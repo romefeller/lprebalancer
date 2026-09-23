@@ -1,0 +1,27 @@
+# Aperture — Solana concentrated-liquidity rebalancer.
+#
+# Copy to /etc/systemd/system/, edit the three paths, then:
+#   sudo systemctl daemon-reload && sudo systemctl enable --now lp-bot
+#
+# LPBOT_WALLET is required and has no default: point it at your keypair.
+# Stop it at any time with:  touch <install dir>/HALT
+[Unit]
+Description=Aperture — Solana concentrated-liquidity rebalancer
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=CHANGEME
+WorkingDirectory=/opt/aperture
+Environment=LPBOT_WALLET=/path/to/your/solana-keypair.json
+Environment=LPBOT_RPC=https://api.mainnet-beta.solana.com
+# Environment=LPBOT_POOL=<whirlpool address>
+# Environment=LPBOT_CAPITAL_USD=190
+ExecStart=/usr/bin/python3 -u /opt/aperture/rebalancer.py
+Restart=on-failure
+RestartSec=60
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

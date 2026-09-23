@@ -1,0 +1,22 @@
+# Aperture Telegram bridge. Reads the event feed and sends it. It has no
+# trading, signing or execution path.
+#
+# Needs TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID, supplied by an EnvironmentFile
+# you keep outside source control (chmod 600).
+[Unit]
+Description=Aperture Telegram bridge
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=CHANGEME
+WorkingDirectory=/opt/aperture
+EnvironmentFile=/path/to/your/telegram.env
+ExecStart=/usr/bin/node /opt/aperture/kmnbot_bridge.mjs
+Restart=on-failure
+RestartSec=30
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

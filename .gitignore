@@ -1,0 +1,30 @@
+# --- anything that could carry a key -----------------------------------------
+# Nothing in this repo should ever hold a secret, but these are the shapes a
+# leak takes, so they are refused by name as well as by review.
+*.secret
+*.key
+*.pem
+*keypair*.json
+id_*.json
+.env
+.env.*
+*.env
+
+# --- runtime state, not source -----------------------------------------------
+# These are this deployment's private operating record: wallet activity,
+# position mints, transaction signatures, timings. On-chain data is public, but
+# publishing it here links a repository to a wallet.
+ledger.sqlite
+ledger.sqlite-*
+kmnbot_feed.jsonl
+kmnbot_bridge_state.json
+runtime.json
+state*.json
+HALT
+
+# --- local junk ---------------------------------------------------------------
+__pycache__/
+*.pyc
+node_modules/
+*.log
+.DS_Store
