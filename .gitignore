@@ -21,6 +21,7 @@ telegram_bridge_state.json
 runtime.json
 state*.json
 HALT
+REBALANCE
 
 # --- local junk ---------------------------------------------------------------
 __pycache__/
