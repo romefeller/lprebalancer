@@ -1,89 +1,99 @@
-"""Every tunable in one place.
+"""Configuration, read from Postgres at startup.
 
-Nothing in this bot is specific to SOL/USDC. The pool is discovered by the
-scanner or pinned here; the band is chosen by simulation; token decimals and
-prices come from the chain. To run it on a different pair, change POOL (or
-leave it None and let it scan), and change nothing else.
+Every tunable lives in `rebalancer.config`, one row per named profile, with
+exactly one row marked active. Nothing here is specific to a pair: the pool
+address, the token symbols, their decimals, the band ladder and every guard are
+columns. Point the bot at a different pool by inserting a row and activating it.
 
-Environment variables override the file, so a service unit can retune without
-editing code:
+    python3 db.py config                       # the active profile
+    python3 db.py set sol-usdc capital_usd=250 # retune, then restart the bot
+    python3 db.py activate wif-usdc            # switch pools
 
-    LPBOT_POOL              pin to one pool address; unset = scan and choose
-    LPBOT_CAPITAL_USD       target position size
-    LPBOT_MAX_USD           hard cap, refuses anything larger
-    LPBOT_POLL_SECONDS      how often to check the band
-    LPBOT_RPC               Solana RPC endpoint
-    LPBOT_WALLET            path to the signing key (REQUIRED, no default)
+Two values stay out of the table on purpose:
+
+    LPBOT_WALLET   path to the signing key. Deployment-specific, and a bot that
+                   guesses where your key lives is a bot that might find the
+                   wrong one. No default: startup fails loudly without it.
+    LPBOT_RPC      endpoint. Often carries an API key in the URL, so it belongs
+                   in the service environment, not in a table anyone can select.
+
+Any column may still be overridden for one run by the matching LPBOT_ variable
+(`LPBOT_POOL`, `LPBOT_CAPITAL_USD`, ...). The table is the source of truth; the
+environment is the escape hatch.
 """
 import os
 
-def _f(name, default):
-    v = os.environ.get(name)
-    return float(v) if v not in (None, '') else default
+import db
 
-def _i(name, default):
-    v = os.environ.get(name)
-    return int(v) if v not in (None, '') else default
 
-def _s(name, default):
+def _env(name, cast, default):
     v = os.environ.get(name)
-    return v if v not in (None, '') else default
+    if v in (None, ''):
+        return default
+    return cast(v)
 
+
+_CFG = db.load_config(os.environ.get('LPBOT_PROFILE'))
+
+PROFILE = _CFG['name']
 
 # --- what to trade -----------------------------------------------------------
-# Pin a pool, or leave None to let the scanner rank every eligible pool and
-# choose. Pinning is the safer default once you know what you want to hold.
-POOL = _s('LPBOT_POOL', 'Czfq3xZZDmsdGdUyrNLtRhGc47cXcZtLG4crryfu44zE')
-PAIR_LABEL = _s('LPBOT_PAIR', 'SOL/USDC')
+POOL = _env('LPBOT_POOL', str, _CFG['pool'])
+PAIR_LABEL = _env('LPBOT_PAIR', str, _CFG['pair_label'])
+TOKEN_A = _env('LPBOT_TOKEN_A', str, _CFG['token_a'])
+TOKEN_B = _env('LPBOT_TOKEN_B', str, _CFG['token_b'])
+DECIMALS_A = _env('LPBOT_DECIMALS_A', int, int(_CFG['decimals_a']))
+DECIMALS_B = _env('LPBOT_DECIMALS_B', int, int(_CFG['decimals_b']))
 
 # --- size --------------------------------------------------------------------
-CAPITAL_USD = _f('LPBOT_CAPITAL_USD', 190.0)
-MAX_USD = _f('LPBOT_MAX_USD', 260.0)
-SOL_RESERVE = _f('LPBOT_SOL_RESERVE', 0.05)     # never spend below this, ever
+CAPITAL_USD = _env('LPBOT_CAPITAL_USD', float, float(_CFG['capital_usd']))
+MAX_USD = _env('LPBOT_MAX_USD', float, float(_CFG['max_usd']))
+# Never spent, ever. A wallet that cannot pay a fee cannot close its position.
+SOL_RESERVE = _env('LPBOT_RESERVE_A', float, float(_CFG['reserve_a']))
 
 # --- band selection ----------------------------------------------------------
-# Candidate half-widths, as a multiplier: 1.05 means the band runs from
-# price/1.05 to price*1.05. The simulator scores each on the pool's own recent
-# price and volume and keeps the best.
-BANDS = tuple(float(x) for x in
-              _s('LPBOT_BANDS', '1.03,1.05,1.08,1.12,1.18,1.25,1.40').split(','))
+# Candidate half-widths as multipliers: 1.05 means the band runs from price/1.05
+# to price*1.05. The simulator scores each on the pool's own recent price and
+# volume and keeps the best.
+BANDS = tuple(_env('LPBOT_BANDS', lambda s: [float(x) for x in s.split(',')],
+                   [float(b) for b in _CFG['bands']]))
 
 # A narrower band earns more per dollar and dies more often. Every rebalance is
-# a chance for a transaction to fail, so the bot will not choose a band whose
-# simulated rebalance rate exceeds this, however good its raw yield looks.
-MAX_REBALANCES_PER_DAY_MODELLED = _f('LPBOT_MAX_MODELLED_REBAL', 0.50)
+# a chance for a transaction to fail, so the bot refuses a band whose simulated
+# rebalance rate exceeds this, however good its raw yield looks.
+MAX_REBALANCES_PER_DAY_MODELLED = _env(
+    'LPBOT_MAX_MODELLED_REBAL', float, float(_CFG['max_modelled_rebal_per_day']))
 
 # --- rebalancing -------------------------------------------------------------
-POLL_SECONDS = _i('LPBOT_POLL_SECONDS', 300)
-MIN_REBALANCE_GAP = _i('LPBOT_MIN_GAP', 3600)       # no churn on a band edge
-MAX_REBALANCES_PER_DAY = _i('LPBOT_MAX_REBAL', 6)   # hard daily ceiling
-REOPT_INTERVAL = _i('LPBOT_REOPT_INTERVAL', 6 * 3600)
-REOPT_MIN_GAIN = _f('LPBOT_REOPT_MIN_GAIN', 0.25)   # only reband for a clear win
+POLL_SECONDS = _env('LPBOT_POLL_SECONDS', int, _CFG['poll_seconds'])
+MIN_REBALANCE_GAP = _env('LPBOT_MIN_GAP', int, _CFG['min_rebalance_gap_seconds'])
+MAX_REBALANCES_PER_DAY = _env('LPBOT_MAX_REBAL', int, _CFG['max_rebalances_per_day'])
+REOPT_INTERVAL = _env('LPBOT_REOPT_INTERVAL', int, _CFG['reopt_interval_seconds'])
+REOPT_MIN_GAIN = _env('LPBOT_REOPT_MIN_GAIN', float, float(_CFG['reopt_min_gain']))
 
 # --- safety ------------------------------------------------------------------
-MAX_CONSECUTIVE_FAILURES = _i('LPBOT_MAX_FAILURES', 3)
-MAX_UNREADABLE_POLLS = _i('LPBOT_MAX_UNREADABLE', 12)
-SLIPPAGE_BPS = _i('LPBOT_SLIPPAGE_BPS', 100)
+MAX_CONSECUTIVE_FAILURES = _env('LPBOT_MAX_FAILURES', int,
+                                _CFG['max_consecutive_failures'])
+MAX_UNREADABLE_POLLS = _env('LPBOT_MAX_UNREADABLE', int, _CFG['max_unreadable_polls'])
+SLIPPAGE_BPS = _env('LPBOT_SLIPPAGE_BPS', int, _CFG['slippage_bps'])
 
 # --- token quality gates (Jev) ----------------------------------------------
 # Only consulted when the scanner picks the pool. A leveraged token in an LP
 # pays a high headline yield for taking the other side of something engineered
-# to decay: SOL/xSOL advertised 243%/yr and xSOL is 3x leveraged SOL.
-MAX_LEVERAGED = _f('LPBOT_MAX_LEVERAGED', 0.35)
-MIN_ESTABLISHED = _f('LPBOT_MIN_ESTABLISHED', 0.30)
-MIN_NET_DAY_PCT = _f('LPBOT_MIN_NET_DAY', 0.05)
-MIN_TVL_USD = _f('LPBOT_MIN_TVL', 250_000.0)
+# to decay: SOL/xSOL advertised 243%/yr, and xSOL is 3x leveraged SOL.
+MAX_LEVERAGED = _env('LPBOT_MAX_LEVERAGED', float, float(_CFG['max_leveraged']))
+MIN_ESTABLISHED = _env('LPBOT_MIN_ESTABLISHED', float, float(_CFG['min_established']))
+MIN_NET_DAY_PCT = _env('LPBOT_MIN_NET_DAY', float, float(_CFG['min_net_day_pct']))
+MIN_TVL_USD = _env('LPBOT_MIN_TVL', float, float(_CFG['min_tvl_usd']))
 
 # --- plumbing ----------------------------------------------------------------
-RPC = _s('LPBOT_RPC', _s('SOLANA_RPC_URL', 'https://api.mainnet-beta.solana.com'))
-# No default. A signing key location is deployment-specific and does not belong
-# in source control, and a bot that guesses where your key lives is a bot that
-# might find the wrong one.
-WALLET = _s('LPBOT_WALLET', _s('WALLET_SECRET_PATH', ''))
+RPC = _env('LPBOT_RPC', str,
+           os.environ.get('SOLANA_RPC_URL') or 'https://api.mainnet-beta.solana.com')
+WALLET = _env('LPBOT_WALLET', str, os.environ.get('WALLET_SECRET_PATH', ''))
 
 
 def require_wallet():
-    """Fail loudly at startup rather than mysteriously at the first signature."""
+    """Fail at startup rather than mysteriously at the first signature."""
     if not WALLET:
         raise SystemExit(
             'No signing key configured. Set LPBOT_WALLET (or WALLET_SECRET_PATH) '
@@ -93,6 +103,7 @@ def require_wallet():
 
 def summary():
     return {
+        'profile': PROFILE,
         'pool': POOL or 'scan and choose',
         'pair': PAIR_LABEL,
         'capital_usd': CAPITAL_USD,

@@ -28,3 +28,6 @@ __pycache__/
 node_modules/
 *.log
 .DS_Store
+
+# --- migrated away, kept locally --------------------------------------------
+.archive/

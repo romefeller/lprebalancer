@@ -245,8 +245,15 @@ def simulate(k, ts, px, vol, pool_L, fee, capital):
             'vs_hold': (final + fees) - hold}
 
 
-def best_band(ts, px, vol, pool_L, fee, capital):
-    runs = [simulate(k, ts, px, vol, pool_L, fee, capital) for k in BANDS]
+def best_band(ts, px, vol, pool_L, fee, capital, bands=None):
+    """Score every candidate band on this pool's own history, keep the best.
+
+    The ladder is a parameter, not a constant: `bands` defaults to the module's
+    own list only so that a bare scan still works. The bot passes the ladder
+    from its active profile.
+    """
+    runs = [simulate(k, ts, px, vol, pool_L, fee, capital)
+            for k in (bands or BANDS)]
     return max(runs, key=lambda r: r['net_day_pct']), runs
 
 

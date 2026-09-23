@@ -1,24 +1,27 @@
-# Aperture — Solana concentrated-liquidity rebalancer.
+# Rebalancer — Solana concentrated-liquidity rebalancer.
 #
-# Copy to /etc/systemd/system/, edit the three paths, then:
+# Copy to /etc/systemd/system/, edit User and the three paths, then:
 #   sudo systemctl daemon-reload && sudo systemctl enable --now lp-bot
+#
+# Every trading parameter comes from the rebalancer.config table, not from here.
+# Change one with:  python3 db.py set <profile> capital_usd=250
 #
 # LPBOT_WALLET is required and has no default: point it at your keypair.
 # Stop it at any time with:  touch <install dir>/HALT
 [Unit]
-Description=Aperture — Solana concentrated-liquidity rebalancer
-After=network-online.target
+Description=Rebalancer — Solana concentrated-liquidity rebalancer
+After=network-online.target postgresql.service
 Wants=network-online.target
 
 [Service]
 Type=simple
 User=CHANGEME
-WorkingDirectory=/opt/aperture
+WorkingDirectory=/opt/rebalancer
 Environment=LPBOT_WALLET=/path/to/your/solana-keypair.json
 Environment=LPBOT_RPC=https://api.mainnet-beta.solana.com
-# Environment=LPBOT_POOL=<whirlpool address>
-# Environment=LPBOT_CAPITAL_USD=190
-ExecStart=/usr/bin/python3 -u /opt/aperture/rebalancer.py
+Environment=LPBOT_DSN=dbname=rebalancer
+# Environment=LPBOT_PROFILE=sol-usdc
+ExecStart=/usr/bin/python3 -u /opt/rebalancer/rebalancer.py
 Restart=on-failure
 RestartSec=60
 NoNewPrivileges=true

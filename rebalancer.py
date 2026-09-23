@@ -1,9 +1,13 @@
-"""Aperture — a concentrated-liquidity rebalancer for Orca whirlpools.
+"""Rebalancer — a concentrated-liquidity rebalancer for Orca whirlpools.
 
 Holds one position, watches the price against its band, and when the price
 leaves, collects the fees, closes, re-optimises the band and opens again. Every
 number it reports comes from the chain or from its own ledger, never from a
 simulation of what it thinks happened.
+
+Every parameter comes from the `rebalancer.config` table and every observation
+goes back into Postgres, so the pool, the band ladder and the guards are data,
+not code.
 
     read chain -> in band?  yes -> record a snapshot, wait
                             no  -> harvest, close, re-optimise, reopen
@@ -36,8 +40,8 @@ import time
 from datetime import datetime, timezone
 
 import config
+import db
 import engine
-import ledger
 
 ROOT = pathlib.Path(__file__).resolve().parent
 STATE = ROOT / 'runtime.json'
@@ -79,11 +83,37 @@ def notify(event, **payload):
           flush=True)
 
 
+def nearest(runs, pct, tolerance=2):
+    """The modelled band closest to the one actually held.
+
+    A band opened at one price and measured at another rarely lands exactly on
+    a rung of the ladder, and a held band with no run to compare against means
+    no re-optimisation ever happens.
+    """
+    if not runs:
+        return None
+    k = min(runs, key=lambda x: abs(x - pct))
+    return runs[k] if abs(k - pct) <= tolerance else None
+
+
+def notify_book(event, **payload):
+    """notify() with the cumulative book attached.
+
+    The book is merged last and wins on any shared key, so a caller can pass a
+    convenient label without risking a duplicate-keyword error at the one moment
+    the bot most needs to report something.
+    """
+    return notify(event, **{**payload, **db.stats()})
+
+
 def chain(*args, timeout=420):
     """Call the signer. Returns (parsed_json, tidy_error)."""
     env = dict(os.environ,
                WALLET_SECRET_PATH=config.WALLET,
-               SOLANA_RPC_URL=config.RPC)
+               SOLANA_RPC_URL=config.RPC,
+               LPBOT_MAX_USD=str(config.MAX_USD),
+               LPBOT_SLIPPAGE_BPS=str(config.SLIPPAGE_BPS),
+               LPBOT_RESERVE_A=str(config.SOL_RESERVE))
     try:
         r = subprocess.run(['node', CHAIN, *args], capture_output=True,
                            text=True, timeout=timeout, env=env)
@@ -112,7 +142,7 @@ def save(s):
 
 def halt(reason):
     HALT.write_text(f'{stamp()} {reason}')
-    ledger.event('BREAKER', reason)
+    db.event('BREAKER', reason)
     notify('BREAKER', reason=reason, action='HALT written; will not restart')
 
 
@@ -123,12 +153,18 @@ def wallet_usd(price):
 
 
 def position_usd(status):
-    """Rough mark of the position, from the amounts a close would return."""
-    a = status.get('closeEstA_SOL')
-    b = status.get('closeEstB_USDC')
+    """Mark of the position, from the amounts a close would return right now.
+
+    The signer already values it in dollars when it knows the quote token's
+    price. Falling back to quote units is only correct when the quote token is
+    a dollar, which is why the signer's figure is preferred.
+    """
+    if status.get('positionUsd') is not None:
+        return status['positionUsd']
+    a, b = status.get('closeEstA'), status.get('closeEstB')
     if a is None or b is None:
         return None
-    return a * status['price'] + b
+    return (a * status['price'] + b) * (status.get('quoteUsd') or 1)
 
 
 def best_band_for(pool):
@@ -187,23 +223,22 @@ def reopen(state, reason):
             out = {'positionMint': status['positionMint'], 'signature': None}
         else:
             state['failures'] += 1; save(state)
-            ledger.event('open_failed', err)
+            db.event('open_failed', err)
             notify('open_failed', reason=err, failures=state['failures'])
             if state['failures'] >= config.MAX_CONSECUTIVE_FAILURES:
                 halt(f'{state["failures"]} consecutive failures')
             return False
     state['failures'] = 0; save(state)
     mint = (out or {}).get('positionMint')
-    ledger.open_position(mint, pool, config.PAIR_LABEL, lower, upper,
-                         (best['band'] - 1) * 100, (out or {}).get('signature'),
-                         config.CAPITAL_USD, reason)
-    notify('OPEN', pair=config.PAIR_LABEL, pool=pool,
+    db.open_position(mint, pool, config.PAIR_LABEL, lower, upper,
+                     (best['band'] - 1) * 100, (out or {}).get('signature'),
+                     config.CAPITAL_USD, reason, config_name=config.PROFILE)
+    notify_book('OPEN', pair=config.PAIR_LABEL, pool=pool,
            band=f'+/-{(best["band"] - 1) * 100:.0f}%',
            lower=round(lower, 4), upper=round(upper, 4),
            expected_net_day_pct=round(best['net_day_pct'], 3),
            modelled_rebalances_per_day=round(best['rebal_per_day'], 2),
-           signature=(out or {}).get('signature'), reason=reason,
-           **ledger.stats())
+           signature=(out or {}).get('signature'), reason=reason)
     return True
 
 
@@ -220,12 +255,12 @@ def rebalance(state, status, reason):
         return
     mint = status['positionMint']
 
-    accrued_a = status.get('feesAccruedA_SOL', 0.0)
-    accrued_b = status.get('feesAccruedB_USDC', 0.0)
+    accrued_a = status.get('feesAccruedA', 0.0)
+    accrued_b = status.get('feesAccruedB', 0.0)
     accrued_usd = status.get('feesAccrued_USD', 0.0)
     out, err = chain('harvest', mint, '--execute')
     if out and out.get('signature'):
-        ledger.record_harvest(mint, accrued_a, accrued_b, accrued_usd,
+        db.record_harvest(mint, accrued_a, accrued_b, accrued_usd,
                               out['signature'])
         notify('HARVEST', collected_usd=round(accrued_usd, 4),
                signature=out['signature'])
@@ -245,14 +280,14 @@ def rebalance(state, status, reason):
             out = {'signature': None}
         else:
             state['failures'] += 1; save(state)
-            ledger.event('close_failed', err)
+            db.event('close_failed', err)
             notify('close_failed', reason=err, failures=state['failures'])
             if state['failures'] >= config.MAX_CONSECUTIVE_FAILURES:
                 halt(f'{state["failures"]} consecutive failures')
             return
-    ledger.close_position(mint, (out or {}).get('signature'), None)
-    notify('CLOSE', positionMint=mint, signature=(out or {}).get('signature'),
-           reason=reason, **ledger.stats())
+    db.close_position(mint, (out or {}).get('signature'), None)
+    notify_book('CLOSE', positionMint=mint,
+                signature=(out or {}).get('signature'), reason=reason)
 
     state['last_rebalance'] = now
     state['rebalance_times'] = recent + [now]
@@ -266,8 +301,8 @@ def main():
         return 2
     config.require_wallet()
     state = load()
-    notify('startup', mode='ARMED — signs its own rebalances',
-           **config.summary(), **ledger.stats())
+    notify_book('startup', mode='ARMED — signs its own rebalances',
+                **config.summary())
 
     while True:
         if HALT.exists():
@@ -295,10 +330,10 @@ def main():
 
         price = status['price']
         wusd, _ = wallet_usd(price)
-        ledger.snapshot(status['positionMint'], price, status.get('inRange'),
+        db.snapshot(status['positionMint'], price, status.get('inRange'),
                         status.get('liquidity'),
-                        status.get('feesAccruedA_SOL', 0.0),
-                        status.get('feesAccruedB_USDC', 0.0),
+                        status.get('feesAccruedA', 0.0),
+                        status.get('feesAccruedB', 0.0),
                         status.get('feesAccrued_USD', 0.0),
                         wusd, position_usd(status))
 
@@ -317,9 +352,15 @@ def main():
             if best:
                 # Score the band actually held against the best available, both
                 # under the same model, so the comparison means something.
-                held_pct = round((status['upperPrice'] / price - 1) * 100)
+                # The held band's half-width is a property of the band, not of
+                # where the price happens to sit inside it. Measuring it against
+                # the current price returns a number that drifts the moment the
+                # price moves off centre, misses the lookup below, and quietly
+                # turns the whole re-optimiser into a no-op.
+                held = (status['upperPrice'] / status['lowerPrice']) ** 0.5
+                held_pct = round((held - 1) * 100)
                 runs = {round((r['band'] - 1) * 100): r for r in best['all_runs']}
-                cur_run = runs.get(held_pct)
+                cur_run = runs.get(held_pct) or nearest(runs, held_pct)
                 if cur_run:
                     gain = ((best['net_day_pct'] - cur_run['net_day_pct'])
                             / max(abs(cur_run['net_day_pct']), 1e-9))
@@ -329,8 +370,8 @@ def main():
                                new_band=f'+/-{(best["band"] - 1) * 100:.0f}%',
                                old_net_day=round(cur_run['net_day_pct'], 3),
                                new_net_day=round(best['net_day_pct'], 3))
-                        ledger.event('REBAND', f'{held_pct}% -> '
-                                               f'{(best["band"] - 1) * 100:.0f}%')
+                        db.event('REBAND', f'{held_pct}% -> '
+                                           f'{(best["band"] - 1) * 100:.0f}%')
                         rebalance(state, status, 're-optimised band')
                         time.sleep(config.POLL_SECONDS)
                         continue
@@ -341,9 +382,9 @@ def main():
                            verdict=f'{gain * 100:.0f}% gain is under the '
                                    f'{config.REOPT_MIN_GAIN * 100:.0f}% threshold')
 
-        notify('in_band', price=price, lower=status['lowerPrice'],
-               upper=status['upperPrice'], liquidity=status.get('liquidity'),
-               **ledger.stats())
+        notify_book('in_band', price=price, lower=status['lowerPrice'],
+                    upper=status['upperPrice'],
+                    liquidity=status.get('liquidity'))
         time.sleep(config.POLL_SECONDS)
 
 
