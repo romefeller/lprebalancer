@@ -13,6 +13,11 @@ Both are Postgres tables now. The bot reads its parameters from
 running deployment with an UPDATE and a restart, and you can read the numbers
 with psql while the bot is mid-rebalance.
 
+    python3 db.py add <name> <pool> [k=v ...]   describe a pool; symbols come from Orca
+    python3 db.py activate <name>               make it the one the bot runs
+    python3 db.py set <name> k=v [k=v ...]      retune
+    python3 db.py [stats|daily|history|json]    the book
+
 Connections are opened per operation. At one write every few minutes the cost
 is nothing, and it means a dropped connection cannot wedge the loop.
 """
@@ -313,18 +318,43 @@ def history(limit=30):
 
 # --- command line ------------------------------------------------------------
 
-SEED = dict(
-    name='sol-usdc', active=True,
-    pool='Czfq3xZZDmsdGdUyrNLtRhGc47cXcZtLG4crryfu44zE',
-    pair_label='SOL/USDC', token_a='SOL', token_b='USDC',
-    decimals_a=9, decimals_b=6,
-    capital_usd=190, max_usd=260, reserve_a=0.05,
-)
+ORCA = 'https://api.orca.so/v2/solana'
+SEED_POOL = 'Czfq3xZZDmsdGdUyrNLtRhGc47cXcZtLG4crryfu44zE'   # SOL/USDC 0.04%
 
 
-def seed(profile=None):
-    """Insert a starting profile. Does nothing if the name already exists."""
-    p = dict(SEED, **(profile or {}))
+def describe_pool(pool):
+    """Ask Orca what this pool is. Refuses the one kind the signer cannot open."""
+    import urllib.request
+    req = urllib.request.Request(f'{ORCA}/pools/{pool}',
+                                 headers={'accept': 'application/json',
+                                          'user-agent': 'Mozilla/5.0'})
+    d = json.loads(urllib.request.urlopen(req, timeout=30).read())
+    d = d.get('data') or d
+    if not d.get('tokenA'):
+        raise SystemExit(f'Orca does not know a pool at {pool}. Nothing was added.')
+    a, b = d['tokenA']['symbol'], d['tokenB']['symbol']
+    if d.get('adaptiveFeeEnabled'):
+        raise SystemExit(
+            f'{a}/{b} is an adaptive-fee pool. The signer cannot open positions on '
+            'it (Whirlpool error 6069, which reads like slippage and is not). '
+            'Nothing was added.')
+    return {'pair_label': f'{a}/{b}', 'token_a': a, 'token_b': b,
+            'fee_rate': int(d.get('feeRate') or 0) / 1e6,
+            'tvl_usd': float(d.get('tvlUsdc') or 0), 'price': float(d['price'])}
+
+
+def add(name, pool, active=False, **params):
+    """Describe a new pool to the bot. Everything but the address and the size
+    comes from the pool itself or from the column defaults.
+
+        python3 db.py add wif-usdc <pool> capital_usd=200 max_usd=300
+    """
+    info = describe_pool(pool)
+    p = dict(name=name, pool=pool, active=active,
+             pair_label=info['pair_label'], token_a=info['token_a'],
+             token_b=info['token_b'], **params)
+    p.setdefault('capital_usd', 190)
+    p.setdefault('max_usd', float(p['capital_usd']) * 1.4)
     cols = ', '.join(p)
     vals = ', '.join(['%s'] * len(p))
     with cursor(commit=True) as cur:
@@ -333,7 +363,14 @@ def seed(profile=None):
         cur.execute(f'insert into config ({cols}) values ({vals}) '
                     'on conflict (name) do nothing returning *', list(p.values()))
         row = cur.fetchone()
-    return dict(row) if row else load_config(p['name'])
+    out = dict(row) if row else load_config(name)
+    out['_pool'] = {k: info[k] for k in ('fee_rate', 'tvl_usd', 'price')}
+    return out
+
+
+def seed():
+    """A first profile on SOL/USDC, so a fresh install has something to run."""
+    return add('sol-usdc', SEED_POOL, active=True, capital_usd=190, max_usd=260)
 
 
 def migrate_sqlite(path='ledger.sqlite'):
@@ -416,6 +453,12 @@ if __name__ == '__main__':
 
     if cmd == 'seed':
         print(json.dumps(seed(), indent=1, default=str))
+    elif cmd == 'add':
+        # db.py add <name> <pool> [key=value ...]
+        if len(sys.argv) < 4:
+            raise SystemExit('usage: db.py add <name> <pool> [capital_usd=... ...]')
+        kv = dict(p.partition('=')[::2] for p in sys.argv[4:])
+        print(json.dumps(add(arg, sys.argv[3], **kv), indent=1, default=str))
     elif cmd == 'migrate':
         print(json.dumps(migrate_sqlite(arg or 'ledger.sqlite'), indent=1, default=str))
     elif cmd == 'config':

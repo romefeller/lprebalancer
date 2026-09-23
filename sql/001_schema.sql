@@ -15,23 +15,30 @@ create table if not exists rebalancer.config (
   name                        text        not null unique,
   active                      boolean     not null default false,
 
-  -- what to trade. Decimals live here so the bot is not pinned to one pair.
+  -- what to trade. Only the pool address is essential: the symbols are for
+  -- display and `db.py add` fills them from the pool. Decimals are not stored;
+  -- the signer reads them from the pool every time.
   pool                        text        not null,
   pair_label                  text        not null,
   token_a                     text        not null default 'A',
   token_b                     text        not null default 'B',
-  decimals_a                  smallint    not null default 9,
-  decimals_b                  smallint    not null default 6,
 
-  -- size
+  -- size. gas_reserve_sol is native SOL kept back for transaction fees; it
+  -- applies whether or not SOL is one of the pool's tokens.
   capital_usd                 numeric(18,6) not null,
   max_usd                     numeric(18,6) not null,
-  reserve_a                   numeric(18,9) not null default 0.05,
+  gas_reserve_sol             numeric(18,9) not null default 0.05,
+  -- each token's deposit cap as a fraction of capital. A centred band takes
+  -- about half of each; the margin over 0.5 absorbs the price moving between
+  -- the quote and the fill.
+  side_cap_fraction           numeric(4,3) not null default 0.550,
 
   -- band search. bands are half-widths as multipliers: 1.05 means +/-5%.
   bands                       numeric(8,4)[] not null
                                 default '{1.03,1.05,1.08,1.12,1.18,1.25,1.40}',
   max_modelled_rebal_per_day  numeric(8,4) not null default 0.50,
+  -- round-trip swap and slippage charged per modelled rebalance
+  swap_cost_bps               integer     not null default 10,
 
   -- cadence
   poll_seconds                integer     not null default 300,
@@ -64,11 +71,14 @@ begin
   if not exists (select 1 from pg_constraint where conname = 'config_sane') then
     alter table rebalancer.config add constraint config_sane check (
       capital_usd > 0 and max_usd >= capital_usd
+      and gas_reserve_sol >= 0
       and poll_seconds between 30 and 86400
       and min_rebalance_gap_seconds >= 0
       and max_rebalances_per_day between 1 and 100
       and reopt_min_gain >= 0
       and slippage_bps between 1 and 1000
+      and swap_cost_bps between 0 and 500
+      and side_cap_fraction between 0.5 and 1.0
       and array_length(bands, 1) >= 1
     );
   end if;

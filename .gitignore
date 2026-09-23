@@ -16,8 +16,8 @@ id_*.json
 # publishing it here links a repository to a wallet.
 ledger.sqlite
 ledger.sqlite-*
-kmnbot_feed.jsonl
-kmnbot_bridge_state.json
+events.jsonl
+telegram_bridge_state.json
 runtime.json
 state*.json
 HALT

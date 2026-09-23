@@ -11,7 +11,17 @@ a restart and a reboot.
 Every parameter is a row in a table. The pool, the band ladder, the size, the
 cadence and every safety limit come from `rebalancer.config`. Nothing about the
 code is specific to SOL/USDC: token decimals, symbols, the fee tier and the
-price all come from the pool itself.
+price all come from the pool itself, and the position is sized from what the
+wallet holds of the pool's own two tokens.
+
+```sh
+python3 db.py add wif-usdc <pool address> capital_usd=200   # describe a pool
+python3 db.py activate wif-usdc                              # run it
+sudo systemctl restart lp-bot
+```
+
+`add` asks Orca what the pool is, fills the pair from the answer, and refuses an
+adaptive-fee pool before you have bought a token for it.
 
 ---
 
@@ -164,8 +174,9 @@ exactly one row is active, enforced by a partial unique index, so the bot never
 has to guess which parameters are its own.
 
 ```sh
-psql -d rebalancer -f sql/001_schema.sql   # create the schema (idempotent)
-python3 db.py seed                          # insert a starting profile
+psql -d rebalancer -f sql/001_schema.sql -f sql/002_any_pool.sql   # schema (idempotent)
+python3 db.py seed                          # a first profile, SOL/USDC
+python3 db.py add wif-usdc <pool> capital_usd=200   # describe another pool
 python3 db.py config                        # show the active profile
 python3 db.py set sol-usdc capital_usd=250  # retune, then restart the bot
 python3 db.py activate wif-usdc             # switch pools
@@ -173,9 +184,9 @@ python3 db.py activate wif-usdc             # switch pools
 
 | group | columns |
 |---|---|
-| what to trade | `pool`, `pair_label`, `token_a`, `token_b`, `decimals_a`, `decimals_b` |
-| size | `capital_usd`, `max_usd`, `reserve_a` |
-| band search | `bands` (the ladder), `max_modelled_rebal_per_day` |
+| what to trade | `pool`; `pair_label`, `token_a`, `token_b` for display, filled by `add` |
+| size | `capital_usd`, `max_usd`, `gas_reserve_sol`, `side_cap_fraction` |
+| band search | `bands` (the ladder), `max_modelled_rebal_per_day`, `swap_cost_bps` |
 | cadence | `poll_seconds`, `min_rebalance_gap_seconds`, `max_rebalances_per_day`, `reopt_interval_seconds`, `reopt_min_gain` |
 | safety | `max_consecutive_failures`, `max_unreadable_polls`, `slippage_bps` |
 | pool screening | `max_leveraged`, `min_established`, `min_net_day_pct`, `min_tvl_usd` |
@@ -197,17 +208,27 @@ variable. The table is the source of truth; the environment is the escape hatch.
 
 ### Pointing it at a different pool
 
-Insert a row and activate it. Nothing else changes — the signer reads the pair's
-decimals, symbols and fee tier from the pool, and values fees in the quote token
-before converting to dollars, so a pool whose quote token is not a dollar is
-priced correctly rather than silently by a factor.
+`db.py add <name> <pool>`, then `activate`. Nothing else changes — the signer
+reads the pair's decimals, symbols and fee tier from the pool, and values fees
+in the quote token before converting to dollars, so a pool whose quote token is
+not a dollar is priced correctly rather than silently by a factor.
+
+Sizing follows the pool too. Before an open the bot reads the wallet's balance
+of both pool tokens and caps each side at `side_cap_fraction` of the capital in
+that token's own units, less the gas reserve when the token is native SOL. A
+wallet short of one side opens a smaller position instead of failing. Equity
+counts both balances plus the position, so a close that returns the quote token
+to the wallet does not read as a loss.
+
+`gas_reserve_sol` is native SOL that is never deposited, whatever the pool
+holds: a WIF/USDC position still needs SOL to close itself.
 
 Two constraints on the pool you choose:
 
-- **Adaptive-fee pools cannot be opened by this path.** Check `adaptiveFee` with
-  `node signer2.mjs pool <address>` before committing. ZEC/USDC is one, and the
-  failure mode is an instant rejection with Whirlpool error 6069 that reads like
-  a slippage problem and is not one.
+- **Adaptive-fee pools cannot be opened by this path.** `db.py add` and the
+  signer both refuse them. ZEC/USDC is one, and the failure mode is an instant
+  rejection with Whirlpool error 6069 that reads like a slippage problem and is
+  not one.
 - **Thin pools move when you enter and vanish when you leave.** `min_tvl_usd`
   defaults to $250k for that reason.
 
@@ -287,19 +308,29 @@ the stale field separately so the difference stays visible.
 python3 config.py
 python3 db.py
 
-# the current position, straight from the chain
+# the current position and the wallet, straight from the chain
 WALLET_SECRET_PATH=/path/to/key node signer2.mjs status
+WALLET_SECRET_PATH=/path/to/key node signer2.mjs balance <pool>
 
 # run it
 sudo systemctl start lp-bot          # the rebalancer
-sudo systemctl start lp-kmnbot       # the Telegram bridge
+sudo systemctl start lp-telegram     # the Telegram bridge
 
 # stop it, from anywhere, immediately
 touch HALT
+
+# run one full rebalance now, while you watch
+touch REBALANCE
 ```
 
 `HALT` is absolute: the loop exits on its next cycle, the signer refuses to
 build a transaction, and neither restarts until the file is removed.
+
+`REBALANCE` runs harvest → close → re-optimise → reopen on the next poll, under
+the same minimum-gap and per-day limits as an automatic one, and is deleted
+before it runs so a failure cannot loop on it. It exists because the rebalance
+path is the one that runs unattended, and a path that has only run at 3am has
+never been watched.
 
 ---
 
@@ -312,8 +343,9 @@ build a transaction, and neither restarts until the file is removed.
 | `db.py` | Postgres: configuration, accounting, statistics, the CLI |
 | `config.py` | loads the active profile, with environment overrides |
 | `signer2.mjs` | all chain I/O and signing, on `@orca-so/whirlpools` v8 |
-| `kmnbot_bridge.mjs` | forwards the event feed to Telegram |
+| `telegram_bridge.mjs` | forwards `events.jsonl` to Telegram |
 | `sql/001_schema.sql` | the schema, idempotent |
+| `sql/002_any_pool.sql` | migration for databases created before the pool-agnostic sizing |
 | `ops/*.service` | systemd units |
 
 ---
@@ -326,7 +358,7 @@ build a transaction, and neither restarts until the file is removed.
 | minimum gap between rebalances | 1 hour |
 | rebalances per day | 6, then HALT |
 | position size cap | `max_usd`, refused above it, priced at the pool's own price |
-| token A reserve | never spent — a wallet that cannot pay fees cannot close its own position |
+| gas reserve | `gas_reserve_sol`, never deposited — a wallet that cannot pay fees cannot close its own position |
 | consecutive failures | 3, then HALT |
 | unreadable polls | 12, then HALT |
 

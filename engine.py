@@ -35,9 +35,14 @@ ORCA = 'https://api.orca.so/v2/solana'
 GECKO = 'https://api.geckoterminal.com/api/v2/networks/solana'
 TYPESAFE = 'https://api.typesafe.ai/v1/systemone'
 
+# Defaults for a bare scan from the command line. The bot passes its own values
+# from the active profile; nothing below reads these when it is running.
 SWAP_COST = 0.0010          # round trip swap + slippage at a few hundred dollars
 MIN_TVL = 250_000.0         # thin pools move when you enter and vanish when you leave
 BANDS = (1.03, 1.05, 1.08, 1.12, 1.18, 1.25, 1.40)
+# Tokens whose partner is the one worth judging: on SOL/WIF the question is
+# about WIF, on USDC/PUMP about PUMP.
+MAJORS = {'SOL', 'USDC', 'USDT', 'PYUSD', 'USDS', 'DAI', 'FDUSD', 'USDE'}
 
 
 def curl(url, accept='application/json'):
@@ -209,7 +214,7 @@ def band_concentration(k):
     return 1.0 / (1.0 - 1.0 / math.sqrt(k))
 
 
-def simulate(k, ts, px, vol, pool_L, fee, capital):
+def simulate(k, ts, px, vol, pool_L, fee, capital, swap_cost=SWAP_COST):
     """Replay one band. Returns net per day and the rebalance behaviour."""
     entry = float(px[0])
     pa, pb = entry / k, entry * k
@@ -226,8 +231,8 @@ def simulate(k, ts, px, vol, pool_L, fee, capital):
         else:
             x, y = amounts(L, p, pa, pb)
             value = x * p + y
-            cost += value * SWAP_COST
-            value -= value * SWAP_COST
+            cost += value * swap_cost
+            value -= value * swap_cost
             rebal += 1
             entry = p
             pa, pb = entry / k, entry * k
@@ -245,25 +250,26 @@ def simulate(k, ts, px, vol, pool_L, fee, capital):
             'vs_hold': (final + fees) - hold}
 
 
-def best_band(ts, px, vol, pool_L, fee, capital, bands=None):
+def best_band(ts, px, vol, pool_L, fee, capital, bands=None, swap_cost=SWAP_COST):
     """Score every candidate band on this pool's own history, keep the best.
 
     The ladder is a parameter, not a constant: `bands` defaults to the module's
     own list only so that a bare scan still works. The bot passes the ladder
     from its active profile.
     """
-    runs = [simulate(k, ts, px, vol, pool_L, fee, capital)
+    runs = [simulate(k, ts, px, vol, pool_L, fee, capital, swap_cost)
             for k in (bands or BANDS)]
     return max(runs, key=lambda r: r['net_day_pct']), runs
 
 
-def scan(capital, limit=100, use_jev=True, verbose=True):
+def scan(capital, limit=100, use_jev=True, verbose=True, bands=None,
+         min_tvl=MIN_TVL, swap_cost=SWAP_COST):
     """Rank pools by what an optimally banded position would have returned."""
     d = curl(f'{ORCA}/pools?limit={limit}&sortBy=volume24h')
     out = []
     for p in (d or {}).get('data', []):
         tvl = float(p.get('tvlUsdc') or 0)
-        if tvl < MIN_TVL:
+        if tvl < min_tvl:
             continue
         pool_L_native = active_liquidity(p)
         if not pool_L_native:
@@ -297,7 +303,7 @@ def scan(capital, limit=100, use_jev=True, verbose=True):
                       flush=True)
             continue
         ctx = {'tvl_usd': tvl, 'c_pool': c_pool}
-        best, runs = best_band(ts, px, vol, ctx, fee, capital)
+        best, runs = best_band(ts, px, vol, ctx, fee, capital, bands, swap_cost)
         row = {'address': p['address'], 'pair': pair, 'fee': fee, 'tvl': tvl,
                'c_pool': c_pool, 'price': float(p.get('price') or 0), **best}
         out.append(row)
@@ -310,6 +316,6 @@ def scan(capital, limit=100, use_jev=True, verbose=True):
     if use_jev:
         for r in out[:12]:
             a, b = r['pair'].split('/')
-            q = token_quality(b if a in ('SOL', 'USDC') else a, r['pair'])
+            q = token_quality(b if a in MAJORS else a, r['pair'])
             r['jev'] = {'leveraged': q[0], 'established': q[1]} if q else None
     return out

@@ -29,7 +29,13 @@ reports nothing may open.
 every time you rebalance. Cumulative earnings live in the ledger, split into
 realised (harvested into the wallet) and unrealised (still in the position).
 
-Stop it at any time with:  touch HALT
+Stop it at any time with:       touch HALT
+Force one rebalance now with:   touch REBALANCE
+
+The trigger exists because the rebalance path is the one that runs unattended,
+and a path that has only ever run at 3am has never been watched. Touch the file
+while you are looking and the next poll runs harvest -> close -> reopen at the
+best band, subject to the same gap and daily limits as an automatic one.
 """
 import json
 import os
@@ -45,8 +51,9 @@ import engine
 
 ROOT = pathlib.Path(__file__).resolve().parent
 STATE = ROOT / 'runtime.json'
-FEED = ROOT / 'kmnbot_feed.jsonl'
+FEED = ROOT / 'events.jsonl'
 HALT = ROOT / 'HALT'
+REBALANCE = ROOT / 'REBALANCE'
 CHAIN = str(ROOT / 'signer2.mjs')
 
 
@@ -113,7 +120,7 @@ def chain(*args, timeout=420):
                SOLANA_RPC_URL=config.RPC,
                LPBOT_MAX_USD=str(config.MAX_USD),
                LPBOT_SLIPPAGE_BPS=str(config.SLIPPAGE_BPS),
-               LPBOT_RESERVE_A=str(config.SOL_RESERVE))
+               LPBOT_GAS_RESERVE_SOL=str(config.GAS_RESERVE_SOL))
     try:
         r = subprocess.run(['node', CHAIN, *args], capture_output=True,
                            text=True, timeout=timeout, env=env)
@@ -146,10 +153,34 @@ def halt(reason):
     notify('BREAKER', reason=reason, action='HALT written; will not restart')
 
 
-def wallet_usd(price):
-    out, _ = chain('balance')
-    sol = (out or {}).get('sol', 0.0)
-    return sol * price, sol
+def wallet(pool):
+    """What the wallet holds of this pool's two tokens, and its dollar value.
+
+    Both tokens, not just SOL. After a close the withdrawn quote token sits in
+    the wallet; counting SOL alone would drop it from equity and report a loss
+    on every rebalance that never happened.
+    """
+    out, _ = chain('balance', pool)
+    return out or {}
+
+
+def deposit_caps(bal):
+    """Per-token deposit caps for an open, from what the wallet actually holds.
+
+    Each side is capped at `side_cap_fraction` of the capital, in that token's
+    own units, and at the wallet's balance of it less the gas reserve when the
+    token is native SOL. The SDK's quote picks the liquidity both caps allow, so
+    a wallet that is short one side opens a smaller position rather than failing.
+    """
+    price = bal['price']
+    quote_usd = bal.get('quoteUsd') or 1.0
+    capital_quote = config.CAPITAL_USD / quote_usd
+    reserve = config.GAS_RESERVE_SOL
+    avail_a = bal['balanceA'] - (reserve if bal.get('nativeSide') == 'A' else 0)
+    avail_b = bal['balanceB'] - (reserve if bal.get('nativeSide') == 'B' else 0)
+    cap_a = min(max(avail_a, 0), capital_quote * config.SIDE_CAP_FRACTION / price)
+    cap_b = min(max(avail_b, 0), capital_quote * config.SIDE_CAP_FRACTION)
+    return cap_a, cap_b
 
 
 def position_usd(status):
@@ -185,7 +216,8 @@ def best_band_for(pool):
     ts, px, vol = c
     fee = int(p.get('feeRate') or 0) / 1e6
     ctx = {'tvl_usd': tvl, 'c_pool': c_pool}
-    runs = [engine.simulate(k, ts, px, vol, ctx, fee, config.CAPITAL_USD)
+    runs = [engine.simulate(k, ts, px, vol, ctx, fee, config.CAPITAL_USD,
+                            config.SWAP_COST)
             for k in config.BANDS]
     # Reject bands that churn. A high simulated yield bought with a rebalance a
     # day is a high yield bought with a daily chance of a failed transaction.
@@ -207,11 +239,18 @@ def reopen(state, reason):
         return False
     price = best['price']
     lower, upper = price / best['band'], price * best['band']
-    _, sol = wallet_usd(price)
-    max_sol = max(sol - config.SOL_RESERVE, 0) * 0.55
-    max_usdc = config.CAPITAL_USD * 0.55
+    bal = wallet(pool)
+    if 'balanceA' not in bal:
+        notify('idle', reason='could not read the wallet; opening nothing')
+        return False
+    cap_a, cap_b = deposit_caps(bal)
+    if cap_a * price + cap_b < config.CAPITAL_USD * 0.1 / (bal.get('quoteUsd') or 1):
+        notify('idle', reason=f'wallet holds too little {bal["tokenA"]} and '
+                              f'{bal["tokenB"]} to open; nothing to do',
+               balanceA=bal['balanceA'], balanceB=bal['balanceB'])
+        return False
     out, err = chain('open', pool, f'{lower:.6f}', f'{upper:.6f}',
-                     f'{max_sol:.6f}', f'{max_usdc:.2f}', '--execute')
+                     f'{cap_a:.9f}', f'{cap_b:.9f}', '--execute')
     if err and not out:
         # The open may still have landed. Ask the chain before believing this.
         time.sleep(15)
@@ -236,6 +275,7 @@ def reopen(state, reason):
     notify_book('OPEN', pair=config.PAIR_LABEL, pool=pool,
            band=f'+/-{(best["band"] - 1) * 100:.0f}%',
            lower=round(lower, 4), upper=round(upper, 4),
+           cap_a=f'{cap_a:.6f} {bal["tokenA"]}', cap_b=f'{cap_b:.6f} {bal["tokenB"]}',
            expected_net_day_pct=round(best['net_day_pct'], 3),
            modelled_rebalances_per_day=round(best['rebal_per_day'], 2),
            signature=(out or {}).get('signature'), reason=reason)
@@ -329,7 +369,7 @@ def main():
             continue
 
         price = status['price']
-        wusd, _ = wallet_usd(price)
+        wusd = wallet(status['whirlpool']).get('walletUsd')
         db.snapshot(status['positionMint'], price, status.get('inRange'),
                         status.get('liquidity'),
                         status.get('feesAccruedA', 0.0),
@@ -343,6 +383,16 @@ def main():
                    lower=status['lowerPrice'], upper=status['upperPrice'],
                    action='harvest, close, re-optimise, reopen')
             rebalance(state, status, f'price went {side}')
+            time.sleep(config.POLL_SECONDS)
+            continue
+
+        if REBALANCE.exists():
+            # Consumed before it runs, so a failure cannot loop on the trigger.
+            REBALANCE.unlink()
+            db.event('REBALANCE_REQUESTED', 'operator touched REBALANCE')
+            notify('REBALANCE_REQUESTED', price=price,
+                   action='harvest, close, re-optimise, reopen')
+            rebalance(state, status, 'operator requested')
             time.sleep(config.POLL_SECONDS)
             continue
 

@@ -1,11 +1,10 @@
-// KMNBOT bridge for the LP rebalancer.
+// Telegram bridge for the rebalancer.
 //
-// Tails lp_bot/kmnbot_feed.jsonl and forwards every row to Telegram, so the
-// bot is updated on each signal, entry, exit, skip and breaker event. It has NO
-// trading, signing or execution path: it only reads a file and sends text.
+// Tails events.jsonl and forwards every row to Telegram, so you see each poll,
+// open, close, reband and breaker as it happens. It has NO trading, signing or
+// execution path: it only reads a file and sends text.
 //
-// Needs TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID, the same pair kmn_notifier.mjs
-// uses. Run it with the same EnvironmentFile as kamino-live.
+// Needs TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID in the environment.
 import fs from 'fs';
 import path from 'path';
 
@@ -14,8 +13,8 @@ const chatId = process.env.TELEGRAM_CHAT_ID;
 if (!token || !chatId) throw new Error('needs TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID');
 
 const DIR = path.dirname(new URL(import.meta.url).pathname);
-const FEED = path.join(DIR, 'kmnbot_feed.jsonl');
-const STATE_F = path.join(DIR, 'kmnbot_bridge_state.json');
+const FEED = path.join(DIR, 'events.jsonl');
+const STATE_F = path.join(DIR, 'telegram_bridge_state.json');
 
 let state = { pos: 0 };
 try { state = { ...state, ...JSON.parse(fs.readFileSync(STATE_F, 'utf8')) }; } catch {}
@@ -28,8 +27,6 @@ async function send(text) {
   const j = await r.json();
   if (!j.ok) throw new Error(`telegram: ${JSON.stringify(j)}`);
 }
-
-const money = (x) => (x >= 0 ? '+' : '') + Number(x).toFixed(2);
 
 function render(row) {
   const { event } = row;
@@ -62,7 +59,7 @@ function render(row) {
 
   switch (event) {
     case 'startup':
-      return `APERTURE · online\n${row.pair} · capital $${n(row.capital_usd, 0)}\n`
+      return `REBALANCER · online\n${row.pair} · capital $${n(row.capital_usd, 0)}\n`
         + `poll ${row.poll_seconds}s · reopt ${row.reopt_every_hours}h @ +${(row.reopt_min_gain * 100).toFixed(0)}%\n`
         + book(row);
     case 'in_band':
@@ -71,13 +68,20 @@ function render(row) {
     case 'OUT_OF_BAND':
       return `OUT OF RANGE · went ${row.side}\n`
         + `price ${n(row.price, 4)} · band ${n(row.lower, 4)} — ${n(row.upper, 4)}\n${row.action}`;
+    case 'REBALANCE_REQUESTED':
+      return `REBALANCE REQUESTED by operator · price ${n(row.price, 4)}\n${row.action}`;
+    case 'rebalance_deferred':
+      return `rebalance deferred · ${row.seconds_remaining}s until the minimum gap`;
     case 'HARVEST':
       return `HARVESTED $${n(row.collected_usd, 4)}\n${row.signature ?? ''}`;
+    case 'harvest_skipped':
+      return `harvest skipped · ${row.reason}`;
     case 'CLOSE':
       return `CLOSED · ${row.reason}\n${row.signature ?? ''}\n` + book(row);
     case 'OPEN':
       return `OPENED · ${row.pair} ${row.band}\n`
         + `range ${n(row.lower, 4)} — ${n(row.upper, 4)}\n`
+        + `caps ${row.cap_a ?? '—'} · ${row.cap_b ?? '—'}\n`
         + `modelled ${n(row.expected_net_day_pct, 3)}%/day at `
         + `${n(row.modelled_rebalances_per_day, 2)} rebalances/day\n`
         + `${row.reason}\n${row.signature ?? ''}\n` + book(row);
@@ -121,7 +125,7 @@ async function tail() {
   }
 }
 
-console.error('kmnbot_bridge running');
+console.error('telegram_bridge running');
 for (;;) {
   try { await tail(); } catch (e) { console.error('tail:', e.message); }
   await new Promise(s => setTimeout(s, 5000));

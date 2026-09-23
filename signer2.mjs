@@ -16,7 +16,7 @@
 // is ever shown.
 //
 // Commands:
-//   node signer2.mjs balance
+//   node signer2.mjs balance [pool]
 //   node signer2.mjs positions
 //   node signer2.mjs status [mint]
 //   node signer2.mjs open <pool> <lowerPrice> <upperPrice> <maxA> <maxB> [--execute]
@@ -42,8 +42,11 @@ const RPC = process.env.SOLANA_RPC_URL
 // values from its active profile; the defaults only matter to a bare CLI run.
 const MAX_USD = Number(process.env.LPBOT_MAX_USD ?? 260);
 const SLIPPAGE_BPS = Number(process.env.LPBOT_SLIPPAGE_BPS ?? 100);
-const RESERVE_A = Number(process.env.LPBOT_RESERVE_A ?? 0.02);
+// Native SOL kept back for transaction fees. Not a property of the pool: a
+// WIF/USDC position still needs SOL to close itself.
+const GAS_RESERVE_SOL = Number(process.env.LPBOT_GAS_RESERVE_SOL ?? 0.02);
 
+const NATIVE_MINT = 'So11111111111111111111111111111111111111112';
 const HEADERS = { accept: 'application/json', 'user-agent': 'Mozilla/5.0' };
 
 function guard() {
@@ -105,6 +108,32 @@ async function quoteUsd(info) {
   return { usd: null, source: 'unknown' };
 }
 
+// Dollar price of native SOL, for valuing the gas balance when SOL is not one
+// of the pool's tokens. When it is, the pool's own price is the answer.
+async function solUsd(info, qUsd) {
+  if (info.mintA === NATIVE_MINT && qUsd != null) return info.price * qUsd;
+  if (info.mintB === NATIVE_MINT && qUsd != null) return qUsd;
+  try {
+    const r = await fetch('https://api.geckoterminal.com/api/v2/simple/networks/solana/'
+      + `token_price/${NATIVE_MINT}`, { headers: { accept: 'application/json;version=20230203' } });
+    const p = Number((await r.json())?.data?.attributes?.token_prices?.[NATIVE_MINT]);
+    return p > 0 ? p : null;
+  } catch { return null; }
+}
+
+// Human-unit balance of one SPL mint. The native mint is the lamport balance:
+// the wrapping strategy wraps it into an ATA on demand at open time.
+async function tokenBalance(rpc, owner, mint, decimals, lamports) {
+  if (mint === NATIVE_MINT) return lamports / 1e9;
+  const r = await rpc.getTokenAccountsByOwner(owner, { mint: address(mint) },
+    { encoding: 'jsonParsed' }).send();
+  let raw = 0n;
+  for (const a of r.value ?? []) {
+    raw += BigInt(a.account?.data?.parsed?.info?.tokenAmount?.amount ?? 0);
+  }
+  return Number(raw) / 10 ** decimals;
+}
+
 // Try each endpoint in turn. A single rate-limited RPC made the bot read
 // "no position" and try to open a second one; the read must be hard to fail,
 // and when it does fail it must fail loudly rather than return an empty answer.
@@ -145,12 +174,35 @@ async function connect() {
   return withRpc(async (c) => c);
 }
 
-async function balance() {
+// What the wallet holds. With a pool: both of its tokens, what each is worth,
+// and the whole wallet in dollars. Without one: native SOL only.
+//
+// The pool-aware form is what the bot sizes an open from and what it adds to
+// the position's mark for equity. Counting SOL alone made every idle USDC
+// balance invisible, so equity would have dropped by the withdrawn amount on
+// every close and reported a loss that never happened.
+async function balance(pool) {
+  const info = pool ? await poolInfo(pool) : null;
   return withRpc(async ({ signer, rpc }) => {
-    const lamports = await rpc.getBalance(signer.address).send();
-    console.log(JSON.stringify({
-      owner: signer.address, sol: Number(lamports.value) / 1e9,
-    }, null, 1));
+    const lamports = Number((await rpc.getBalance(signer.address).send()).value);
+    const out = { owner: signer.address, sol: lamports / 1e9 };
+    if (info) {
+      const { usd: qUsd } = await quoteUsd(info);
+      const sUsd = await solUsd(info, qUsd);
+      out.pool = pool;
+      out.tokenA = info.symbolA; out.tokenB = info.symbolB;
+      out.price = info.price; out.quoteUsd = qUsd;
+      out.balanceA = await tokenBalance(rpc, signer.address, info.mintA, info.decimalsA, lamports);
+      out.balanceB = await tokenBalance(rpc, signer.address, info.mintB, info.decimalsB, lamports);
+      out.nativeSide = info.mintA === NATIVE_MINT ? 'A' : info.mintB === NATIVE_MINT ? 'B' : null;
+      // The pool's two tokens in quote units, then dollars; plus the gas SOL
+      // when it is not already one of them.
+      const inQuote = out.balanceA * info.price + out.balanceB;
+      out.walletUsd = qUsd == null ? null : Number((inQuote * qUsd
+        + (out.nativeSide ? 0 : out.sol * (sUsd ?? 0))).toFixed(4));
+    }
+    console.log(JSON.stringify(out, null, 1));
+    return out;
   });
 }
 
@@ -168,10 +220,17 @@ async function positions() {
 
 async function open(pool, lower, upper, maxA, maxB, execute) {
   const info = await poolInfo(pool);
+  // The liquidity instructions this package builds are rejected by adaptive-fee
+  // pools with custom error 6069, which reads like slippage and is not. Refuse
+  // before any token is bought for it; the first time this cost a round trip.
+  if (info.adaptiveFee) {
+    throw new Error(`${info.symbolA}/${info.symbolB} is an adaptive-fee pool; this `
+      + 'signer cannot open positions on it (Whirlpool error 6069). Choose another pool.');
+  }
   return withRpc(async ({ signer, rpc }) => {
     const lamports = await rpc.getBalance(signer.address).send();
-    if (Number(lamports.value) / 1e9 < RESERVE_A) {
-      throw new Error(`SOL below the ${RESERVE_A} reserve; a wallet that cannot `
+    if (Number(lamports.value) / 1e9 < GAS_RESERVE_SOL) {
+      throw new Error(`SOL below the ${GAS_RESERVE_SOL} gas reserve; a wallet that cannot `
         + 'pay fees cannot close its own position');
     }
     // Size the cap at the pool's own price rather than a constant. The old
@@ -335,14 +394,14 @@ async function main() {
   const [cmd, ...rest] = process.argv.slice(2);
   const execute = rest.includes('--execute');
   const a = rest.filter(x => x !== '--execute');
-  if (cmd === 'balance') return balance();
+  if (cmd === 'balance') return balance(a[0]);
   if (cmd === 'positions') return positions();
   if (cmd === 'status') return status(a[0]);
   if (cmd === 'harvest') return harvest(a[0], execute);
   if (cmd === 'close') return close(a[0], execute);
   if (cmd === 'open') return open(a[0], a[1], a[2], a[3], a[4], execute);
   if (cmd === 'pool') return poolInfo(a[0]).then(i => console.log(JSON.stringify(i, null, 1)));
-  console.log('commands: balance | positions | status [mint] | pool <pool> | '
+  console.log('commands: balance [pool] | positions | status [mint] | pool <pool> | '
     + 'open <pool> <lo> <hi> <maxA> <maxB> [--execute] | harvest <mint> [--execute] '
     + '| close <mint> [--execute]');
 }
