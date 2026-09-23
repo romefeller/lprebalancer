@@ -296,7 +296,10 @@ def main():
         price = status['price']
         wusd, _ = wallet_usd(price)
         ledger.snapshot(status['positionMint'], price, status.get('inRange'),
-                        status.get('liquidity'), status.get('feesAccrued_USD', 0.0),
+                        status.get('liquidity'),
+                        status.get('feesAccruedA_SOL', 0.0),
+                        status.get('feesAccruedB_USDC', 0.0),
+                        status.get('feesAccrued_USD', 0.0),
                         wusd, position_usd(status))
 
         if not status.get('inRange'):

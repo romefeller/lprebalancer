@@ -116,6 +116,40 @@ One subtlety worth knowing: Whirlpool only settles fee accounting when a
 position is touched, so the position's own `feeOwed` fields read zero on a live,
 earning position. Aperture reads the real figure from a close quote instead.
 
+## What it reports
+
+Every message carrying money shows the same block, so a rebalance can never make
+the earnings look like they reset:
+
+```
+IN RANGE · 113.7400
+band 108.7100 — 119.9000
+━━ FEES ━━
+today       0.000265 SOL   0.0332 USDC   $0.0469
+realised    0 SOL          0 USDC        $0.0000
+unrealised  0.000265 SOL   0.0332 USDC   $0.0635
+TOTAL       0.000265 SOL   0.0332 USDC   $0.0635
+━━ BOOK ━━
+equity      $241.55   P&L +1.17
+rate        $0.41/day   APR 62.1%
+in range    100%   over 1.34d
+activity    1 position · 0 rebands · 0 harvests
+```
+
+Fees are shown in both tokens because they are earned in both. A position pays
+you token A and token B in whatever proportion the trading happened to take, so
+a single dollar figure hides what you hold and moves with the price even in an
+hour when you earned nothing.
+
+- **today** — since 00:00 UTC, harvested plus accrued since this morning
+- **realised** — harvested into the wallet. Permanent.
+- **unrealised** — still in the position. Resets to zero when it closes.
+- **TOTAL** — realised plus unrealised, since the ledger began. Only goes up.
+- **APR** — annualised on equity actually at work, not on notional.
+
+`python3 ledger.py` prints the same figures as JSON; `python3 ledger.py history`
+prints the snapshot series.
+
 ## Safety
 
 | guard | default |

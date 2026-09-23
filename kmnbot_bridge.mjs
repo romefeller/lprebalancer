@@ -33,66 +33,72 @@ const money = (x) => (x >= 0 ? '+' : '') + Number(x).toFixed(2);
 
 function render(row) {
   const { event } = row;
-  const n = (x, d = 2) => (x === undefined || x === null ? '-' : Number(x).toFixed(d));
-  // Every message that reports money carries the same cumulative block, so a
-  // rebalance can never make the earnings look like they went back to zero.
-  const money = (r) =>
-      `FEES  realised $${n(r.fees_realised_usd, 4)}`
-    + `  +  unrealised $${n(r.fees_unrealised_usd, 4)}`
-    + `  =  TOTAL $${n(r.fees_total_usd, 4)}\n`
-    + `equity $${n(r.equity_usd)}`
-    + (r.pnl_usd !== undefined && r.pnl_usd !== null ? `   P&L ${r.pnl_usd >= 0 ? '+' : ''}${n(r.pnl_usd)}` : '')
-    + (r.fees_per_day_usd ? `\nrate $${n(r.fees_per_day_usd, 4)}/day` : '')
-    + (r.in_range_pct !== undefined && r.in_range_pct !== null ? `   in range ${n(r.in_range_pct, 0)}%` : '')
-    + `\npositions ${r.positions_opened ?? '-'}   rebands ${r.rebands ?? '-'}   harvests ${r.harvests ?? '-'}`;
+  const n = (x, d = 2) => (x === undefined || x === null ? '—' : Number(x).toFixed(d));
+  const tok = (x, d = 6) => (x === undefined || x === null ? '—' : Number(x).toFixed(d).replace(/0+$/, '').replace(/\.$/, ''));
+  const sign = (x) => (Number(x) >= 0 ? '+' : '') + n(x);
+  const plural = (c, word) => (c == null ? `— ${word}s` : `${c} ${word}${c === 1 ? '' : 's'}`);
+
+  // The standing report. Fees are earned in two currencies, so both are shown:
+  // a single dollar figure moves when the price moves even if nothing was
+  // earned. Realised is harvested and permanent; unrealised resets when the
+  // position closes; the total only ever goes up.
+  const book = (r) => {
+    const A = r.token_a ?? 'A', B = r.token_b ?? 'B';
+    return [
+      `━━ FEES ━━`,
+      `today       ${tok(r.fees_today_a)} ${A}   ${tok(r.fees_today_b, 4)} ${B}   $${n(r.fees_today_usd, 4)}`,
+      `realised    ${tok(r.fees_realised_a)} ${A}   ${tok(r.fees_realised_b, 4)} ${B}   $${n(r.fees_realised_usd, 4)}`,
+      `unrealised  ${tok(r.fees_unrealised_a)} ${A}   ${tok(r.fees_unrealised_b, 4)} ${B}   $${n(r.fees_unrealised_usd, 4)}`,
+      `TOTAL       ${tok(r.fees_total_a)} ${A}   ${tok(r.fees_total_b, 4)} ${B}   $${n(r.fees_total_usd, 4)}`,
+      `━━ BOOK ━━`,
+      `equity      $${n(r.equity_usd)}   P&L ${sign(r.pnl_usd)}`,
+      `rate        ${r.fees_per_day_usd != null ? '$' + n(r.fees_per_day_usd, 4) + '/day' : '— (needs an hour)'}`
+        + `${r.apr_pct != null ? `   APR ${n(r.apr_pct, 1)}%` : ''}`,
+      `in range    ${n(r.in_range_pct, 0)}%   over ${n(r.tracked_days, 2)}d`,
+      `activity    ${plural(r.positions_opened, 'position')} · ${plural(r.rebands, 'reband')} · `
+        + `${plural(r.harvests, 'harvest')}${r.failures ? ` · ${plural(r.failures, 'failure')}` : ''}`,
+    ].join('\n');
+  };
+
   switch (event) {
     case 'startup':
-      return `APERTURE online — ${row.mode}\n`
-        + `${row.pair} · ${row.pool}\n`
-        + `capital $${row.capital_usd}   poll ${row.poll_seconds}s\n`
-        + `reopt every ${row.reopt_every_hours}h, min gain ${(row.reopt_min_gain * 100).toFixed(0)}%\n`
-        + money(row);
+      return `APERTURE · online\n${row.pair} · capital $${n(row.capital_usd, 0)}\n`
+        + `poll ${row.poll_seconds}s · reopt ${row.reopt_every_hours}h @ +${(row.reopt_min_gain * 100).toFixed(0)}%\n`
+        + book(row);
     case 'in_band':
-      return `IN BAND   price ${n(row.price, 4)}\n`
-        + `band ${n(row.lower, 4)} — ${n(row.upper, 4)}\n` + money(row);
+      return `IN RANGE · ${n(row.price, 4)}\nband ${n(row.lower, 4)} — ${n(row.upper, 4)}\n`
+        + book(row);
     case 'OUT_OF_BAND':
-      return `OUT OF BAND — ${row.side}\n`
-        + `price ${n(row.price, 4)}   band ${n(row.lower, 4)} — ${n(row.upper, 4)}\n`
-        + `${row.action}`;
+      return `OUT OF RANGE · went ${row.side}\n`
+        + `price ${n(row.price, 4)} · band ${n(row.lower, 4)} — ${n(row.upper, 4)}\n${row.action}`;
     case 'HARVEST':
-      return `FEES COLLECTED  $${n(row.collected_usd, 4)}\n${row.signature ?? ''}`;
+      return `HARVESTED $${n(row.collected_usd, 4)}\n${row.signature ?? ''}`;
     case 'CLOSE':
-      return `CLOSED (${row.reason})\n${row.signature ?? ''}\n` + money(row);
+      return `CLOSED · ${row.reason}\n${row.signature ?? ''}\n` + book(row);
     case 'OPEN':
-      return `NEW LP  ${row.pair}\n`
-        + `band ${row.band}   ${n(row.lower, 4)} — ${n(row.upper, 4)}\n`
-        + `expected ${n(row.expected_net_day_pct, 3)}%/day, `
+      return `OPENED · ${row.pair} ${row.band}\n`
+        + `range ${n(row.lower, 4)} — ${n(row.upper, 4)}\n`
+        + `modelled ${n(row.expected_net_day_pct, 3)}%/day at `
         + `${n(row.modelled_rebalances_per_day, 2)} rebalances/day\n`
-        + `reason: ${row.reason}\n${row.signature ?? ''}\n` + money(row);
+        + `${row.reason}\n${row.signature ?? ''}\n` + book(row);
     case 'REBAND':
-      return `RE-OPTIMISED  ${row.old_band} -> ${row.new_band}\n`
-        + `${n(row.old_net_day, 3)}%/day -> ${n(row.new_net_day, 3)}%/day `
-        + `(+${row.improvement_pct}%)`;
+      return `REBANDED · ${row.old_band} → ${row.new_band}\n`
+        + `${n(row.old_net_day, 3)}%/day → ${n(row.new_net_day, 3)}%/day (+${row.improvement_pct}%)`;
     case 'reopt_checked':
-      return `band check: holding ${row.held}, best ${row.best}\n${row.verdict}`;
+      return `band review · holding ${row.held}, best ${row.best}\n${row.verdict}`;
     case 'status_unreadable':
-      return `cannot read chain (${row.consecutive}): ${row.reason}\n${row.action}`;
+      return `chain unreadable (${row.consecutive}) · ${row.reason}\n${row.action}`;
     case 'close_recovered':
     case 'open_recovered':
-      return `RECOVERED — ${row.detail}`;
+      return `RECOVERED · ${row.detail}`;
     case 'close_failed':
     case 'open_failed':
-      return `${event.toUpperCase()}: ${row.reason}\nfailures ${row.failures}`;
-    case 'no_position':
-      return `no position: ${row.detail}`;
-    case 'idle':
-      return `idle: ${row.reason}`;
-    case 'BREAKER':
-      return `BREAKER TRIPPED\n${row.reason}\n${row.action}`;
-    case 'halted':
-      return `HALTED: ${row.reason}`;
-    default:
-      return `${event}: ${JSON.stringify(row)}`;
+      return `${event.replace('_', ' ').toUpperCase()} · ${row.reason}\nfailures ${row.failures}`;
+    case 'no_position':   return `no position · ${row.detail}`;
+    case 'idle':          return `idle · ${row.reason}`;
+    case 'BREAKER':       return `BREAKER · ${row.reason}\n${row.action}`;
+    case 'halted':        return `HALTED · ${row.reason}`;
+    default:              return `${event} · ${JSON.stringify(row)}`;
   }
 }
 
