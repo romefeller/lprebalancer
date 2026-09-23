@@ -99,6 +99,54 @@ For each candidate band `k` in the ladder:
    capital / days`, plus the rebalance count, the fraction of hours in range,
    and the result against simply holding 50/50.
 
+### Many origins, not one path
+
+One replay over the whole window is one draw from the pool's history. A band
+that happened to fit the last six weeks is not a band that fits this pool. So
+every candidate is also replayed from every 24th hour over a 10-day horizon —
+about 32 windows on 1000 candles — and the bot decides on the **median** net
+return per day across those windows. The 25th percentile and the worst window
+are reported next to it, so a band that is brilliant on average and ruinous
+one time in four is visible as such.
+
+The same origins give the band's **survival curve**: from each starting hour,
+how long until the price first leaves a band of that width. Windows that never
+saw an exit before the data ran out are censored, not dropped, and the curve is
+a Kaplan-Meier estimate. The table reports the median lifetime and the
+probability that the band is still intact after 24 hours, 72 hours and 7 days.
+
+Next to it stands the one number that is analytic: the **edge loss**, the
+value a position has given up against holding 50/50 by the time the price
+reaches its edge. For a ±5% band it is 1.23%; for ±18%, 4.30%. A rebalance at
+the edge makes that loss permanent. Narrow bands pay it often and small; wide
+bands pay it rarely and large. The survival curve says how often.
+
+```sh
+python3 engine.py ladder <pool> [capital_usd] [bands]
+```
+
+```
+   band    path  median     p25   worst  +win  beat  reb/d  exit50%  S24h  S72h   S7d   edge
++/-   3%   0.142   0.029  -0.152  -0.358   59%    9%   0.94      25h   50%   12%    0%  0.74%
++/-   5%   0.335   0.115  -0.073  -0.455   66%   25%   0.42      57h   76%   39%    7%  1.23%
++/-   8%   0.449   0.341   0.147  -0.296   91%   50%   0.14     121h   91%   69%   37%  1.96%
++/-  10%   0.490   0.361   0.189  -0.272   91%   53%   0.09     147h   96%   74%   45%  2.44%
++/-  12%   0.468   0.318   0.143  -0.283   91%   47%   0.08     159h   98%   80%   48%  2.91%
++/-  18%   0.438   0.395   0.112  -0.301   88%   59%   0.03     599h  100%   95%   72%  4.30%  <-
++/-  25%   0.404   0.369   0.083  -0.311   88%   59%   0.03     702h  100%   99%   87%  5.87%
++/-  40%   0.384   0.340   0.054  -0.321   84%   59%   0.01     >win  100%  100%  100%  9.03%
+```
+
+SOL/USDC, $190, 2026-09-23. `path` is the single full-window replay, the
+figure the bot used to decide on; `median`, `p25`, `worst` are the rolling
+windows; `+win` is the share of windows with a positive net; `beat` the share
+that beat holding. Read the ±5% row: the single path says 0.335%/day, the
+median says 0.115, a quarter of windows lose money, and the band has a 7%
+chance of lasting a week. The ±10% row has the best single path and the ±18%
+row the best median; the bot takes ±18%. No band beats holding in more than
+59% of windows, which is the same fact as the `vs hold` column above, seen
+from many angles instead of one.
+
 ### The churn gate
 
 Then one rule overrides the score. A band whose replay needed more rebalances
@@ -347,6 +395,35 @@ never been watched.
 | `sql/001_schema.sql` | the schema, idempotent |
 | `sql/002_any_pool.sql` | migration for databases created before the pool-agnostic sizing |
 | `ops/*.service` | systemd units |
+| `tests/` | the test suite, below |
+
+---
+
+## Tests
+
+```sh
+createdb rebalancer_test
+psql -d rebalancer_test -f sql/001_schema.sql -f sql/002_any_pool.sql
+tests/run.sh                                        # offline suites
+WALLET_SECRET_PATH=/path/to/key tests/run.sh        # plus the live signer reads
+```
+
+Four suites, 58 tests, about 20 seconds. They run against a database whose
+name ends in `_test` and refuse to run against anything else, because the
+ledger tests truncate tables.
+
+| suite | what it proves |
+|---|---|
+| `test_engine` | the CLMM arithmetic round-trips; a position at its edge has lost to holding; fees scale with concentration; flat, stepped and trending paths give the answers known in advance; Kaplan-Meier respects censoring; wider bands survive longer; the ladder refuses a pool whose candles disagree with its price |
+| `test_rebalancer` | deposit sizing on a flush wallet, a short wallet, a native-B pool and a BTC-quoted pool; the gas reserve comes off the native side only; rate-limit dumps tidy to one line; signer output parses through bindings noise; a timeout is an error, not a crash |
+| `test_db` | one active profile; parameters validate and the sanity constraint bites; `add` fills the pair from Orca and refuses adaptive-fee pools; a full lifecycle — open, accrue, harvest, close, reopen — keeps TOTAL monotonic and counts a harvest once; token amounts survive exactly |
+| `test_signer_live` | read-only against mainnet: pool descriptions, both balances on a dollar-quoted and a BTC-quoted pool, status, dry-run open and close that build real instructions, refusal of adaptive-fee pools and of positions over the cap |
+
+Three of these tests found bugs on the day they were written: `daily` had a
+SQL syntax error and had never run; a harvest was counted as both realised and
+unrealised until the next poll, so $0.26 read as $0.51; and the quote-token
+price on SOL/cbBTC came back as the price of SOL, because GeckoTerminal orders
+a pair by its own convention. Tokens are now priced by mint.
 
 ---
 

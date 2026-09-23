@@ -141,7 +141,11 @@ def record_harvest(mint, fee_a, fee_b, fee_usd, sig):
 
 def snapshot(mint, price, in_range, liquidity, accrued_a, accrued_b,
              accrued_usd, wallet_usd, position_usd):
-    equity = (wallet_usd or 0) + (position_usd or 0)
+    # Equity is the wallet plus the position. If either could not be read
+    # this poll, equity is unknown — not "the other half", which would show up
+    # as a $170 loss in the P&L for one poll and a $170 gain in the next.
+    equity = ((wallet_usd + position_usd)
+              if (wallet_usd is not None and position_usd is not None) else None)
     with cursor(commit=True) as cur:
         cur.execute("""
             insert into snapshots (ts, mint, price, in_range, liquidity, accrued_a,
@@ -190,15 +194,30 @@ def stats(token_a=None, token_b=None):
                     "where ts >= date_trunc('day', now() at time zone 'utc')")
         rt = cur.fetchone()
 
-        cur.execute('select ts, price, accrued_a, accrued_b, accrued_usd, equity_usd '
-                    'from snapshots order by id desc limit 1')
+        # The latest snapshot, and whether the position it describes still
+        # exists. Unrealised fees are what is sitting in an OPEN position. A
+        # snapshot of a position that has since been harvested and closed
+        # describes money that is now in the wallet and already counted as
+        # realised; reading it as unrealised too is how a $0.26 harvest was
+        # reported as $0.51 of fees.
+        cur.execute('select s.ts, s.mint, s.price, s.accrued_a, s.accrued_b, '
+                    's.accrued_usd, s.equity_usd, '
+                    '(p.mint is not null and p.closed_at is null) as open '
+                    'from snapshots s left join positions p on p.mint = s.mint '
+                    'order by s.id desc limit 1')
         latest = cur.fetchone()
+        if latest and not latest['open']:
+            latest = dict(latest, accrued_a=0, accrued_b=0, accrued_usd=0)
 
-        # The first snapshot of today, so "today" counts what accrued since
-        # midnight rather than everything the open position has ever earned.
+        # The first snapshot of today FOR THIS POSITION, so "today" counts what
+        # accrued since midnight rather than everything the open position has
+        # ever earned. Filtering by mint matters: after a rebalance the day's
+        # first snapshot belongs to a position that no longer exists, and its
+        # accrual has nothing to do with the new one's.
         cur.execute("select accrued_a, accrued_b, accrued_usd from snapshots "
                     "where ts >= date_trunc('day', now() at time zone 'utc') "
-                    "order by id asc limit 1")
+                    "and mint = %s order by id asc limit 1",
+                    (latest['mint'] if latest else None,))
         day0 = cur.fetchone()
 
         # The clock starts when the first position opened, not when the first
@@ -282,28 +301,53 @@ def stats(token_a=None, token_b=None):
 
 
 def daily():
-    """Fees per UTC day, realised plus the change in accrual. One row per day."""
+    """Fees per UTC day. One row per day.
+
+    A position's earnings to date are its unharvested accrual plus everything
+    already harvested from it. That sum is what grows as fees come in and does
+    not move when a harvest turns accrued into realised, so the day's earning
+    is its rise over the day, per position, summed. Adding harvests to the
+    accrual delta instead counted a $0.26 harvest twice.
+    """
     with cursor() as cur:
         cur.execute("""
-            with h as (
-                select date_trunc('day', ts) d,
-                       sum(fee_a) a, sum(fee_b) b, sum(fee_usd) usd
-                from harvests group by 1
+            with pts as (
+                -- every snapshot, marked with the position's total to date
+                select s.ts, s.mint,
+                       s.accrued_a + coalesce((select sum(h.fee_a) from harvests h
+                                               where h.mint = s.mint and h.ts <= s.ts), 0) a,
+                       s.accrued_b + coalesce((select sum(h.fee_b) from harvests h
+                                               where h.mint = s.mint and h.ts <= s.ts), 0) b,
+                       s.accrued_usd + coalesce((select sum(h.fee_usd) from harvests h
+                                                 where h.mint = s.mint and h.ts <= s.ts), 0) usd
+                from snapshots s
+                union all
+                -- and every harvest, as the moment accrual became realised
+                select h.ts, h.mint,
+                       (select sum(fee_a) from harvests x where x.mint = h.mint and x.ts <= h.ts),
+                       (select sum(fee_b) from harvests x where x.mint = h.mint and x.ts <= h.ts),
+                       (select sum(fee_usd) from harvests x where x.mint = h.mint and x.ts <= h.ts)
+                from harvests h
+                union all
+                -- and every open, at zero: what accrued before the first
+                -- snapshot is still the day's earning
+                select p.opened_at, p.mint, 0, 0, 0 from positions p
+            ), per_mint as (
+                select date_trunc('day', ts) d, mint,
+                       max(a) - min(a) a, max(b) - min(b) b, max(usd) - min(usd) usd
+                from pts group by 1, 2
+            ), f as (
+                select d, sum(a) a, sum(b) b, sum(usd) usd from per_mint group by 1
             ), s as (
                 select date_trunc('day', ts) d,
-                       max(accrued_a) - min(accrued_a) a,
-                       max(accrued_b) - min(accrued_b) b,
-                       max(accrued_usd) - min(accrued_usd) usd,
                        avg(case when in_range then 1.0 else 0.0 end) ir,
                        max(equity_usd) eq
                 from snapshots group by 1
             )
-            select coalesce(h.d, s.d)::date day,
-                   coalesce(h.a,0) + coalesce(s.a,0) fee_a,
-                   coalesce(h.b,0) + coalesce(s.b,0) fee_b,
-                   coalesce(h.usd,0) + coalesce(s.usd,0) fee_usd,
+            select coalesce(f.d, s.d)::date as day,
+                   coalesce(f.a, 0) fee_a, coalesce(f.b, 0) fee_b, coalesce(f.usd, 0) fee_usd,
                    s.ir in_range, s.eq equity_usd
-            from h full outer join s on h.d = s.d
+            from f full outer join s on f.d = s.d
             order by 1 desc limit 60
         """)
         return [dict(r) for r in cur.fetchall()]
@@ -324,11 +368,14 @@ SEED_POOL = 'Czfq3xZZDmsdGdUyrNLtRhGc47cXcZtLG4crryfu44zE'   # SOL/USDC 0.04%
 
 def describe_pool(pool):
     """Ask Orca what this pool is. Refuses the one kind the signer cannot open."""
-    import urllib.request
+    import urllib.error, urllib.request
     req = urllib.request.Request(f'{ORCA}/pools/{pool}',
                                  headers={'accept': 'application/json',
                                           'user-agent': 'Mozilla/5.0'})
-    d = json.loads(urllib.request.urlopen(req, timeout=30).read())
+    try:
+        d = json.loads(urllib.request.urlopen(req, timeout=30).read())
+    except (urllib.error.URLError, ValueError) as e:
+        raise SystemExit(f'Orca does not know a pool at {pool} ({e}). Nothing was added.')
     d = d.get('data') or d
     if not d.get('tokenA'):
         raise SystemExit(f'Orca does not know a pool at {pool}. Nothing was added.')

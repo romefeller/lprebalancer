@@ -199,34 +199,26 @@ def position_usd(status):
 
 
 def best_band_for(pool):
-    """Simulate every candidate band on this pool's own recent data."""
+    """Score every candidate band on this pool's own recent data.
+
+    Each band is replayed from many origins, not once: the bot decides on the
+    median net return per day across rolling windows, so a band that fitted
+    the last six weeks by luck does not beat one that works from most starting
+    points. The churn gate then discards bands that rebalance too often.
+    """
     d = engine.curl(f'{engine.ORCA}/pools/{pool}')
     p = (d or {}).get('data') or d
-    if not p:
+    if not p or not p.get('tokenA'):
         return None
-    pool_l = engine.active_liquidity(p)
-    tvl = float(p.get('tvlUsdc') or 0)
-    quote_usd = engine.pool_quote_price(pool)
-    c_pool = engine.pool_concentration(pool_l, tvl, float(p['price']), quote_usd or 0)
-    if not c_pool or not (1.0 <= c_pool <= 500.0):
+    out = engine.ladder(p, engine.candles(pool), config.BANDS,
+                        config.CAPITAL_USD, config.SWAP_COST)
+    if not out:
         return None
-    c = engine.candles(pool)
-    if not c:
-        return None
-    ts, px, vol = c
-    fee = int(p.get('feeRate') or 0) / 1e6
-    ctx = {'tvl_usd': tvl, 'c_pool': c_pool}
-    runs = [engine.simulate(k, ts, px, vol, ctx, fee, config.CAPITAL_USD,
-                            config.SWAP_COST)
-            for k in config.BANDS]
-    # Reject bands that churn. A high simulated yield bought with a rebalance a
-    # day is a high yield bought with a daily chance of a failed transaction.
-    calm = [r for r in runs
-            if r['rebal_per_day'] <= config.MAX_REBALANCES_PER_DAY_MODELLED]
-    pick = max(calm or runs, key=lambda r: r['net_day_pct'])
-    pick['price'] = float(p['price'])
-    pick['fee'] = fee
-    pick['all_runs'] = runs
+    rows, meta = out
+    pick = dict(engine.choose(rows, config.MAX_REBALANCES_PER_DAY_MODELLED))
+    pick['price'] = meta['price']
+    pick['fee'] = meta['fee']
+    pick['all_runs'] = rows
     return pick
 
 
@@ -269,12 +261,26 @@ def reopen(state, reason):
             return False
     state['failures'] = 0; save(state)
     mint = (out or {}).get('positionMint')
+    # What actually went in, not the configured capital: a wallet short of one
+    # side opens a smaller position, and the ledger must say so. The chain's
+    # own mark of the new position is the truth; the signer's estimate is the
+    # fallback if that read fails.
+    deposit_usd = None
+    if mint:
+        st, _ = chain('status', mint)
+        deposit_usd = (st or {}).get('positionUsd')
+    if deposit_usd is None:
+        deposit_usd = (out or {}).get('depositUsd')
+    if deposit_usd is None:
+        deposit_usd = min(config.CAPITAL_USD, cap_a * price + cap_b)
     db.open_position(mint, pool, config.PAIR_LABEL, lower, upper,
                      (best['band'] - 1) * 100, (out or {}).get('signature'),
-                     config.CAPITAL_USD, reason, config_name=config.PROFILE)
+                     deposit_usd, reason, config_name=config.PROFILE)
     notify_book('OPEN', pair=config.PAIR_LABEL, pool=pool,
            band=f'+/-{(best["band"] - 1) * 100:.0f}%',
            lower=round(lower, 4), upper=round(upper, 4),
+           deposit_usd=round(deposit_usd, 2),
+           deposit_a=(out or {}).get('depositEstA'), deposit_b=(out or {}).get('depositEstB'),
            cap_a=f'{cap_a:.6f} {bal["tokenA"]}', cap_b=f'{cap_b:.6f} {bal["tokenB"]}',
            expected_net_day_pct=round(best['net_day_pct'], 3),
            modelled_rebalances_per_day=round(best['rebal_per_day'], 2),
@@ -302,6 +308,13 @@ def rebalance(state, status, reason):
     if out and out.get('signature'):
         db.record_harvest(mint, accrued_a, accrued_b, accrued_usd,
                               out['signature'])
+        # The fees just moved from the position to the wallet. Record the
+        # position's counter at zero now, or the book double-counts them as
+        # both realised and unrealised until the next poll.
+        db.snapshot(mint, status['price'], status.get('inRange'),
+                    status.get('liquidity'), 0.0, 0.0, 0.0,
+                    wallet(status['whirlpool']).get('walletUsd'),
+                    position_usd(status))
         notify('HARVEST', collected_usd=round(accrued_usd, 4),
                signature=out['signature'])
     else:
@@ -314,9 +327,10 @@ def rebalance(state, status, reason):
         time.sleep(15)
         check, _ = chain('status')
         if check is not None and not check.get('positionMint'):
+            db.event('close_recovered', err)
             notify('close_recovered',
                    detail='close reported an error but the position is gone; '
-                          'treating it as closed')
+                          'treating it as closed', error=err)
             out = {'signature': None}
         else:
             state['failures'] += 1; save(state)

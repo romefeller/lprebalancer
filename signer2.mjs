@@ -74,9 +74,10 @@ const poolCache = new Map();
 async function poolInfo(pool) {
   if (poolCache.has(pool)) return poolCache.get(pool);
   const r = await fetch(`https://api.orca.so/v2/solana/pools/${pool}`, { headers: HEADERS });
-  const j = await r.json();
-  const d = j.data ?? j;
-  if (!d?.tokenA) throw new Error(`could not read pool ${pool}`);
+  // Orca answers an unknown address with plain text, not JSON.
+  const j = await r.json().catch(() => null);
+  const d = j?.data ?? j;
+  if (!d?.tokenA) throw new Error(`could not read pool ${pool}: Orca returned ${r.status}`);
   const info = {
     address: pool,
     price: Number(d.price),
@@ -96,14 +97,28 @@ async function poolInfo(pool) {
 // dollar figure the bot reports into nonsense.
 const STABLES = new Set(['USDC', 'USDT', 'PYUSD', 'USDS', 'DAI', 'FDUSD', 'USDE']);
 
+// Priced by MINT, never by GeckoTerminal's idea of which token is the quote.
+// Gecko orders a pair by its own convention, so its quote_token_price_usd on
+// SOL/cbBTC is the price of SOL. Read that as the price of a bitcoin and the
+// wallet reads $0.10 and every position is mispriced by a factor of a thousand.
+async function tokenUsd(mint) {
+  // GeckoTerminal's free tier is ~30 requests a minute; one retry covers the
+  // 429 a burst of reads produces, and a second failure is reported as null.
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const r = await fetch('https://api.geckoterminal.com/api/v2/simple/networks/solana/'
+      + `token_price/${mint}`, { headers: { accept: 'application/json;version=20230203' } });
+    if (r.status === 429 && attempt === 0) { await new Promise(s => setTimeout(s, 2500)); continue; }
+    const p = Number((await r.json().catch(() => null))?.data?.attributes?.token_prices?.[mint]);
+    return p > 0 ? p : null;
+  }
+  return null;
+}
+
 async function quoteUsd(info) {
   if (STABLES.has(info.symbolB)) return { usd: 1, source: 'stable' };
   try {
-    const r = await fetch(`https://api.geckoterminal.com/api/v2/networks/solana/pools/${info.address}`,
-      { headers: { accept: 'application/json;version=20230203' } });
-    const a = (await r.json())?.data?.attributes ?? {};
-    const p = Number(a.quote_token_price_usd);
-    if (p > 0) return { usd: p, source: 'geckoterminal' };
+    const p = await tokenUsd(info.mintB);
+    if (p) return { usd: p, source: 'geckoterminal:mint' };
   } catch { /* fall through to the honest answer below */ }
   return { usd: null, source: 'unknown' };
 }
@@ -113,12 +128,7 @@ async function quoteUsd(info) {
 async function solUsd(info, qUsd) {
   if (info.mintA === NATIVE_MINT && qUsd != null) return info.price * qUsd;
   if (info.mintB === NATIVE_MINT && qUsd != null) return qUsd;
-  try {
-    const r = await fetch('https://api.geckoterminal.com/api/v2/simple/networks/solana/'
-      + `token_price/${NATIVE_MINT}`, { headers: { accept: 'application/json;version=20230203' } });
-    const p = Number((await r.json())?.data?.attributes?.token_prices?.[NATIVE_MINT]);
-    return p > 0 ? p : null;
-  } catch { return null; }
+  try { return await tokenUsd(NATIVE_MINT); } catch { return null; }
 }
 
 // Human-unit balance of one SPL mint. The native mint is the lamport balance:
@@ -132,6 +142,24 @@ async function tokenBalance(rpc, owner, mint, decimals, lamports) {
     raw += BigInt(a.account?.data?.parsed?.info?.tokenAmount?.amount ?? 0);
   }
   return Number(raw) / 10 ** decimals;
+}
+
+// Deposit for a band [pa, pb] at price p with per-token caps: the liquidity
+// each cap alone would fund, the smaller of the two, and the amounts that
+// liquidity takes. Standard concentrated-liquidity arithmetic, in human units.
+function depositQuote(p, pa, pb, capA, capB) {
+  if (!(p > 0 && pa > 0 && pb > pa)) return null;
+  const sp = Math.sqrt(p), sa = Math.sqrt(pa), sb = Math.sqrt(pb);
+  let L;
+  if (p <= pa) L = capA / (1 / sa - 1 / sb);
+  else if (p >= pb) L = capB / (sb - sa);
+  else L = Math.min(capA / (1 / sp - 1 / sb), capB / (sp - sa));
+  if (!(L > 0)) return null;
+  const estA = p <= pa ? L * (1 / sa - 1 / sb) : p >= pb ? 0 : L * (1 / sp - 1 / sb);
+  const estB = p >= pb ? L * (sb - sa) : p <= pa ? 0 : L * (sp - sa);
+  const bound = p <= pa ? 'A' : p >= pb ? 'B'
+    : (capA / (1 / sp - 1 / sb) <= capB / (sp - sa) ? 'A' : 'B');
+  return { liquidity: L, estA, estB, binding: bound };
 }
 
 // Try each endpoint in turn. A single rate-limited RPC made the bot read
@@ -244,22 +272,30 @@ async function open(pool, lower, upper, maxA, maxB, execute) {
       tokenMaxA: BigInt(Math.floor(Number(maxA) * 10 ** info.decimalsA)),
       tokenMaxB: BigInt(Math.floor(Number(maxB) * 10 ** info.decimalsB)),
     };
+    // Nothing in 8.0.1 returns the deposit quote, so it is computed here from
+    // the CLMM amount formulas: the liquidity both caps allow, and what that
+    // liquidity takes of each token at the current price. The caps are
+    // ceilings; the ledger must record what actually goes in, which on a
+    // wallet short of one side is less than the capital. After a live open
+    // the bot replaces this estimate with the chain's own mark.
+    const quote = depositQuote(info.price, Number(lower), Number(upper), Number(maxA), Number(maxB));
+    const estA = quote?.estA ?? null;
+    const estB = quote?.estB ?? null;
+
     const result = await openConcentratedPosition(
       address(pool), param, Number(lower), Number(upper),
       { slippageToleranceBps: SLIPPAGE_BPS, funder: signer });
-
     const report = {
       pool, pair: `${info.symbolA}/${info.symbolB}`,
       lowerPrice: Number(lower), upperPrice: Number(upper),
       tokenMaxA: Number(maxA), tokenMaxB: Number(maxB),
       tokenA: info.symbolA, tokenB: info.symbolB,
       approxUsd: Number(approxUsd.toFixed(2)),
+      depositEstA: estA, depositEstB: estB,
+      depositUsd: (estA != null && qUsd != null)
+        ? Number(((estA * info.price + estB) * qUsd).toFixed(4)) : null,
       positionMint: result.positionMint ?? null,
-      quote: result.quote ? {
-        liquidity: result.quote.liquidityDelta?.toString(),
-        tokenEstA: result.quote.tokenEstA?.toString(),
-        tokenEstB: result.quote.tokenEstB?.toString(),
-      } : null,
+      quote,
       initializationCost: result.initializationCost?.toString() ?? null,
       instructions: result.instructions?.length ?? 0,
     };

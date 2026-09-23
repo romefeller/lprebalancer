@@ -139,12 +139,28 @@ def active_liquidity(pool):
         return None
 
 
-def pool_quote_price(address):
-    """USD price of the pool's quote token, from GeckoTerminal pool info."""
-    d = curl(f'{GECKO}/pools/{address}', accept='application/json;version=20230203')
-    a = (((d or {}).get('data') or {}).get('attributes') or {})
+STABLES = {'USDC', 'USDT', 'PYUSD', 'USDS', 'DAI', 'FDUSD', 'USDE'}
+
+
+def pool_quote_price(pool):
+    """USD price of the pool's quote token (Orca's token B), priced by MINT.
+
+    Never by GeckoTerminal's pool record: Gecko orders a pair by its own
+    convention, so its `quote_token_price_usd` on SOL/cbBTC is the price of
+    SOL, not of a bitcoin. Takes the Orca pool dict.
+    """
+    b = pool.get('tokenB') or {}
+    if b.get('symbol') in STABLES:
+        return 1.0
+    mint = b.get('address')
+    if not mint:
+        return None
+    d = curl(f'{GECKO}/simple/networks/solana/token_price/{mint}',
+             accept='application/json;version=20230203')
     try:
-        return float(a.get('quote_token_price_usd') or 0)
+        p = float(((d or {}).get('data') or {}).get('attributes', {})
+                  .get('token_prices', {}).get(mint) or 0)
+        return p if p > 0 else None
     except Exception:
         return None
 
@@ -219,14 +235,19 @@ def simulate(k, ts, px, vol, pool_L, fee, capital, swap_cost=SWAP_COST):
     entry = float(px[0])
     pa, pb = entry / k, entry * k
     # pool_L here is the POOL CONCENTRATION (dimensionless), not raw liquidity.
-    share = (capital / pool_L['tvl_usd']) * (band_concentration(k) / pool_L['c_pool'])
+    # Fee share per dollar of position: the position's concentration against
+    # the pool's, over the pool's TVL. Multiplied by the position's CURRENT
+    # value each hour, so that a position that has shrunk earns less and one
+    # that has grown earns more, as it does on chain.
+    share_per_usd = band_concentration(k) / pool_L['c_pool'] / pool_L['tvl_usd']
     L = liquidity_for(capital, entry, pa, pb)
     fees = cost = 0.0
     rebal = in_range = 0
     for i in range(1, len(px)):
         p = float(px[i])
         if pa <= p <= pb:
-            fees += vol[i] * fee * share
+            x, y = amounts(L, p, pa, pb)
+            fees += vol[i] * fee * share_per_usd * (x * p + y)
             in_range += 1
         else:
             x, y = amounts(L, p, pa, pb)
@@ -262,6 +283,177 @@ def best_band(ts, px, vol, pool_L, fee, capital, bands=None, swap_cost=SWAP_COST
     return max(runs, key=lambda r: r['net_day_pct']), runs
 
 
+# --- robustness: many origins, not one path ----------------------------------
+#
+# One replay over the whole window is one draw. A band that happened to fit
+# the last six weeks is not a band that fits this pool; a band that does well
+# from most starting points is. So every candidate is also replayed from many
+# origins over a fixed horizon, and scored on the MEDIAN of those runs. The
+# same origins give the band's survival curve: how long it lives before the
+# price leaves it, with Kaplan-Meier handling the origins that never saw an
+# exit before the data ran out.
+
+def rolling(k, ts, px, vol, pool_L, fee, capital, swap_cost=SWAP_COST,
+            horizon_hours=240, step_hours=24):
+    """Replay from every `step_hours`-th origin over `horizon_hours`."""
+    n, H = len(px), horizon_hours
+    runs = [simulate(k, ts[s:s + H + 1], px[s:s + H + 1], vol[s:s + H + 1],
+                     pool_L, fee, capital, swap_cost)
+            for s in range(0, n - H - 1, step_hours)]
+    if not runs:
+        return None
+    nd = np.array([r['net_day_pct'] for r in runs])
+    rb = np.array([r['rebal_per_day'] for r in runs])
+    vh = np.array([r['vs_hold'] for r in runs])
+    return {'windows': len(runs), 'horizon_days': H / 24,
+            'median_net_day': float(np.median(nd)), 'mean_net_day': float(nd.mean()),
+            'p25_net_day': float(np.percentile(nd, 25)), 'worst_net_day': float(nd.min()),
+            'share_positive': float((nd > 0).mean()),
+            'share_beat_hold': float((vh > 0).mean()),
+            'rebal_per_day': float(rb.mean())}
+
+
+def exit_times(px, k, step_hours=6):
+    """First-passage time out of a +/-k band centred at each origin.
+
+    Returns (hours, exited) pairs; an origin whose band the price never left
+    before the data ended is censored at the hours that remained.
+    """
+    logp = np.log(np.asarray(px, dtype=float))
+    lk = math.log(k)
+    n = len(logp)
+    out = []
+    for s in range(0, n - 1, step_hours):
+        gone = np.abs(logp[s + 1:] - logp[s]) > lk
+        if gone.any():
+            out.append((int(np.argmax(gone)) + 1, True))
+        else:
+            out.append((n - 1 - s, False))
+    return out
+
+
+def kaplan_meier(times):
+    """Survival curve S(t) from (time, event) pairs, censoring respected.
+    Returns a list of (t, S(t)) at each event time."""
+    t = np.array([x[0] for x in times], dtype=float)
+    e = np.array([x[1] for x in times], dtype=bool)
+    curve, S = [], 1.0
+    for ti in np.unique(t[e]):
+        at_risk = int((t >= ti).sum())
+        died = int(((t == ti) & e).sum())
+        if at_risk:
+            S *= 1.0 - died / at_risk
+        curve.append((float(ti), S))
+    return curve
+
+
+def survival(px, k, step_hours=6, horizons=(24, 72, 168)):
+    """How long a +/-k band lives on this pool's own path."""
+    times = exit_times(px, k, step_hours)
+    if not times:
+        return None
+    curve = kaplan_meier(times)
+
+    def S_at(h):
+        s = 1.0
+        for t, v in curve:
+            if t <= h:
+                s = v
+            else:
+                break
+        return s
+    median = next((t for t, v in curve if v <= 0.5), None)
+    return {'origins': len(times), 'exited': sum(1 for _, x in times if x),
+            'median_exit_hours': median,
+            **{f'p_survive_{h}h': S_at(h) for h in horizons}}
+
+
+def edge_loss(k):
+    """Value lost against holding 50/50 when the price rides to the band's
+    edge — the impermanent loss a rebalance at the edge makes permanent.
+    Averaged over the two edges, as a fraction of the starting value."""
+    L = liquidity_for(1.0, 1.0, 1 / k, k)
+    x, y = amounts(L, k, 1 / k, k)
+    up = 1 - (x * k + y) / (0.5 * k + 0.5)
+    x, y = amounts(L, 1 / k, 1 / k, k)
+    down = 1 - (x / k + y) / (0.5 / k + 0.5)
+    return (up + down) / 2
+
+
+def ladder(pool, candle_data, bands, capital, swap_cost=SWAP_COST,
+           horizon_hours=240, step_hours=24):
+    """Score every band on a pool three ways: the one full-window path, the
+    rolling-origin distribution, and the survival curve.
+
+    `pool` is Orca's pool dict; `candle_data` is what candles() returned.
+    Returns (rows, meta) or None when the pool cannot be priced consistently.
+    Each row carries `net_day_pct` and `rebal_per_day` from the ROLLING
+    median, which is what the bot decides on; the single path is kept under
+    `path` for comparison.
+    """
+    pool_l = active_liquidity(pool)
+    tvl = float(pool.get('tvlUsdc') or 0)
+    price = float(pool.get('price') or 0)
+    quote_usd = pool_quote_price(pool)
+    c_pool = pool_concentration(pool_l, tvl, price, quote_usd or 0) if pool_l else None
+    if not c_pool or not (1.0 <= c_pool <= 500.0) or not candle_data:
+        return None
+    ts, px, vol = candle_data
+    # The candle price and the pool's own price must agree, or the liquidity
+    # share is computed on a different scale than the pool's L.
+    if abs(px[-1] / price - 1.0) > 0.15:
+        if abs((1.0 / px[-1]) / price - 1.0) > 0.15:
+            return None
+        px = 1.0 / px
+    fee = int(pool.get('feeRate') or 0) / 1e6
+    ctx = {'tvl_usd': tvl, 'c_pool': c_pool}
+    rows = []
+    for k in bands:
+        path = simulate(k, ts, px, vol, ctx, fee, capital, swap_cost)
+        roll = rolling(k, ts, px, vol, ctx, fee, capital, swap_cost, horizon_hours, step_hours)
+        surv = survival(px, k)
+        rows.append({
+            'band': k, 'band_pct': (k - 1) * 100,
+            'net_day_pct': roll['median_net_day'] if roll else path['net_day_pct'],
+            'rebal_per_day': roll['rebal_per_day'] if roll else path['rebal_per_day'],
+            'edge_loss_pct': edge_loss(k) * 100,
+            'path': path, 'roll': roll, 'survival': surv,
+        })
+    meta = {'price': price, 'fee': fee, 'c_pool': c_pool, 'tvl_usd': tvl,
+            'quote_usd': quote_usd, 'days': rows[0]['path']['days'], 'hours': len(px)}
+    return rows, meta
+
+
+def choose(rows, max_rebal_per_day):
+    """The churn gate, then the best median. A high yield bought with a
+    rebalance a day is a high yield bought with a daily chance of a failed
+    transaction; only if every band churns does yield alone decide."""
+    calm = [r for r in rows if r['rebal_per_day'] <= max_rebal_per_day]
+    return max(calm or rows, key=lambda r: r['net_day_pct'])
+
+
+def print_ladder(rows, meta, pick=None):
+    print(f"price {meta['price']:.6g}  fee {meta['fee'] * 100:.2f}%  TVL ${meta['tvl_usd'] / 1e6:.1f}M  "
+          f"pool concentration {meta['c_pool']:.1f}x  window {meta['days']:.1f}d  "
+          f"rolling {rows[0]['roll']['horizon_days']:.0f}d x {rows[0]['roll']['windows']} origins")
+    print(f"{'band':>7} {'path':>7} {'median':>7} {'p25':>7} {'worst':>7} {'+win':>5} "
+          f"{'beat':>5} {'reb/d':>6} {'exit50%':>8} {'S24h':>5} {'S72h':>5} {'S7d':>5} {'edge':>6}")
+    for r in rows:
+        p, o, s = r['path'], r['roll'], r['survival']
+        med = f"{s['median_exit_hours']:.0f}h" if s and s['median_exit_hours'] else '  >win'
+        mark = '  <-' if pick is not None and r['band'] == pick['band'] else ''
+        print(f"+/-{r['band_pct']:>4.0f}% {p['net_day_pct']:>7.3f} {o['median_net_day']:>7.3f} "
+              f"{o['p25_net_day']:>7.3f} {o['worst_net_day']:>7.3f} {o['share_positive'] * 100:>4.0f}% "
+              f"{o['share_beat_hold'] * 100:>4.0f}% {o['rebal_per_day']:>6.2f} {med:>8} "
+              f"{s['p_survive_24h'] * 100:>4.0f}% {s['p_survive_72h'] * 100:>4.0f}% "
+              f"{s['p_survive_168h'] * 100:>4.0f}% {r['edge_loss_pct']:>5.2f}%{mark}")
+    print("path/median/p25/worst: net %/day (fees + position P&L - swaps) over the full window / "
+          "rolling windows.  +win: share of windows with positive net.  beat: share that beat "
+          "holding 50/50.  exit50%: median hours until the price leaves the band.  S: probability "
+          "the band is still intact after 24h/72h/7d.  edge: value lost vs holding when the price "
+          "reaches the edge.")
+
+
 def scan(capital, limit=100, use_jev=True, verbose=True, bands=None,
          min_tvl=MIN_TVL, swap_cost=SWAP_COST):
     """Rank pools by what an optimally banded position would have returned."""
@@ -294,7 +486,7 @@ def scan(capital, limit=100, use_jev=True, verbose=True, bands=None,
         if abs(px[-1] / quoted - 1.0) > 0.15:
             px = 1.0 / px          # pool quotes the inverse pair
         fee = int(p.get('feeRate') or 0) / 1e6
-        quote_usd = pool_quote_price(p['address'])
+        quote_usd = pool_quote_price(p)
         c_pool = pool_concentration(pool_L_native, tvl, float(px[-1]), quote_usd or 0)
         if not c_pool or not (1.0 <= c_pool <= 500.0):
             if verbose:
@@ -319,3 +511,28 @@ def scan(capital, limit=100, use_jev=True, verbose=True, bands=None,
             q = token_quality(b if a in MAJORS else a, r['pair'])
             r['jev'] = {'leveraged': q[0], 'established': q[1]} if q else None
     return out
+
+
+FINE_BANDS = (1.02, 1.03, 1.04, 1.05, 1.06, 1.08, 1.10, 1.12, 1.15, 1.18, 1.25, 1.40)
+
+if __name__ == '__main__':
+    import sys
+    # python3 engine.py ladder <pool> [capital_usd] [bands: 1.03,1.05,...]
+    if len(sys.argv) >= 3 and sys.argv[1] == 'ladder':
+        pool_addr = sys.argv[2]
+        cap = float(sys.argv[3]) if len(sys.argv) > 3 else 190.0
+        bands = (tuple(float(x) for x in sys.argv[4].split(','))
+                 if len(sys.argv) > 4 else FINE_BANDS)
+        d = curl(f'{ORCA}/pools/{pool_addr}')
+        p = (d or {}).get('data') or d
+        if not p or not p.get('tokenA'):
+            raise SystemExit(f'Orca does not know a pool at {pool_addr}')
+        out = ladder(p, candles(pool_addr), bands, cap)
+        if not out:
+            raise SystemExit('pool cannot be priced consistently (candles vs pool price, '
+                             'or implied concentration out of range)')
+        rows, meta = out
+        print(f"{p['tokenA']['symbol']}/{p['tokenB']['symbol']}  ${cap:.0f}")
+        print_ladder(rows, meta, choose(rows, 0.5))
+    else:
+        print('usage: python3 engine.py ladder <pool> [capital_usd] [bands]')

@@ -81,7 +81,7 @@ function render(row) {
     case 'OPEN':
       return `OPENED · ${row.pair} ${row.band}\n`
         + `range ${n(row.lower, 4)} — ${n(row.upper, 4)}\n`
-        + `caps ${row.cap_a ?? '—'} · ${row.cap_b ?? '—'}\n`
+        + `deposited $${n(row.deposit_usd)} · caps ${row.cap_a ?? '—'} · ${row.cap_b ?? '—'}\n`
         + `modelled ${n(row.expected_net_day_pct, 3)}%/day at `
         + `${n(row.modelled_rebalances_per_day, 2)} rebalances/day\n`
         + `${row.reason}\n${row.signature ?? ''}\n` + book(row);
