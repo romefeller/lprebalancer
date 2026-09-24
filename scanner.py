@@ -40,7 +40,7 @@ def run_once(notify=None, progress=None):
     rows = engine.score_board(
         flat, config.CAPITAL_USD, config.BANDS, config.SWAP_COST,
         config.MAX_REBALANCES_PER_DAY_MODELLED, config.MIN_TVL_USD, config.MIN_VOLUME_24H_USD,
-        blocked=blocked, progress=progress, season_out=season)
+        blocked=blocked, progress=progress, season_out=season, policy=config.policy())
     for r in rows:
         r['executable'] = (r['dex'] in config.EXECUTE_DEXES and r.get('net_day_pct') is not None
                            and not r.get('skipped'))

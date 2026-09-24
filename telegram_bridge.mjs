@@ -68,16 +68,51 @@ function render(row) {
         `rhythm      ${String(r.season.hour_utc).padStart(2, '0')}h UTC ${n(r.season.now_x, 2)}x avg · next ${r.season.next_hours}h ${n(r.season.next_x, 2)}x`
         + `${r.expected_next_hours_fees_per_day_usd != null ? ` → ~$${n(r.expected_next_hours_fees_per_day_usd, 2)}/day` : ''}`
         + ` · peak ${String(r.season.peak_hour_utc).padStart(2, '0')}h trough ${String(r.season.trough_hour_utc).padStart(2, '0')}h`] : []),
+      ...band(r),
       `in range    ${n(r.in_range_pct, 0)}%   over ${n(r.tracked_days, 2)}d`,
       `activity    ${plural(r.positions_opened, 'position')} · ${plural(r.rebands, 'reband')} · `
         + `${plural(r.harvests, 'harvest')}${r.failures ? ` · ${plural(r.failures, 'failure')}` : ''}`,
     ].join('\n');
   };
 
+  // The survival block. The full forecast rides on the event when the loop
+  // made one this poll; otherwise the figures recorded at the last poll.
+  function band(r) {
+    const f = r.forecast;
+    const pct = (x) => (x == null ? '—' : `${Math.round(Number(x) * 100)}%`);
+    if (f) {
+      const lines = [`━━ BAND ━━`];
+      if (f.inside) {
+        lines.push(`price       ${n(f.to_lower_pct, 1)}% above the floor · ${n(f.to_upper_pct, 1)}% below the ceiling`
+          + `${f.hours_alive != null ? ` · alive ${n(f.hours_alive, 0)}h` : ''}`);
+        lines.push(`P(exit)     6h ${pct(f.p_exit_6h_regime ?? f.p_exit_6h)}   24h ${pct(f.p_exit_24h_regime ?? f.p_exit_24h)}`
+          + `   72h ${pct(f.p_exit_72h_regime ?? f.p_exit_72h)}   7d ${pct(f.p_exit_168h_regime ?? f.p_exit_168h)}`);
+        const med = f.median_life_hours_regime ?? f.median_life_hours;
+        lines.push(`life        median ${med != null ? `${n(med, 0)}h` : '> 7d'} · vol ${n(f.vol_regime_x, 2)}x normal`
+          + ` (${f.origins_regime ?? f.origins} origins)`);
+      } else {
+        lines.push(`OUT         ${n(f.beyond_half_widths, 2)} half-widths beyond the edge`);
+      }
+      if (f.il_now_pct != null) {
+        lines.push(`if closed   locks ${n(f.il_now_pct, 2)}% vs holding · price ${sign(f.since_open_pct)}% since open`);
+      }
+      lines.push(`rule        act at P(exit ≤${f.horizon_hours}h) ≥ ${pct(f.threshold)} · now ${pct(f.p_exit_horizon)}`
+        + ` → ${f.act ? 'RE-CENTRE' : 'hold'}`);
+      return lines;
+    }
+    const b = r.band;
+    if (!b || b.p_exit_24h == null) return [];
+    return [`━━ BAND ━━`,
+      `${b.in_range ? 'in range' : 'OUT'}    position ${sign(b.position)} · alive ${n(b.hours_alive, 0)}h`
+      + ` · P(exit) 6h ${pct(b.p_exit_6h)}  24h ${pct(b.p_exit_24h)}  72h ${pct(b.p_exit_72h)}`];
+  }
+
   switch (event) {
     case 'startup':
       return `REBALANCER · online\n${row.dex ?? 'orca'} ${row.pair} · capital $${n(row.capital_usd, 0)}\n`
         + `poll ${row.poll_seconds}s · reopt ${row.reopt_every_hours}h @ +${(row.reopt_min_gain * 100).toFixed(0)}%\n`
+        + (row.proactive_threshold ? `re-centre at P(exit ≤${row.proactive_horizon_hours}h) ≥ ${Math.round(row.proactive_threshold * 100)}%`
+          + ` · dividend every ${row.harvest_every_hours}h from $${n(row.min_harvest_usd, 2)}\n` : '')
         + `board ${(row.scan_dexes ?? []).join(', ')} every ${row.scan_every_hours}h · `
         + `move @ +${((row.migrate_min_gain ?? 0) * 100).toFixed(0)}% · can open on ${(row.execute_dexes ?? []).join(', ')}\n`
         + book(row);
@@ -87,7 +122,16 @@ function render(row) {
         + book(row);
     case 'OUT_OF_BAND':
       return `OUT OF RANGE · went ${row.side}\n`
-        + `price ${n(row.price, 4)} · band ${n(row.lower, 4)} — ${n(row.upper, 4)}\n${row.action}`;
+        + `price ${n(row.price, 4)} · band ${n(row.lower, 4)} — ${n(row.upper, 4)}\n${row.action}`
+        + (row.forecast ? '\n' + band(row).join('\n') : '');
+    case 'PROACTIVE':
+      return `RE-CENTRING · P(exit within ${row.horizon_hours}h) ${Math.round(row.p_exit * 100)}%`
+        + ` ≥ ${Math.round(row.threshold * 100)}%\n`
+        + `price ${n(row.price, 4)} · band ${n(row.lower, 4)} — ${n(row.upper, 4)}\n${row.action}\n` + book(row);
+    case 'recentre_deferred':
+      return `re-centre deferred · P(exit within ${row.horizon_hours}h) ${Math.round(row.p_exit * 100)}%\n${row.reason}`;
+    case 'DIVIDEND':
+      return `DIVIDEND · $${n(row.collected_usd, 4)} harvested to the wallet\n${row.signature ?? ''}\n` + book(row);
     case 'move_deferred':
       return `${row.kind} deferred · holding ${row.held}, best ${row.best}\n${row.reason}`;
     case 'migrate_refused':

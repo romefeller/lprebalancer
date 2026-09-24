@@ -316,3 +316,44 @@ class Season(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)
+
+
+class Forecasts(unittest.TestCase):
+    """The survival record: forecasts are stored with the poll and checked
+    against what the same position did next."""
+
+    def setUp(self):
+        _fixtures.ensure_profile()
+        _fixtures.reset_ledger()
+
+    def test_snapshot_keeps_the_forecast_and_stats_shows_it(self):
+        db.open_position('M', LIVE_POOL, 'SOL/USDC', 95.0, 105.0, 5.0, 'sig', 190.0, 'test')
+        db.snapshot('M', 100.0, True, 1, 0, 0, 0, 50.0, 190.0,
+                    forecast={'p_exit_6h': 0.1, 'p_exit_24h_regime': 0.3, 'p_exit_24h': 0.4,
+                              'p_exit_72h': 0.6, 'position': 0.2})
+        b = db.stats()['band']
+        self.assertEqual(b['p_exit_6h'], 0.1); self.assertEqual(b['p_exit_24h'], 0.3)   # regime figure preferred
+        self.assertEqual(b['p_exit_72h'], 0.6); self.assertEqual(b['position'], 0.2)
+        self.assertTrue(b['in_range']); self.assertIsNotNone(b['hours_alive'])
+        self.assertAlmostEqual(db.position_open_price('M'), (95.0 * 105.0) ** 0.5)
+        self.assertIsNotNone(db.position_opened('M'))
+
+    def test_calibration_counts_exits_within_the_horizon_and_censors_the_rest(self):
+        from datetime import timedelta
+        t0 = db.now() - timedelta(hours=30)
+        with db.cursor(commit=True) as cur:
+            cur.execute("insert into positions (mint, pool, opened_at) values ('A', 'p', %s), ('B', 'p', %s)", (t0, t0))
+            # A: forecast 0.9 at t0, out of range 2h later -> an exit within 6h
+            cur.execute("insert into snapshots (ts, mint, price, in_range, p_exit_6h) values (%s,'A',100,true,0.9)", (t0,))
+            cur.execute("insert into snapshots (ts, mint, price, in_range) values (%s,'A',110,false)", (t0 + timedelta(hours=2),))
+            # B: forecast 0.1 at t0, still inside 8h later -> survived the 6h horizon
+            cur.execute("insert into snapshots (ts, mint, price, in_range, p_exit_6h) values (%s,'B',100,true,0.1)", (t0,))
+            cur.execute("insert into snapshots (ts, mint, price, in_range) values (%s,'B',101,true)", (t0 + timedelta(hours=8),))
+            # B again: a forecast 20 minutes ago cannot be resolved yet -> censored
+            cur.execute("insert into snapshots (ts, mint, price, in_range, p_exit_6h) values (%s,'B',100,true,0.5)",
+                        (db.now() - timedelta(minutes=20),))
+        r = db.forecasts(horizons=(6,))[6]
+        self.assertEqual(r['n'], 2)
+        rates = {b['p_mean']: b['exit_rate'] for b in r['buckets']}
+        self.assertEqual(rates[0.9], 1.0); self.assertEqual(rates[0.1], 0.0)
+        self.assertAlmostEqual(r['brier'], (0.01 + 0.01) / 2, places=6)

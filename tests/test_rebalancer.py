@@ -333,3 +333,61 @@ class QuietHours(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)
+
+
+class Proactive(unittest.TestCase):
+    """The loop acts on the forecast, and the dividend is gated."""
+
+    def test_harvest_due_gates_on_interval_and_amount(self):
+        with mock.patch.object(rebalancer.config, 'HARVEST_INTERVAL', 24 * 3600), \
+                mock.patch.object(rebalancer.config, 'MIN_HARVEST_USD', 0.25):
+            self.assertTrue(rebalancer.harvest_due({'last_harvest': 0}, {'feesAccrued_USD': 0.5}))
+            self.assertFalse(rebalancer.harvest_due({'last_harvest': 0}, {'feesAccrued_USD': 0.1}))
+            import time
+            self.assertFalse(rebalancer.harvest_due({'last_harvest': time.time() - 3600}, {'feesAccrued_USD': 5}))
+        with mock.patch.object(rebalancer.config, 'HARVEST_INTERVAL', 0):
+            self.assertFalse(rebalancer.harvest_due({'last_harvest': 0}, {'feesAccrued_USD': 5}))
+
+    def test_dividend_records_once_and_zeroes_the_counter(self):
+        sent, snaps, harvests = [], [], []
+        status = {'positionMint': 'M', 'whirlpool': 'P', 'price': 100.0, 'inRange': True, 'liquidity': '1',
+                  'feesAccruedA': 0.001, 'feesAccruedB': 0.2, 'feesAccrued_USD': 0.3, 'positionUsd': 190.0}
+        state = {'last_harvest': 0}
+        with mock.patch.object(rebalancer, 'chain', lambda *a, **k: ({'signature': 'sig'}, None)), \
+                mock.patch.object(rebalancer, 'wallet', lambda p: {'walletUsd': 50.0}), \
+                mock.patch.object(rebalancer, 'save', lambda s: None), \
+                mock.patch.object(rebalancer, 'notify_book', lambda ev, **kw: sent.append(ev)), \
+                mock.patch.object(rebalancer.db, 'record_harvest', lambda *a: harvests.append(a)), \
+                mock.patch.object(rebalancer.db, 'snapshot', lambda *a, **k: snaps.append(a)), \
+                mock.patch.object(rebalancer.db, 'event', lambda *a: None):
+            self.assertTrue(rebalancer.dividend(state, status))
+        self.assertEqual(sent, ['DIVIDEND']); self.assertEqual(len(harvests), 1)
+        self.assertEqual(snaps[0][4:7], (0.0, 0.0, 0.0))        # accrual recorded at zero
+        self.assertGreater(state['last_harvest'], 0)
+
+    def test_forecast_for_uses_the_tape_and_the_ledger(self):
+        import numpy as np
+        rng = np.random.default_rng(1)
+        px = 100 * np.exp(np.cumsum(rng.normal(0, 0.01, 1200)))
+        status = {'positionMint': 'M', 'whirlpool': 'P', 'price': 104.5, 'lowerPrice': 95.0, 'upperPrice': 105.0}
+        with mock.patch.object(rebalancer, 'tape', lambda pool: (np.arange(1200), px, np.ones(1200))), \
+                mock.patch.object(rebalancer.db, 'position_opened', lambda m: rebalancer.db.now()), \
+                mock.patch.object(rebalancer.db, 'position_open_price', lambda m: 100.0), \
+                mock.patch.object(rebalancer.config, 'PROACTIVE_HORIZON', 6), \
+                mock.patch.object(rebalancer.config, 'PROACTIVE_THRESHOLD', 0.5):
+            f = rebalancer.forecast_for(status)
+        self.assertTrue(f['act']); self.assertGreater(f['p_exit_6h'], 0.5)
+        with mock.patch.object(rebalancer, 'tape', lambda pool: None):
+            self.assertIsNone(rebalancer.forecast_for(status))
+
+    def test_tape_is_cached_for_an_hour_and_survives_a_failed_fetch(self):
+        calls = []
+        rebalancer._TAPE.clear()
+        with mock.patch.object(rebalancer.engine, 'candles', lambda p: calls.append(p) or ('t', 'p', 'v')):
+            self.assertEqual(rebalancer.tape('X'), ('t', 'p', 'v'))
+            self.assertEqual(rebalancer.tape('X'), ('t', 'p', 'v'))
+        self.assertEqual(calls, ['X'])
+        rebalancer._TAPE['X'] = (0, ('t', 'p', 'v'))          # stale
+        with mock.patch.object(rebalancer.engine, 'candles', lambda p: None):
+            self.assertEqual(rebalancer.tape('X'), ('t', 'p', 'v'))
+        rebalancer._TAPE.clear()

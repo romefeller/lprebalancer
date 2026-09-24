@@ -425,3 +425,107 @@ class Tape(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)
+
+
+class Proactive(unittest.TestCase):
+    """The rule that acts before the price leaves, and the figures behind it."""
+
+    def ctx(self):
+        return {'tvl_quote': 1e7, 'c_pool': 20.0}
+
+    def test_forward_extrema_are_running_max_and_min(self):
+        logp = np.log(np.array([100, 101, 99, 103, 98.0]))
+        M, m = engine.forward_extrema(logp, 3)
+        # from origin 0 over 1..3 hours: returns to 101, 99, 103
+        self.assertAlmostEqual(M[0, 0], math.log(1.01)); self.assertAlmostEqual(m[0, 0], math.log(1.01))
+        self.assertAlmostEqual(m[0, 1], math.log(0.99)); self.assertAlmostEqual(M[0, 2], math.log(1.03))
+        self.assertTrue(np.isnan(M[3, 1]))          # origin 3 sees only one hour
+
+    def test_p_exit_is_walk_forward_and_monotone_in_distance(self):
+        rng = np.random.default_rng(5)
+        logp = np.cumsum(rng.normal(0, 0.01, 2000))
+        M, m = engine.forward_extrema(logp, 24)
+        v = engine.trailing_vol(logp)
+        i = 1500
+        near = engine.p_exit(M, m, i, 0.005, 0.005, 24, vol24=v)
+        far = engine.p_exit(M, m, i, 0.10, 0.10, 24, vol24=v)
+        self.assertGreater(near, far); self.assertGreater(near, 0.9); self.assertLess(far, 0.1)
+        # nothing after hour i is used: perturbing the future changes nothing
+        logp2 = logp.copy(); logp2[i + 1:] += 5.0
+        M2, m2 = engine.forward_extrema(logp2, 24)
+        self.assertEqual(engine.p_exit(M2, m2, i, 0.02, 0.02, 24, vol24=v),
+                         engine.p_exit(M, m, i, 0.02, 0.02, 24, vol24=v))
+        self.assertIsNone(engine.p_exit(M, m, 30, 0.02, 0.02, 24))   # too few origins
+
+    def test_proactive_recentres_before_the_edge_on_a_drift(self):
+        # a steady climb: the plain rule exits once the band is left; the
+        # proactive rule re-centres while still inside, at a higher probability
+        n = 24 * 40 + 1
+        ts = np.arange(n) * 3600
+        px = 100 * np.exp(np.arange(n) * 0.0015)      # +3.7% a day, no noise
+        vol = np.full(n, 1e6)
+        logp = np.log(px)
+        M, m = engine.forward_extrema(logp, 6)
+        tables = (M, m, engine.trailing_vol(logp))
+        plain = engine.simulate(1.05, ts, px, vol, self.ctx(), 0.0004, 1000.0)
+        pro = engine.simulate(1.05, ts, px, vol, self.ctx(), 0.0004, 1000.0,
+                              horizon=6, threshold=0.5, tables=tables, offset=0)
+        self.assertEqual(plain['proactive'], 0)
+        self.assertGreater(pro['proactive'], 0)
+        # once the tape is long enough to forecast, it never actually leaves
+        self.assertLessEqual(pro['rebalances'] - pro['proactive'], 1)
+        self.assertGreater(pro['in_range_pct'], plain['in_range_pct'])
+
+    def test_flat_path_never_triggers(self):
+        n = 24 * 40 + 1
+        ts = np.arange(n) * 3600
+        px = np.full(n, 100.0); vol = np.full(n, 1e6)
+        logp = np.log(px); M, m = engine.forward_extrema(logp, 6)
+        r = engine.simulate(1.05, ts, px, vol, self.ctx(), 0.0004, 1000.0,
+                            horizon=6, threshold=0.5, tables=(M, m, engine.trailing_vol(logp)))
+        self.assertEqual(r['rebalances'], 0)
+
+    def test_conditional_survival_respects_where_the_price_sits(self):
+        rng = np.random.default_rng(9)
+        px = 100 * np.exp(np.cumsum(rng.normal(0, 0.01, 1500)))
+        centred = engine.conditional_survival(px, 0.05, 0.05)
+        near_top = engine.conditional_survival(px, 0.005, 0.095)
+        self.assertLess(near_top['p_survive_24h'], centred['p_survive_24h'])
+        flat = engine.conditional_survival(np.full(500, 100.0), 0.05, 0.05)
+        self.assertEqual(flat['exited'], 0); self.assertEqual(flat['p_survive_168h'], 1.0)
+        self.assertIsNone(engine.conditional_survival(np.full(50, 100.0), 0.05, 0.05))
+
+    def test_band_forecast_inside_and_outside(self):
+        rng = np.random.default_rng(2)
+        px = 100 * np.exp(np.cumsum(rng.normal(0, 0.01, 1500)))
+        f = engine.band_forecast(px, 100.0, 100 / 1.05, 105.0, open_price=100.0, hours_alive=10, horizon=6, threshold=0.5)
+        self.assertTrue(f['inside']); self.assertAlmostEqual(f['position'], 0.0, places=2)
+        self.assertLessEqual(f['p_exit_6h'], f['p_exit_24h']); self.assertLessEqual(f['p_exit_24h'], f['p_exit_72h'])
+        self.assertAlmostEqual(f['il_now_pct'], 0.0, places=6)      # at the open price nothing is lost
+        self.assertFalse(f['act'])
+        # right at the ceiling: leaving within 6h is near certain, the rule fires
+        g = engine.band_forecast(px, 104.9, 95.0, 105.0, open_price=100.0, horizon=6, threshold=0.5)
+        self.assertGreater(g['p_exit_6h'], 0.5); self.assertTrue(g['act'])
+        self.assertGreater(g['il_now_pct'], 0.0)
+        # threshold 0 disables the rule
+        h = engine.band_forecast(px, 104.9, 95.0, 105.0, horizon=6, threshold=0)
+        self.assertFalse(h['act'])
+        # outside: certain, with the overshoot in half-widths
+        o = engine.band_forecast(px, 110.0, 95.0, 105.0, horizon=6, threshold=0.5)
+        self.assertFalse(o['inside']); self.assertTrue(o['act']); self.assertGreater(o['beyond_half_widths'], 0.9)
+        self.assertIsNone(engine.band_forecast(px, 100.0, 105.0, 95.0))
+
+    def test_ladder_reports_the_policy_it_scored_under(self):
+        n = 24 * 41 + 1
+        rng = np.random.default_rng(11)
+        ts = np.arange(n) * 3600
+        px = 100 * np.exp(np.cumsum(rng.normal(0, 0.008, n)))
+        vol = np.full(n, 3e6)
+        pool = {'tokenA': {'decimals': 9, 'symbol': 'SOL'}, 'tokenB': {'decimals': 6, 'symbol': 'USDC'},
+                'liquidity': str(int(20 * (2e7 / (2 * px[-1] ** 0.5)) * (10 ** 15) ** 0.5)),
+                'tvlUsdc': '20000000', 'price': str(px[-1]), 'feeRate': 400}
+        rows, meta = engine.ladder(pool, (ts, px, vol), (1.03, 1.08), 190.0, policy={'horizon': 6, 'threshold': 0.5})
+        self.assertEqual(meta['policy'], {'horizon': 6, 'threshold': 0.5})
+        self.assertIn('proactive_per_day', rows[0]['path'])
+        rows2, meta2 = engine.ladder(pool, (ts, px, vol), (1.03, 1.08), 190.0, policy={})
+        self.assertEqual(rows2[0]['path']['proactive'], 0)

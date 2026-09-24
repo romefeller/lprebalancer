@@ -17,8 +17,18 @@ Every parameter comes from the `rebalancer.config` table and every observation
 goes back into Postgres, so the pool, the band ladder and the guards are data,
 not code.
 
-    read chain -> in band?  yes -> record a snapshot, wait
+    read chain -> in band?  yes -> forecast: P(exit within H hours) from the pool's own tape
+                                   high -> harvest, close, re-centre NOW (quiet hour if one is near)
+                                   low  -> record a snapshot, wait
                             no  -> harvest, close, re-optimise, reopen
+
+The bot acts before the price leaves, not after. A rebalance at the edge makes
+the position's whole loss against holding permanent and leaves it one-sided
+and earning nothing until it runs; a re-centre while still inside is done at
+a price of the bot's choosing, and the survival figures that drive it are in
+every book it sends. Accrued fees are harvested into the wallet on a schedule
+(the dividend), so income is realised and permanent rather than a number on
+an open position.
 
 Three things it does that a simpler loop gets wrong:
 
@@ -183,7 +193,7 @@ def load():
     if STATE.exists():
         return json.loads(STATE.read_text())
     return {'last_rebalance': 0, 'rebalance_times': [], 'failures': 0,
-            'read_failures': 0, 'last_reopt': 0}
+            'read_failures': 0, 'last_reopt': 0, 'last_harvest': 0}
 
 
 def save(s):
@@ -252,6 +262,70 @@ def position_usd(status):
     return (a * status['price'] + b) * (status.get('quoteUsd') or 1) + rent
 
 
+# --- the tape, the forecast, the dividend -------------------------------------
+
+_TAPE = {}                      # pool -> (fetched_at, candles)
+TAPE_REFRESH = 3600             # one GeckoTerminal call an hour, at most
+
+
+def tape(pool):
+    """The pool's hourly closes, refreshed at most once an hour. A fetch that
+    fails leaves the last tape in place: a forecast an hour stale beats none."""
+    t, c = _TAPE.get(pool, (0, None))
+    if c is None or time.time() - t > TAPE_REFRESH:
+        try:
+            fresh = engine.candles(pool)
+        except Exception:
+            fresh = None
+        if fresh:
+            c = fresh
+            _TAPE[pool] = (time.time(), c)
+    return c
+
+
+def forecast_for(status):
+    """The band forecast for the held position, or None without a tape."""
+    c = tape(status.get('whirlpool') or config.POOL)
+    if not c:
+        return None
+    opened = db.position_opened(status['positionMint'])
+    hours = ((db.now() - opened).total_seconds() / 3600) if opened else None
+    return engine.band_forecast(c[1], status['price'], status['lowerPrice'], status['upperPrice'],
+                                open_price=db.position_open_price(status['positionMint']),
+                                hours_alive=hours, horizon=config.PROACTIVE_HORIZON,
+                                threshold=config.PROACTIVE_THRESHOLD)
+
+
+def harvest_due(state, status):
+    """The dividend: accrued fees go to the wallet every HARVEST_INTERVAL,
+    once at least MIN_HARVEST_USD has accrued. Never while a rebalance is
+    about to harvest anyway."""
+    if not config.HARVEST_INTERVAL:
+        return False
+    if (status.get('feesAccrued_USD') or 0) < config.MIN_HARVEST_USD:
+        return False
+    return time.time() - state.get('last_harvest', 0) >= config.HARVEST_INTERVAL
+
+
+def dividend(state, status):
+    """Harvest into the wallet and report it. The ledger counts it once: the
+    snapshot after the harvest records the position's counter at zero."""
+    mint = status['positionMint']
+    a, b, usd = status.get('feesAccruedA', 0.0), status.get('feesAccruedB', 0.0), status.get('feesAccrued_USD', 0.0)
+    out, err = chain('harvest', mint, '--execute')
+    state['last_harvest'] = time.time(); save(state)
+    if out and out.get('signature'):
+        db.record_harvest(mint, a, b, usd, out['signature'])
+        db.snapshot(mint, status['price'], status.get('inRange'), status.get('liquidity'),
+                    0.0, 0.0, 0.0, wallet(status['whirlpool']).get('walletUsd'), position_usd(status))
+        db.event('DIVIDEND', f'${usd:.4f} harvested to the wallet')
+        notify_book('DIVIDEND', collected_usd=round(usd, 4), collected_a=a, collected_b=b,
+                    signature=out['signature'])
+        return True
+    notify('harvest_skipped', reason=err or 'no signature returned', kind='dividend')
+    return False
+
+
 def best_band_for(pool, dex=None):
     """Score every candidate band on this pool's own recent data.
 
@@ -267,7 +341,7 @@ def best_band_for(pool, dex=None):
     if not p:
         return None
     out = engine.ladder(p, engine.candles(pool), dexes.feasible_bands(p, config.BANDS),
-                        config.CAPITAL_USD, config.SWAP_COST)
+                        config.CAPITAL_USD, config.SWAP_COST, policy=config.policy())
     if not out:
         return None
     rows, meta = out
@@ -516,6 +590,7 @@ def rebalance(state, status, reason, target=None):
     accrued_b = status.get('feesAccruedB', 0.0)
     accrued_usd = status.get('feesAccrued_USD', 0.0)
     out, err = chain('harvest', mint, '--execute')
+    state['last_harvest'] = now
     if out and out.get('signature'):
         db.record_harvest(mint, accrued_a, accrued_b, accrued_usd,
                               out['signature'])
@@ -614,21 +689,54 @@ def main():
 
         price = status['price']
         wusd = wallet(status['whirlpool']).get('walletUsd')
+        fc = forecast_for(status)
         db.snapshot(status['positionMint'], price, status.get('inRange'),
                         status.get('liquidity'),
                         status.get('feesAccruedA', 0.0),
                         status.get('feesAccruedB', 0.0),
                         status.get('feesAccrued_USD', 0.0),
-                        wusd, position_usd(status))
+                        wusd, position_usd(status), forecast=fc)
 
         if not status.get('inRange'):
             side = 'above' if price > status['upperPrice'] else 'below'
             notify('OUT_OF_BAND', side=side, price=price,
                    lower=status['lowerPrice'], upper=status['upperPrice'],
-                   action='harvest, close, re-optimise, reopen')
+                   action='harvest, close, re-optimise, reopen', forecast=fc)
             rebalance(state, status, f'price went {side}')
             time.sleep(config.POLL_SECONDS)
             continue
+
+        # Still inside, but likely not for long: re-centre now, at this price,
+        # rather than at whatever price the exit happens to land on. Waits
+        # for a quiet hour only while the probability is below the ceiling
+        # (90%): past that the exit is imminent and the hour does not matter.
+        if fc and fc.get('act') and config.PROACTIVE_THRESHOLD:
+            p_now = fc.get('p_exit_horizon')
+            if busy_hour() and (p_now or 0) < 0.9:
+                o = db.season_outlook(db.season(), hour=utc_hour())
+                notify('recentre_deferred', p_exit=p_now, horizon_hours=config.PROACTIVE_HORIZON,
+                       reason=f"hour {o['hour_utc']:02d} UTC runs {o['now_x']}x the average; "
+                              f"waiting for a quiet hour unless the probability reaches 90%",
+                       forecast=fc)
+            else:
+                notify_book('PROACTIVE', price=price, lower=status['lowerPrice'],
+                            upper=status['upperPrice'], p_exit=p_now,
+                            horizon_hours=config.PROACTIVE_HORIZON,
+                            threshold=config.PROACTIVE_THRESHOLD, forecast=fc,
+                            action='harvest, close, re-centre on the current price')
+                db.event('PROACTIVE', f"P(exit within {config.PROACTIVE_HORIZON}h) = {p_now} "
+                                      f"at {price}, band {status['lowerPrice']}..{status['upperPrice']}")
+                rebalance(state, status, f'P(exit within {config.PROACTIVE_HORIZON}h) '
+                                         f'{(p_now or 0) * 100:.0f}% >= {config.PROACTIVE_THRESHOLD * 100:.0f}%')
+                time.sleep(config.POLL_SECONDS)
+                continue
+
+        if harvest_due(state, status):
+            dividend(state, status)
+            status, err = read_status()
+            if not status or not status.get('positionMint'):
+                time.sleep(config.POLL_SECONDS)
+                continue
 
         if MIGRATE.exists():
             # "<dex> <pool>". Consumed before it runs. The same gates as an
@@ -711,7 +819,7 @@ def main():
 
         notify_book('in_band', price=price, lower=status['lowerPrice'],
                     upper=status['upperPrice'],
-                    liquidity=status.get('liquidity'))
+                    liquidity=status.get('liquidity'), forecast=fc)
         time.sleep(config.POLL_SECONDS)
 
 

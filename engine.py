@@ -264,8 +264,65 @@ def band_concentration(k):
     return 1.0 / (1.0 - 1.0 / math.sqrt(k))
 
 
-def simulate(k, ts, px, vol, pool_L, fee, capital, swap_cost=SWAP_COST):
-    """Replay one band. Returns net per day and the rebalance behaviour."""
+# --- the proactive policy ------------------------------------------------------
+#
+# The bot does not wait for the price to leave the band. While inside, it
+# estimates from the pool's own tape the probability that the price will be
+# outside within the next `horizon` hours, given where it sits now and the
+# current volatility, and re-centres once that probability reaches
+# `threshold`. The replay applies the same rule so a band is scored under the
+# policy the loop will actually run on it.
+PROACTIVE_HORIZON = 6        # hours ahead
+PROACTIVE_THRESHOLD = 0.5    # act when leaving is more likely than not
+
+
+def forward_extrema(logp, H):
+    """M[s,t], m[s,t]: running max and min of the forward log-return from
+    origin s over t = 1..H hours. Rows with fewer than H hours ahead are NaN
+    past what they can see."""
+    n = len(logp)
+    r = np.full((n, H), np.nan)
+    for t in range(1, H + 1):
+        r[:n - t, t - 1] = logp[t:] - logp[:n - t]
+    M = np.fmax.accumulate(np.where(np.isnan(r), -np.inf, r), axis=1)
+    m = np.fmin.accumulate(np.where(np.isnan(r), np.inf, r), axis=1)
+    M[np.isnan(r)] = np.nan
+    m[np.isnan(r)] = np.nan
+    return M, m
+
+
+def trailing_vol(logp, hours=24):
+    """Realised hourly sigma over the trailing `hours`, per hour."""
+    r1 = np.diff(logp, prepend=logp[0])
+    return np.sqrt(np.convolve(r1 ** 2, np.ones(hours) / hours, mode='full')[:len(r1)])
+
+
+def p_exit(M, m, i, d_up, d_down, H, window=720, vol24=None, regime=True, min_origins=50):
+    """Walk-forward P(price leaves a band `d_up` above / `d_down` below the
+    current price within H hours), from the `window` fully observed origins
+    before hour i. With `regime`, only origins whose trailing-24h volatility
+    is within a factor 1.5 of the current one are used, when enough exist."""
+    lo, hi = max(0, i - H - window), i - H
+    if hi - lo < min_origins:
+        return None
+    hit = (M[lo:hi, H - 1] > d_up) | (m[lo:hi, H - 1] < -d_down)
+    if regime and vol24 is not None:
+        v = vol24[lo:hi]
+        sel = (v > vol24[i] / 1.5) & (v < vol24[i] * 1.5)
+        if sel.sum() >= 100:
+            hit = hit[sel]
+    return float(hit.mean())
+
+
+def simulate(k, ts, px, vol, pool_L, fee, capital, swap_cost=SWAP_COST,
+             horizon=0, threshold=None, tables=None, offset=0):
+    """Replay one band. Returns net per day and the rebalance behaviour.
+
+    With `horizon` and `threshold` the proactive rule runs inside the band:
+    `tables` is (M, m, vol24) from the FULL series and `offset` the index of
+    px[0] in it, so the probability at each hour uses only earlier data. The
+    default (horizon 0) is the plain rule, so the arithmetic tests keep their
+    known answers."""
     entry = float(px[0])
     pa, pb = entry / k, entry * k
     # pool_L carries the POOL CONCENTRATION (dimensionless) and the pool's TVL
@@ -279,22 +336,32 @@ def simulate(k, ts, px, vol, pool_L, fee, capital, swap_cost=SWAP_COST):
     share_per_unit = band_concentration(k) / pool_L['c_pool'] / pool_L['tvl_quote']
     L = liquidity_for(capital, entry, pa, pb)
     fees = cost = 0.0
-    rebal = in_range = 0
+    rebal = proactive = in_range = 0
     for i in range(1, len(px)):
         p = float(px[i])
+        act = None
         if pa <= p <= pb:
             x, y = amounts(L, p, pa, pb)
             fees += vol[i] * fee * share_per_unit * (x * p + y)
             in_range += 1
+            if horizon and threshold is not None and tables is not None:
+                M, m, vol24 = tables
+                P = p_exit(M, m, offset + i, math.log(pb / p), math.log(p / pa), horizon, vol24=vol24)
+                if P is not None and P >= threshold:
+                    act = 'proactive'
         else:
-            x, y = amounts(L, p, pa, pb)
-            value = x * p + y
-            cost += value * swap_cost
-            value -= value * swap_cost
-            rebal += 1
-            entry = p
-            pa, pb = entry / k, entry * k
-            L = liquidity_for(value, entry, pa, pb)
+            act = 'exit'
+        if not act:
+            continue
+        x, y = amounts(L, p, pa, pb)
+        value = x * p + y
+        cost += value * swap_cost
+        value -= value * swap_cost
+        rebal += 1
+        proactive += (act == 'proactive')
+        entry = p
+        pa, pb = entry / k, entry * k
+        L = liquidity_for(value, entry, pa, pb)
     x, y = amounts(L, float(px[-1]), pa, pb)
     final = x * float(px[-1]) + y
     days = (ts[-1] - ts[0]) / 86400
@@ -304,18 +371,19 @@ def simulate(k, ts, px, vol, pool_L, fee, capital, swap_cost=SWAP_COST):
             'fees': fees, 'position_pnl': final - capital, 'cost': cost,
             'net': net, 'net_day_pct': net / capital / days * 100,
             'rebalances': rebal, 'rebal_per_day': rebal / days,
+            'proactive': proactive, 'proactive_per_day': proactive / days,
             'in_range_pct': in_range / (len(px) - 1) * 100,
             'vs_hold': (final + fees) - hold}
 
 
-def best_band(ts, px, vol, pool_L, fee, capital, bands=None, swap_cost=SWAP_COST):
+def best_band(ts, px, vol, pool_L, fee, capital, bands=None, swap_cost=SWAP_COST, **policy):
     """Score every candidate band on this pool's own history, keep the best.
 
     The ladder is a parameter, not a constant: `bands` defaults to the module's
     own list only so that a bare scan still works. The bot passes the ladder
     from its active profile.
     """
-    runs = [simulate(k, ts, px, vol, pool_L, fee, capital, swap_cost)
+    runs = [simulate(k, ts, px, vol, pool_L, fee, capital, swap_cost, **policy)
             for k in (bands or BANDS)]
     return max(runs, key=lambda r: r['net_day_pct']), runs
 
@@ -331,11 +399,11 @@ def best_band(ts, px, vol, pool_L, fee, capital, bands=None, swap_cost=SWAP_COST
 # exit before the data ran out.
 
 def rolling(k, ts, px, vol, pool_L, fee, capital, swap_cost=SWAP_COST,
-            horizon_hours=240, step_hours=24):
+            horizon_hours=240, step_hours=24, **policy):
     """Replay from every `step_hours`-th origin over `horizon_hours`."""
     n, H = len(px), horizon_hours
     runs = [simulate(k, ts[s:s + H + 1], px[s:s + H + 1], vol[s:s + H + 1],
-                     pool_L, fee, capital, swap_cost)
+                     pool_L, fee, capital, swap_cost, offset=s, **policy)
             for s in range(0, n - H - 1, step_hours)]
     if not runs:
         return None
@@ -405,6 +473,112 @@ def survival(px, k, step_hours=6, horizons=(24, 72, 168)):
             **{f'p_survive_{h}h': S_at(h) for h in horizons}}
 
 
+def conditional_survival(px, d_up, d_down, horizons=(6, 24, 72, 168), step_hours=1,
+                         vol_match=None):
+    """Kaplan-Meier survival of a band whose edges sit `d_up` above and
+    `d_down` below the CURRENT price (log distances), from every origin of
+    the pool's own history. Origins that never crossed before the data ran
+    out are censored. `vol_match` = (vol24 series, current sigma) keeps only
+    origins in a similar volatility regime when at least 100 exist.
+
+    Returns P(still inside after h) for each horizon, the median lifetime and
+    the origin count, or None with too little data."""
+    logp = np.log(np.asarray(px, dtype=float))
+    n = len(logp)
+    if n < 100:
+        return None
+    Hmax = max(horizons)
+    origins = np.arange(0, n - 1, step_hours)
+    if vol_match is not None:
+        v, now = vol_match
+        sel = (v[origins] > now / 1.5) & (v[origins] < now * 1.5)
+        if sel.sum() >= 100:
+            origins = origins[sel]
+    times = []
+    for s in origins:
+        seg = logp[s + 1:s + 1 + Hmax] - logp[s]
+        gone = (seg > d_up) | (seg < -d_down)
+        if gone.any():
+            times.append((int(np.argmax(gone)) + 1, True))
+        else:
+            times.append((len(seg), False))
+    if not times:
+        return None
+    curve = kaplan_meier(times)
+
+    def S_at(h):
+        s = 1.0
+        for t, v in curve:
+            if t <= h:
+                s = v
+            else:
+                break
+        return s
+    median = next((t for t, v in curve if v <= 0.5), None)
+    return {'origins': len(times), 'exited': sum(1 for _, x in times if x),
+            'median_exit_hours': median,
+            **{f'p_survive_{h}h': S_at(h) for h in horizons}}
+
+
+def band_forecast(px, price, lower, upper, open_price=None, hours_alive=None,
+                  horizon=PROACTIVE_HORIZON, threshold=PROACTIVE_THRESHOLD):
+    """Everything the book says about the held band, from the pool's own
+    tape: where the price sits, how likely it is to leave, what a re-centre
+    now would lock in, and whether the proactive rule fires.
+
+    Pure: `px` is the hourly close series (most recent last), the rest are
+    the live position's numbers."""
+    if price <= 0 or lower <= 0 or upper <= lower:
+        return None
+    lk = math.log(upper / lower) / 2
+    d_up, d_down = math.log(upper / price), math.log(price / lower)
+    inside = lower <= price <= upper
+    # -1 at the lower edge, 0 centred, +1 at the upper edge
+    pos = (d_down - d_up) / (2 * lk) if lk > 0 else 0.0
+    logp = np.log(np.asarray(px, dtype=float))
+    v24 = trailing_vol(logp)
+    sigma_now = float(v24[-1]) if len(v24) else None
+    sigma_hist = float(np.median(v24[24:])) if len(v24) > 48 else None
+    out = {'inside': inside, 'position': round(pos, 3),
+           'to_upper_pct': round((upper / price - 1) * 100, 2),
+           'to_lower_pct': round((1 - lower / price) * 100, 2),
+           'half_width_pct': round((math.exp(lk) - 1) * 100, 2),
+           'hours_alive': (round(hours_alive, 1) if hours_alive is not None else None),
+           'sigma_24h_pct': (round(sigma_now * 100, 3) if sigma_now else None),
+           'vol_regime_x': (round(sigma_now / sigma_hist, 2) if sigma_now and sigma_hist else None),
+           'horizon_hours': horizon, 'threshold': threshold}
+    if inside:
+        all_o = conditional_survival(px, d_up, d_down)
+        reg = conditional_survival(px, d_up, d_down, vol_match=(v24, sigma_now)) if sigma_now else None
+        for tag, s in (('', all_o), ('_regime', reg)):
+            if not s:
+                continue
+            for h in (6, 24, 72, 168):
+                out[f'p_exit_{h}h{tag}'] = round(1 - s[f'p_survive_{h}h'], 3)
+            out[f'median_life_hours{tag}'] = s['median_exit_hours']
+            out[f'origins{tag}'] = s['origins']
+        # the figure the rule acts on: the regime-matched estimate at the
+        # policy horizon, falling back to all origins
+        key = f'p_exit_{horizon}h'
+        P = out.get(key + '_regime', out.get(key))
+        out['p_exit_horizon'] = P
+        out['act'] = bool(P is not None and threshold and P >= threshold)
+    else:
+        out['p_exit_horizon'] = 1.0
+        out['act'] = True
+        beyond = math.log(price / upper) if price > upper else math.log(lower / price)
+        out['beyond_half_widths'] = round(beyond / lk, 2) if lk > 0 else None
+    if open_price and open_price > 0:
+        # what a re-centre now makes permanent: the position's value against
+        # holding 50/50 since the open, at this price, as a share of the open
+        L = liquidity_for(1.0, open_price, lower, upper)
+        x, y = amounts(L, price, lower, upper)
+        hold = 0.5 * price / open_price + 0.5
+        out['il_now_pct'] = round((1 - (x * price + y) / hold) * 100, 3)
+        out['since_open_pct'] = round((price / open_price - 1) * 100, 2)
+    return out
+
+
 def edge_loss(k):
     """Value lost against holding 50/50 when the price rides to the band's
     edge — the impermanent loss a rebalance at the edge makes permanent.
@@ -418,7 +592,7 @@ def edge_loss(k):
 
 
 def ladder(pool, candle_data, bands, capital, swap_cost=SWAP_COST,
-           horizon_hours=240, step_hours=24, quote_usd=None):
+           horizon_hours=240, step_hours=24, quote_usd=None, policy=None):
     """Score every band on a pool three ways: the one full-window path, the
     rolling-origin distribution, and the survival curve.
 
@@ -427,8 +601,14 @@ def ladder(pool, candle_data, bands, capital, swap_cost=SWAP_COST,
     (rows, meta) or None when the pool cannot be priced consistently. Each row
     carries `net_day_pct` and `rebal_per_day` from the ROLLING median, which
     is what the bot decides on; the single path is kept under `path`.
+
+    `policy` is {'horizon': h, 'threshold': t}, the proactive rule; None means
+    the module defaults, {} the plain rule. Every band is scored under the
+    rule the loop will apply to it.
     """
     rec = as_record(pool)
+    if policy is None:
+        policy = {'horizon': PROACTIVE_HORIZON, 'threshold': PROACTIVE_THRESHOLD}
     if not candle_data:
         return None
     tvl = float(rec.get('tvl_usd') or 0)
@@ -455,10 +635,15 @@ def ladder(pool, candle_data, bands, capital, swap_cost=SWAP_COST,
         vol = vol * px
     fee = float(rec.get('fee') or 0)
     ctx = {'tvl_quote': tvl / quote_usd, 'c_pool': c_pool}
+    pol = dict(policy)
+    if pol.get('horizon'):
+        logp = np.log(px)
+        M, m = forward_extrema(logp, int(pol['horizon']))
+        pol['tables'] = (M, m, trailing_vol(logp))
     rows = []
     for k in bands:
-        path = simulate(k, ts, px, vol, ctx, fee, capital, swap_cost)
-        roll = rolling(k, ts, px, vol, ctx, fee, capital, swap_cost, horizon_hours, step_hours)
+        path = simulate(k, ts, px, vol, ctx, fee, capital, swap_cost, **pol)
+        roll = rolling(k, ts, px, vol, ctx, fee, capital, swap_cost, horizon_hours, step_hours, **pol)
         surv = survival(px, k)
         rows.append({
             'band': k, 'band_pct': (k - 1) * 100,
@@ -469,7 +654,8 @@ def ladder(pool, candle_data, bands, capital, swap_cost=SWAP_COST,
         })
     meta = {'price': price, 'fee': fee, 'c_pool': c_pool, 'tvl_usd': tvl,
             'quote_usd': quote_usd, 'days': rows[0]['path']['days'], 'hours': len(px),
-            'dex': rec.get('dex'), 'kind': rec.get('kind', 'clmm'), 'pair': rec.get('pair')}
+            'dex': rec.get('dex'), 'kind': rec.get('kind', 'clmm'), 'pair': rec.get('pair'),
+            'policy': {k: v for k, v in policy.items() if k != 'tables'}}
     return rows, meta
 
 
@@ -485,15 +671,18 @@ def print_ladder(rows, meta, pick=None):
     print(f"price {meta['price']:.6g}  fee {meta['fee'] * 100:.2f}%  TVL ${meta['tvl_usd'] / 1e6:.1f}M  "
           f"pool concentration {meta['c_pool']:.1f}x  window {meta['days']:.1f}d  "
           f"rolling {rows[0]['roll']['horizon_days']:.0f}d x {rows[0]['roll']['windows']} origins")
+    pol = meta.get('policy') or {}
+    if pol.get('horizon'):
+        print(f"proactive: re-centre when P(exit within {pol['horizon']}h) >= {pol['threshold']}")
     print(f"{'band':>7} {'path':>7} {'median':>7} {'p25':>7} {'worst':>7} {'+win':>5} "
-          f"{'beat':>5} {'reb/d':>6} {'exit50%':>8} {'S24h':>5} {'S72h':>5} {'S7d':>5} {'edge':>6}")
+          f"{'beat':>5} {'reb/d':>6} {'pro/d':>6} {'exit50%':>8} {'S24h':>5} {'S72h':>5} {'S7d':>5} {'edge':>6}")
     for r in rows:
         p, o, s = r['path'], r['roll'], r['survival']
         med = f"{s['median_exit_hours']:.0f}h" if s and s['median_exit_hours'] else '  >win'
         mark = '  <-' if pick is not None and r['band'] == pick['band'] else ''
         print(f"+/-{r['band_pct']:>4.0f}% {p['net_day_pct']:>7.3f} {o['median_net_day']:>7.3f} "
               f"{o['p25_net_day']:>7.3f} {o['worst_net_day']:>7.3f} {o['share_positive'] * 100:>4.0f}% "
-              f"{o['share_beat_hold'] * 100:>4.0f}% {o['rebal_per_day']:>6.2f} {med:>8} "
+              f"{o['share_beat_hold'] * 100:>4.0f}% {o['rebal_per_day']:>6.2f} {p['proactive_per_day']:>6.2f} {med:>8} "
               f"{s['p_survive_24h'] * 100:>4.0f}% {s['p_survive_72h'] * 100:>4.0f}% "
               f"{s['p_survive_168h'] * 100:>4.0f}% {r['edge_loss_pct']:>5.2f}%{mark}")
     print("path/median/p25/worst: net %/day (fees + position P&L - swaps) over the full window / "
@@ -584,7 +773,7 @@ def realised_check(rows):
 
 def score_board(records, capital, bands, swap_cost=SWAP_COST, max_rebal_per_day=0.5,
                 min_tvl=MIN_TVL, min_volume=0.0, screen_top=20, blocked=None, progress=None,
-                season_out=None):
+                season_out=None, policy=None):
     """Rank pools from any DEX by what an optimally banded position would
     have returned, under the same model the bot uses to choose its band.
 
@@ -654,7 +843,7 @@ def score_board(records, capital, bands, swap_cost=SWAP_COST, max_rebal_per_day=
             out.append({**base, 'skipped': 'fewer than 240 hourly candles'})
             continue
         res = ladder(rec, cd, dexes.feasible_bands(rec, bands), capital, swap_cost,
-                     quote_usd=quote_usd)
+                     quote_usd=quote_usd, policy=policy)
         if not res:
             c = concentration(rec, quote_usd)
             out.append({**base, 'skipped': (f'implied concentration {c:.1f}x out of range' if c

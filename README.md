@@ -347,6 +347,61 @@ The board is advisory and the loop is not: a scan that fails leaves the last
 board in place and reports `scan_failed`; a board older than three scan
 intervals is ignored.
 
+### Acting before the price leaves
+
+A rebalance at the edge is the worst-priced trade the bot can make: it
+happens at whatever price the exit lands on, it makes the position's whole
+loss against holding permanent, and until it runs the position is one-sided
+and earning nothing. So the bot does not wait for the edge.
+
+Every poll it estimates, from the pool's own hourly tape, the probability
+that the price is outside the held band within the next
+`proactive_horizon_hours` (default 6). The estimate is a Kaplan-Meier
+survival curve conditioned on the live position: from every origin in the
+history, how long until the price moved as far up as the ceiling is now, or
+as far down as the floor is now, with origins that never did censored. It is
+computed twice, from all origins and from those whose trailing-24h
+volatility was within a factor 1.5 of today's, and the regime-matched figure
+decides. When it reaches `proactive_threshold` (default 0.5: leaving is more
+likely than not), the bot harvests, closes and reopens centred on the current
+price. It waits for a quiet hour to do so unless the probability has passed
+90%, when the hour no longer matters. An actual exit still rebalances at
+once. `proactive_threshold=0` switches the rule off.
+
+The ladder and the board replay every band under the same rule, walk-forward
+(each hour's probability uses only the hours before it), so a band is scored
+as the loop will run it. `pro/d` in the ladder is how often the rule fired.
+
+```sh
+python3 db.py set sol-usdc proactive_horizon_hours=6 proactive_threshold=0.5
+python3 db.py forecasts        # predicted vs realised exits, by decile, with Brier
+```
+
+Every forecast is stored with its snapshot (`p_exit_6h`, `p_exit_24h`,
+`p_exit_72h`, `band_position`), so the model is checked against the tape it
+ran on: `forecasts` buckets the predictions by decile and prints the realised
+exit rate next to each, for the same position, with unresolved forecasts
+censored rather than counted as survivors.
+
+What the replay says about it, on 180 days of this pool's tape, for the
+record: at ±8% and wider the rule fires rarely and scores the same as
+rebalancing at the edge; at ±5% it fires often enough to cost about
+0.05%/day in extra swaps and locked loss. The exit probability is honest; the
+price is close to a martingale at every horizon from six hours to a week
+(variance ratios 0.93 to 1.07), so knowing an exit is likely does not say
+which way the price goes after it. The defaults are therefore the least
+active setting the rule allows, six hours and a coin flip, and the figures are
+in every book so the operator can see it fire and judge it.
+
+### The dividend
+
+Fees accrue on the position and are only realised when something touches
+it. Every `harvest_interval_hours` (default 24) the bot harvests them into
+the wallet, once at least `min_harvest_usd` (default 0.25) has accrued, and
+reports `DIVIDEND` with the book. A rebalance harvests too and resets the
+clock. Realised fees are the income: they are in the wallet, they do not move
+with the price, and no later rebalance can give them back.
+
 ### Re-optimisation
 
 The ladder is re-run every `reopt_interval_seconds` (default 6 hours) against a
@@ -388,7 +443,7 @@ exactly one row is active, enforced by a partial unique index, so the bot never
 has to guess which parameters are its own.
 
 ```sh
-psql -d rebalancer -f sql/001_schema.sql -f sql/002_any_pool.sql -f sql/003_multi_dex.sql -f sql/004_seasonality.sql
+psql -d rebalancer -f sql/001_schema.sql -f sql/002_any_pool.sql -f sql/003_multi_dex.sql -f sql/004_seasonality.sql -f sql/005_proactive.sql
 python3 db.py seed                          # a first profile, SOL/USDC
 python3 db.py add wif-usdc <pool> capital_usd=200   # describe another pool
 python3 db.py config                        # show the active profile
@@ -404,6 +459,8 @@ python3 db.py activate wif-usdc             # switch pools
 | size | `capital_usd`, `max_usd`, `gas_reserve_sol`, `side_cap_fraction` |
 | band search | `bands` (the ladder), `max_modelled_rebal_per_day`, `swap_cost_bps` |
 | cadence | `poll_seconds`, `min_rebalance_gap_seconds`, `max_rebalances_per_day`, `reopt_interval_seconds`, `reopt_min_gain` |
+| acting early | `proactive_horizon_hours`, `proactive_threshold` |
+| the dividend | `harvest_interval_hours`, `min_harvest_usd` |
 | safety | `max_consecutive_failures`, `max_unreadable_polls`, `slippage_bps` |
 | pool screening | `max_leveraged`, `min_established`, `min_net_day_pct`, `min_tvl_usd` |
 
@@ -503,6 +560,26 @@ even in an hour when you earned nothing.
 - **TOTAL** — realised plus unrealised. Only goes up.
 - **rate / APR** — annualised on the equity actually at work, not on notional,
   and suppressed entirely until the position has run for an hour
+
+### The band
+
+Below the book, the survival block for the held band:
+
+```
+━━ BAND ━━
+price       8.6% above the floor · 6.6% below the ceiling · alive 23h
+P(exit)     6h 0%   24h 14%   72h 30%   7d 45%
+life        median > 7d · vol 1.02x normal (614 origins)
+if closed   locks 0.06% vs holding · price +1.22% since open
+rule        act at P(exit ≤6h) ≥ 50% · now 0% → hold
+```
+
+`P(exit)` is one minus the conditional survival at each horizon, regime
+matched. `life` is the median remaining lifetime of the band from here.
+`if closed` is what a re-centre now would make permanent: the position's
+value against holding 50/50 since the open, at this price. `rule` is the
+proactive rule's current verdict. `python3 db.py` prints the same figures
+from the last snapshot.
 
 ### By pool, and rent
 
@@ -604,6 +681,7 @@ never been watched.
 | `sql/002_any_pool.sql` | migration for databases created before the pool-agnostic sizing |
 | `sql/003_multi_dex.sql` | the board tables and the pool-move parameters |
 | `sql/004_seasonality.sql` | the hour-of-day profile on each scan and the quiet-hours switch |
+| `sql/005_proactive.sql` | the proactive rule, the dividend schedule, and the forecast columns on snapshots |
 | `ops/*.service` | systemd units |
 | `tests/` | the test suite, below |
 
@@ -618,13 +696,13 @@ tests/run.sh                                        # offline suites
 WALLET_SECRET_PATH=/path/to/key tests/run.sh        # plus the live signer reads
 ```
 
-Four suites, 58 tests, about 20 seconds. They run against a database whose
+Four suites, 91 tests, about 20 seconds. They run against a database whose
 name ends in `_test` and refuse to run against anything else, because the
 ledger tests truncate tables.
 
 | suite | what it proves |
 |---|---|
-| `test_engine` | the CLMM arithmetic round-trips; a position at its edge has lost to holding; fees scale with concentration; flat, stepped and trending paths give the answers known in advance; Kaplan-Meier respects censoring; wider bands survive longer; the ladder refuses a pool whose candles disagree with its price |
+| `test_engine` | the exit probability is walk-forward and monotone in distance; the proactive rule re-centres before the edge on a drift and never on a flat path; the band forecast fires at the ceiling and not at the centre; the CLMM arithmetic round-trips; a position at its edge has lost to holding; fees scale with concentration; flat, stepped and trending paths give the answers known in advance; Kaplan-Meier respects censoring; wider bands survive longer; the ladder refuses a pool whose candles disagree with its price |
 | `test_rebalancer` | deposit sizing on a flush wallet, a short wallet, a native-B pool and a BTC-quoted pool; the gas reserve comes off the native side only; rate-limit dumps tidy to one line; signer output parses through bindings noise; a timeout is an error, not a crash |
 | `test_db` | one active profile; parameters validate and the sanity constraint bites; `add` fills the pair from Orca and refuses adaptive-fee pools; a full lifecycle — open, accrue, harvest, close, reopen — keeps TOTAL monotonic and counts a harvest once; token amounts survive exactly |
 | `test_signer_live` | read-only against mainnet: pool descriptions, both balances on a dollar-quoted and a BTC-quoted pool, status, dry-run open and close that build real instructions, refusal of adaptive-fee pools and of positions over the cap |

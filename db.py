@@ -17,6 +17,7 @@ with psql while the bot is mid-rebalance.
     python3 db.py activate <name>               make it the one the bot runs
     python3 db.py set <name> k=v [k=v ...]      retune
     python3 db.py [stats|daily|history|json]    the book
+    python3 db.py forecasts                     the survival model against the tape
 
 Connections are opened per operation. At one write every few minutes the cost
 is nothing, and it means a dropped connection cannot wedge the loop.
@@ -247,6 +248,23 @@ def close_position(mint, sig, withdraw_usd):
                     (now(), sig, withdraw_usd, mint))
 
 
+def position_opened(mint):
+    with cursor() as cur:
+        cur.execute('select opened_at from positions where mint = %s', (mint,))
+        r = cur.fetchone()
+    return r['opened_at'] if r else None
+
+
+def position_open_price(mint):
+    """The price the band was centred on: the geometric middle of the band."""
+    with cursor() as cur:
+        cur.execute('select lower_price, upper_price from positions where mint = %s', (mint,))
+        r = cur.fetchone()
+    if not r or not r['lower_price'] or not r['upper_price']:
+        return None
+    return float(r['lower_price'] * r['upper_price']) ** 0.5
+
+
 def record_harvest(mint, fee_a, fee_b, fee_usd, sig):
     with cursor(commit=True) as cur:
         cur.execute('insert into harvests (ts, mint, fee_a, fee_b, fee_usd, signature) '
@@ -255,20 +273,27 @@ def record_harvest(mint, fee_a, fee_b, fee_usd, sig):
 
 
 def snapshot(mint, price, in_range, liquidity, accrued_a, accrued_b,
-             accrued_usd, wallet_usd, position_usd):
+             accrued_usd, wallet_usd, position_usd, forecast=None):
     # Equity is the wallet plus the position. If either could not be read
     # this poll, equity is unknown — not "the other half", which would show up
     # as a $170 loss in the P&L for one poll and a $170 gain in the next.
     equity = ((wallet_usd + position_usd)
               if (wallet_usd is not None and position_usd is not None) else None)
+    # The forecast made at this poll is kept next to the observation, so the
+    # survival model can be checked against what happened (see forecasts()).
+    f = forecast or {}
     with cursor(commit=True) as cur:
         cur.execute("""
             insert into snapshots (ts, mint, price, in_range, liquidity, accrued_a,
                                    accrued_b, accrued_usd, wallet_usd, position_usd,
-                                   equity_usd)
-            values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                                   equity_usd, p_exit_6h, p_exit_24h, p_exit_72h, band_position)
+            values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
         """, (now(), mint, price, bool(in_range), str(liquidity or 0),
-              accrued_a, accrued_b, accrued_usd, wallet_usd, position_usd, equity))
+              accrued_a, accrued_b, accrued_usd, wallet_usd, position_usd, equity,
+              f.get('p_exit_6h_regime', f.get('p_exit_6h')),
+              f.get('p_exit_24h_regime', f.get('p_exit_24h')),
+              f.get('p_exit_72h_regime', f.get('p_exit_72h')),
+              f.get('position')))
 
 
 def event(kind, detail=''):
@@ -419,7 +444,8 @@ def stats(token_a=None, token_b=None):
         # realised; reading it as unrealised too is how a $0.26 harvest was
         # reported as $0.51 of fees.
         cur.execute('select s.ts, s.mint, s.price, s.accrued_a, s.accrued_b, '
-                    's.accrued_usd, s.equity_usd, '
+                    's.accrued_usd, s.equity_usd, s.in_range, s.p_exit_6h, s.p_exit_24h, '
+                    's.p_exit_72h, s.band_position, p.opened_at, '
                     '(p.mint is not null and p.closed_at is null) as open '
                     'from snapshots s left join positions p on p.mint = s.mint '
                     'order by s.id desc limit 1')
@@ -563,7 +589,55 @@ def stats(token_a=None, token_b=None):
         'tracked_days': round(days, 3) if days else None,
         'last_price': _f(latest and latest['price']) or None,
         'last_seen': latest['ts'].isoformat() if latest else None,
+        # the survival figures recorded at the last poll of the open position
+        'band': ({'in_range': latest['in_range'],
+                  'position': _num(latest['band_position']),
+                  'p_exit_6h': _num(latest['p_exit_6h']),
+                  'p_exit_24h': _num(latest['p_exit_24h']),
+                  'p_exit_72h': _num(latest['p_exit_72h']),
+                  'hours_alive': (round((latest['ts'] - latest['opened_at']).total_seconds() / 3600, 1)
+                                  if latest['opened_at'] else None)}
+                 if latest and latest['open'] else None),
     }
+
+
+def forecasts(horizons=(6, 24, 72)):
+    """The survival model against the tape it ran on. For every snapshot that
+    carried a forecast, whether the SAME position was seen out of range within
+    the horizon (a position that closed for another reason before the horizon
+    ran out is censored: dropped, not counted as a survivor). Predictions are
+    bucketed by decile so a bucket's mean forecast can be read next to its
+    realised exit rate; Brier is the mean squared error of the probability."""
+    out = {}
+    with cursor() as cur:
+        for h in horizons:
+            cur.execute(f"""
+                with f as (
+                    select s.id, s.ts, s.mint, s.p_exit_{h}h p
+                    from snapshots s
+                    where s.p_exit_{h}h is not null and s.in_range
+                ), o as (
+                    select f.id, f.p,
+                           exists (select 1 from snapshots x where x.mint = f.mint
+                                   and x.ts > f.ts and x.ts <= f.ts + make_interval(hours => %s)
+                                   and not x.in_range) exited,
+                           (select max(x.ts) from snapshots x where x.mint = f.mint) last_seen
+                    from f
+                )
+                select width_bucket(p, 0, 1.0000001, 10) bucket, count(*) n, avg(p) p_mean,
+                       avg(case when exited then 1.0 else 0.0 end) exit_rate,
+                       avg((p - case when exited then 1.0 else 0.0 end) ^ 2) brier
+                from o
+                where exited or last_seen >= (select ts from snapshots where id = o.id) + make_interval(hours => %s)
+                group by 1 order by 1
+            """, (h, h))
+            rows = [dict(r) for r in cur.fetchall()]
+            n = sum(r['n'] for r in rows)
+            brier = (sum(_f(r['brier']) * r['n'] for r in rows) / n) if n else None
+            out[h] = {'n': n, 'brier': (round(brier, 4) if brier is not None else None),
+                      'buckets': [{'n': r['n'], 'p_mean': round(_f(r['p_mean']), 3),
+                                   'exit_rate': round(_f(r['exit_rate']), 3)} for r in rows]}
+    return out
 
 
 def daily():
@@ -778,6 +852,11 @@ def _print_stats():
         print(f"  rhythm      hour {o['hour_utc']:02d} UTC runs {o['now_x']}x the average hour; "
               f"next {o['next_hours']}h {o['next_x']}x -> ~${s['expected_next_hours_fees_per_day_usd']}/day"
               f"   (peak {o['peak_hour_utc']:02d}, trough {o['trough_hour_utc']:02d} UTC)")
+    b = s.get('band')
+    if b and b['p_exit_24h'] is not None:
+        print(f"  band        {'in' if b['in_range'] else 'OUT of'} range · position {b['position']:+.2f} "
+              f"· alive {b['hours_alive']}h · P(exit) 6h {b['p_exit_6h']:.0%}  24h {b['p_exit_24h']:.0%}  "
+              f"72h {b['p_exit_72h']:.0%}")
     print(f"  activity    {s['positions_opened']} positions · {s['rebands']} rebands "
           f"· {s['harvests']} harvests · {s['failures']} failures")
 
@@ -843,6 +922,11 @@ if __name__ == '__main__':
                   f"in_range {r['in_range']!s:<5}  accrued "
                   f"${float(r['accrued_usd'] or 0):.4f}  "
                   f"equity ${float(r['equity_usd'] or 0):.2f}")
+    elif cmd == 'forecasts':
+        for h, r in forecasts().items():
+            print(f"P(exit within {h}h): {r['n']} forecasts resolved, Brier {r['brier']}")
+            for b in r['buckets']:
+                print(f"    predicted {b['p_mean']:.0%}  realised {b['exit_rate']:.0%}  (n={b['n']})")
     elif cmd == 'json':
         print(json.dumps(stats(), indent=1, default=str))
     else:

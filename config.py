@@ -117,6 +117,26 @@ ALLOW_SWAP = _env('LPBOT_ALLOW_SWAP', lambda s: s.lower() in ('1', 'true', 'yes'
 DEFER_MOVES_TO_QUIET_HOURS = _env('LPBOT_DEFER_QUIET', lambda s: s.lower() in ('1', 'true', 'yes'),
                                   bool(_CFG.get('defer_moves_to_quiet_hours', True)))
 
+# --- the proactive policy ------------------------------------------------------
+# The bot acts BEFORE the price leaves. Every poll it estimates, from the
+# pool's own tape, the probability that the price is outside the band within
+# `proactive_horizon_hours`; at or above `proactive_threshold` it re-centres.
+# A threshold of 0 disables the rule (rebalance only once outside).
+PROACTIVE_HORIZON = _env('LPBOT_PROACTIVE_HORIZON', int, int(_CFG.get('proactive_horizon_hours') or 6))
+PROACTIVE_THRESHOLD = _env('LPBOT_PROACTIVE_THRESHOLD', float, float(_CFG.get('proactive_threshold') or 0))
+
+# --- the dividend -------------------------------------------------------------
+# Accrued fees are harvested into the wallet every `harvest_interval_hours`
+# (0: only when a position closes), once at least `min_harvest_usd` accrued.
+HARVEST_INTERVAL = _env('LPBOT_HARVEST_INTERVAL_HOURS', int, int(_CFG.get('harvest_interval_hours') or 0)) * 3600
+MIN_HARVEST_USD = _env('LPBOT_MIN_HARVEST_USD', float, float(_CFG.get('min_harvest_usd') or 0))
+
+
+def policy():
+    """The proactive rule as the engine takes it."""
+    return {'horizon': PROACTIVE_HORIZON, 'threshold': PROACTIVE_THRESHOLD}
+
+
 # --- plumbing ----------------------------------------------------------------
 RPC = _env('LPBOT_RPC', str,
            os.environ.get('SOLANA_RPC_URL') or 'https://api.mainnet-beta.solana.com')
@@ -161,6 +181,10 @@ def summary():
         'migrate_min_gain': MIGRATE_MIN_GAIN,
         'pool_pinned': POOL_PINNED,
         'allow_swap': ALLOW_SWAP,
+        'proactive_horizon_hours': PROACTIVE_HORIZON,
+        'proactive_threshold': PROACTIVE_THRESHOLD,
+        'harvest_every_hours': HARVEST_INTERVAL / 3600,
+        'min_harvest_usd': MIN_HARVEST_USD,
     }
 
 
