@@ -451,7 +451,9 @@ def reopen(state, reason):
     deposit_usd = None
     if mint:
         st, _ = read_status(mint)
-        deposit_usd = (st or {}).get('positionUsd')
+        # The same mark the snapshots use: tokens plus the rent, so the
+        # deposit and every later mark are measured the same way.
+        deposit_usd = position_usd(st) if st else None
     if deposit_usd is None:
         deposit_usd = (out or {}).get('depositUsd')
     if deposit_usd is None:
