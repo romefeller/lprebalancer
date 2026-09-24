@@ -308,12 +308,29 @@ def board_pick(current_best, exclude_address):
         cands.append(r)
     if not cands:
         return run, None, None, 'no eligible candidate on the board'
-    best = max(cands, key=lambda r: r['net_day_pct'])
+    # Ranked on the decision figure: the modelled median, scaled down where
+    # the pool's own last-24h fees say the model's fee share is stale.
+    use = lambda r: r.get('decision_day_pct') if r.get('decision_day_pct') is not None else r['net_day_pct']
+    best = max(cands, key=use)
     if not current_best:
         return run, best, None, 'held pool unscorable'
     cur = current_best['net_day_pct']
-    gain = (best['net_day_pct'] - cur) / max(abs(cur), 1e-9)
+    gain = (use(best) - cur) / max(abs(cur), 1e-9)
     return run, best, gain, None
+
+
+def utc_hour():
+    return db.now().hour
+
+
+def busy_hour():
+    """True when this UTC hour usually carries more than the average volume,
+    so a voluntary move would cost the most. Uses the board's latest profile;
+    with none, no hour is busy."""
+    if not config.DEFER_MOVES_TO_QUIET_HOURS:
+        return False
+    o = db.season_outlook(db.season(), hour=utc_hour())
+    return bool(o and not o['quiet'])
 
 
 def consider_migration(state, status, current_best):
@@ -338,6 +355,12 @@ def consider_migration(state, status, current_best):
                pool=best['address'], dex=best['dex'],
                reason=f'no signer armed for {best["dex"]}; the bot stays where it is',
                command=f'python3 db.py repoint {config.PROFILE} {best["dex"]} {best["address"]}')
+        return False
+    if busy_hour():
+        o = db.season_outlook(db.season(), hour=utc_hour())
+        notify('move_deferred', kind='pool move', held=cur_txt, best=best_txt,
+               reason=f"hour {o['hour_utc']:02d} UTC runs {o['now_x']}x the average; "
+                      f"waiting for a quiet hour (trough {o['trough_hour_utc']:02d} UTC)")
         return False
     notify('MIGRATE', held=cur_txt, best=best_txt,
            gain_pct=None if gain is None else round(gain * 100),
@@ -660,7 +683,15 @@ def main():
                 if cur_run:
                     gain = ((best['net_day_pct'] - cur_run['net_day_pct'])
                             / max(abs(cur_run['net_day_pct']), 1e-9))
-                    if gain >= config.REOPT_MIN_GAIN:
+                    if gain >= config.REOPT_MIN_GAIN and busy_hour():
+                        o = db.season_outlook(db.season(), hour=utc_hour())
+                        notify('move_deferred', kind='reband',
+                               held=f'+/-{held_pct}%', best=f'+/-{(best["band"] - 1) * 100:.0f}%',
+                               reason=f"hour {o['hour_utc']:02d} UTC runs {o['now_x']}x the average; "
+                                      f"waiting for a quiet hour (trough {o['trough_hour_utc']:02d} UTC)")
+                        # come back next poll cycle rather than in six hours
+                        state['last_reopt'] = time.time() - config.REOPT_INTERVAL + 1800; save(state)
+                    elif gain >= config.REOPT_MIN_GAIN:
                         notify('REBAND', improvement_pct=round(gain * 100),
                                old_band=f'+/-{held_pct}%',
                                new_band=f'+/-{(best["band"] - 1) * 100:.0f}%',

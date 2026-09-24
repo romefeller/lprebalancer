@@ -64,6 +64,10 @@ function render(row) {
         `last 6h     $${n(r.fees_per_day_6h_usd, 4)}/day${r.apr_6h_pct != null ? `   APR ${n(r.apr_6h_pct, 1)}%` : ''}`] : []),
       ...(r.fees_per_day_24h_usd != null ? [
         `last 24h    $${n(r.fees_per_day_24h_usd, 4)}/day${r.apr_24h_pct != null ? `   APR ${n(r.apr_24h_pct, 1)}%` : ''}`] : []),
+      ...(r.season ? [
+        `rhythm      ${String(r.season.hour_utc).padStart(2, '0')}h UTC ${n(r.season.now_x, 2)}x avg · next ${r.season.next_hours}h ${n(r.season.next_x, 2)}x`
+        + `${r.expected_next_hours_fees_per_day_usd != null ? ` → ~$${n(r.expected_next_hours_fees_per_day_usd, 2)}/day` : ''}`
+        + ` · peak ${String(r.season.peak_hour_utc).padStart(2, '0')}h trough ${String(r.season.trough_hour_utc).padStart(2, '0')}h`] : []),
       `in range    ${n(r.in_range_pct, 0)}%   over ${n(r.tracked_days, 2)}d`,
       `activity    ${plural(r.positions_opened, 'position')} · ${plural(r.rebands, 'reband')} · `
         + `${plural(r.harvests, 'harvest')}${r.failures ? ` · ${plural(r.failures, 'failure')}` : ''}`,
@@ -84,6 +88,8 @@ function render(row) {
     case 'OUT_OF_BAND':
       return `OUT OF RANGE · went ${row.side}\n`
         + `price ${n(row.price, 4)} · band ${n(row.lower, 4)} — ${n(row.upper, 4)}\n${row.action}`;
+    case 'move_deferred':
+      return `${row.kind} deferred · holding ${row.held}, best ${row.best}\n${row.reason}`;
     case 'migrate_refused':
       return `move refused · ${row.reason}`;
     case 'REOPT_REQUESTED':
@@ -112,10 +118,12 @@ function render(row) {
       return `band review · holding ${row.held}, best ${row.best}\n${row.verdict}`;
     case 'SCAN': {
       const top = (row.top ?? []).map(t =>
-        `${t.can_open ? '▸' : '·'} ${t.dex} ${t.pair} ${t.band} ${n(t.net_day_pct, 3)}%/d `
+        `${t.can_open ? '▸' : '·'} ${t.dex} ${t.pair} ${t.band} ${n(t.net_day_pct, 3)}%/d`
+        + `${t.drift != null && t.drift < 0.999 ? ` (tape ${n(t.drift, 2)}x → use ${n(t.use_day_pct, 3)})` : ''} `
         + `${n(t.rebal_per_day, 2)} reb/d $${n(t.tvl_musd, 1)}M${t.ok ? '' : ' ✗'}`).join('\n');
       const errs = row.errors ? `\nerrors: ${Object.entries(row.errors).map(([k, v]) => `${k}: ${v}`).join('; ')}` : '';
-      return `BOARD #${row.run} · ${row.scored}/${row.listed} pools scored in ${row.seconds}s\n`
+      return `BOARD #${row.run} · ${row.scored}/${row.listed} pools scored in ${row.seconds}s`
+        + `${row.season_now != null ? ` · this hour ${n(row.season_now, 2)}x avg` : ''}\n`
         + `${(row.dexes ?? []).join(', ')}\n${top}${errs}\n▸ can open here · ✗ failed the token screen`;
     }
     case 'scan_failed':

@@ -111,6 +111,12 @@ POOL_PINNED = _env('LPBOT_POOL_PINNED', lambda s: s.lower() in ('1', 'true', 'ye
 ALLOW_SWAP = _env('LPBOT_ALLOW_SWAP', lambda s: s.lower() in ('1', 'true', 'yes'),
                   bool(_CFG.get('allow_swap')))
 
+# A voluntary move (reband, pool move) waits for a quiet hour, one whose
+# volume multiplier is at or under 1.0, when ten minutes out of market costs
+# least. An out-of-band rebalance never waits.
+DEFER_MOVES_TO_QUIET_HOURS = _env('LPBOT_DEFER_QUIET', lambda s: s.lower() in ('1', 'true', 'yes'),
+                                  bool(_CFG.get('defer_moves_to_quiet_hours', True)))
+
 # --- plumbing ----------------------------------------------------------------
 RPC = _env('LPBOT_RPC', str,
            os.environ.get('SOLANA_RPC_URL') or 'https://api.mainnet-beta.solana.com')

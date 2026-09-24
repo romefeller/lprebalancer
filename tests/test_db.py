@@ -288,5 +288,31 @@ class ByPool(unittest.TestCase):
         _fixtures.reset_ledger()
 
 
+
+
+class Season(unittest.TestCase):
+    def test_profile_round_trips_and_outlook_reads_the_hour(self):
+        _fixtures.ensure_profile()
+        with db.cursor(commit=True) as cur:
+            cur.execute('truncate scan_pools, scan_runs')
+        prof = [0.7] * 12 + [1.3] * 12
+        db.record_scan('sol-usdc', ('orca',), [], {}, 1.0, listed=0, season=prof)
+        self.assertEqual(db.season(), prof)
+        o = db.season_outlook(prof, hour=3)
+        self.assertTrue(o['quiet']); self.assertEqual(o['now_x'], 0.7)
+        self.assertAlmostEqual(o['next_x'], 0.7)
+        o = db.season_outlook(prof, hour=11)
+        self.assertTrue(o['quiet']); self.assertAlmostEqual(o['next_x'], 1.3)   # the peak is coming
+        o = db.season_outlook(prof, hour=15)
+        self.assertFalse(o['quiet'])
+        self.assertEqual(o['peak_hour_utc'], 12); self.assertEqual(o['trough_hour_utc'], 0)
+        self.assertIsNone(db.season_outlook(None)); self.assertIsNone(db.season_outlook([1.0] * 5))
+        s = db.stats()
+        self.assertIsNotNone(s['season'])
+        with db.cursor(commit=True) as cur:
+            cur.execute('truncate scan_pools, scan_runs')
+        self.assertIsNone(db.season())
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

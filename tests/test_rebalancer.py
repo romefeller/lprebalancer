@@ -282,5 +282,54 @@ class Guarded(unittest.TestCase):
         self.assertEqual(state['failures'], 1)
 
 
+
+
+class QuietHours(unittest.TestCase):
+    def test_a_voluntary_move_waits_for_a_quiet_hour(self):
+        busy = [0.7] * 12 + [1.4] * 12
+        sent, moved = [], []
+        rows = [{'address': 'M1', 'dex': 'meteora-dlmm', 'pair': 'SOL/USDC', 'band': 1.08, 'band_pct': 8.0,
+                 'net_day_pct': 0.9, 'decision_day_pct': 0.9, 'rebal_per_day': 0.1, 'screen_ok': True, 'skipped': None,
+                 'token_a': {'address': 'a', 'symbol': 'SOL'}, 'token_b': {'address': 'b', 'symbol': 'USDC'}}]
+        held = {'band': 1.18, 'net_day_pct': 0.4, 'record': {'token_a': {'address': 'a'}, 'token_b': {'address': 'b'}}}
+        with mock.patch.object(rebalancer, 'notify', lambda ev, **kw: sent.append(ev)), \
+                mock.patch.object(rebalancer, 'rebalance', lambda *a, **kw: moved.append(1)), \
+                mock.patch.object(rebalancer.db, 'event', lambda *a: None), \
+                mock.patch.object(rebalancer.db, 'latest_scan', lambda max_age_seconds=None: ({'id': 1}, rows)), \
+                mock.patch.object(rebalancer.db, 'season', lambda: busy), \
+                mock.patch.object(rebalancer.config, 'POOL_PINNED', False), \
+                mock.patch.object(rebalancer.config, 'MIGRATE_MIN_GAIN', 0.25), \
+                mock.patch.object(rebalancer.config, 'EXECUTE_DEXES', ('orca', 'meteora-dlmm')):
+            with mock.patch.object(rebalancer, 'utc_hour', lambda: 15):        # busy afternoon
+                self.assertFalse(rebalancer.consider_migration({}, {}, held))
+            self.assertEqual(sent[-1], 'move_deferred'); self.assertEqual(moved, [])
+            with mock.patch.object(rebalancer, 'utc_hour', lambda: 4):         # quiet night
+                self.assertTrue(rebalancer.consider_migration({}, {}, held))
+            self.assertEqual(sent[-1], 'MIGRATE'); self.assertEqual(moved, [1])
+            # the switch off: busy hour, still moves
+            with mock.patch.object(rebalancer.config, 'DEFER_MOVES_TO_QUIET_HOURS', False), \
+                    mock.patch.object(rebalancer, 'utc_hour', lambda: 15):
+                self.assertTrue(rebalancer.consider_migration({}, {}, held))
+            self.assertEqual(len(moved), 2)
+            # no profile yet: nothing is busy
+            with mock.patch.object(rebalancer.db, 'season', lambda: None), \
+                    mock.patch.object(rebalancer, 'utc_hour', lambda: 15):
+                self.assertTrue(rebalancer.consider_migration({}, {}, held))
+            self.assertEqual(len(moved), 3)
+
+    def test_board_pick_prefers_the_decision_figure(self):
+        rows = [{'address': 'A', 'dex': 'orca', 'pair': 'SOL/USDC', 'net_day_pct': 0.9, 'decision_day_pct': 0.3,
+                 'screen_ok': True, 'skipped': None, 'band_pct': 8.0, 'band': 1.08, 'rebal_per_day': 0.1,
+                 'token_a': {'address': 'a', 'symbol': 'SOL'}, 'token_b': {'address': 'b', 'symbol': 'USDC'}},
+                {'address': 'B', 'dex': 'orca', 'pair': 'SOL/USDC', 'net_day_pct': 0.6, 'decision_day_pct': 0.6,
+                 'screen_ok': True, 'skipped': None, 'band_pct': 8.0, 'band': 1.08, 'rebal_per_day': 0.1,
+                 'token_a': {'address': 'a', 'symbol': 'SOL'}, 'token_b': {'address': 'b', 'symbol': 'USDC'}}]
+        held = {'band': 1.18, 'net_day_pct': 0.4, 'record': {'token_a': {'address': 'a'}, 'token_b': {'address': 'b'}}}
+        with mock.patch.object(rebalancer.db, 'latest_scan', lambda max_age_seconds=None: ({'id': 1}, rows)):
+            run, best, gain, why = rebalancer.board_pick(held, 'X')
+        self.assertEqual(best['address'], 'B')                 # A's tape says its model is stale
+        self.assertAlmostEqual(gain, (0.6 - 0.4) / 0.4)
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

@@ -34,21 +34,26 @@ def run_once(notify=None, progress=None):
     t0 = time.time()
     listed, errors = dexes.fetch_all(config.DEXES, config.SCAN_LIMIT)
     flat = [r for rows in listed.values() for r in rows]
+    season = {}
     rows = engine.score_board(
         flat, config.CAPITAL_USD, config.BANDS, config.SWAP_COST,
         config.MAX_REBALANCES_PER_DAY_MODELLED, config.MIN_TVL_USD, config.MIN_VOLUME_24H_USD,
-        blocked=blocked, progress=progress)
+        blocked=blocked, progress=progress, season_out=season)
     for r in rows:
         r['executable'] = (r['dex'] in config.EXECUTE_DEXES and r.get('net_day_pct') is not None
                            and not r.get('skipped'))
-    run_id = db.record_scan(config.PROFILE, config.DEXES, rows, errors, time.time() - t0, len(flat))
+    run_id = db.record_scan(config.PROFILE, config.DEXES, rows, errors, time.time() - t0, len(flat),
+                            season=season.get('profile'))
     scored = [r for r in rows if r.get('net_day_pct') is not None]
     if notify:
         notify('SCAN', run=run_id, dexes=list(config.DEXES), listed=len(flat), scored=len(scored),
                seconds=round(time.time() - t0),
                errors=errors or None,
+               season_now=(round(season['profile'][db.now().hour], 2) if season.get('profile') else None),
                top=[{'dex': r['dex'], 'pair': r['pair'], 'band': f"+/-{r['band_pct']:.0f}%",
                      'net_day_pct': round(r['net_day_pct'], 3),
+                     'use_day_pct': round(r.get('decision_day_pct', r['net_day_pct']), 3),
+                     'drift': (round(r['liquidity_drift'], 2) if r.get('liquidity_drift') is not None else None),
                      'rebal_per_day': round(r['rebal_per_day'], 2),
                      'tvl_musd': round(r['tvl_usd'] / 1e6, 2),
                      'ok': bool(r.get('screen_ok')), 'can_open': bool(r.get('executable'))}

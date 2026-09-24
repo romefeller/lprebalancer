@@ -515,8 +515,63 @@ def _pick_row(rec, rows, meta, pick):
     }
 
 
+def season_profile(vol_series, ts_series):
+    """Hour-of-day volume multipliers, 1.0 = the average hour, pooled across
+    pools after normalising each by its own mean so a big pool does not set
+    the rhythm for all. Returns 24 floats, or None with too little data."""
+    acc = np.zeros(24); cnt = np.zeros(24)
+    for ts, vol in zip(ts_series, vol_series):
+        v = np.asarray(vol, dtype=float)
+        if len(v) < 48 or v.mean() <= 0:
+            continue
+        v = v / v.mean()
+        h = (np.asarray(ts) // 3600) % 24
+        for hour in range(24):
+            m = h == hour
+            acc[hour] += v[m].sum(); cnt[hour] += m.sum()
+    if (cnt == 0).any():
+        return None
+    prof = acc / cnt
+    return [round(float(x), 3) for x in prof / prof.mean()]
+
+
+def realised_check(rows):
+    """Set the model against the tape. For every scored pool: the fee yield
+    the pool's own last-24h fees would have paid a position at the chosen
+    band, against the gross fee yield the model's replay averaged. Volume is
+    common to the whole market on a given day, so each pool's ratio is judged
+    relative to the median ratio across the board: a pool whose ratio sits
+    well under its peers has had liquidity flood in (or volume leave) since
+    the history the model used, and its decision figure is scaled down to
+    match. Never scaled up: a hot day is not a reason to trust a pool more."""
+    ratios = []
+    for r in rows:
+        if r.get('net_day_pct') is None:
+            continue
+        share = band_concentration(r['band']) / r['c_pool'] / r['tvl_usd']   # per $ of position
+        r['realised_day_pct'] = float(r.get('fees_24h_usd') or 0) * share * 100
+        path = r.get('path') or {}
+        gross = (path.get('fees') or 0) / max(path.get('days') or 1, 1e-9)
+        r['modelled_gross_day_pct'] = gross / max(r.get('capital', 190.0), 1e-9) * 100
+        r['realised_ratio'] = (r['realised_day_pct'] / r['modelled_gross_day_pct']
+                               if r['modelled_gross_day_pct'] > 0 else None)
+        if r['realised_ratio'] is not None:
+            ratios.append(r['realised_ratio'])
+    med = float(np.median(ratios)) if ratios else None
+    for r in rows:
+        if r.get('net_day_pct') is None:
+            continue
+        rr = r.get('realised_ratio')
+        drift = (rr / med) if (rr is not None and med and med > 0) else None
+        r['liquidity_drift'] = drift
+        r['decision_day_pct'] = (r['net_day_pct'] * min(1.0, drift) if drift is not None
+                                 else r['net_day_pct'])
+    return med
+
+
 def score_board(records, capital, bands, swap_cost=SWAP_COST, max_rebal_per_day=0.5,
-                min_tvl=MIN_TVL, min_volume=0.0, screen_top=20, blocked=None, progress=None):
+                min_tvl=MIN_TVL, min_volume=0.0, screen_top=20, blocked=None, progress=None,
+                season_out=None):
     """Rank pools from any DEX by what an optimally banded position would
     have returned, under the same model the bot uses to choose its band.
 
@@ -528,7 +583,12 @@ def score_board(records, capital, bands, swap_cost=SWAP_COST, max_rebal_per_day=
 
     `blocked(rec)` may return a reason a pool cannot be opened at all (an
     adaptive-fee Orca pool, a DEX without a signer); those are listed but not
-    spent a candle fetch on.
+    spent a candle fetch on. `season_out`, a dict, receives the hour-of-day
+    profile built from every scored pool's candles.
+
+    Rows are ranked by `decision_day_pct`: the modelled median net per day,
+    scaled down where the pool's own last-24h fees say the model's fee share
+    is stale (see realised_check).
     """
     import dexes
     seen, todo, out = set(), [], []
@@ -567,6 +627,7 @@ def score_board(records, capital, bands, swap_cost=SWAP_COST, max_rebal_per_day=
     if need:
         quotes = dexes.jupiter_prices(need)
 
+    ts_series, vol_series = [], []
     for i, (rec, base) in enumerate(todo):
         if progress:
             progress(i, len(todo), rec)
@@ -588,10 +649,17 @@ def score_board(records, capital, bands, swap_cost=SWAP_COST, max_rebal_per_day=
             continue
         rows, meta = res
         pick = choose(rows, max_rebal_per_day)
-        out.append(_pick_row(rec, rows, meta, pick))
+        row = _pick_row(rec, rows, meta, pick)
+        row['path'] = pick['path']; row['capital'] = capital
+        out.append(row)
+        ts_series.append(cd[0]); vol_series.append(cd[2])
 
+    if season_out is not None:
+        season_out['profile'] = season_profile(vol_series, ts_series)
+        season_out['pools'] = len(vol_series)
     scored = [r for r in out if r.get('net_day_pct') is not None]
-    scored.sort(key=lambda r: -r['net_day_pct'])
+    realised_check(scored)
+    scored.sort(key=lambda r: -r['decision_day_pct'])
     unscored = [r for r in out if r.get('net_day_pct') is None]
 
     # Screen the top of the board. A pool of two majors passes by name; any
@@ -622,16 +690,19 @@ def score_board(records, capital, bands, swap_cost=SWAP_COST, max_rebal_per_day=
 
 def print_board(rows, top=25):
     print(f"{'dex':<22}{'pair':<16}{'fee':>7}{'tvl$M':>7}{'vol$M':>7}{'cpool':>6}{'band':>6}"
-          f"{'net%/d':>8}{'p25':>7}{'+win':>5}{'reb/d':>6}{'S7d':>5}  screen")
+          f"{'net%/d':>8}{'real':>6}{'use':>7}{'p25':>7}{'+win':>5}{'reb/d':>6}{'S7d':>5}  screen")
     for r in rows[:top]:
         if r.get('net_day_pct') is None:
             print(f"{r['dex']:<22}{(r.get('pair') or '?')[:15]:<16}{'':>7}{(r.get('tvl_usd') or 0) / 1e6:>7.2f}"
                   f"{(r.get('volume_24h_usd') or 0) / 1e6:>7.2f}  -- {r.get('skipped')}")
             continue
         scr = ('ok' if r.get('screen_ok') else 'NO') + ' ' + (r.get('screen_reason') or '')
+        drift = r.get('liquidity_drift')
         print(f"{r['dex']:<22}{r['pair'][:15]:<16}{r['fee'] * 100:>6.3f}%{r['tvl_usd'] / 1e6:>7.2f}"
               f"{(r.get('volume_24h_usd') or 0) / 1e6:>7.2f}{r['c_pool']:>6.1f}{r['band_pct']:>5.0f}%"
-              f"{r['net_day_pct']:>8.3f}{(r.get('p25_net_day') or 0):>7.3f}"
+              f"{r['net_day_pct']:>8.3f}{(f'{drift:.2f}x' if drift is not None else '-'):>6}"
+              f"{(r.get('decision_day_pct') if r.get('decision_day_pct') is not None else r['net_day_pct']):>7.3f}"
+              f"{(r.get('p25_net_day') or 0):>7.3f}"
               f"{(r.get('share_positive') or 0) * 100:>4.0f}%{r['rebal_per_day']:>6.2f}"
               f"{(r.get('p_survive_168h') or 0) * 100:>4.0f}%  {scr[:40]}")
 

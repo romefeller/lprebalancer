@@ -258,6 +258,33 @@ quote tokens and its token API feeds the screen below. Saros DLMM and
 DeFiTuna's own pools carry a few thousand dollars a day. HumidiFi, ZeroFi,
 SolFi and Lifinity take no outside liquidity.
 
+#### The tape, and the day's rhythm
+
+The model takes the pool's active liquidity as it is now and volume from six
+weeks of candles. When liquidity floods into a pool, the modelled fee share is
+stale until the next scan. So every scored pool is set against its own tape:
+the fee yield its last-24h fees would have paid a position at the chosen band,
+against the gross fee yield the replay averaged. Volume is common to the whole
+market on a given day, so each pool's ratio is judged relative to the median
+ratio across the board. A pool well under its peers has its decision figure
+scaled down by that much; nothing is ever scaled up. The board's `use` column
+is what the bot ranks and moves on; `real` is the ratio.
+
+The same candles give the day's rhythm: the hour-of-day volume multiplier,
+pooled across every scored pool after normalising each by its own mean.
+Measured on thirty days of the five SOL/USDC pools, UTC 13 to 16 runs 1.3 to
+1.7 times the average hour and UTC 04 to 11 runs 0.7 to 0.8. Hour-to-hour fee
+yield is persistent (autocorrelation 0.5 to 0.8) but six hours ahead it is
+not (0.05 to 0.4), and chasing whichever pool had the best last six hours
+returned 0.2704% per window against 0.2723% for staying in the best pool by
+average: the relative rank of pools is structural and moves over days, which
+is what the six-hourly board already tracks. The rhythm is used for two
+things only. The book shows the hour's multiplier and the expected rate for
+the coming hours, so a noon APR reads as the trough it is. And a voluntary
+move, a reband or a pool move, waits for an hour at or under the average
+(`defer_moves_to_quiet_hours`, default on), when ten minutes out of market
+costs least; an out-of-band rebalance never waits.
+
 #### The token screen
 
 The highest-yielding pool ever seen on the board was SOL/xSOL at 243%/yr, and
@@ -361,7 +388,7 @@ exactly one row is active, enforced by a partial unique index, so the bot never
 has to guess which parameters are its own.
 
 ```sh
-psql -d rebalancer -f sql/001_schema.sql -f sql/002_any_pool.sql -f sql/003_multi_dex.sql   # schema (idempotent)
+psql -d rebalancer -f sql/001_schema.sql -f sql/002_any_pool.sql -f sql/003_multi_dex.sql -f sql/004_seasonality.sql
 python3 db.py seed                          # a first profile, SOL/USDC
 python3 db.py add wif-usdc <pool> capital_usd=200   # describe another pool
 python3 db.py config                        # show the active profile
@@ -373,7 +400,7 @@ python3 db.py activate wif-usdc             # switch pools
 |---|---|
 | what to trade | `dex`, `pool`; `pair_label`, `token_a`, `token_b` for display, filled by `add` |
 | the board | `dexes`, `scan_limit`, `scan_interval_seconds`, `min_volume_24h_usd` |
-| the move | `migrate_min_gain`, `execute_dexes`, `pool_pinned`, `allow_swap` |
+| the move | `migrate_min_gain`, `execute_dexes`, `pool_pinned`, `allow_swap`, `defer_moves_to_quiet_hours` |
 | size | `capital_usd`, `max_usd`, `gas_reserve_sol`, `side_cap_fraction` |
 | band search | `bands` (the ladder), `max_modelled_rebal_per_day`, `swap_cost_bps` |
 | cadence | `poll_seconds`, `min_rebalance_gap_seconds`, `max_rebalances_per_day`, `reopt_interval_seconds`, `reopt_min_gain` |
@@ -576,6 +603,7 @@ never been watched.
 | `sql/001_schema.sql` | the schema, idempotent |
 | `sql/002_any_pool.sql` | migration for databases created before the pool-agnostic sizing |
 | `sql/003_multi_dex.sql` | the board tables and the pool-move parameters |
+| `sql/004_seasonality.sql` | the hour-of-day profile on each scan and the quiet-hours switch |
 | `ops/*.service` | systemd units |
 | `tests/` | the test suite, below |
 

@@ -126,7 +126,7 @@ def _num(x):
     return None if x is None else float(x)
 
 
-def record_scan(config_name, dexes, rows, errors, duration_s, listed):
+def record_scan(config_name, dexes, rows, errors, duration_s, listed, season=None):
     """One scan of the board: the run, then every pool it looked at, ranked.
     Everything the decision used is in `detail`, so a move can be explained
     later from the table alone."""
@@ -135,10 +135,11 @@ def record_scan(config_name, dexes, rows, errors, duration_s, listed):
     with cursor(commit=True) as cur:
         cur.execute("""
             insert into scan_runs (ts, config_name, dexes, pools_listed, pools_scored,
-                                   duration_s, errors, best)
-            values (%s,%s,%s,%s,%s,%s,%s,%s) returning id
+                                   duration_s, errors, best, season)
+            values (%s,%s,%s,%s,%s,%s,%s,%s,%s) returning id
         """, (now(), config_name, list(dexes), listed, len(scored), duration_s,
-              json.dumps(errors or {}), json.dumps(_brief(best), default=str) if best else None))
+              json.dumps(errors or {}), json.dumps(_brief(best), default=str) if best else None,
+              json.dumps(season) if season else None))
         run_id = cur.fetchone()['id']
         psycopg2.extras.execute_batch(cur, """
             insert into scan_pools (run_id, rank, dex, kind, address, pair, fee, tvl_usd,
@@ -161,6 +162,7 @@ def _brief(r):
     if not r:
         return None
     return {k: r.get(k) for k in ('dex', 'address', 'pair', 'band_pct', 'net_day_pct',
+                                  'decision_day_pct', 'liquidity_drift', 'realised_day_pct',
                                   'rebal_per_day', 'tvl_usd', 'volume_24h_usd', 'fee',
                                   'executable', 'screen_ok', 'screen_reason')}
 
@@ -185,6 +187,28 @@ def latest_scan(max_age_seconds=None):
                      screen_reason=r['screen_reason'], rank=r['rank'], skipped=r['skipped'])
             rows.append(d)
     return dict(run), rows
+
+
+def season():
+    """The latest hour-of-day profile the board built, or None."""
+    with cursor() as cur:
+        cur.execute('select season from scan_runs where season is not null order by id desc limit 1')
+        r = cur.fetchone()
+    return list(r['season']) if r and r['season'] else None
+
+
+def season_outlook(profile, hour=None, ahead=6):
+    """Where in the day's rhythm we are: the current hour's multiplier, the
+    mean multiplier of the next `ahead` hours, and whether this is a quiet
+    hour (at or under the average) in which a voluntary move costs least."""
+    if not profile or len(profile) != 24:
+        return None
+    h = now().hour if hour is None else hour
+    nxt = [profile[(h + i) % 24] for i in range(1, ahead + 1)]
+    return {'hour_utc': h, 'now_x': round(profile[h], 2), 'next_hours': ahead,
+            'next_x': round(sum(nxt) / len(nxt), 2), 'quiet': profile[h] <= 1.0,
+            'peak_hour_utc': int(max(range(24), key=lambda i: profile[i])),
+            'trough_hour_utc': int(min(range(24), key=lambda i: profile[i]))}
 
 
 def scan_history(address, limit=30):
@@ -478,6 +502,7 @@ def stats(token_a=None, token_b=None):
 
     pools = by_pool()
     t6, t24 = trailing_rate(6), trailing_rate(24)
+    outlook = season_outlook(season())
     eq_f = _f(equity) if equity else None
     apr_of = lambda t: (round(t['fees_per_day_usd'] / eq_f * 365 * 100, 2)
                         if t and eq_f else None)
@@ -520,6 +545,12 @@ def stats(token_a=None, token_b=None):
         'fees_per_day_6h_usd': t6 and t6['fees_per_day_usd'],
         'fees_per_day_24h_usd': t24 and t24['fees_per_day_usd'],
         'apr_6h_pct': apr_of(t6), 'apr_24h_pct': apr_of(t24),
+        # the day's rhythm, from the board's candles: where this hour sits
+        # against the average hour, and what the next hours usually carry
+        'season': outlook,
+        'expected_next_hours_fees_per_day_usd': (
+            round(t24['fees_per_day_usd'] * outlook['next_x'], 4)
+            if (t24 and outlook) else None),
         'harvests': r['n'],
         'positions_opened': pos['total'], 'positions_open_now': pos['open_now'],
         'rebands': ev['rebands'], 'failures': ev['failures'],
@@ -742,6 +773,11 @@ def _print_stats():
     print(f"  rate        ${s['fees_per_day_usd']}/day   APR {s['apr_pct']}%   (since start)")
     print(f"  last 6h     ${s['fees_per_day_6h_usd']}/day   APR {s['apr_6h_pct']}%")
     print(f"  last 24h    ${s['fees_per_day_24h_usd']}/day   APR {s['apr_24h_pct']}%")
+    o = s.get('season')
+    if o:
+        print(f"  rhythm      hour {o['hour_utc']:02d} UTC runs {o['now_x']}x the average hour; "
+              f"next {o['next_hours']}h {o['next_x']}x -> ~${s['expected_next_hours_fees_per_day_usd']}/day"
+              f"   (peak {o['peak_hour_utc']:02d}, trough {o['trough_hour_utc']:02d} UTC)")
     print(f"  activity    {s['positions_opened']} positions · {s['rebands']} rebands "
           f"· {s['harvests']} harvests · {s['failures']} failures")
 

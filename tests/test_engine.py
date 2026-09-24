@@ -299,5 +299,81 @@ class Board(unittest.TestCase):
         self.assertIn('all_runs', by['P1'])
 
 
+
+
+class Tape(unittest.TestCase):
+    """The model against the pool's own last-24h fees, and the day's rhythm."""
+
+    def row(self, address, net, fees_24h, tvl=1e7, c_pool=20.0, band=1.08, gross_fees=None, days=41.0):
+        return {'address': address, 'net_day_pct': net, 'fees_24h_usd': fees_24h, 'tvl_usd': tvl,
+                'c_pool': c_pool, 'band': band, 'capital': 190.0,
+                'path': {'fees': gross_fees if gross_fees is not None else 0.3 * 190 / 100 * days, 'days': days}}
+
+    def test_pool_whose_tape_lags_its_peers_is_scaled_down_never_up(self):
+        # three pools modelled at 0.3%/day gross; the tape confirms two and
+        # shows the third earning a quarter of that (liquidity flooded in)
+        share = lambda tvl, c: engine.band_concentration(1.08) / c / tvl
+        full = 0.3 / 100 / share(1e7, 20.0)                 # fees/day that reproduce 0.3%/day
+        rows = [self.row('A', 0.50, full), self.row('B', 0.40, full * 1.5), self.row('C', 0.45, full * 0.25)]
+        med = engine.realised_check(rows)
+        by = {r['address']: r for r in rows}
+        self.assertAlmostEqual(by['A']['realised_day_pct'], 0.3, places=6)
+        self.assertAlmostEqual(by['A']['modelled_gross_day_pct'], 0.3, places=6)
+        self.assertAlmostEqual(med, 1.0)
+        self.assertAlmostEqual(by['A']['decision_day_pct'], 0.50)          # ratio 1: unchanged
+        self.assertAlmostEqual(by['B']['decision_day_pct'], 0.40)          # hot tape: never scaled up
+        self.assertAlmostEqual(by['C']['liquidity_drift'], 0.25)
+        self.assertAlmostEqual(by['C']['decision_day_pct'], 0.45 * 0.25)   # stale share: scaled down
+
+    def test_a_market_wide_quiet_day_scales_nobody(self):
+        share = engine.band_concentration(1.08) / 20.0 / 1e7
+        full = 0.3 / 100 / share
+        rows = [self.row('A', 0.5, full * 0.4), self.row('B', 0.4, full * 0.4)]
+        engine.realised_check(rows)
+        for r in rows:
+            self.assertAlmostEqual(r['liquidity_drift'], 1.0)
+            self.assertAlmostEqual(r['decision_day_pct'], r['net_day_pct'])
+
+    def test_unscored_rows_are_left_alone(self):
+        rows = [{'address': 'X', 'net_day_pct': None, 'skipped': 'thin'}]
+        self.assertIsNone(engine.realised_check(rows))
+        self.assertNotIn('decision_day_pct', rows[0])
+
+    def test_season_profile_recovers_a_known_rhythm(self):
+        n = 24 * 30
+        ts = np.arange(n) * 3600
+        hours = (ts // 3600) % 24
+        shape = np.where((hours >= 13) & (hours <= 16), 2.0, 0.8)     # busy afternoon
+        prof = engine.season_profile([shape * 5e6, shape * 1e5], [ts, ts])   # two pools, different sizes
+        self.assertEqual(len(prof), 24)
+        self.assertAlmostEqual(sum(prof) / 24, 1.0, places=2)
+        self.assertGreater(prof[14], 1.5); self.assertLess(prof[3], 0.9)
+        self.assertGreater(prof[14], prof[3])
+        self.assertIsNone(engine.season_profile([np.ones(10)], [ts[:10]]))
+
+    def test_score_board_ranks_on_the_decision_figure_and_reports_the_profile(self):
+        n = 24 * 41 + 1
+        rng = np.random.default_rng(9)
+        ts = np.arange(n) * 3600
+        px = 100 * np.exp(np.cumsum(rng.normal(0, 0.008, n)))
+        vol = np.full(n, 3e6) * np.where(((ts // 3600) % 24) == 14, 3.0, 1.0)
+        base = {'kind': 'clmm', 'pair': 'SOL/USDC', 'price': float(px[-1]), 'fee': 0.0004,
+                'fee_source': 'nominal', 'tvl_usd': 2e7, 'volume_24h_usd': 5e7, 'adaptive_fee': False,
+                'liquidity': 20 * (2e7 / (2 * 100 ** 0.5)),
+                'token_a': {'address': 'a', 'symbol': 'SOL', 'name': 'Solana', 'decimals': 9},
+                'token_b': {'address': 'b', 'symbol': 'USDC', 'name': 'USD Coin', 'decimals': 6}}
+        # identical pools except the tape: P2's last-24h fees are a tenth of P1's
+        recs = [dict(base, dex='orca', address='P1', fees_24h_usd=3e6 * 24 * 0.0004),
+                dict(base, dex='raydium-clmm', address='P2', fees_24h_usd=3e6 * 24 * 0.0004 / 10)]
+        season = {}
+        with mock.patch.object(engine, 'candles', lambda a: (ts, px, vol)):
+            board = engine.score_board(recs, 190.0, (1.05, 1.12), min_tvl=2.5e5, season_out=season)
+        self.assertEqual(board[0]['address'], 'P1')
+        self.assertLess(board[1]['decision_day_pct'], board[1]['net_day_pct'])
+        self.assertAlmostEqual(board[0]['decision_day_pct'], board[0]['net_day_pct'])
+        self.assertEqual(len(season['profile']), 24)
+        self.assertEqual(int(max(range(24), key=lambda h: season['profile'][h])), 14)
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)
