@@ -59,7 +59,11 @@ function render(row) {
       `━━ BOOK ━━`,
       `equity      $${n(r.equity_usd)}   P&L ${sign(r.pnl_usd)}`,
       `rate        ${r.fees_per_day_usd != null ? '$' + n(r.fees_per_day_usd, 4) + '/day' : '— (needs an hour)'}`
-        + `${r.apr_pct != null ? `   APR ${n(r.apr_pct, 1)}%` : ''}`,
+        + `${r.apr_pct != null ? `   APR ${n(r.apr_pct, 1)}%` : ''} since start`,
+      ...(r.fees_per_day_6h_usd != null ? [
+        `last 6h     $${n(r.fees_per_day_6h_usd, 4)}/day${r.apr_6h_pct != null ? `   APR ${n(r.apr_6h_pct, 1)}%` : ''}`] : []),
+      ...(r.fees_per_day_24h_usd != null ? [
+        `last 24h    $${n(r.fees_per_day_24h_usd, 4)}/day${r.apr_24h_pct != null ? `   APR ${n(r.apr_24h_pct, 1)}%` : ''}`] : []),
       `in range    ${n(r.in_range_pct, 0)}%   over ${n(r.tracked_days, 2)}d`,
       `activity    ${plural(r.positions_opened, 'position')} · ${plural(r.rebands, 'reband')} · `
         + `${plural(r.harvests, 'harvest')}${r.failures ? ` · ${plural(r.failures, 'failure')}` : ''}`,

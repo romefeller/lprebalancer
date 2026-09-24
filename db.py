@@ -259,6 +259,42 @@ def _f(x):
     return float(x) if x is not None else 0.0
 
 
+def trailing_rate(hours):
+    """Fees earned per day over the last `hours`, from the ledger's own
+    series: for every position, fees to date are its unharvested accrual plus
+    what was harvested from it, so the window's earning is the rise of that
+    sum, per position, summed. Realised does not move it, a rebalance does not
+    reset it. None when the window has fewer than two points."""
+    with cursor() as cur:
+        cur.execute("""
+            with pts as (
+                select s.ts, s.mint,
+                       s.accrued_usd + coalesce((select sum(h.fee_usd) from harvests h
+                                                 where h.mint = s.mint and h.ts <= s.ts), 0) usd
+                from snapshots s
+                where s.ts >= now() - make_interval(hours => %s) - interval '10 minutes'
+                union all
+                select h.ts, h.mint,
+                       (select sum(fee_usd) from harvests x where x.mint = h.mint and x.ts <= h.ts)
+                from harvests h where h.ts >= now() - make_interval(hours => %s) - interval '10 minutes'
+                union all
+                select p.opened_at, p.mint, 0 from positions p
+                where p.opened_at >= now() - make_interval(hours => %s) - interval '10 minutes'
+            ), per_mint as (
+                select mint, max(usd) - min(usd) usd, min(ts) t0, max(ts) t1 from pts group by mint
+            )
+            select coalesce(sum(usd), 0) usd, min(t0) t0, max(t1) t1, count(*) n from per_mint
+        """, (hours, hours, hours))
+        r = cur.fetchone()
+    if not r or not r['n'] or r['t0'] is None or r['t1'] is None:
+        return None
+    span_days = (r['t1'] - r['t0']).total_seconds() / 86400
+    if span_days < MIN_RATE_DAYS:
+        return None
+    return {'fees_usd': round(_f(r['usd']), 4), 'days': round(span_days, 3),
+            'fees_per_day_usd': round(_f(r['usd']) / span_days, 4)}
+
+
 def by_pool():
     """The book split by pool, and therefore by DEX: for every pool the bot
     has ever held, how long it was there, what it earned there realised and
@@ -441,6 +477,10 @@ def stats(token_a=None, token_b=None):
     apr = (rate / float(equity) * 365 * 100) if (rate and equity) else None
 
     pools = by_pool()
+    t6, t24 = trailing_rate(6), trailing_rate(24)
+    eq_f = _f(equity) if equity else None
+    apr_of = lambda t: (round(t['fees_per_day_usd'] / eq_f * 365 * 100, 2)
+                        if t and eq_f else None)
     rnd = lambda x, d=6: round(_f(x), d)
     return {
         'pair': cfg.get('pair_label'),
@@ -474,6 +514,12 @@ def stats(token_a=None, token_b=None):
         'fees_total_usd': round(total_usd, 4),
         'fees_per_day_usd': round(rate, 4) if rate else None,
         'apr_pct': round(apr, 2) if apr else None,
+        # what it is doing NOW, not the average since the first position: the
+        # since-start figure is a total over an ever-longer clock and decays
+        # toward the true rate from wherever the first hour happened to put it
+        'fees_per_day_6h_usd': t6 and t6['fees_per_day_usd'],
+        'fees_per_day_24h_usd': t24 and t24['fees_per_day_usd'],
+        'apr_6h_pct': apr_of(t6), 'apr_24h_pct': apr_of(t24),
         'harvests': r['n'],
         'positions_opened': pos['total'], 'positions_open_now': pos['open_now'],
         'rebands': ev['rebands'], 'failures': ev['failures'],
@@ -693,7 +739,9 @@ def _print_stats():
           f"   total P&L {s['pnl_all_pools_usd'] if s['pnl_all_pools_usd'] is not None else '-'}")
     print('BOOK')
     print(f"  equity      ${s['equity_usd']}   P&L {s['pnl_usd']}")
-    print(f"  rate        ${s['fees_per_day_usd']}/day   APR {s['apr_pct']}%")
+    print(f"  rate        ${s['fees_per_day_usd']}/day   APR {s['apr_pct']}%   (since start)")
+    print(f"  last 6h     ${s['fees_per_day_6h_usd']}/day   APR {s['apr_6h_pct']}%")
+    print(f"  last 24h    ${s['fees_per_day_24h_usd']}/day   APR {s['apr_24h_pct']}%")
     print(f"  activity    {s['positions_opened']} positions · {s['rebands']} rebands "
           f"· {s['harvests']} harvests · {s['failures']} failures")
 

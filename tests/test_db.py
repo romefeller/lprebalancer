@@ -262,6 +262,31 @@ class ByPool(unittest.TestCase):
         self.assertIn('meteora-dlmm SOL/USDC', d[0]['pools'])
         _fixtures.reset_ledger()
 
+    def test_trailing_rate_is_the_rise_of_fees_to_date(self):
+        _fixtures.ensure_profile()
+        _fixtures.reset_ledger()
+        with db.cursor(commit=True) as cur:
+            cur.execute("insert into positions (mint, pool, pair_label, opened_at, deposit_usd, dex) "
+                        "values ('t1', 'P', 'SOL/USDC', now() - interval '5 hours', 190, 'orca')")
+            # accrual 0 -> 0.30 over 5h, then a harvest turns it realised: the
+            # rate must not move on the harvest and must not double count it
+            cur.execute("insert into snapshots (ts, mint, accrued_usd, in_range) values "
+                        "(now() - interval '5 hours', 't1', 0.0, true), "
+                        "(now() - interval '3 hours', 't1', 0.12, true), "
+                        "(now() - interval '1 hour', 't1', 0.24, true)")
+            cur.execute("insert into harvests (ts, mint, fee_usd) values (now() - interval '30 minutes', 't1', 0.30)")
+            cur.execute("insert into snapshots (ts, mint, accrued_usd, in_range) values (now(), 't1', 0.0, true)")
+        t = db.trailing_rate(6)
+        self.assertAlmostEqual(t['fees_usd'], 0.30, places=3)
+        self.assertAlmostEqual(t['fees_per_day_usd'], 0.30 / (5 / 24), delta=0.05)
+        t24 = db.trailing_rate(24)
+        self.assertAlmostEqual(t24['fees_usd'], 0.30, places=3)
+        # a window with a single point has no rate
+        self.assertIsNone(db.trailing_rate(0))
+        s = db.stats()
+        self.assertIsNotNone(s['fees_per_day_6h_usd'])
+        _fixtures.reset_ledger()
+
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)
