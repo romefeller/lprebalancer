@@ -47,6 +47,15 @@ function render(row) {
       `realised    ${tok(r.fees_realised_a)} ${A}   ${tok(r.fees_realised_b, 4)} ${B}   $${n(r.fees_realised_usd, 4)}`,
       `unrealised  ${tok(r.fees_unrealised_a)} ${A}   ${tok(r.fees_unrealised_b, 4)} ${B}   $${n(r.fees_unrealised_usd, 4)}`,
       `TOTAL       ${tok(r.fees_total_a)} ${A}   ${tok(r.fees_total_b, 4)} ${B}   $${n(r.fees_total_usd, 4)}`,
+      ...(Array.isArray(r.by_pool) && r.by_pool.length > 1 ? [
+        `━━ POOLS ━━`,
+        ...r.by_pool.slice(0, 5).map(p =>
+          `${p.open_now ? '▸' : '·'} ${p.dex} ${p.pair_label} ${n(p.days, 2)}d fees $${n(p.fees_usd, 4)}`
+          + `${p.apr_pct != null ? ` APR ${n(p.apr_pct, 0)}%` : ''}`
+          + `${p.pnl_usd != null ? ` P&L ${sign(p.pnl_usd)}` : ''}`
+          + `${p.in_range_pct != null ? ` ${n(p.in_range_pct, 0)}% in` : ''}`),
+        `all pools   fees $${n(r.fees_total_usd, 4)}   P&L ${r.pnl_all_pools_usd != null ? sign(r.pnl_all_pools_usd) : '—'}`,
+      ] : []),
       `━━ BOOK ━━`,
       `equity      $${n(r.equity_usd)}   P&L ${sign(r.pnl_usd)}`,
       `rate        ${r.fees_per_day_usd != null ? '$' + n(r.fees_per_day_usd, 4) + '/day' : '— (needs an hour)'}`
@@ -59,15 +68,22 @@ function render(row) {
 
   switch (event) {
     case 'startup':
-      return `REBALANCER · online\n${row.pair} · capital $${n(row.capital_usd, 0)}\n`
+      return `REBALANCER · online\n${row.dex ?? 'orca'} ${row.pair} · capital $${n(row.capital_usd, 0)}\n`
         + `poll ${row.poll_seconds}s · reopt ${row.reopt_every_hours}h @ +${(row.reopt_min_gain * 100).toFixed(0)}%\n`
+        + `board ${(row.scan_dexes ?? []).join(', ')} every ${row.scan_every_hours}h · `
+        + `move @ +${((row.migrate_min_gain ?? 0) * 100).toFixed(0)}% · can open on ${(row.execute_dexes ?? []).join(', ')}\n`
         + book(row);
     case 'in_band':
-      return `IN RANGE · ${n(row.price, 4)}\nband ${n(row.lower, 4)} — ${n(row.upper, 4)}\n`
+      return `IN RANGE · ${row.position_dex ?? row.dex ?? ''} ${row.position_pair ?? row.pair ?? ''} · ${n(row.price, 4)}\n`
+        + `band ${n(row.lower, 4)} — ${n(row.upper, 4)}\n`
         + book(row);
     case 'OUT_OF_BAND':
       return `OUT OF RANGE · went ${row.side}\n`
         + `price ${n(row.price, 4)} · band ${n(row.lower, 4)} — ${n(row.upper, 4)}\n${row.action}`;
+    case 'migrate_refused':
+      return `move refused · ${row.reason}`;
+    case 'REOPT_REQUESTED':
+      return `REVIEW REQUESTED by operator · ${row.action}`;
     case 'REBALANCE_REQUESTED':
       return `REBALANCE REQUESTED by operator · price ${n(row.price, 4)}\n${row.action}`;
     case 'rebalance_deferred':
@@ -79,7 +95,7 @@ function render(row) {
     case 'CLOSE':
       return `CLOSED · ${row.reason}\n${row.signature ?? ''}\n` + book(row);
     case 'OPEN':
-      return `OPENED · ${row.pair} ${row.band}\n`
+      return `OPENED · ${row.dex ? row.dex + ' ' : ''}${row.pair} ${row.band}\n`
         + `range ${n(row.lower, 4)} — ${n(row.upper, 4)}\n`
         + `deposited $${n(row.deposit_usd)} · caps ${row.cap_a ?? '—'} · ${row.cap_b ?? '—'}\n`
         + `modelled ${n(row.expected_net_day_pct, 3)}%/day at `
@@ -90,11 +106,33 @@ function render(row) {
         + `${n(row.old_net_day, 3)}%/day → ${n(row.new_net_day, 3)}%/day (+${row.improvement_pct}%)`;
     case 'reopt_checked':
       return `band review · holding ${row.held}, best ${row.best}\n${row.verdict}`;
+    case 'SCAN': {
+      const top = (row.top ?? []).map(t =>
+        `${t.can_open ? '▸' : '·'} ${t.dex} ${t.pair} ${t.band} ${n(t.net_day_pct, 3)}%/d `
+        + `${n(t.rebal_per_day, 2)} reb/d $${n(t.tvl_musd, 1)}M${t.ok ? '' : ' ✗'}`).join('\n');
+      const errs = row.errors ? `\nerrors: ${Object.entries(row.errors).map(([k, v]) => `${k}: ${v}`).join('; ')}` : '';
+      return `BOARD #${row.run} · ${row.scored}/${row.listed} pools scored in ${row.seconds}s\n`
+        + `${(row.dexes ?? []).join(', ')}\n${top}${errs}\n▸ can open here · ✗ failed the token screen`;
+    }
+    case 'scan_failed':
+      return `board scan failed · ${row.reason}`;
+    case 'board_checked':
+      return `pool review · ${row.held ? `holding ${row.held}\nbest ${row.best}\n` : ''}${row.verdict}`;
+    case 'MIGRATE_RECOMMENDED':
+      return `BETTER POOL ELSEWHERE${row.gain_pct != null ? ` (+${row.gain_pct}%)` : ''}\n`
+        + `holding ${row.held}\nbest ${row.best}\n${row.reason}\nto move by hand:\n${row.command}`;
+    case 'MIGRATE':
+      return `MOVING POOL${row.gain_pct != null ? ` (+${row.gain_pct}%)` : ''}\n`
+        + `from ${row.held}\nto ${row.best}\n${row.pool}`;
+    case 'REPOINTED':
+      return `profile now on ${row.dex} ${row.pair}\n${row.pool}`;
     case 'status_unreadable':
       return `chain unreadable (${row.consecutive}) · ${row.reason}\n${row.action}`;
     case 'close_recovered':
     case 'open_recovered':
       return `RECOVERED · ${row.detail}`;
+    case 'open_refused':
+      return `OPEN REFUSED · ${row.reason}\nfailures ${row.failures}`;
     case 'close_failed':
     case 'open_failed':
       return `${event.replace('_', ' ').toUpperCase()} · ${row.reason}\nfailures ${row.failures}`;

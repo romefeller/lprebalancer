@@ -350,6 +350,16 @@ async function status(mintArg) {
       inRange: price >= lower && price <= upper,
       feeOwedA: ua(d.feeOwedA), feeOwedB: ub(d.feeOwedB),
     };
+    // Rent in the position account (and the NFT's token account), refunded on
+    // close. Small on Orca, 0.2 SOL on a wide DLMM position; counted the same
+    // way everywhere so equity does not fall by the rent on every open.
+    try {
+      const acct = await rpc.getAccountInfo(chosen.address, { encoding: 'base64' }).send();
+      const rentLamports = Number(acct?.value?.lamports ?? 0);
+      out.rentSol = rentLamports / 1e9;
+      const sUsd = await solUsd(info, q.usd);
+      out.rentUsd = sUsd != null ? Number((out.rentSol * sUsd).toFixed(4)) : null;
+    } catch { /* reporting only */ }
     // The position's own feeOwed fields are only settled when the position is
     // touched, so they read zero on a live position that is in fact earning.
     // The close quote recomputes them from current fee growth, which is the

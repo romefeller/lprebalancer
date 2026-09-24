@@ -1,12 +1,18 @@
 # Rebalancer
 
-An autonomous band optimiser for concentrated liquidity on Orca whirlpools.
+An autonomous band and pool optimiser for concentrated liquidity on Solana.
 
 It holds one position, watches the price against that position's band, and when
 the price leaves, it collects the fees, closes, re-optimises the band and opens
 again. It signs its own transactions. It reports every move to Telegram, and it
 keeps its accounts in Postgres so the money it has earned survives a rebalance,
 a restart and a reboot.
+
+It also asks, every few hours, whether it is in the right pool at all. A scanner
+lists the busiest pools on Orca, Raydium, Meteora, Byreal and PancakeSwap,
+scores each one under the same replay the band optimiser uses, and when a pool
+elsewhere pays materially better, the bot closes here and opens there. See
+[The board](#the-board).
 
 Every parameter is a row in a table. The pool, the band ladder, the size, the
 cadence and every safety limit come from `rebalancer.config`. Nothing about the
@@ -181,6 +187,139 @@ Note the last column. **Every band lost to simply holding 50/50 over this
 window**, by $11 to $25 on $190. That is not a defect in the optimiser; it is
 what an LP is. See below.
 
+### The board
+
+A pool that pays 0.4%/day is not the right pool if one next door pays 0.6%.
+So the optimiser does not stop at the band. A scanner thread lists, every
+`scan_interval_seconds` (default 6 hours), the `scan_limit` busiest pools by
+24-hour volume on every DEX in `dexes`, and scores each one with the ladder
+above: its own candles, its own fee, its own implied concentration, the
+rolling medians, the survival curve, the churn gate. The result is written to
+`rebalancer.scan_runs` and `scan_pools`, ranked by the best band's median net
+return per day.
+
+```
+python3 scanner.py            # scan now and print the board
+python3 db.py board           # the last board, from the table
+```
+
+```
+dex                   pair              fee  tvl$M  vol$M cpool  band  net%/d    p25 +win reb/d  S7d  screen
+meteora-dlmm          SOL/USDC       0.048%   6.93  55.48  18.5    8%   0.582  0.292  88%  0.14  38%  ok both tokens are majors
+pancakeswap-v3-solana SOL/USDC       0.030%   1.35   4.06   7.1   18%   0.433  0.122  91%  0.03  72%  ok both tokens are majors
+raydium-clmm          SOL/USDC       0.040%   7.22  38.15  15.2   18%   0.397  0.083  91%  0.03  72%  ok both tokens are majors
+orca                  SOL/USDC       0.040%  25.97 162.10  21.1   18%   0.386  0.080  81%  0.03  72%  ok both tokens are majors
+orca                  SOL/PENGU      0.300%   3.97   3.55   3.9   40%   0.336 -0.456  66%  0.00  99%  ok PENGU: verified
+raydium-clmm          SOL/RAY        0.050%   4.08  23.85   4.6   40%  -0.130 -2.745  41%  0.04  74%  NO below the screened top
+orca                  SOL/STONK      0.650%   2.82   5.18   8.6   40%  -5.512 -8.680   0%  0.64   0%  NO below the screened top
+orca                  ZEC/USDC                2.85  17.19  -- adaptive-fee pool: the Orca signer cannot open it
+```
+
+2026-09-23, $190. Read the first four rows: the same pair, SOL/USDC, on four
+DEXes, and the modelled return runs from 0.39%/day on Orca to 0.58%/day on
+Meteora. The difference is not the fee tier. It is how crowded the active
+price is: Orca's pool is concentrated 21 times over full range, Meteora's 18
+times, PancakeSwap's 7 times, and a dollar of yours earns in inverse proportion.
+Volume per dollar of TVL is the other half, and the replay weighs both.
+
+Then read the bottom. The pools with the highest headline fees — STONK, RAY,
+ZEC — lose money at every band, because their prices move faster than any band
+can follow and every exit realises the loss. The board says so before any
+capital goes near them.
+
+#### What makes a pool comparable
+
+Every DEX publishes a different record, and two of them do not publish the one
+number the fee model needs. `dexes.py` turns them into one shape:
+
+| DEX | list | active liquidity | fee |
+|---|---|---|---|
+| Orca | its API | in the record | nominal |
+| Raydium CLMM | its API | pool account, decoded on chain | nominal |
+| Byreal | its API | pool account (Raydium layout) | nominal, or realised for dynamic-fee pools |
+| PancakeSwap V3 | GeckoTerminal | pool account (Raydium layout) | AmmConfig account |
+| Meteora DLMM | its API | bins around the active bin, via the SDK | realised (base plus variable) |
+
+For a tick pool the implied concentration is the active liquidity against
+what a full-range position of the same TVL would have. For a bin pool it is
+the dollars per bin near the active bin against what a full-range position
+would leave in one bin, which is `TVL × step / 4`. Both are pure numbers that
+say the same thing, so the fee share formula does not care which kind of pool
+it is scoring. On Meteora's SOL/USDC the figure lands at 18; on Orca's, 21.
+
+Candles come from GeckoTerminal for every DEX, at the free tier's pace of one
+request every two seconds, through one lock shared by everything in the
+process. A full board of forty pools takes about three minutes.
+
+Not on the board, and why: Meteora DAMM v2 sets one price range per pool that
+every position shares, so there is no band to choose. Jupiter runs no
+range-liquidity product a third party can deposit into; its price API prices
+quote tokens and its token API feeds the screen below. Saros DLMM and
+DeFiTuna's own pools carry a few thousand dollars a day. HumidiFi, ZeroFi,
+SolFi and Lifinity take no outside liquidity.
+
+#### The token screen
+
+The highest-yielding pool ever seen on the board was SOL/xSOL at 243%/yr, and
+xSOL is Hylo's 3x leveraged SOL: a token engineered to decay, which no
+volatility statistic flags. So every non-major token in the top of the board
+is looked up on Jupiter, and a pool passes only if each such token is verified
+there, carries no leveraged or structured tag, does not say so in its name,
+and has its mint authority disabled. A token Jupiter does not know fails. A
+pool of two majors passes by name.
+
+#### The move
+
+At every re-optimisation the loop takes the freshest board and, before it
+compares bands, compares pools. A candidate must be scored, must have passed
+the screen, and — unless `allow_swap` is set — must hold the same two tokens
+the wallet already holds, because entering a different pair means buying it.
+The best candidate's modelled net per day is set against the held pool's own
+best band under the same model, and the bot moves only if the gain clears
+`migrate_min_gain` (default 50%: a pool move is a close, an open on a venue
+the bot has not been watching, and possibly a swap, and a modelled 20% does
+not pay for that).
+
+Then one more gate: the target's DEX must be in `execute_dexes`, the list of
+DEXes the bot holds a signer for. When it is, the bot harvests, closes,
+repoints the profile to the new pool (`config.dex`, `config.pool`), reloads
+its configuration, and opens at the best band on the new pool. The events are
+`MIGRATE`, `CLOSE`, `REPOINTED`, `OPEN`. When it is not, the bot says
+`MIGRATE_RECOMMENDED` with the command to move by hand and stays where it is.
+
+Five signers exist, one per DEX, all speaking the contract in
+`SIGNER_CONTRACT.md` so the loop cannot tell which it is on:
+
+| dex | signer | built on | signed live |
+|---|---|---|---|
+| orca | `signer2.mjs` | `@orca-so/whirlpools` v8 | yes, since day one |
+| meteora-dlmm | `signer_dlmm.mjs` | `@meteora-ag/dlmm` 1.9 | yes: the first move, 2026-09-24 00:28 UTC, $194 into SOL/USDC ±8% as two position accounts |
+| raydium-clmm | `signer_raydium.mjs` | `@raydium-io/raydium-sdk-v2` | not yet; open simulated green |
+| byreal | `signer_byreal.mjs` | `@byreal-io/byreal-clmm-sdk` | not yet; open simulated to the token transfer, harvest and close simulated green on live positions |
+| pancakeswap-v3-solana | `signer_pancake.mjs` | Raydium instruction builders on the fork's program, two PDA fixes | not yet; whole open simulated green |
+
+`swap_jupiter.mjs` is Jupiter's place in the bot: a swap route, not a pool,
+for the day `allow_swap` is on. Dry runs quote and build; it has not sent.
+
+A DLMM band is several position accounts: the program refuses more than about
+70 bins per account at creation, so a ±8% band on the 4 bp pool is two
+accounts and six transactions. The Meteora signer treats every position the
+wallet holds on a pool as one logical position, and the loop's status read
+passes the pool in `LPBOT_POOL`, never as an argument. A positional argument
+is a position filter; passing the pool there once made the signer answer "no
+position" for a position it held, and the loop went to open a second one.
+
+```sh
+python3 db.py set sol-usdc execute_dexes=orca,meteora-dlmm   # which DEXes may be opened on
+python3 db.py set sol-usdc pool_pinned=true                  # stay put whatever the board says
+echo "raydium-clmm <pool>" > MIGRATE                         # move there on the next poll
+touch REOPT                                                  # board and band review now
+```
+
+The board is advisory and the loop is not: a scan that fails leaves the last
+board in place and reports `scan_failed`; a board older than three scan
+intervals is ignored.
+
 ### Re-optimisation
 
 The ladder is re-run every `reopt_interval_seconds` (default 6 hours) against a
@@ -222,7 +361,7 @@ exactly one row is active, enforced by a partial unique index, so the bot never
 has to guess which parameters are its own.
 
 ```sh
-psql -d rebalancer -f sql/001_schema.sql -f sql/002_any_pool.sql   # schema (idempotent)
+psql -d rebalancer -f sql/001_schema.sql -f sql/002_any_pool.sql -f sql/003_multi_dex.sql   # schema (idempotent)
 python3 db.py seed                          # a first profile, SOL/USDC
 python3 db.py add wif-usdc <pool> capital_usd=200   # describe another pool
 python3 db.py config                        # show the active profile
@@ -232,7 +371,9 @@ python3 db.py activate wif-usdc             # switch pools
 
 | group | columns |
 |---|---|
-| what to trade | `pool`; `pair_label`, `token_a`, `token_b` for display, filled by `add` |
+| what to trade | `dex`, `pool`; `pair_label`, `token_a`, `token_b` for display, filled by `add` |
+| the board | `dexes`, `scan_limit`, `scan_interval_seconds`, `min_volume_24h_usd` |
+| the move | `migrate_min_gain`, `execute_dexes`, `pool_pinned`, `allow_swap` |
 | size | `capital_usd`, `max_usd`, `gas_reserve_sol`, `side_cap_fraction` |
 | band search | `bands` (the ladder), `max_modelled_rebal_per_day`, `swap_cost_bps` |
 | cadence | `poll_seconds`, `min_rebalance_gap_seconds`, `max_rebalances_per_day`, `reopt_interval_seconds`, `reopt_min_gain` |
@@ -288,7 +429,8 @@ Accounting lives in four Postgres tables and is cumulative by construction.
 
 | table | holds |
 |---|---|
-| `positions` | one row per position ever opened, with its band, deposit and withdrawal |
+| `positions` | one row per position ever opened, with its DEX, band, deposit and withdrawal |
+| `scan_runs`, `scan_pools` | every board ever scanned: each pool's score, band, screen verdict, or the reason it was not scored |
 | `harvests` | every fee collection, in both tokens, with its signature |
 | `snapshots` | the time series: price, range status, liquidity, accrual, equity |
 | `events` | rebands, failures, breakers — anything worth explaining later |
@@ -335,6 +477,33 @@ even in an hour when you earned nothing.
 - **rate / APR** — annualised on the equity actually at work, not on notional,
   and suppressed entirely until the position has run for an hour
 
+### By pool, and rent
+
+The bot moves between pools and DEXes, so one running total says nothing
+about which venue paid. `python3 db.py pools` splits the book: for every pool
+ever held, the days there, fees realised and unrealised, fee APR on the
+capital that sat there, position P&L (what came out against what went in),
+and the share of polls in range. The Telegram book carries the same lines
+when more than one pool has been held.
+
+Equity counts rent. A Meteora DLMM position stores per-bin data, so a ±8%
+band on a 4 bp pool is a 38 KB account holding 0.2 SOL of rent, refunded on
+close. Every signer reports `rentSol`/`rentUsd` on `status` and the mark adds
+it; before it did, the first move to Meteora read as a $27 loss that never
+happened. At close, the mark taken just before is recorded as the
+withdrawal, so per-pool P&L exists without a second read.
+
+### Guards
+
+`guards.py` is checked at the moment money is about to move, after the
+tests and independent of them: a signer argument must be printable and
+short, a signer script must live in the bot's directory, a pool must be a
+base58 address, an open's band must contain the LIVE price the wallet read
+and the model's price must agree with it within 3%, the caps must sit under
+the capital and the ceiling, and a move's target must be a known DEX with an
+armed signer and two distinct mints. A refusal is reported as `open_refused`
+and counted like a failed open.
+
 ### Why the ledger exists
 
 A position's fee counter belongs to the position, not to you. Harvest, close,
@@ -374,6 +543,11 @@ touch REBALANCE
 `HALT` is absolute: the loop exits on its next cycle, the signer refuses to
 build a transaction, and neither restarts until the file is removed.
 
+`REOPT` runs the board and band review on the next poll instead of waiting
+for the interval. `MIGRATE`, containing `<dex> <pool>`, closes here and opens
+there on the next poll, through the same gates as an automatic move: the DEX
+must have a signer named in `execute_dexes`.
+
 `REBALANCE` runs harvest → close → re-optimise → reopen on the next poll, under
 the same minimum-gap and per-day limits as an automatic one, and is deleted
 before it runs so a failure cannot loop on it. It exists because the rebalance
@@ -386,14 +560,22 @@ never been watched.
 
 | file | what it does |
 |---|---|
-| `rebalancer.py` | the loop: read, decide, harvest, close, re-optimise, reopen |
-| `engine.py` | pool scanning, the band simulator, Jev token screening |
-| `db.py` | Postgres: configuration, accounting, statistics, the CLI |
+| `rebalancer.py` | the loop: read, decide, harvest, close, re-optimise, move pools, reopen |
+| `engine.py` | the band simulator, the board scorer, the token screen |
+| `dexes.py` | one pool record from five DEX APIs and their on-chain accounts |
+| `scanner.py` | the board thread and its CLI |
+| `dlmm_probe.mjs` | reads the bins around the active bin of Meteora pools |
+| `db.py` | Postgres: configuration, accounting, the board, statistics, the CLI |
 | `config.py` | loads the active profile, with environment overrides |
-| `signer2.mjs` | all chain I/O and signing, on `@orca-so/whirlpools` v8 |
+| `signer2.mjs` | Orca chain I/O and signing, on `@orca-so/whirlpools` v8 |
+| `signer_dlmm.mjs` | Meteora DLMM chain I/O and signing, on `@meteora-ag/dlmm` 1.9; same commands and fields |
+| `signer_raydium.mjs`, `signer_byreal.mjs`, `signer_pancake.mjs` | the same for Raydium CLMM, Byreal and PancakeSwap V3 |
+| `swap_jupiter.mjs` | Jupiter swaps, for moving the wallet between pairs; `SWAP_HOOK.md` says where the loop will call it |
+| `SIGNER_CONTRACT.md` | what every signer must accept and print |
 | `telegram_bridge.mjs` | forwards `events.jsonl` to Telegram |
 | `sql/001_schema.sql` | the schema, idempotent |
 | `sql/002_any_pool.sql` | migration for databases created before the pool-agnostic sizing |
+| `sql/003_multi_dex.sql` | the board tables and the pool-move parameters |
 | `ops/*.service` | systemd units |
 | `tests/` | the test suite, below |
 
@@ -469,7 +651,6 @@ The legacy `@orca-so/whirlpools-sdk` cannot open positions — every attempt fai
 with custom error 6069 after ~1390 compute units, and 0.22.0 is its final
 release. The current package is the fix, not a version bump.
 
-Token screening through Jev is optional and consulted only when the scanner
-picks the pool rather than a pinned one. It exists because the highest-yielding
-pool on the board advertised 243%/yr and its second asset was 3x leveraged SOL —
-a token engineered to decay, which no volatility statistic flags.
+`@meteora-ag/dlmm` 1.9 for the Meteora signer and the bin probe. Its ESM build
+imports a directory and fails to load under Node 24; both scripts load the
+CommonJS build through `createRequire`.

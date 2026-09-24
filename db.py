@@ -106,23 +106,114 @@ def activate(name):
     return name
 
 
+def repoint(name, dex, pool, pair_label, token_a, token_b):
+    """Move a profile to another pool, on any DEX. The bot calls this when the
+    board says a different pool pays better and it can open there; the
+    operator can call it by hand through `db.py repoint`."""
+    with cursor(commit=True) as cur:
+        cur.execute('update config set dex = %s, pool = %s, pair_label = %s, token_a = %s, '
+                    'token_b = %s, updated_at = now() where name = %s returning *',
+                    (dex, pool, pair_label, token_a, token_b, name))
+        row = cur.fetchone()
+    if not row:
+        raise SystemExit(f'No profile named {name}.')
+    return dict(row)
+
+
+# --- the board ---------------------------------------------------------------
+
+def _num(x):
+    return None if x is None else float(x)
+
+
+def record_scan(config_name, dexes, rows, errors, duration_s, listed):
+    """One scan of the board: the run, then every pool it looked at, ranked.
+    Everything the decision used is in `detail`, so a move can be explained
+    later from the table alone."""
+    scored = [r for r in rows if r.get('net_day_pct') is not None]
+    best = scored[0] if scored else None
+    with cursor(commit=True) as cur:
+        cur.execute("""
+            insert into scan_runs (ts, config_name, dexes, pools_listed, pools_scored,
+                                   duration_s, errors, best)
+            values (%s,%s,%s,%s,%s,%s,%s,%s) returning id
+        """, (now(), config_name, list(dexes), listed, len(scored), duration_s,
+              json.dumps(errors or {}), json.dumps(_brief(best), default=str) if best else None))
+        run_id = cur.fetchone()['id']
+        psycopg2.extras.execute_batch(cur, """
+            insert into scan_pools (run_id, rank, dex, kind, address, pair, fee, tvl_usd,
+                                    volume_24h_usd, c_pool, band, net_day_pct, rebal_per_day,
+                                    p25_net_day, worst_net_day, share_positive, p_survive_168h,
+                                    executable, screen_ok, screen_reason, skipped, detail)
+            values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+        """, [(run_id, i + 1, r['dex'], r.get('kind'), r['address'], r.get('pair'),
+               _num(r.get('fee')), _num(r.get('tvl_usd')), _num(r.get('volume_24h_usd')),
+               _num(r.get('c_pool')), _num(r.get('band')), _num(r.get('net_day_pct')),
+               _num(r.get('rebal_per_day')), _num(r.get('p25_net_day')), _num(r.get('worst_net_day')),
+               _num(r.get('share_positive')), _num(r.get('p_survive_168h')),
+               bool(r.get('executable')), r.get('screen_ok'), r.get('screen_reason'),
+               r.get('skipped'), json.dumps(r, default=str))
+              for i, r in enumerate(rows)])
+    return run_id
+
+
+def _brief(r):
+    if not r:
+        return None
+    return {k: r.get(k) for k in ('dex', 'address', 'pair', 'band_pct', 'net_day_pct',
+                                  'rebal_per_day', 'tvl_usd', 'volume_24h_usd', 'fee',
+                                  'executable', 'screen_ok', 'screen_reason')}
+
+
+def latest_scan(max_age_seconds=None):
+    """The most recent board: (run, rows) with rows in rank order, or (None, [])
+    when there is none or it is older than `max_age_seconds`."""
+    with cursor() as cur:
+        cur.execute('select * from scan_runs order by id desc limit 1')
+        run = cur.fetchone()
+        if not run:
+            return None, []
+        if max_age_seconds is not None and \
+                (now() - run['ts']).total_seconds() > max_age_seconds:
+            return dict(run), []
+        cur.execute('select detail, executable, screen_ok, screen_reason, rank, skipped '
+                    'from scan_pools where run_id = %s order by rank', (run['id'],))
+        rows = []
+        for r in cur.fetchall():
+            d = r['detail'] or {}
+            d.update(executable=r['executable'], screen_ok=r['screen_ok'],
+                     screen_reason=r['screen_reason'], rank=r['rank'], skipped=r['skipped'])
+            rows.append(d)
+    return dict(run), rows
+
+
+def scan_history(address, limit=30):
+    """How one pool has scored over time."""
+    with cursor() as cur:
+        cur.execute('select s.ts, p.rank, p.band, p.net_day_pct, p.rebal_per_day, p.tvl_usd, '
+                    'p.volume_24h_usd, p.c_pool from scan_pools p join scan_runs s on s.id = p.run_id '
+                    'where p.address = %s order by s.id desc limit %s', (address, limit))
+        return [dict(r) for r in cur.fetchall()]
+
+
 # --- accounting: writes ------------------------------------------------------
 
 def open_position(mint, pool, pair, lower, upper, band_pct, sig,
-                  deposit_usd, reason='', config_name=None):
+                  deposit_usd, reason='', config_name=None, dex='orca'):
     with cursor(commit=True) as cur:
         cur.execute("""
             insert into positions (mint, config_name, pool, pair_label, opened_at,
                                    lower_price, upper_price, band_pct, open_sig,
-                                   deposit_usd, open_reason)
-            values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                                   deposit_usd, open_reason, dex)
+            values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
             on conflict (mint) do update set
                 pool = excluded.pool, pair_label = excluded.pair_label,
                 lower_price = excluded.lower_price, upper_price = excluded.upper_price,
                 band_pct = excluded.band_pct, open_sig = excluded.open_sig,
-                deposit_usd = excluded.deposit_usd, open_reason = excluded.open_reason
+                deposit_usd = excluded.deposit_usd, open_reason = excluded.open_reason,
+                dex = excluded.dex
         """, (mint, config_name, pool, pair, now(), lower, upper, band_pct, sig,
-              deposit_usd, reason))
+              deposit_usd, reason, dex))
 
 
 def close_position(mint, sig, withdraw_usd):
@@ -166,6 +257,73 @@ def event(kind, detail=''):
 
 def _f(x):
     return float(x) if x is not None else 0.0
+
+
+def by_pool():
+    """The book split by pool, and therefore by DEX: for every pool the bot
+    has ever held, how long it was there, what it earned there realised and
+    unrealised, and how often it was in range. The bot moves between DEXes
+    now, so a single running total says nothing about which venue paid."""
+    with cursor() as cur:
+        cur.execute("""
+            with per_pos as (
+                select p.mint, p.dex, p.pool, p.pair_label, p.opened_at, p.closed_at,
+                       coalesce((select sum(h.fee_usd) from harvests h where h.mint = p.mint), 0) realised_usd,
+                       case when p.closed_at is null then coalesce(
+                           (select s.accrued_usd from snapshots s where s.mint = p.mint
+                            order by s.id desc limit 1), 0) else 0 end unrealised_usd,
+                       extract(epoch from coalesce(p.closed_at, now()) - p.opened_at) / 86400 days,
+                       (select avg(case when s.in_range then 1.0 else 0.0 end)
+                        from snapshots s where s.mint = p.mint) in_range,
+                       (select s.equity_usd from snapshots s where s.mint = p.mint
+                        order by s.id desc limit 1) equity_usd,
+                       p.deposit_usd,
+                       -- what came out: the recorded withdrawal for a closed
+                       -- position, the latest mark for an open one
+                       case when p.closed_at is null then
+                           (select s.position_usd from snapshots s where s.mint = p.mint
+                            and s.position_usd is not null order by s.id desc limit 1)
+                       else p.withdraw_usd end out_usd
+                from positions p
+            )
+            select dex, pool, pair_label, count(*) positions,
+                   count(*) filter (where closed_at is null) open_now,
+                   sum(days) days, sum(realised_usd) realised_usd, sum(unrealised_usd) unrealised_usd,
+                   avg(in_range) in_range, min(opened_at) first_opened,
+                   max(coalesce(closed_at, now())) last_seen,
+                   max(equity_usd) filter (where closed_at is null) equity_usd,
+                   sum(deposit_usd) deposit_usd,
+                   -- position P&L: out - in, over positions where both are known
+                   sum(out_usd - deposit_usd) filter (where out_usd is not null and deposit_usd is not null) position_pnl_usd,
+                   count(*) filter (where out_usd is null or deposit_usd is null) unpriced,
+                   sum(deposit_usd * days) / nullif(sum(days), 0) avg_deposit_usd
+            from per_pos
+            group by 1, 2, 3
+            order by max(opened_at) desc
+        """)
+        rows = []
+        for r in cur.fetchall():
+            d = dict(r)
+            days = _f(d['days'])
+            total = _f(d['realised_usd']) + _f(d['unrealised_usd'])
+            rate = (total / days) if days >= MIN_RATE_DAYS else None
+            avg_dep = _f(d['avg_deposit_usd'])
+            ppnl = d['position_pnl_usd']
+            d.update(days=round(days, 3), realised_usd=round(_f(d['realised_usd']), 4),
+                     unrealised_usd=round(_f(d['unrealised_usd']), 4), fees_usd=round(total, 4),
+                     fees_per_day_usd=(round(rate, 4) if rate is not None else None),
+                     # fee APR on the capital that sat in this pool, not on notional
+                     apr_pct=(round(rate / avg_dep * 365 * 100, 2) if rate is not None and avg_dep > 0 else None),
+                     in_range_pct=(round(_f(d['in_range']) * 100, 1) if d['in_range'] is not None else None),
+                     equity_usd=(round(_f(d['equity_usd']), 2) if d['equity_usd'] is not None else None),
+                     deposit_usd=round(_f(d['deposit_usd']), 2),
+                     position_pnl_usd=(round(_f(ppnl), 4) if ppnl is not None else None),
+                     # total: what came out minus what went in, plus every fee
+                     pnl_usd=(round(_f(ppnl) + total, 4) if ppnl is not None else None),
+                     unpriced=int(d['unpriced'] or 0))
+            d.pop('in_range'); d.pop('avg_deposit_usd')
+            rows.append(d)
+        return rows
 
 
 def stats(token_a=None, token_b=None):
@@ -242,6 +400,12 @@ def stats(token_a=None, token_b=None):
         """)
         pos = cur.fetchone()
 
+        # Where the money is, from the ledger rather than the config: the two
+        # agree except in the seconds between a repoint and the next open.
+        cur.execute('select dex, pool, pair_label from positions where closed_at is null '
+                    'order by opened_at desc limit 1')
+        cur_pos = cur.fetchone()
+
         cur.execute("""
             select count(*) filter (where kind = 'REBAND') rebands,
                    count(*) filter (where kind ilike '%fail%') failures
@@ -253,6 +417,14 @@ def stats(token_a=None, token_b=None):
     u_b = _f(latest and latest['accrued_b'])
     u_usd = _f(latest and latest['accrued_usd'])
     equity = latest and latest['equity_usd']
+    if equity is None and latest:
+        # One failed wallet read must not blank the book: the latest snapshot
+        # that could be priced stands in, and says how old it is.
+        with cursor() as cur:
+            cur.execute('select equity_usd, ts from snapshots where equity_usd is not null '
+                        'order by id desc limit 1')
+            last_priced = cur.fetchone()
+        equity = last_priced and last_priced['equity_usd']
     started = first_eq and first_eq['equity_usd']
 
     du_a = max(u_a - _f(day0 and day0['accrued_a']), 0.0)
@@ -268,9 +440,26 @@ def stats(token_a=None, token_b=None):
     # Annualised on the capital actually at work, not on notional.
     apr = (rate / float(equity) * 365 * 100) if (rate and equity) else None
 
+    pools = by_pool()
     rnd = lambda x, d=6: round(_f(x), d)
     return {
         'pair': cfg.get('pair_label'),
+        'dex': cfg.get('dex'),
+        'position_dex': cur_pos['dex'] if cur_pos else None,
+        'position_pair': cur_pos['pair_label'] if cur_pos else None,
+        'position_pool': cur_pos['pool'] if cur_pos else None,
+        'dexes_held': sorted({r['dex'] for r in pools}),
+        'by_pool': [{k: r[k] for k in ('dex', 'pair_label', 'pool', 'positions', 'open_now', 'days',
+                                       'fees_usd', 'fees_per_day_usd', 'apr_pct', 'in_range_pct',
+                                       'position_pnl_usd', 'pnl_usd')}
+                    for r in pools[:8]],
+        # across every pool and DEX: fees earned everywhere plus position
+        # P&L on every position whose deposit and withdrawal are both known
+        'pnl_all_pools_usd': (round(sum(_f(r['pnl_usd']) for r in pools if r['pnl_usd'] is not None), 4)
+                              if pools else None),
+        'position_pnl_all_pools_usd': (round(sum(_f(r['position_pnl_usd']) for r in pools
+                                                 if r['position_pnl_usd'] is not None), 4)
+                                       if pools else None),
         'token_a': token_a or cfg.get('token_a') or 'A',
         'token_b': token_b or cfg.get('token_b') or 'B',
         'fees_today_a': rnd(_f(rt['a']) + du_a),
@@ -344,10 +533,17 @@ def daily():
                        max(equity_usd) eq
                 from snapshots group by 1
             )
+            , where_ as (
+                -- the pools the money sat in that day, most-snapshotted first
+                select date_trunc('day', s.ts) d,
+                       string_agg(distinct p.dex || ' ' || p.pair_label, ', ') pools
+                from snapshots s join positions p on p.mint = s.mint group by 1
+            )
             select coalesce(f.d, s.d)::date as day,
                    coalesce(f.a, 0) fee_a, coalesce(f.b, 0) fee_b, coalesce(f.usd, 0) fee_usd,
-                   s.ir in_range, s.eq equity_usd
+                   s.ir in_range, s.eq equity_usd, w.pools
             from f full outer join s on f.d = s.d
+            left join where_ w on w.d = coalesce(f.d, s.d)
             order by 1 desc limit 60
         """)
         return [dict(r) for r in cur.fetchall()]
@@ -366,38 +562,35 @@ ORCA = 'https://api.orca.so/v2/solana'
 SEED_POOL = 'Czfq3xZZDmsdGdUyrNLtRhGc47cXcZtLG4crryfu44zE'   # SOL/USDC 0.04%
 
 
-def describe_pool(pool):
-    """Ask Orca what this pool is. Refuses the one kind the signer cannot open."""
-    import urllib.error, urllib.request
-    req = urllib.request.Request(f'{ORCA}/pools/{pool}',
-                                 headers={'accept': 'application/json',
-                                          'user-agent': 'Mozilla/5.0'})
+def describe_pool(pool, dex='orca'):
+    """Ask the DEX what this pool is. Refuses the one kind the Orca signer
+    cannot open."""
+    import dexes
     try:
-        d = json.loads(urllib.request.urlopen(req, timeout=30).read())
-    except (urllib.error.URLError, ValueError) as e:
-        raise SystemExit(f'Orca does not know a pool at {pool} ({e}). Nothing was added.')
-    d = d.get('data') or d
-    if not d.get('tokenA'):
-        raise SystemExit(f'Orca does not know a pool at {pool}. Nothing was added.')
-    a, b = d['tokenA']['symbol'], d['tokenB']['symbol']
-    if d.get('adaptiveFeeEnabled'):
+        rec = dexes.pool(dex, pool)
+    except Exception as e:
+        raise SystemExit(f'{dex} did not answer for {pool} ({e}). Nothing was added.')
+    if not rec:
+        raise SystemExit(f'{dex} does not know a pool at {pool}. Nothing was added.')
+    a, b = rec['token_a']['symbol'], rec['token_b']['symbol']
+    if dex == 'orca' and rec.get('adaptive_fee'):
         raise SystemExit(
             f'{a}/{b} is an adaptive-fee pool. The signer cannot open positions on '
             'it (Whirlpool error 6069, which reads like slippage and is not). '
             'Nothing was added.')
-    return {'pair_label': f'{a}/{b}', 'token_a': a, 'token_b': b,
-            'fee_rate': int(d.get('feeRate') or 0) / 1e6,
-            'tvl_usd': float(d.get('tvlUsdc') or 0), 'price': float(d['price'])}
+    return {'pair_label': f'{a}/{b}', 'token_a': a, 'token_b': b, 'dex': dex,
+            'fee_rate': rec['fee'], 'tvl_usd': rec['tvl_usd'], 'price': rec['price']}
 
 
-def add(name, pool, active=False, **params):
+def add(name, pool, active=False, dex='orca', **params):
     """Describe a new pool to the bot. Everything but the address and the size
     comes from the pool itself or from the column defaults.
 
         python3 db.py add wif-usdc <pool> capital_usd=200 max_usd=300
+        python3 db.py add sol-usdc-met <pool> dex=meteora-dlmm
     """
-    info = describe_pool(pool)
-    p = dict(name=name, pool=pool, active=active,
+    info = describe_pool(pool, dex)
+    p = dict(name=name, pool=pool, active=active, dex=dex,
              pair_label=info['pair_label'], token_a=info['token_a'],
              token_b=info['token_b'], **params)
     p.setdefault('capital_usd', 190)
@@ -479,13 +672,25 @@ def _print_stats():
     a, b = s['token_a'], s['token_b']
     w = lambda lbl, ka, kb, ku: print(
         f"  {lbl:<11} {s[ka]:>12.6f} {a:<5} {s[kb]:>12.6f} {b:<5} ${s[ku]:.4f}")
-    print(f"{s['pair'] or '-'}   {s['positions_open_now']} open   "
+    print(f"{s.get('dex') or ''} {s['pair'] or '-'}   {s['positions_open_now']} open   "
           f"in range {s['in_range_pct']}%   over {s['tracked_days']}d")
     print('FEES')
     w('today', 'fees_today_a', 'fees_today_b', 'fees_today_usd')
     w('realised', 'fees_realised_a', 'fees_realised_b', 'fees_realised_usd')
     w('unrealised', 'fees_unrealised_a', 'fees_unrealised_b', 'fees_unrealised_usd')
     w('TOTAL', 'fees_total_a', 'fees_total_b', 'fees_total_usd')
+    print('POOLS')
+    for r in s['by_pool']:
+        mark = '>' if r['open_now'] else ' '
+        rate = f"${r['fees_per_day_usd']:.4f}/day" if r['fees_per_day_usd'] is not None else '-'
+        apr = f"APR {r['apr_pct']:.1f}%" if r['apr_pct'] is not None else ''
+        pnl = f"P&L {r['pnl_usd']:+.2f}" if r['pnl_usd'] is not None else 'P&L -'
+        print(f"  {mark} {r['dex']:<22} {r['pair_label']:<12} {r['days']:>6.2f}d  "
+              f"fees ${r['fees_usd']:.4f}  {rate:>14}  {apr:<12} {pnl:<12} in range "
+              f"{r['in_range_pct'] if r['in_range_pct'] is not None else '-'}%")
+    print(f"  all pools   fees ${s['fees_total_usd']:.4f}   position P&L "
+          f"{s['position_pnl_all_pools_usd'] if s['position_pnl_all_pools_usd'] is not None else '-'}"
+          f"   total P&L {s['pnl_all_pools_usd'] if s['pnl_all_pools_usd'] is not None else '-'}")
     print('BOOK')
     print(f"  equity      ${s['equity_usd']}   P&L {s['pnl_usd']}")
     print(f"  rate        ${s['fees_per_day_usd']}/day   APR {s['apr_pct']}%")
@@ -519,11 +724,35 @@ if __name__ == '__main__':
             k, _, v = p.partition('=')
             row = set_param(profile, k.strip(), v.strip())
             print(f'{k.strip()} = {row[k.strip()]}')
+    elif cmd == 'repoint':
+        # db.py repoint <profile> <dex> <pool>
+        if len(sys.argv) < 5:
+            raise SystemExit('usage: db.py repoint <profile> <dex> <pool>')
+        info = describe_pool(sys.argv[4], sys.argv[3])
+        row = repoint(arg, sys.argv[3], sys.argv[4], info['pair_label'],
+                      info['token_a'], info['token_b'])
+        print(f"{row['name']} -> {row['dex']} {row['pair_label']} {row['pool']}  (restart the bot)")
+    elif cmd == 'board':
+        run, rows = latest_scan()
+        if not run:
+            raise SystemExit('no scan yet')
+        import engine
+        print(f"scan #{run['id']} at {run['ts']:%Y-%m-%d %H:%M} UTC  "
+              f"{run['pools_scored']}/{run['pools_listed']} scored  "
+              f"{float(run['duration_s'] or 0):.0f}s  errors {dict(run['errors'] or {})}")
+        engine.print_board(rows, top=int(sys.argv[3]) if len(sys.argv) > 3 else 40)
+    elif cmd == 'pools':
+        for r in by_pool():
+            rate = f"${r['fees_per_day_usd']:.4f}/day" if r['fees_per_day_usd'] is not None else '-'
+            print(f"{'>' if r['open_now'] else ' '} {r['dex']:<22} {r['pair_label']:<12} "
+                  f"{r['positions']} pos  {r['days']:>6.2f}d  fees ${r['fees_usd']:.4f} "
+                  f"(real ${r['realised_usd']:.4f} + unreal ${r['unrealised_usd']:.4f})  {rate:>14}  "
+                  f"in range {r['in_range_pct'] if r['in_range_pct'] is not None else '-'}%  {r['pool']}")
     elif cmd == 'daily':
         for d in reversed(daily()):
             print(f"{d['day']}  {float(d['fee_a']):.6f} A  {float(d['fee_b']):.6f} B  "
                   f"${float(d['fee_usd']):.4f}  in range "
-                  f"{(float(d['in_range'] or 0) * 100):.0f}%")
+                  f"{(float(d['in_range'] or 0) * 100):.0f}%  {d.get('pools') or ''}")
     elif cmd == 'history':
         for r in reversed(history()):
             print(f"{r['ts']:%Y-%m-%d %H:%M}  price {float(r['price'] or 0):>9.4f}  "

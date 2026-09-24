@@ -22,6 +22,8 @@ runtime.json
 state*.json
 HALT
 REBALANCE
+REOPT
+MIGRATE
 
 # --- local junk ---------------------------------------------------------------
 __pycache__/

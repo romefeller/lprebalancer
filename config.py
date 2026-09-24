@@ -40,6 +40,7 @@ _CFG = db.load_config(os.environ.get('LPBOT_PROFILE'))
 PROFILE = _CFG['name']
 
 # --- what to trade -----------------------------------------------------------
+DEX = _env('LPBOT_DEX', str, _CFG.get('dex') or 'orca')
 POOL = _env('LPBOT_POOL', str, _CFG['pool'])
 PAIR_LABEL = _env('LPBOT_PAIR', str, _CFG['pair_label'])
 TOKEN_A = _env('LPBOT_TOKEN_A', str, _CFG['token_a'])
@@ -84,13 +85,31 @@ MAX_UNREADABLE_POLLS = _env('LPBOT_MAX_UNREADABLE', int, _CFG['max_unreadable_po
 SLIPPAGE_BPS = _env('LPBOT_SLIPPAGE_BPS', int, _CFG['slippage_bps'])
 
 # --- pool screening (scanner only) ------------------------------------------
-# Consulted only when the scanner picks the pool. A leveraged token in an LP
-# pays a high headline yield for taking the other side of something engineered
-# to decay: SOL/xSOL advertised 243%/yr, and xSOL is 3x leveraged SOL.
-MAX_LEVERAGED = _env('LPBOT_MAX_LEVERAGED', float, float(_CFG['max_leveraged']))
-MIN_ESTABLISHED = _env('LPBOT_MIN_ESTABLISHED', float, float(_CFG['min_established']))
+# Consulted only when the scanner picks the pool. Token quality is a rule on
+# Jupiter's token facts (engine.screen_token), not a parameter here.
 MIN_NET_DAY_PCT = _env('LPBOT_MIN_NET_DAY', float, float(_CFG['min_net_day_pct']))
 MIN_TVL_USD = _env('LPBOT_MIN_TVL', float, float(_CFG['min_tvl_usd']))
+
+# --- the board: scanning other pools and other DEXes --------------------------
+_list = lambda s: [x.strip() for x in s.split(',') if x.strip()]
+DEXES = tuple(_env('LPBOT_DEXES', _list, list(_CFG.get('dexes') or ['orca'])))
+SCAN_LIMIT = _env('LPBOT_SCAN_LIMIT', int, _CFG.get('scan_limit') or 30)
+SCAN_INTERVAL = _env('LPBOT_SCAN_INTERVAL', int, _CFG.get('scan_interval_seconds') or 21600)
+MIN_VOLUME_24H_USD = _env('LPBOT_MIN_VOLUME', float, float(_CFG.get('min_volume_24h_usd') or 0))
+# The board's best must beat the held pool's best by this much (modelled,
+# relative) before the bot moves pools. Higher than reopt_min_gain: a pool
+# move is a close, possibly a swap, and an open on a venue the bot has not
+# been watching.
+MIGRATE_MIN_GAIN = _env('LPBOT_MIGRATE_MIN_GAIN', float, float(_CFG.get('migrate_min_gain') or 0.5))
+# DEXes the bot may actually open positions on: the ones with a signer.
+EXECUTE_DEXES = tuple(_env('LPBOT_EXECUTE_DEXES', _list, list(_CFG.get('execute_dexes') or ['orca'])))
+# Stay on `pool` whatever the board says.
+POOL_PINNED = _env('LPBOT_POOL_PINNED', lambda s: s.lower() in ('1', 'true', 'yes'),
+                   bool(_CFG.get('pool_pinned')))
+# Whether the bot may swap tokens to enter a pool of a different pair. Until
+# it may, migration is limited to pools of the pair the wallet already holds.
+ALLOW_SWAP = _env('LPBOT_ALLOW_SWAP', lambda s: s.lower() in ('1', 'true', 'yes'),
+                  bool(_CFG.get('allow_swap')))
 
 # --- plumbing ----------------------------------------------------------------
 RPC = _env('LPBOT_RPC', str,
@@ -107,9 +126,17 @@ def require_wallet():
     return WALLET
 
 
+def reload():
+    """Re-read the active profile in place. The bot calls this after it moves
+    pools, so every `config.X` the loop reads reflects the new pool."""
+    import importlib, sys
+    importlib.reload(sys.modules[__name__])
+
+
 def summary():
     return {
         'profile': PROFILE,
+        'dex': DEX,
         'pool': POOL,
         'pair': PAIR_LABEL,
         'capital_usd': CAPITAL_USD,
@@ -122,6 +149,12 @@ def summary():
         'max_rebalances_per_day': MAX_REBALANCES_PER_DAY,
         'reopt_every_hours': REOPT_INTERVAL / 3600,
         'reopt_min_gain': REOPT_MIN_GAIN,
+        'scan_dexes': list(DEXES),
+        'scan_every_hours': SCAN_INTERVAL / 3600,
+        'execute_dexes': list(EXECUTE_DEXES),
+        'migrate_min_gain': MIGRATE_MIN_GAIN,
+        'pool_pinned': POOL_PINNED,
+        'allow_swap': ALLOW_SWAP,
     }
 
 

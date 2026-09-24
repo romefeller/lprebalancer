@@ -20,12 +20,21 @@ average LP concentration of 21.1x, and a +/-10% band (21.5x) then reproduces
 Orca's published 0.222%/day. Dividing by dollar TVL instead overstates fees
 about 57 times.
 
-Token quality is a semantic judgment, so Jev handles it. The reason is concrete:
-the highest-yielding pool on the board was SOL/xSOL at 243%/yr, and xSOL is
-"Hylo 3x Leveraged SOL" — a leveraged token with volatility decay and
-spiral-to-zero risk that no volatility statistic flags.
+Token screening is a plain rule: a pool may hold a token that is a major, or
+one Jupiter lists as verified. The reason is concrete: the highest-yielding
+pool on the board was SOL/xSOL at 243%/yr, and xSOL is "Hylo 3x Leveraged
+SOL", a leveraged token with volatility decay that no volatility statistic
+flags. A tag list from Jupiter refuses it by name (`leveraged`, `lst-derivative`
+and the like) where a yield number cannot.
+
+Nothing here is specific to one DEX. A pool arrives as the record `dexes.py`
+builds — address, tokens, price, fee, TVL, volume, and the pool's own active
+liquidity — and is scored the same way whether it lives on Orca, Raydium,
+Meteora or Byreal. Candles come from GeckoTerminal, which indexes all of them by
+address. The fee-share model needs one number per pool, its implied
+concentration, and each DEX kind has its own route to it (see `concentration`).
 """
-import json, math, os, pathlib, subprocess, time, urllib.error, urllib.request
+import json, math, os, pathlib, subprocess, threading, time, urllib.error, urllib.request
 import numpy as np
 
 ROOT = pathlib.Path(__file__).resolve().parent
@@ -33,7 +42,6 @@ UA = ('Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 '
       '(KHTML, like Gecko) Chrome/126.0 Safari/537.36')
 ORCA = 'https://api.orca.so/v2/solana'
 GECKO = 'https://api.geckoterminal.com/api/v2/networks/solana'
-TYPESAFE = 'https://api.typesafe.ai/v1/systemone'
 
 # Defaults for a bare scan from the command line. The bot passes its own values
 # from the active profile; nothing below reads these when it is running.
@@ -45,92 +53,78 @@ BANDS = (1.03, 1.05, 1.08, 1.12, 1.18, 1.25, 1.40)
 MAJORS = {'SOL', 'USDC', 'USDT', 'PYUSD', 'USDS', 'DAI', 'FDUSD', 'USDE'}
 
 
-def curl(url, accept='application/json'):
-    r = subprocess.run(['curl', '-s', '--max-time', '40',
-                        '-H', f'accept: {accept}', '-H', f'user-agent: {UA}', url],
-                       capture_output=True, text=True)
-    try:
-        return json.loads(r.stdout)
-    except Exception:
-        return None
+# GeckoTerminal's free tier allows about 30 requests a minute. Every caller in
+# this process — the scanner thread, the re-optimiser, the quote pricer — goes
+# through this one gate, so they cannot add up to a 429 between them.
+_GECKO_LOCK = threading.Lock()
+_GECKO_LAST = [0.0]
+GECKO_SPACING = 2.1
 
 
-def jev_key():
-    """TypeSafe API key, from the environment or a file it points at.
-
-    Token screening is optional: without a key the scanner simply skips it. No
-    default path — a hardcoded key location in source control tells a reader
-    where to look on a machine they may already be on.
-    """
-    k = os.environ.get('TYPESAFE_API_KEY')
-    if not k:
-        path = os.environ.get('TYPESAFE_API_KEY_FILE')
-        if not path:
-            return None
+def curl(url, accept='application/json', retries=2):
+    if 'geckoterminal.com' in url:
+        with _GECKO_LOCK:
+            wait = _GECKO_LAST[0] + GECKO_SPACING - time.time()
+            if wait > 0:
+                time.sleep(wait)
+            _GECKO_LAST[0] = time.time()
+    for attempt in range(retries + 1):
+        r = subprocess.run(['curl', '-s', '--max-time', '40',
+                            '-H', f'accept: {accept}', '-H', f'user-agent: {UA}', url],
+                           capture_output=True, text=True)
         try:
-            k = pathlib.Path(path).read_text()
-        except OSError:
-            return None
-    k = k.strip()
-    if '=' in k.split('\n')[0]:
-        k = k.split('=', 1)[1].strip().strip('"\'')
-    return k
+            d = json.loads(r.stdout)
+        except Exception:
+            d = None
+        # A rate-limit answer is JSON too: {"status": {"error_code": 429}}.
+        if isinstance(d, dict) and str((d.get('status') or {}).get('error_code')) == '429':
+            time.sleep(5.0 * (attempt + 1))
+            continue
+        return d
+    return None
 
 
-def token_quality(symbol, name):
-    """Two narrow judgments. Returns (leveraged, established) probabilities."""
-    key = jev_key()
-    if not key:
-        return None
-    body = {
-        'state': {'token_symbol': symbol, 'token_name': name,
-                  'context': 'Solana SPL token quoted in a liquidity pool'},
-        'model': 'jev-latest',
-        'questions': {
-            'is_leveraged': {
-                'type': 'noul',
-                'instructions': {
-                    'question': 'Is this token a leveraged, synthetic or '
-                                'derivative instrument rather than a plain '
-                                'spot asset?',
-                    'counts_as_yes': 'Leveraged tokens (3x, 2x, bull/bear), '
-                                     'volatility or index tokens, tokens whose '
-                                     'value is engineered from another asset '
-                                     'with amplification, and tranche tokens '
-                                     'that absorb another holder\'s losses.',
-                    'counts_as_no': 'Plain spot tokens, governance tokens, '
-                                    'memecoins, stablecoins, and liquid staking '
-                                    'tokens that simply accrue staking yield.',
-                },
-            },
-            'is_established': {
-                'type': 'noul',
-                'instructions': {
-                    'question': 'Is this a widely recognised token with a real '
-                                'project and sustained trading history?',
-                    'counts_as_yes': 'Major assets and well-known Solana '
-                                     'ecosystem or DeFi tokens that have traded '
-                                     'for months or years with broad listings.',
-                    'counts_as_no': 'Freshly launched tokens, unknown tickers, '
-                                    'and tokens whose only presence is one pool.',
-                },
-            },
-        },
-    }
-    req = urllib.request.Request(
-        TYPESAFE, data=json.dumps(body).encode(),
-        headers={'Authorization': f'Bearer {key}',
-                 'Content-Type': 'application/json'})
-    try:
-        r = json.loads(urllib.request.urlopen(req, timeout=40).read())
-        return (float(r['answers']['is_leveraged']['noul']),
-                float(r['answers']['is_established']['noul']))
-    except Exception:
-        return None
+# Jupiter tags that name an instrument the bot must not hold: leveraged and
+# structured tokens pay a high headline yield for taking the other side of
+# something engineered to decay.
+REFUSED_TAGS = {'leveraged', 'leverage', 'perpetual', 'perp', 'synthetic', 'derivative',
+                'index', 'structured', 'tranche', 'bull', 'bear', 'volatility'}
+REFUSED_NAME_WORDS = ('leveraged', 'leverage', '2x', '3x', '5x', 'bull', 'bear', 'inverse')
+
+
+def screen_token(symbol, facts):
+    """Pass/fail for one non-major token from what Jupiter knows about it.
+    Returns (ok, reason). No facts is a fail: an unknown token is not held."""
+    if not facts:
+        return False, f'{symbol}: unknown to Jupiter'
+    name = f"{facts.get('name') or ''} {symbol}".lower()
+    tags = {str(t).lower() for t in (facts.get('tags') or [])}
+    if tags & REFUSED_TAGS or any(w in name for w in REFUSED_NAME_WORDS):
+        return False, f'{symbol}: leveraged or structured instrument'
+    if not facts.get('verified'):
+        return False, f'{symbol}: not verified by Jupiter'
+    if facts.get('mint_authority_disabled') is False:
+        return False, f'{symbol}: mint authority still enabled'
+    return True, f'{symbol}: verified'
+
+
+def screening_verdict(rec, facts, majors=MAJORS):
+    """Both tokens must pass: a major passes by name, anything else on its
+    Jupiter facts. The worst answer decides."""
+    reasons = []
+    for side in ('a', 'b'):
+        tok = rec[f'token_{side}']
+        if tok.get('symbol') in majors:
+            continue
+        ok, why = screen_token(tok.get('symbol'), (facts or {}).get(side))
+        if not ok:
+            return False, why
+        reasons.append(why)
+    return True, '; '.join(reasons) or 'both tokens are majors'
 
 
 def active_liquidity(pool):
-    """Pool active L in human units, from the raw CLMM liquidity field."""
+    """Pool active L in human units, from Orca's raw CLMM liquidity field."""
     try:
         da = int(pool['tokenA'].get('decimals', 9))
         db = int(pool['tokenB'].get('decimals', 6))
@@ -142,14 +136,23 @@ def active_liquidity(pool):
 STABLES = {'USDC', 'USDT', 'PYUSD', 'USDS', 'DAI', 'FDUSD', 'USDE'}
 
 
+def as_record(pool):
+    """Accept either the normalised record or Orca's raw pool dict."""
+    if 'tokenA' in pool and 'token_a' not in pool:
+        import dexes
+        return dexes.from_orca(pool)
+    return pool
+
+
 def pool_quote_price(pool):
-    """USD price of the pool's quote token (Orca's token B), priced by MINT.
+    """USD price of the pool's quote token (token B), priced by MINT.
 
     Never by GeckoTerminal's pool record: Gecko orders a pair by its own
     convention, so its `quote_token_price_usd` on SOL/cbBTC is the price of
-    SOL, not of a bitcoin. Takes the Orca pool dict.
+    SOL, not of a bitcoin.
     """
-    b = pool.get('tokenB') or {}
+    rec = as_record(pool)
+    b = rec.get('token_b') or {}
     if b.get('symbol') in STABLES:
         return 1.0
     mint = b.get('address')
@@ -163,6 +166,37 @@ def pool_quote_price(pool):
         return p if p > 0 else None
     except Exception:
         return None
+
+
+def concentration(rec, quote_usd):
+    """The pool's implied concentration, by DEX kind.
+
+    clmm  (Orca, Raydium, Byreal): active liquidity L against the L a
+          full-range position of the same TVL would have.
+    dlmm  (Meteora): the dollar liquidity per bin near the active bin against
+          what a full-range position of the same TVL would leave in one bin.
+          A full-range position holds TVL * s / 4 in a bin of log-width s (one
+          token per bin, L*sqrt(P)*s/2 with L = TVL/(2 sqrt P)), so the ratio
+          is 4A / (TVL * s). Both say the same thing — what fraction of the
+          pool's capital is working at the current price — so one fee-share
+          model serves both, and on Meteora's SOL/USDC it lands at about 18x
+          against Orca's 21x.
+    """
+    tvl = float(rec.get('tvl_usd') or 0)
+    price = float(rec.get('price') or 0)
+    if tvl <= 0 or price <= 0:
+        return None
+    if rec.get('kind', 'clmm') == 'clmm':
+        L = rec.get('liquidity')
+        if not L or not quote_usd:
+            return None
+        return pool_concentration(float(L), tvl, price, quote_usd)
+    if rec.get('kind') == 'dlmm':
+        A, step = rec.get('active_bin_usd'), rec.get('bin_step')
+        if not A or not step:
+            return None
+        return 4.0 * float(A) / (tvl * float(step) / 1e4)
+    return None
 
 
 def candles(address, native=True):
@@ -381,22 +415,25 @@ def edge_loss(k):
 
 
 def ladder(pool, candle_data, bands, capital, swap_cost=SWAP_COST,
-           horizon_hours=240, step_hours=24):
+           horizon_hours=240, step_hours=24, quote_usd=None):
     """Score every band on a pool three ways: the one full-window path, the
     rolling-origin distribution, and the survival curve.
 
-    `pool` is Orca's pool dict; `candle_data` is what candles() returned.
-    Returns (rows, meta) or None when the pool cannot be priced consistently.
-    Each row carries `net_day_pct` and `rebal_per_day` from the ROLLING
-    median, which is what the bot decides on; the single path is kept under
-    `path` for comparison.
+    `pool` is a normalised record from dexes.py (Orca's raw dict is accepted
+    and converted); `candle_data` is what candles() returned. Returns
+    (rows, meta) or None when the pool cannot be priced consistently. Each row
+    carries `net_day_pct` and `rebal_per_day` from the ROLLING median, which
+    is what the bot decides on; the single path is kept under `path`.
     """
-    pool_l = active_liquidity(pool)
-    tvl = float(pool.get('tvlUsdc') or 0)
-    price = float(pool.get('price') or 0)
-    quote_usd = pool_quote_price(pool)
-    c_pool = pool_concentration(pool_l, tvl, price, quote_usd or 0) if pool_l else None
-    if not c_pool or not (1.0 <= c_pool <= 500.0) or not candle_data:
+    rec = as_record(pool)
+    if not candle_data:
+        return None
+    tvl = float(rec.get('tvl_usd') or 0)
+    price = float(rec.get('price') or 0)
+    if quote_usd is None:
+        quote_usd = pool_quote_price(rec)
+    c_pool = concentration(rec, quote_usd or 0)
+    if not c_pool or not (1.0 <= c_pool <= 500.0):
         return None
     ts, px, vol = candle_data
     # The candle price and the pool's own price must agree, or the liquidity
@@ -405,7 +442,7 @@ def ladder(pool, candle_data, bands, capital, swap_cost=SWAP_COST,
         if abs((1.0 / px[-1]) / price - 1.0) > 0.15:
             return None
         px = 1.0 / px
-    fee = int(pool.get('feeRate') or 0) / 1e6
+    fee = float(rec.get('fee') or 0)
     ctx = {'tvl_usd': tvl, 'c_pool': c_pool}
     rows = []
     for k in bands:
@@ -420,7 +457,8 @@ def ladder(pool, candle_data, bands, capital, swap_cost=SWAP_COST,
             'path': path, 'roll': roll, 'survival': surv,
         })
     meta = {'price': price, 'fee': fee, 'c_pool': c_pool, 'tvl_usd': tvl,
-            'quote_usd': quote_usd, 'days': rows[0]['path']['days'], 'hours': len(px)}
+            'quote_usd': quote_usd, 'days': rows[0]['path']['days'], 'hours': len(px),
+            'dex': rec.get('dex'), 'kind': rec.get('kind', 'clmm'), 'pair': rec.get('pair')}
     return rows, meta
 
 
@@ -454,63 +492,148 @@ def print_ladder(rows, meta, pick=None):
           "reaches the edge.")
 
 
-def scan(capital, limit=100, use_jev=True, verbose=True, bands=None,
-         min_tvl=MIN_TVL, swap_cost=SWAP_COST):
-    """Rank pools by what an optimally banded position would have returned."""
-    d = curl(f'{ORCA}/pools?limit={limit}&sortBy=volume24h')
-    out = []
-    for p in (d or {}).get('data', []):
-        tvl = float(p.get('tvlUsdc') or 0)
-        if tvl < min_tvl:
-            continue
-        pool_L_native = active_liquidity(p)
-        if not pool_L_native:
-            continue
-        pair = f"{p['tokenA'].get('symbol','?')}/{p['tokenB'].get('symbol','?')}"
-        c = candles(p['address'])
-        time.sleep(2.2)
-        if not c:
-            continue
-        ts, px, vol = c
-        # The candle price and the pool's own reported price must agree, or the
-        # liquidity share is computed on a different scale than the pool's L.
-        quoted = float(p.get('price') or 0)
-        if quoted <= 0:
-            continue
-        drift = abs(px[-1] / quoted - 1.0)
-        if drift > 0.15 and abs((1.0 / px[-1]) / quoted - 1.0) > 0.15:
-            if verbose:
-                print(f'  {pair[:22]:<23} SKIPPED: candle price {px[-1]:.6g} '
-                      f'disagrees with pool price {quoted:.6g}', flush=True)
-            continue
-        if abs(px[-1] / quoted - 1.0) > 0.15:
-            px = 1.0 / px          # pool quotes the inverse pair
-        fee = int(p.get('feeRate') or 0) / 1e6
-        quote_usd = pool_quote_price(p)
-        c_pool = pool_concentration(pool_L_native, tvl, float(px[-1]), quote_usd or 0)
-        if not c_pool or not (1.0 <= c_pool <= 500.0):
-            if verbose:
-                print(f'  {pair[:22]:<23} SKIPPED: implied pool concentration '
-                      f'{c_pool if c_pool else float("nan"):.1f}x is out of range',
-                      flush=True)
-            continue
-        ctx = {'tvl_usd': tvl, 'c_pool': c_pool}
-        best, runs = best_band(ts, px, vol, ctx, fee, capital, bands, swap_cost)
-        row = {'address': p['address'], 'pair': pair, 'fee': fee, 'tvl': tvl,
-               'c_pool': c_pool, 'price': float(p.get('price') or 0), **best}
-        out.append(row)
-        if verbose:
-            print(f'  {pair[:22]:<23} band +/-{best["band_pct"]:>4.0f}%  '
-                  f'net {best["net_day_pct"]:+.3f}%/day  '
-                  f'rebal/day {best["rebal_per_day"]:.2f}', flush=True)
-    out.sort(key=lambda r: -r['net_day_pct'])
+def _pick_row(rec, rows, meta, pick):
+    """One board row: the pool, the band the bot would choose on it, and the
+    distribution behind that choice."""
+    o, sv = pick.get('roll') or {}, pick.get('survival') or {}
+    return {
+        'dex': rec['dex'], 'kind': rec.get('kind', 'clmm'), 'address': rec['address'],
+        'pair': rec['pair'], 'token_a': rec['token_a'], 'token_b': rec['token_b'],
+        'fee': rec['fee'], 'fee_source': rec.get('fee_source'), 'adaptive_fee': rec.get('adaptive_fee'),
+        'tvl_usd': rec['tvl_usd'], 'volume_24h_usd': rec.get('volume_24h_usd'),
+        'fees_24h_usd': rec.get('fees_24h_usd'), 'price': meta['price'], 'c_pool': meta['c_pool'],
+        'band': pick['band'], 'band_pct': pick['band_pct'],
+        'net_day_pct': pick['net_day_pct'], 'rebal_per_day': pick['rebal_per_day'],
+        'path_net_day': pick['path']['net_day_pct'],
+        'p25_net_day': o.get('p25_net_day'), 'worst_net_day': o.get('worst_net_day'),
+        'share_positive': o.get('share_positive'), 'share_beat_hold': o.get('share_beat_hold'),
+        'windows': o.get('windows'),
+        'p_survive_24h': sv.get('p_survive_24h'), 'p_survive_72h': sv.get('p_survive_72h'),
+        'p_survive_168h': sv.get('p_survive_168h'), 'median_exit_hours': sv.get('median_exit_hours'),
+        'edge_loss_pct': pick['edge_loss_pct'], 'days': meta['days'], 'hours': meta['hours'],
+        'all_runs': [{k: r[k] for k in ('band', 'net_day_pct', 'rebal_per_day')} for r in rows],
+    }
 
-    if use_jev:
-        for r in out[:12]:
-            a, b = r['pair'].split('/')
-            q = token_quality(b if a in MAJORS else a, r['pair'])
-            r['jev'] = {'leveraged': q[0], 'established': q[1]} if q else None
-    return out
+
+def score_board(records, capital, bands, swap_cost=SWAP_COST, max_rebal_per_day=0.5,
+                min_tvl=MIN_TVL, min_volume=0.0, screen_top=20, blocked=None, progress=None):
+    """Rank pools from any DEX by what an optimally banded position would
+    have returned, under the same model the bot uses to choose its band.
+
+    Every pool that clears the size gates gets the full ladder: rolling
+    medians, survival, churn gate, and the band the bot would pick. The top
+    of the board is then screened on Jupiter's token facts. Rows that could
+    not be scored are kept with the reason, so the board says what it
+    declined and why.
+
+    `blocked(rec)` may return a reason a pool cannot be opened at all (an
+    adaptive-fee Orca pool, a DEX without a signer); those are listed but not
+    spent a candle fetch on.
+    """
+    import dexes
+    seen, todo, out = set(), [], []
+    for rec in records:
+        if not rec.get('address') or rec['address'] in seen:
+            continue
+        seen.add(rec['address'])
+        base = {'dex': rec['dex'], 'kind': rec.get('kind', 'clmm'), 'address': rec['address'],
+                'pair': rec.get('pair'), 'token_a': rec.get('token_a'), 'token_b': rec.get('token_b'),
+                'fee': rec.get('fee'), 'fee_source': rec.get('fee_source'),
+                'adaptive_fee': rec.get('adaptive_fee'), 'tvl_usd': rec.get('tvl_usd'),
+                'volume_24h_usd': rec.get('volume_24h_usd'), 'fees_24h_usd': rec.get('fees_24h_usd'),
+                'net_day_pct': None}
+        reason = None
+        if (rec.get('tvl_usd') or 0) < min_tvl:
+            reason = f'tvl ${rec.get("tvl_usd", 0) / 1e6:.2f}M below ${min_tvl / 1e6:.2f}M'
+        elif (rec.get('volume_24h_usd') or 0) < min_volume:
+            reason = f'volume ${rec.get("volume_24h_usd", 0) / 1e6:.2f}M below ${min_volume / 1e6:.2f}M'
+        elif rec.get('kind') == 'clmm' and not rec.get('liquidity'):
+            reason = rec.get('note') or 'active liquidity unreadable'
+        elif rec.get('kind') == 'dlmm' and not rec.get('active_bin_usd'):
+            reason = rec.get('note') or 'bin liquidity unreadable'
+        elif not rec.get('fee'):
+            reason = 'fee rate unknown'
+        elif blocked and blocked(rec):
+            reason = blocked(rec)
+        if reason:
+            out.append({**base, 'skipped': reason})
+            continue
+        todo.append((rec, base))
+
+    # Quote-token prices in one Jupiter call, so a non-dollar quote costs no
+    # GeckoTerminal budget.
+    quotes = {}
+    need = [r['token_b']['address'] for r, _ in todo if r['token_b'].get('symbol') not in STABLES]
+    if need:
+        quotes = dexes.jupiter_prices(need)
+
+    for i, (rec, base) in enumerate(todo):
+        if progress:
+            progress(i, len(todo), rec)
+        qsym, qmint = rec['token_b'].get('symbol'), rec['token_b'].get('address')
+        quote_usd = 1.0 if qsym in STABLES else quotes.get(qmint) or pool_quote_price(rec)
+        if not quote_usd:
+            out.append({**base, 'skipped': 'quote token unpriced'})
+            continue
+        cd = candles(rec['address'])
+        if not cd:
+            out.append({**base, 'skipped': 'fewer than 240 hourly candles'})
+            continue
+        res = ladder(rec, cd, dexes.feasible_bands(rec, bands), capital, swap_cost,
+                     quote_usd=quote_usd)
+        if not res:
+            c = concentration(rec, quote_usd)
+            out.append({**base, 'skipped': (f'implied concentration {c:.1f}x out of range' if c
+                                            else 'candle price disagrees with pool price')})
+            continue
+        rows, meta = res
+        pick = choose(rows, max_rebal_per_day)
+        out.append(_pick_row(rec, rows, meta, pick))
+
+    scored = [r for r in out if r.get('net_day_pct') is not None]
+    scored.sort(key=lambda r: -r['net_day_pct'])
+    unscored = [r for r in out if r.get('net_day_pct') is None]
+
+    # Screen the top of the board. A pool of two majors passes by name; any
+    # other token is looked up on Jupiter, and one lookup per mint serves
+    # every pool that holds it.
+    facts_cache = {}
+    for i, r in enumerate(scored):
+        r['facts'] = None
+        if all(r[f'token_{x}']['symbol'] in MAJORS for x in ('a', 'b')):
+            r['screen_ok'], r['screen_reason'] = True, 'both tokens are majors'
+            continue
+        if i >= screen_top:
+            r['screen_ok'], r['screen_reason'] = False, 'below the screened top of the board'
+            continue
+        facts = {}
+        for side in ('a', 'b'):
+            tok = r[f'token_{side}']
+            if tok['symbol'] in MAJORS:
+                continue
+            m = tok['address']
+            if m not in facts_cache:
+                facts_cache[m] = dexes.jupiter_token(m)
+            facts[side] = facts_cache[m]
+        r['facts'] = facts
+        r['screen_ok'], r['screen_reason'] = screening_verdict(r, facts)
+    return scored + unscored
+
+
+def print_board(rows, top=25):
+    print(f"{'dex':<22}{'pair':<16}{'fee':>7}{'tvl$M':>7}{'vol$M':>7}{'cpool':>6}{'band':>6}"
+          f"{'net%/d':>8}{'p25':>7}{'+win':>5}{'reb/d':>6}{'S7d':>5}  screen")
+    for r in rows[:top]:
+        if r.get('net_day_pct') is None:
+            print(f"{r['dex']:<22}{(r.get('pair') or '?')[:15]:<16}{'':>7}{(r.get('tvl_usd') or 0) / 1e6:>7.2f}"
+                  f"{(r.get('volume_24h_usd') or 0) / 1e6:>7.2f}  -- {r.get('skipped')}")
+            continue
+        scr = ('ok' if r.get('screen_ok') else 'NO') + ' ' + (r.get('screen_reason') or '')
+        print(f"{r['dex']:<22}{r['pair'][:15]:<16}{r['fee'] * 100:>6.3f}%{r['tvl_usd'] / 1e6:>7.2f}"
+              f"{(r.get('volume_24h_usd') or 0) / 1e6:>7.2f}{r['c_pool']:>6.1f}{r['band_pct']:>5.0f}%"
+              f"{r['net_day_pct']:>8.3f}{(r.get('p25_net_day') or 0):>7.3f}"
+              f"{(r.get('share_positive') or 0) * 100:>4.0f}%{r['rebal_per_day']:>6.2f}"
+              f"{(r.get('p_survive_168h') or 0) * 100:>4.0f}%  {scr[:40]}")
 
 
 FINE_BANDS = (1.02, 1.03, 1.04, 1.05, 1.06, 1.08, 1.10, 1.12, 1.15, 1.18, 1.25, 1.40)
@@ -523,16 +646,31 @@ if __name__ == '__main__':
         cap = float(sys.argv[3]) if len(sys.argv) > 3 else 190.0
         bands = (tuple(float(x) for x in sys.argv[4].split(','))
                  if len(sys.argv) > 4 else FINE_BANDS)
-        d = curl(f'{ORCA}/pools/{pool_addr}')
-        p = (d or {}).get('data') or d
-        if not p or not p.get('tokenA'):
-            raise SystemExit(f'Orca does not know a pool at {pool_addr}')
+        import dexes
+        dex = sys.argv[5] if len(sys.argv) > 5 else 'orca'
+        p = dexes.pool(dex, pool_addr)
+        if not p:
+            raise SystemExit(f'{dex} does not know a pool at {pool_addr}')
         out = ladder(p, candles(pool_addr), bands, cap)
         if not out:
             raise SystemExit('pool cannot be priced consistently (candles vs pool price, '
                              'or implied concentration out of range)')
         rows, meta = out
-        print(f"{p['tokenA']['symbol']}/{p['tokenB']['symbol']}  ${cap:.0f}")
+        print(f"{p['dex']} {p['pair']}  ${cap:.0f}")
         print_ladder(rows, meta, choose(rows, 0.5))
+    elif len(sys.argv) >= 2 and sys.argv[1] == 'board':
+        # python3 engine.py board [dex,dex,...] [limit] [capital]
+        import dexes
+        which = tuple(sys.argv[2].split(',')) if len(sys.argv) > 2 else dexes.KNOWN
+        lim = int(sys.argv[3]) if len(sys.argv) > 3 else 15
+        cap = float(sys.argv[4]) if len(sys.argv) > 4 else 190.0
+        recs, errs = dexes.fetch_all(which, lim)
+        for d, e in errs.items():
+            print(f'{d}: {e}')
+        flat = [r for rows in recs.values() for r in rows]
+        board = score_board(flat, cap, BANDS, min_volume=1e6,
+                            progress=lambda i, n, r: print(f'  [{i + 1}/{n}] {r["dex"]} {r["pair"]}', flush=True))
+        print_board(board, top=60)
     else:
-        print('usage: python3 engine.py ladder <pool> [capital_usd] [bands]')
+        print('usage: python3 engine.py ladder <pool> [capital_usd] [bands]\n'
+              '       python3 engine.py board [dexes] [limit] [capital]')

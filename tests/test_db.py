@@ -159,5 +159,109 @@ class Ledger(unittest.TestCase):
         self.assertEqual(len(db.history()), 3)
 
 
+
+
+class Board(unittest.TestCase):
+    def setUp(self):
+        _fixtures.ensure_profile()
+        with db.cursor(commit=True) as cur:
+            cur.execute('truncate scan_pools, scan_runs')
+
+    def rows(self):
+        return [
+            {'dex': 'meteora-dlmm', 'kind': 'dlmm', 'address': 'M1', 'pair': 'SOL/USDC', 'fee': 0.00048,
+             'tvl_usd': 6.9e6, 'volume_24h_usd': 5.5e7, 'c_pool': 18.5, 'band': 1.08, 'band_pct': 8.0,
+             'net_day_pct': 0.582, 'rebal_per_day': 0.14, 'p25_net_day': 0.29, 'worst_net_day': -0.1,
+             'share_positive': 0.88, 'p_survive_168h': 0.38, 'executable': False, 'screen_ok': True,
+             'screen_reason': 'both tokens are majors',
+             'token_a': {'address': 'a', 'symbol': 'SOL'}, 'token_b': {'address': 'b', 'symbol': 'USDC'}},
+            {'dex': 'orca', 'kind': 'clmm', 'address': 'O1', 'pair': 'SOL/USDC', 'fee': 0.0004,
+             'tvl_usd': 2.6e7, 'volume_24h_usd': 1.6e8, 'c_pool': 21.1, 'band': 1.18, 'band_pct': 18.0,
+             'net_day_pct': 0.386, 'rebal_per_day': 0.03, 'p25_net_day': 0.08, 'worst_net_day': -0.2,
+             'share_positive': 0.81, 'p_survive_168h': 0.72, 'executable': True, 'screen_ok': True,
+             'screen_reason': 'both tokens are majors',
+             'token_a': {'address': 'a', 'symbol': 'SOL'}, 'token_b': {'address': 'b', 'symbol': 'USDC'}},
+            {'dex': 'orca', 'kind': 'clmm', 'address': 'O2', 'pair': 'ZEC/USDC', 'tvl_usd': 2.8e6,
+             'volume_24h_usd': 1.7e7, 'net_day_pct': None, 'skipped': 'adaptive-fee pool'},
+        ]
+
+    def test_record_and_read_back_in_rank_order(self):
+        run_id = db.record_scan('sol-usdc', ('orca', 'meteora-dlmm'), self.rows(),
+                                {'byreal': 'timeout'}, 123.4, listed=3)
+        run, rows = db.latest_scan()
+        self.assertEqual(run['id'], run_id)
+        self.assertEqual(run['pools_scored'], 2)
+        self.assertEqual(run['pools_listed'], 3)
+        self.assertEqual(run['errors'], {'byreal': 'timeout'})
+        self.assertEqual(run['best']['address'], 'M1')
+        self.assertEqual([r['address'] for r in rows], ['M1', 'O1', 'O2'])
+        self.assertEqual(rows[0]['rank'], 1)
+        self.assertTrue(rows[1]['executable']); self.assertFalse(rows[0]['executable'])
+        self.assertEqual(rows[2]['skipped'], 'adaptive-fee pool')
+        self.assertAlmostEqual(rows[0]['net_day_pct'], 0.582)
+        self.assertEqual(rows[0]['token_b']['symbol'], 'USDC')      # detail survives
+
+    def test_stale_board_is_reported_as_empty(self):
+        db.record_scan('sol-usdc', ('orca',), self.rows(), {}, 1.0, listed=3)
+        with db.cursor(commit=True) as cur:
+            cur.execute("update scan_runs set ts = now() - interval '2 days'")
+        run, rows = db.latest_scan(max_age_seconds=3600)
+        self.assertIsNotNone(run); self.assertEqual(rows, [])
+        self.assertEqual(db.latest_scan(), (db.latest_scan()[0], db.latest_scan()[1]))
+
+    def test_scan_history_per_pool(self):
+        db.record_scan('sol-usdc', ('orca',), self.rows(), {}, 1.0, listed=3)
+        db.record_scan('sol-usdc', ('orca',), self.rows(), {}, 1.0, listed=3)
+        self.assertEqual(len(db.scan_history('O1')), 2)
+        self.assertEqual(db.scan_history('nope'), [])
+
+    def test_repoint_moves_the_profile(self):
+        row = db.repoint('sol-usdc', 'meteora-dlmm', 'M1', 'SOL/USDC', 'SOL', 'USDC')
+        self.assertEqual((row['dex'], row['pool']), ('meteora-dlmm', 'M1'))
+        with self.assertRaises(SystemExit):
+            db.repoint('nope', 'orca', 'x', 'a/b', 'a', 'b')
+        db.repoint('sol-usdc', 'orca', LIVE_POOL, 'SOL/USDC', 'SOL', 'USDC')
+
+    def test_positions_carry_their_dex(self):
+        _fixtures.reset_ledger()
+        db.open_position('mintX', 'M1', 'SOL/USDC', 100, 120, 8, 'sig', 190, 'test',
+                         config_name='sol-usdc', dex='meteora-dlmm')
+        with db.cursor() as cur:
+            cur.execute("select dex from positions where mint = 'mintX'")
+            self.assertEqual(cur.fetchone()['dex'], 'meteora-dlmm')
+        _fixtures.reset_ledger()
+
+
+
+
+class ByPool(unittest.TestCase):
+    def test_fees_and_time_are_split_by_pool_and_dex(self):
+        _fixtures.ensure_profile()
+        _fixtures.reset_ledger()
+        db.open_position('o1', 'POOL_O', 'SOL/USDC', 100, 120, 8, 's', 190, 'x', dex='orca')
+        db.snapshot('o1', 110, True, 1, 0.0, 0.0, 0.5, 50, 190)
+        db.record_harvest('o1', 0, 1.0, 1.0, 'h1')
+        db.close_position('o1', 'c', None)
+        db.open_position('m1', 'POOL_M', 'SOL/USDC', 100, 120, 8, 's', 194, 'x', dex='meteora-dlmm')
+        db.snapshot('m1', 110, True, 1, 0.0, 0.0, 0.25, 40, 194)
+        db.snapshot('m1', 130, False, 1, 0.0, 0.0, 0.30, 40, 194)
+        rows = db.by_pool()
+        by = {r['dex']: r for r in rows}
+        self.assertEqual(set(by), {'orca', 'meteora-dlmm'})
+        self.assertEqual(by['orca']['open_now'], 0)
+        self.assertAlmostEqual(by['orca']['fees_usd'], 1.0)          # realised only, closed
+        self.assertEqual(by['meteora-dlmm']['open_now'], 1)
+        self.assertAlmostEqual(by['meteora-dlmm']['fees_usd'], 0.30)  # latest unrealised
+        self.assertEqual(by['meteora-dlmm']['in_range_pct'], 50.0)
+        self.assertEqual(rows[0]['dex'], 'meteora-dlmm')               # most recent first
+        s = db.stats()
+        self.assertEqual(s['position_dex'], 'meteora-dlmm')
+        self.assertEqual(s['dexes_held'], ['meteora-dlmm', 'orca'])
+        self.assertEqual(len(s['by_pool']), 2)
+        d = db.daily()
+        self.assertIn('meteora-dlmm SOL/USDC', d[0]['pools'])
+        _fixtures.reset_ledger()
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

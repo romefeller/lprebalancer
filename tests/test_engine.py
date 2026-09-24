@@ -1,6 +1,7 @@
 """The band arithmetic, on paths whose answer is known in advance."""
 import math
 import unittest
+from unittest import mock
 
 import numpy as np
 
@@ -215,13 +216,87 @@ class Rolling(unittest.TestCase):
         self.assertIsNone(engine.ladder(bad, (ts, px, vol), (1.05,), 190.0))
 
 
-class Jev(unittest.TestCase):
-    def test_partner_of_a_major_is_the_token_judged(self):
-        pick = lambda pair: (lambda a, b: b if a in engine.MAJORS else a)(*pair.split('/'))
-        self.assertEqual(pick('SOL/WIF'), 'WIF')
-        self.assertEqual(pick('USDC/PUMP'), 'PUMP')
-        self.assertEqual(pick('WIF/USDC'), 'WIF')
-        self.assertEqual(pick('USDT/USDC'), 'USDC')
+
+
+class Board(unittest.TestCase):
+    def rec(self, **kw):
+        base = {'dex': 'orca', 'kind': 'clmm', 'address': 'P1', 'pair': 'SOL/USDC',
+                'token_a': {'address': 'a', 'symbol': 'SOL', 'name': 'Solana', 'decimals': 9},
+                'token_b': {'address': 'b', 'symbol': 'USDC', 'name': 'USD Coin', 'decimals': 6},
+                'price': 100.0, 'fee': 0.0004, 'fee_source': 'nominal', 'tvl_usd': 2e7,
+                'volume_24h_usd': 5e7, 'fees_24h_usd': 2e4, 'adaptive_fee': False,
+                'liquidity': 20 * (2e7 / (2 * 100 ** 0.5))}
+        base.update(kw)
+        return base
+
+    def test_dlmm_concentration_matches_clmm_for_the_same_pool_shape(self):
+        # A full-range position of TVL V holds V*s/4 per bin of log-width s.
+        # A pool whose bins each hold 20x that is 20x concentrated.
+        tvl, step = 1e7, 4
+        per_bin_full = tvl * (step / 1e4) / 4
+        c = engine.concentration({'kind': 'dlmm', 'tvl_usd': tvl, 'price': 100.0,
+                                  'bin_step': step, 'active_bin_usd': 20 * per_bin_full}, 1.0)
+        self.assertAlmostEqual(c, 20.0)
+        c2 = engine.concentration({'kind': 'clmm', 'tvl_usd': tvl, 'price': 100.0,
+                                   'liquidity': 20 * tvl / (2 * 10)}, 1.0)
+        self.assertAlmostEqual(c2, 20.0)
+        self.assertIsNone(engine.concentration({'kind': 'dlmm', 'tvl_usd': tvl, 'price': 100.0}, 1.0))
+
+    def test_screen_token_rules(self):
+        ok, why = engine.screen_token('WIF', {'name': 'dogwifhat', 'verified': True, 'tags': ['verified']})
+        self.assertTrue(ok)
+        ok, why = engine.screen_token('xSOL', {'name': 'Hylo 3x Leveraged SOL', 'verified': True})
+        self.assertFalse(ok); self.assertIn('leveraged', why)
+        ok, _ = engine.screen_token('NEW', {'name': 'New Coin', 'verified': False})
+        self.assertFalse(ok)
+        ok, _ = engine.screen_token('NEW', None)
+        self.assertFalse(ok)
+        ok, _ = engine.screen_token('X', {'name': 'X', 'verified': True, 'mint_authority_disabled': False})
+        self.assertFalse(ok)
+
+    def test_screening_verdict_is_the_worst_side(self):
+        rec = {'token_a': {'symbol': 'SOL'}, 'token_b': {'symbol': 'WIF'}}
+        ok, why = engine.screening_verdict(rec, {'b': {'name': 'dogwifhat', 'verified': True}})
+        self.assertTrue(ok)
+        ok, why = engine.screening_verdict(rec, {'b': None})
+        self.assertFalse(ok)
+        ok, why = engine.screening_verdict({'token_a': {'symbol': 'SOL'}, 'token_b': {'symbol': 'USDC'}}, {})
+        self.assertTrue(ok); self.assertIn('majors', why)
+
+    def test_score_board_scores_gates_and_screens(self):
+        n = 24 * 41 + 1
+        rng = np.random.default_rng(5)
+        ts = np.arange(n) * 3600
+        px = 100 * np.exp(np.cumsum(rng.normal(0, 0.008, n)))
+        vol = np.full(n, 3e6)
+        recs = [
+            self.rec(address='P1', price=float(px[-1])),
+            self.rec(address='P2', dex='raydium-clmm', tvl_usd=1e5),                 # too small
+            self.rec(address='P3', dex='byreal', liquidity=None),                    # unreadable
+            self.rec(address='P4', dex='meteora-dlmm', kind='dlmm', pair='SOL/WIF',
+                     token_b={'address': 'w', 'symbol': 'WIF', 'name': 'dogwifhat', 'decimals': 6},
+                     bin_step=4, active_bin_usd=20 * 2e7 * 4e-4 / 4, price=float(px[-1])),
+            self.rec(address='P5', adaptive_fee=True),
+        ]
+        import dexes
+        with mock.patch.object(engine, 'candles', lambda a: (ts, px, vol)), \
+                mock.patch.object(dexes, 'jupiter_prices', lambda m: {'w': 1.0}), \
+                mock.patch.object(dexes, 'jupiter_token',
+                                  lambda m: {'name': 'dogwifhat', 'verified': True, 'tags': []}):
+            board = engine.score_board(recs, 190.0, (1.05, 1.12), min_tvl=2.5e5,
+                                       blocked=lambda r: 'adaptive' if r.get('adaptive_fee') else None)
+        by = {r['address']: r for r in board}
+        self.assertIsNotNone(by['P1']['net_day_pct'])
+        self.assertEqual(by['P1']['screen_reason'], 'both tokens are majors')
+        self.assertIn('below', by['P2']['skipped'])
+        self.assertIn('unreadable', by['P3']['skipped'])
+        self.assertTrue(by['P4']['screen_ok'])
+        self.assertIn('WIF', by['P4']['screen_reason'])
+        self.assertEqual(by['P5']['skipped'], 'adaptive')
+        scored = [r for r in board if r.get('net_day_pct') is not None]
+        self.assertEqual([r['address'] for r in scored], sorted((r['address'] for r in scored),
+                         key=lambda a: -by[a]['net_day_pct']))
+        self.assertIn('all_runs', by['P1'])
 
 
 if __name__ == '__main__':
