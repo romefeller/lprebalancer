@@ -366,7 +366,7 @@ async function rentOf(connection, owner, nftMints, programId) {
   return lamports / 1e9;
 }
 const TOKEN_PROGRAM_ID_RENT = new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA');
-const TOKEN_2022_PROGRAM_ID_RENT = new PublicKey('TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnWqfbrbyy3X22');
+const TOKEN_2022_PROGRAM_ID_RENT = new PublicKey('TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb');
 
 async function rentUsdOf(info, rentSol) {
   const su = info.nativeSide === 'A' && info.quoteUsd != null ? info.price * info.quoteUsd
