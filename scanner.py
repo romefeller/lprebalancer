@@ -3,6 +3,7 @@ names, scored under the bot's own model, screened, written to Postgres.
 
     python3 scanner.py            # scan once, print the board
     python3 scanner.py board      # print the last board without scanning
+    touch RESCAN                  # make the running bot scan on its next tick
 
 Inside the bot it runs as a thread. The scan is slow — one GeckoTerminal
 request per pool at the free tier's pace, a few minutes for a full board — and
@@ -10,6 +11,7 @@ the trading loop must not wait on it, so the thread writes to `scan_runs` /
 `scan_pools` and the loop reads the latest row when it next re-optimises. A
 scan that fails leaves the previous board in place and says so in the feed.
 """
+import pathlib
 import threading
 import time
 import traceback
@@ -71,9 +73,15 @@ class Scanner(threading.Thread):
         self.stop = threading.Event()
 
     def due(self):
+        trigger = pathlib.Path(__file__).resolve().parent / 'RESCAN'
+        if trigger.exists():
+            trigger.unlink()     # consumed before it runs, like the other triggers
+            return True
         run, _ = db.latest_scan()
         if not run:
             return True
+        if not run.get('season'):
+            return True          # a board without the day's rhythm is from older code
         return (db.now() - run['ts']).total_seconds() >= config.SCAN_INTERVAL
 
     def run(self):

@@ -24,6 +24,7 @@ HALT
 REBALANCE
 REOPT
 MIGRATE
+RESCAN
 
 # --- local junk ---------------------------------------------------------------
 __pycache__/

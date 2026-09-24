@@ -268,12 +268,15 @@ def simulate(k, ts, px, vol, pool_L, fee, capital, swap_cost=SWAP_COST):
     """Replay one band. Returns net per day and the rebalance behaviour."""
     entry = float(px[0])
     pa, pb = entry / k, entry * k
-    # pool_L here is the POOL CONCENTRATION (dimensionless), not raw liquidity.
-    # Fee share per dollar of position: the position's concentration against
-    # the pool's, over the pool's TVL. Multiplied by the position's CURRENT
-    # value each hour, so that a position that has shrunk earns less and one
-    # that has grown earns more, as it does on chain.
-    share_per_usd = band_concentration(k) / pool_L['c_pool'] / pool_L['tvl_usd']
+    # pool_L carries the POOL CONCENTRATION (dimensionless) and the pool's TVL
+    # in QUOTE-TOKEN units. Everything in this replay is in quote units: the
+    # candle volume (GeckoTerminal, currency=token), the position's value,
+    # the capital. The fee share is the position's concentration against the
+    # pool's, over the pool's TVL in the same units, times the position's
+    # CURRENT value each hour, so a position that has shrunk earns less. With
+    # TVL in dollars instead, a SOL-quoted pool was understated by the SOL
+    # price and a PENGU-quoted one overstated by a hundred.
+    share_per_unit = band_concentration(k) / pool_L['c_pool'] / pool_L['tvl_quote']
     L = liquidity_for(capital, entry, pa, pb)
     fees = cost = 0.0
     rebal = in_range = 0
@@ -281,7 +284,7 @@ def simulate(k, ts, px, vol, pool_L, fee, capital, swap_cost=SWAP_COST):
         p = float(px[i])
         if pa <= p <= pb:
             x, y = amounts(L, p, pa, pb)
-            fees += vol[i] * fee * share_per_usd * (x * p + y)
+            fees += vol[i] * fee * share_per_unit * (x * p + y)
             in_range += 1
         else:
             x, y = amounts(L, p, pa, pb)
@@ -437,13 +440,21 @@ def ladder(pool, candle_data, bands, capital, swap_cost=SWAP_COST,
         return None
     ts, px, vol = candle_data
     # The candle price and the pool's own price must agree, or the liquidity
-    # share is computed on a different scale than the pool's L.
+    # share is computed on a different scale than the pool's L. GeckoTerminal
+    # orders a pair its own way; when it has the pool inverted, its price is
+    # inverted AND its volume is in ITS quote token, which is this pool's base.
+    # Multiplying by the re-inverted price converts each hour's volume into
+    # this pool's quote token. Without that, SOL/PENGU (Gecko: PENGU/SOL) had
+    # its volume in SOL where the model wanted PENGU, 3800 times too small,
+    # and SOL/WBTC had it in SOL where the model wanted WBTC, 740 times too
+    # large, which the board printed as 152%/day.
     if abs(px[-1] / price - 1.0) > 0.15:
         if abs((1.0 / px[-1]) / price - 1.0) > 0.15:
             return None
         px = 1.0 / px
+        vol = vol * px
     fee = float(rec.get('fee') or 0)
-    ctx = {'tvl_usd': tvl, 'c_pool': c_pool}
+    ctx = {'tvl_quote': tvl / quote_usd, 'c_pool': c_pool}
     rows = []
     for k in bands:
         path = simulate(k, ts, px, vol, ctx, fee, capital, swap_cost)
@@ -548,7 +559,9 @@ def realised_check(rows):
     for r in rows:
         if r.get('net_day_pct') is None:
             continue
-        share = band_concentration(r['band']) / r['c_pool'] / r['tvl_usd']   # per $ of position
+        # per dollar of position: dollar fees over dollar TVL, a pure fraction,
+        # like the replay's fees over capital in quote units
+        share = band_concentration(r['band']) / r['c_pool'] / r['tvl_usd']
         r['realised_day_pct'] = float(r.get('fees_24h_usd') or 0) * share * 100
         path = r.get('path') or {}
         gross = (path.get('fees') or 0) / max(path.get('days') or 1, 1e-9)
@@ -690,7 +703,7 @@ def score_board(records, capital, bands, swap_cost=SWAP_COST, max_rebal_per_day=
 
 def print_board(rows, top=25):
     print(f"{'dex':<22}{'pair':<16}{'fee':>7}{'tvl$M':>7}{'vol$M':>7}{'cpool':>6}{'band':>6}"
-          f"{'net%/d':>8}{'real':>6}{'use':>7}{'p25':>7}{'+win':>5}{'reb/d':>6}{'S7d':>5}  screen")
+          f"{'net%/d':>8}{'real':>8}{'use':>7}{'p25':>7}{'+win':>5}{'reb/d':>6}{'S7d':>5}  screen")
     for r in rows[:top]:
         if r.get('net_day_pct') is None:
             print(f"{r['dex']:<22}{(r.get('pair') or '?')[:15]:<16}{'':>7}{(r.get('tvl_usd') or 0) / 1e6:>7.2f}"
@@ -700,7 +713,7 @@ def print_board(rows, top=25):
         drift = r.get('liquidity_drift')
         print(f"{r['dex']:<22}{r['pair'][:15]:<16}{r['fee'] * 100:>6.3f}%{r['tvl_usd'] / 1e6:>7.2f}"
               f"{(r.get('volume_24h_usd') or 0) / 1e6:>7.2f}{r['c_pool']:>6.1f}{r['band_pct']:>5.0f}%"
-              f"{r['net_day_pct']:>8.3f}{(f'{drift:.2f}x' if drift is not None else '-'):>6}"
+              f"{r['net_day_pct']:>8.3f}{(f'{min(drift, 99.0):.2f}x' if drift is not None else '-'):>8}"
               f"{(r.get('decision_day_pct') if r.get('decision_day_pct') is not None else r['net_day_pct']):>7.3f}"
               f"{(r.get('p25_net_day') or 0):>7.3f}"
               f"{(r.get('share_positive') or 0) * 100:>4.0f}%{r['rebal_per_day']:>6.2f}"

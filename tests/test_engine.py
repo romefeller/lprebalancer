@@ -55,7 +55,7 @@ class Clmm(unittest.TestCase):
 
 class Simulate(unittest.TestCase):
     def ctx(self):
-        return {'tvl_usd': 1e7, 'c_pool': 20.0}
+        return {'tvl_quote': 1e7, 'c_pool': 20.0}
 
     def hours(self, n):
         return np.arange(n) * 3600
@@ -116,6 +116,54 @@ class Simulate(unittest.TestCase):
         self.assertLess(bc['band'], bw['band'])
 
 
+class QuoteUnits(unittest.TestCase):
+    def test_the_same_pool_scores_the_same_in_any_quote_token(self):
+        """A SOL/USDC pool and the identical pool quoted in a token worth $2:
+        candles halve, TVL in quote units halves, and net %/day must agree.
+        With TVL left in dollars the second pool scored half the fees."""
+        n = 24 * 41 + 1
+        rng = np.random.default_rng(3)
+        ts = np.arange(n) * 3600
+        px_usd = 100 * np.exp(np.cumsum(rng.normal(0, 0.006, n)))
+        vol_usd = np.full(n, 3e6) * (1 + 0.5 * rng.random(n))
+        L_human = 20 * (2e7 / (2 * px_usd[-1] ** 0.5))
+        usd = {'kind': 'clmm', 'tvl_usd': 2e7, 'price': float(px_usd[-1]), 'fee': 0.0004,
+               'liquidity': L_human, 'token_b': {'symbol': 'USDC', 'address': 'b'},
+               'token_a': {'symbol': 'SOL', 'address': 'a'}, 'dex': 'x', 'address': 'p', 'pair': 'SOL/USDC'}
+        q = 2.0                       # the quote token is worth $2
+        two = dict(usd, price=float(px_usd[-1]) / q, liquidity=L_human / q ** 0.5,   # L = V/(2 sqrt P) in quote units
+                   token_b={'symbol': 'TWO', 'address': 'c'}, pair='SOL/TWO')
+        r1 = engine.ladder(usd, (ts, px_usd, vol_usd), (1.05, 1.12), 190.0, quote_usd=1.0)
+        r2 = engine.ladder(two, (ts, px_usd / q, vol_usd / q), (1.05, 1.12), 190.0, quote_usd=q)
+        self.assertIsNotNone(r1); self.assertIsNotNone(r2)
+        self.assertAlmostEqual(r1[1]['c_pool'], r2[1]['c_pool'], places=6)
+        for a, b in zip(r1[0], r2[0]):
+            self.assertAlmostEqual(a['net_day_pct'], b['net_day_pct'], places=4)
+            self.assertAlmostEqual(a['path']['fees'] / 190.0, b['path']['fees'] / 190.0, places=6)
+
+
+    def test_geckoterminal_inverted_pair_scores_like_the_upright_one(self):
+        """Gecko lists SOL/PENGU as PENGU/SOL: price inverted, volume in SOL.
+        Re-inverting the price without converting the volume left SOL/PENGU
+        3800x too small and SOL/WBTC 740x too large on the live board."""
+        n = 24 * 41 + 1
+        rng = np.random.default_rng(4)
+        ts = np.arange(n) * 3600
+        px = 3800 * np.exp(np.cumsum(rng.normal(0, 0.01, n)))       # PENGU per SOL, the pool's order
+        vol_pengu = np.full(n, 8e7) * (1 + 0.5 * rng.random(n))    # volume in PENGU, the pool's quote
+        q = 0.03                                                    # PENGU is 3 cents
+        rec = {'kind': 'clmm', 'tvl_usd': 4e6, 'price': float(px[-1]), 'fee': 0.003,
+               'liquidity': 4 * ((4e6 / q) / (2 * px[-1] ** 0.5)),
+               'token_a': {'symbol': 'SOL', 'address': 'a'}, 'token_b': {'symbol': 'PENGU', 'address': 'p'},
+               'dex': 'orca', 'address': 'x', 'pair': 'SOL/PENGU'}
+        upright = engine.ladder(rec, (ts, px, vol_pengu), (1.12, 1.40), 190.0, quote_usd=q)
+        gecko = engine.ladder(rec, (ts, 1.0 / px, vol_pengu / px), (1.12, 1.40), 190.0, quote_usd=q)
+        self.assertIsNotNone(upright); self.assertIsNotNone(gecko)
+        for a, b in zip(upright[0], gecko[0]):
+            self.assertAlmostEqual(a['net_day_pct'], b['net_day_pct'], places=6)
+            self.assertAlmostEqual(a['path']['fees'], b['path']['fees'], places=6)
+
+
 class Survival(unittest.TestCase):
     def test_flat_path_never_exits_and_is_censored(self):
         px = np.full(241, 100.0)
@@ -161,7 +209,7 @@ class Survival(unittest.TestCase):
 
 class Rolling(unittest.TestCase):
     def ctx(self):
-        return {'tvl_usd': 1e7, 'c_pool': 20.0}
+        return {'tvl_quote': 1e7, 'c_pool': 20.0}
 
     def test_flat_path_rolling_equals_the_single_path(self):
         n = 24 * 30 + 1
