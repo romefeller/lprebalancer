@@ -126,3 +126,16 @@ class Ledger(unittest.TestCase):
         rebalancer.db.record_fee_state('orca', 'P', dict(st, g0=5))
         first, last, secs = rebalancer.db.fee_state_span('P')
         self.assertEqual((int(first['g0']), int(last['g0'])), (1, 5)); self.assertGreaterEqual(secs, 0)
+
+
+class RewardPrices(unittest.TestCase):
+    def test_a_failed_fetch_uses_the_last_good_price_for_six_hours(self):
+        rebalancer._REWARD_PX.clear()
+        with mock.patch.object(rebalancer.dexes, 'jupiter_prices', lambda m: {'CAKE': 2.7}):
+            self.assertEqual(rebalancer.reward_prices(['CAKE']), {'CAKE': 2.7})
+        with mock.patch.object(rebalancer.dexes, 'jupiter_prices', lambda m: {}):
+            self.assertEqual(rebalancer.reward_prices(['CAKE']), {'CAKE': 2.7})
+        rebalancer._REWARD_PX['CAKE'] = (time.time() - 7 * 3600, 2.7)
+        with mock.patch.object(rebalancer.dexes, 'jupiter_prices', lambda m: {}):
+            self.assertEqual(rebalancer.reward_prices(['CAKE']), {})
+        rebalancer._REWARD_PX.clear()

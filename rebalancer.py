@@ -1124,6 +1124,24 @@ def sample_fee_growth(state, status=None):
         notify('venue_sample_failed', reason=tidy(e))
 
 
+_REWARD_PX = {}                 # mint -> (fetched_at, usd): the last good price
+
+
+def reward_prices(mints, max_age=6 * 3600):
+    """Jupiter prices for reward mints, falling back to the last good price
+    (up to six hours old) when the free API rate-limits: a missing price
+    valued PancakeSwap's CAKE at nothing in the first live ranking."""
+    try:
+        fresh = dexes.jupiter_prices(mints)
+    except Exception:
+        fresh = {}
+    now = time.time()
+    for m, p in fresh.items():
+        if p and p > 0:
+            _REWARD_PX[m] = (now, float(p))
+    return {m: _REWARD_PX[m][1] for m in mints if m in _REWARD_PX and now - _REWARD_PX[m][0] <= max_age}
+
+
 def venue_income(pool, usd_a, usd_b, band=1.01):
     """The pool's on-chain income for a centred band, % per day, over up to
     the last 24 hours of samples, with the hours of evidence."""
@@ -1132,7 +1150,7 @@ def venue_income(pool, usd_a, usd_b, band=1.01):
         return None
     first, last, secs = span
     rw_mints = [m for m, _ in (last.get('rewards') or [])]
-    rw_usd = dexes.jupiter_prices(rw_mints) if rw_mints else {}
+    rw_usd = reward_prices(rw_mints) if rw_mints else {}
     if rw_mints:
         dexes.mint_decimals(rw_mints)
     inc = dexes.band_income(first, last, secs, band, usd_a, usd_b, rw_usd)
