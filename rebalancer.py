@@ -161,7 +161,7 @@ def notify_book(event, **payload):
     return notify(event, **{**payload, **db.stats()})
 
 
-def chain(*args, dex=None, timeout=420):
+def chain(*args, dex=None, timeout=420, extra_env=None):
     """Call the signer for `dex` (the active pool's by default).
     Returns (parsed_json, tidy_error)."""
     script = SIGNERS.get(dex or config.DEX)
@@ -181,7 +181,7 @@ def chain(*args, dex=None, timeout=420):
                LPBOT_MAX_USD=str(config.MAX_USD),
                LPBOT_SLIPPAGE_BPS=str(config.SLIPPAGE_BPS),
                LPBOT_GAS_RESERVE_SOL=str(config.GAS_RESERVE_SOL),
-               LPBOT_PROFIT_WALLET=config.PROFIT_WALLET)
+               LPBOT_PROFIT_WALLET=config.PROFIT_WALLET, **(extra_env or {}))
     try:
         r = subprocess.run(['node', script, *args], capture_output=True,
                            text=True, timeout=timeout, env=env)
@@ -644,14 +644,30 @@ def balance_wallet(state, bal, rec):
         notify('swap_skipped', reason='pool record has no mints')
         return bal
     target = f'{C * config.SIDE_CAP_FRACTION:.2f}'
-    out, err = chain('rebalance', mint_a, mint_b, target, target, '--execute', dex='jupiter')
+    # Prices and decimals the loop already has, so the swap needs no call to
+    # Jupiter's rate-limited price API for the pool's own tokens.
+    hints = {}
+    try:
+        ra, rb = rec.get('token_a') or {}, rec.get('token_b') or {}
+        if ra.get('decimals') is not None and rb.get('decimals') is not None:
+            hints = {mint_a: {'usd': bal['price'] * q, 'decimals': int(ra['decimals']), 'symbol': ra.get('symbol')},
+                     mint_b: {'usd': q, 'decimals': int(rb['decimals']), 'symbol': rb.get('symbol')}}
+    except (KeyError, TypeError, ValueError):
+        hints = {}
+    env = {'LPBOT_TOKEN_HINTS': json.dumps(hints)} if hints else None
+    out, err = chain('rebalance', mint_a, mint_b, target, target, '--execute', dex='jupiter', extra_env=env)
     if (err or not out) and not (out or {}).get('signature') and not (out or {}).get('partial') \
             and re.search(r'rate limit|429|timeout|timed out|ECONNRESET|blockhash', str(err), re.I):
         # Nothing left this process: a transport failure is safe to repeat
         # once. Two rate-limited swaps in a row on 2026-09-26 left the bot one
         # failure from a halt with its capital idle in the wallet.
         time.sleep(15)
-        out, err = chain('rebalance', mint_a, mint_b, target, target, '--execute', dex='jupiter')
+        out, err = chain('rebalance', mint_a, mint_b, target, target, '--execute', dex='jupiter', extra_env=env)
+    if (err or not out) and not (out or {}).get('signature') and not (out or {}).get('partial'):
+        # Nothing was sent. Open with what the wallet holds: a smaller
+        # position earning fees beats capital idle until the next poll.
+        notify('swap_skipped', reason=f'swap failed without sending ({err or "no result"}); opening with the wallet as it is')
+        return bal
     if out and out.get('noop'):
         notify('swap_skipped', reason='already at target', usd_a=round(usd_a, 2), usd_b=round(usd_b, 2))
         return bal
@@ -890,6 +906,15 @@ def reopen(state, reason, band=None, recovering=False):
     50/50 when `rebalance_swap` is on and the wallet is lopsided)."""
     pool = config.POOL
     best = best_band_for(pool)
+    if not best and band:
+        # A tight calm band needs no ladder: it is centred on the live chain
+        # price. Only the pool's record (tokens, for the swap) is needed. On
+        # 2026-09-26 an hourly-candle fetch failure left the capital idle.
+        try:
+            best = {'band': band, 'price': None, 'net_day_pct': 0.0, 'rebal_per_day': 0.0,
+                    'record': dexes.pool(config.DEX, pool)}
+        except Exception:
+            best = None
     if not best:
         notify('idle', reason='could not price the pool; opening nothing')
         return False

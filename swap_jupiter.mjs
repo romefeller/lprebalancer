@@ -134,6 +134,18 @@ function assertMint(m, what) {
 // One call for prices and decimals, one per mint for the symbol.
 const infoCache = new Map();
 
+// LPBOT_TOKEN_HINTS: {"<mint>": {"usd": price, "decimals": n, "symbol": "X"}} from
+// the loop, which already knows the pool's tokens. A hinted mint needs no
+// Jupiter call: the free price API rate-limits by IP, and on 2026-09-26 its
+// 429s left the capital idle through two reopen attempts.
+try {
+  for (const [m, h] of Object.entries(JSON.parse(process.env.LPBOT_TOKEN_HINTS || '{}'))) {
+    if (h && Number(h.usd) > 0 && Number.isInteger(h.decimals)) {
+      infoCache.set(m, { mint: m, symbol: h.symbol || m.slice(0, 6), decimals: h.decimals, usdPrice: Number(h.usd) });
+    }
+  }
+} catch { /* a bad hint is ignored; Jupiter is asked instead */ }
+
 async function tokenInfos(mints) {
   const need = mints.filter(m => !infoCache.has(m));
   if (need.length) {

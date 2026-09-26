@@ -166,9 +166,21 @@ class Loop(unittest.TestCase):
                 self.assertIn('--execute', calls[0][0])
                 self.assertEqual(after['balanceA'], 1.0)
 
-    def test_failed_swap_opens_nothing_and_counts(self):
+    def test_a_swap_that_sent_nothing_still_lets_the_open_run(self):
         state = {'failures': 0}
+        b = self.bal(0.06, 300.0)
         with mock.patch.object(rebalancer, 'chain', lambda *a, **k: (None, 'impact too high')), \
+                mock.patch.object(rebalancer, 'notify', lambda *a, **k: None), \
+                mock.patch.object(rebalancer, 'save', lambda s: None), \
+                mock.patch.object(rebalancer.db, 'event', lambda *a: None), \
+                mock.patch.object(rebalancer.config, 'REBALANCE_SWAP', True), \
+                mock.patch.object(rebalancer.config, 'CAPITAL_USD', 190.0):
+            self.assertIs(rebalancer.balance_wallet(state, b, self.REC), b)
+        self.assertEqual(state['failures'], 0)
+
+    def test_a_partial_swap_opens_nothing_and_counts(self):
+        state = {'failures': 0}
+        with mock.patch.object(rebalancer, 'chain', lambda *a, **k: ({'signature': 's', 'partial': True}, 'confirm lost')), \
                 mock.patch.object(rebalancer, 'notify', lambda *a, **k: None), \
                 mock.patch.object(rebalancer, 'save', lambda s: None), \
                 mock.patch.object(rebalancer.db, 'event', lambda *a: None), \
