@@ -25,10 +25,15 @@ def is_address(s):
 
 
 def signer_args(args):
-    """Arguments handed to a signer: printable, short, no whitespace."""
+    """Arguments handed to a signer: printable, short, no whitespace, and no
+    option except the literal --execute the loop itself adds. A value from an
+    API that starts with '-' (a mint, an amount) would otherwise be parsed as
+    a flag such as --pool (security review, 2026-09-26)."""
     for a in args:
         if not isinstance(a, str) or not ARG.fullmatch(a):
             raise Refused(f'bad signer argument {a!r}')
+        if a.startswith('-') and a != '--execute':
+            raise Refused(f'signer argument {a!r} looks like an option')
     return True
 
 

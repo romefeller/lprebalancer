@@ -51,7 +51,9 @@ const GAS_RESERVE_SOL = Number(process.env.LPBOT_GAS_RESERVE_SOL ?? 0.02);
 const POSITION_MAX_LENGTH = 1400;      // bins per position, the program's limit
 
 const NATIVE_MINT = 'So11111111111111111111111111111111111111112';
-const STABLES = new Set(['USDC', 'USDT', 'PYUSD', 'USDS', 'DAI', 'FDUSD', 'USDE']);
+// Stablecoins by MINT (USDC, USDT, PYUSD, USDS). A symbol comes from API or token metadata an
+// attacker controls: a fake "USDC" priced at $1 would defeat every dollar cap (review 2026-09-26).
+const STABLE_MINTS = new Set(['EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', 'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB', '2b1kV6DkPAnxd5ixfnxCpjxmKwqjjaYmCZfHsFu24GXo', 'USDSwr9ApdHk5bvJKMjzff41FfuX8bSxdKcR81vTwcA']);
 const METEORA = 'https://dlmm.datapi.meteora.ag';
 const JUPITER = 'https://lite-api.jup.ag';
 const HEADERS = { accept: 'application/json', 'user-agent': 'Mozilla/5.0' };
@@ -105,7 +107,7 @@ async function tokenUsd(mint) {
 }
 
 async function quoteUsd(symY, mintY) {
-  if (STABLES.has(symY)) return { usd: 1, source: 'stable' };
+  if (STABLE_MINTS.has(String(mintY))) return { usd: 1, source: 'stable' };
   const p = await tokenUsd(mintY);
   return p ? { usd: p, source: 'jupiter:mint' } : { usd: null, source: 'unknown' };
 }

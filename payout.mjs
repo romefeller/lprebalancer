@@ -26,6 +26,9 @@ const DIR = path.dirname(new URL(import.meta.url).pathname);
 const HALT = path.join(DIR, 'HALT');
 const RPC = process.env.SOLANA_RPC_URL ?? process.env.LPBOT_RPC ?? 'https://api.mainnet-beta.solana.com';
 const PROFIT = process.env.LPBOT_PROFIT_WALLET ?? '';
+// The pin lives in the service environment, not in the database: a database
+// write alone cannot redirect payouts (security review, 2026-09-26).
+const PIN = process.env.LPBOT_PROFIT_WALLET_PIN ?? '';
 const GAS_RESERVE_SOL = Number(process.env.LPBOT_GAS_RESERVE_SOL ?? 0.05);
 const NATIVE_MINT = 'So11111111111111111111111111111111111111112';
 
@@ -49,9 +52,11 @@ function key(s, what) {
 async function send(mintArg, amountArg, toArg, execute) {
   guard();
   if (!PROFIT) throw new Error('LPBOT_PROFIT_WALLET is not set; refusing to send');
+  if (!PIN) throw new Error('LPBOT_PROFIT_WALLET_PIN is not set; refusing to send');
   const to = key(toArg, 'destination');
-  if (to.toBase58() !== key(PROFIT, 'LPBOT_PROFIT_WALLET').toBase58()) {
-    throw new Error('destination is not the configured profit wallet; refusing to send');
+  if (to.toBase58() !== key(PROFIT, 'LPBOT_PROFIT_WALLET').toBase58()
+      || to.toBase58() !== key(PIN, 'LPBOT_PROFIT_WALLET_PIN').toBase58()) {
+    throw new Error('destination is not the pinned profit wallet; refusing to send');
   }
   const amount = Number(amountArg);
   if (!Number.isFinite(amount) || amount <= 0) throw new Error(`amount must be a positive number, got ${amountArg}`);
@@ -97,7 +102,23 @@ async function send(mintArg, amountArg, toArg, execute) {
     return;
   }
   guard();
-  const signature = await sendAndConfirmTransaction(connection, tx, [payer], { commitment: 'confirmed' });
+  // Send, then confirm. A confirmation that fails after the send is not a
+  // failed transfer: report the signature as partial so the loop never pays
+  // it twice (review, 2026-09-26).
+  const bh = await connection.getLatestBlockhash('confirmed');
+  tx.feePayer = payer.publicKey; tx.recentBlockhash = bh.blockhash;
+  tx.sign(payer);
+  let signature = null;
+  try {
+    signature = await connection.sendRawTransaction(tx.serialize(), { skipPreflight: false, maxRetries: 3 });
+    const conf = await connection.confirmTransaction({ signature, ...bh }, 'confirmed');
+    if (conf.value?.err) throw new Error(`transaction failed on chain: ${JSON.stringify(conf.value.err)}`);
+  } catch (e) {
+    if (!signature) throw e;
+    console.log(JSON.stringify({ ...report, signature, sent: true, partial: true, error: String(e.message ?? e) }, null, 1));
+    process.exitCode = 1;
+    return;
+  }
   console.log(JSON.stringify({ ...report, signature, sent: true }, null, 1));
 }
 

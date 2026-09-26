@@ -34,6 +34,7 @@ SolFi and Lifinity take no outside liquidity.
 import base64
 import concurrent.futures as cf
 import json
+import urllib.request
 import math
 import os
 import subprocess
@@ -111,11 +112,13 @@ def pool_accounts(addresses):
     for i in range(0, len(addresses), 100):
         chunk = addresses[i:i + 100]
         body = json.dumps({'jsonrpc': '2.0', 'id': 1, 'method': 'getMultipleAccounts',
-                           'params': [chunk, {'encoding': 'base64'}]})
-        r = subprocess.run(['curl', '-s', '--max-time', '40', '-H', 'content-type: application/json',
-                            '-d', body, _rpc_url()], capture_output=True, text=True)
+                           'params': [chunk, {'encoding': 'base64'}]}).encode()
+        # In-process, not through curl: the RPC URL can carry an API key, and a
+        # curl argv shows it to every `ps` (security review, 2026-09-26).
         try:
-            vals = json.loads(r.stdout)['result']['value']
+            req = urllib.request.Request(_rpc_url(), data=body, headers={'content-type': 'application/json'})
+            with urllib.request.urlopen(req, timeout=40) as resp:
+                vals = json.loads(resp.read())['result']['value']
         except Exception:
             continue
         for addr, v in zip(chunk, vals):

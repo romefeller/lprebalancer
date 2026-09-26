@@ -128,8 +128,8 @@ class QuoteUnits(unittest.TestCase):
         vol_usd = np.full(n, 3e6) * (1 + 0.5 * rng.random(n))
         L_human = 20 * (2e7 / (2 * px_usd[-1] ** 0.5))
         usd = {'kind': 'clmm', 'tvl_usd': 2e7, 'price': float(px_usd[-1]), 'fee': 0.0004,
-               'liquidity': L_human, 'token_b': {'symbol': 'USDC', 'address': 'b'},
-               'token_a': {'symbol': 'SOL', 'address': 'a'}, 'dex': 'x', 'address': 'p', 'pair': 'SOL/USDC'}
+               'liquidity': L_human, 'token_b': {'symbol': 'USDC', 'address': 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'},
+               'token_a': {'symbol': 'SOL', 'address': 'So11111111111111111111111111111111111111112'}, 'dex': 'x', 'address': 'p', 'pair': 'SOL/USDC'}
         q = 2.0                       # the quote token is worth $2
         two = dict(usd, price=float(px_usd[-1]) / q, liquidity=L_human / q ** 0.5,   # L = V/(2 sqrt P) in quote units
                    token_b={'symbol': 'TWO', 'address': 'c'}, pair='SOL/TWO')
@@ -154,7 +154,7 @@ class QuoteUnits(unittest.TestCase):
         q = 0.03                                                    # PENGU is 3 cents
         rec = {'kind': 'clmm', 'tvl_usd': 4e6, 'price': float(px[-1]), 'fee': 0.003,
                'liquidity': 4 * ((4e6 / q) / (2 * px[-1] ** 0.5)),
-               'token_a': {'symbol': 'SOL', 'address': 'a'}, 'token_b': {'symbol': 'PENGU', 'address': 'p'},
+               'token_a': {'symbol': 'SOL', 'address': 'So11111111111111111111111111111111111111112'}, 'token_b': {'symbol': 'PENGU', 'address': 'p'},
                'dex': 'orca', 'address': 'x', 'pair': 'SOL/PENGU'}
         upright = engine.ladder(rec, (ts, px, vol_pengu), (1.12, 1.40), 190.0, quote_usd=q)
         gecko = engine.ladder(rec, (ts, 1.0 / px, vol_pengu / px), (1.12, 1.40), 190.0, quote_usd=q)
@@ -269,8 +269,8 @@ class Rolling(unittest.TestCase):
 class Board(unittest.TestCase):
     def rec(self, **kw):
         base = {'dex': 'orca', 'kind': 'clmm', 'address': 'P1', 'pair': 'SOL/USDC',
-                'token_a': {'address': 'a', 'symbol': 'SOL', 'name': 'Solana', 'decimals': 9},
-                'token_b': {'address': 'b', 'symbol': 'USDC', 'name': 'USD Coin', 'decimals': 6},
+                'token_a': {'address': 'So11111111111111111111111111111111111111112', 'symbol': 'SOL', 'name': 'Solana', 'decimals': 9},
+                'token_b': {'address': 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', 'symbol': 'USDC', 'name': 'USD Coin', 'decimals': 6},
                 'price': 100.0, 'fee': 0.0004, 'fee_source': 'nominal', 'tvl_usd': 2e7,
                 'volume_24h_usd': 5e7, 'fees_24h_usd': 2e4, 'adaptive_fee': False,
                 'liquidity': 20 * (2e7 / (2 * 100 ** 0.5))}
@@ -408,8 +408,8 @@ class Tape(unittest.TestCase):
         base = {'kind': 'clmm', 'pair': 'SOL/USDC', 'price': float(px[-1]), 'fee': 0.0004,
                 'fee_source': 'nominal', 'tvl_usd': 2e7, 'volume_24h_usd': 5e7, 'adaptive_fee': False,
                 'liquidity': 20 * (2e7 / (2 * 100 ** 0.5)),
-                'token_a': {'address': 'a', 'symbol': 'SOL', 'name': 'Solana', 'decimals': 9},
-                'token_b': {'address': 'b', 'symbol': 'USDC', 'name': 'USD Coin', 'decimals': 6}}
+                'token_a': {'address': 'So11111111111111111111111111111111111111112', 'symbol': 'SOL', 'name': 'Solana', 'decimals': 9},
+                'token_b': {'address': 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', 'symbol': 'USDC', 'name': 'USD Coin', 'decimals': 6}}
         # identical pools except the tape: P2's last-24h fees are a tenth of P1's
         recs = [dict(base, dex='orca', address='P1', fees_24h_usd=3e6 * 24 * 0.0004),
                 dict(base, dex='raydium-clmm', address='P2', fees_24h_usd=3e6 * 24 * 0.0004 / 10)]

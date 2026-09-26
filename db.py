@@ -198,6 +198,31 @@ def latest_scan_id():
     return r['id'] if r else None
 
 
+def record_pool_stats(dex, pool, liquidity, tvl_usd, volume_24h, price):
+    with cursor(commit=True) as cur:
+        cur.execute('insert into pool_stats (ts, dex, pool, liquidity, tvl_usd, volume_24h, price) '
+                    'values (%s,%s,%s,%s,%s,%s,%s)', (now(), dex, pool, liquidity, tvl_usd, volume_24h, price))
+
+
+def pool_stats_summary(pool, hours=24):
+    """Median liquidity and the TVL of `hours` ago for one pool, from its own
+    record, or None with fewer than 3 readings."""
+    with cursor() as cur:
+        cur.execute("""
+            select percentile_cont(0.5) within group (order by liquidity) med_liq, count(*) n,
+                   (select tvl_usd from pool_stats p2 where p2.pool = %s and p2.ts <= now() - make_interval(hours => %s)
+                    order by p2.ts desc limit 1) tvl_then,
+                   min(ts) first_ts
+            from pool_stats where pool = %s and ts >= now() - make_interval(hours => %s) and liquidity > 0
+        """, (pool, hours, pool, hours))
+        r = cur.fetchone()
+    if not r or not r['n'] or r['n'] < 3:
+        return None
+    return {'median_liquidity': float(r['med_liq']), 'readings': int(r['n']),
+            'tvl_then': float(r['tvl_then']) if r['tvl_then'] is not None else None,
+            'since': r['first_ts']}
+
+
 def season():
     """The latest hour-of-day profile the board built, or None."""
     with cursor() as cur:
@@ -481,6 +506,13 @@ def by_pool():
         return rows
 
 
+def _paid_usd(config_name):
+    try:
+        return float(payout_totals(config_name)['paid_usd'])
+    except Exception:
+        return 0.0
+
+
 def stats(token_a=None, token_b=None):
     """Everything cumulative, in both tokens and in dollars.
 
@@ -634,7 +666,9 @@ def stats(token_a=None, token_b=None):
         'rebands': ev['rebands'], 'failures': ev['failures'],
         'equity_usd': round(_f(equity), 2) if equity is not None else None,
         'equity_start_usd': round(_f(started), 2) if started is not None else None,
-        'pnl_usd': (round(_f(equity) - _f(started), 2)
+        # Payouts leave the LP wallet by design; they are income, not a loss
+        # (review, 2026-09-26: the book counted every payout against P&L).
+        'pnl_usd': (round(_f(equity) - _f(started) + _paid_usd(cfg.get('name')), 2)
                     if (equity is not None and started is not None) else None),
         'in_range_pct': (round(_f(span['ir']) * 100, 1)
                          if span and span['ir'] is not None else None),

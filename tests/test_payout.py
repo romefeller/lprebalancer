@@ -1,4 +1,5 @@
 """The fee split: the owner's rule, the transfer wiring, the sizing base."""
+import os
 import unittest
 from unittest import mock
 
@@ -52,7 +53,8 @@ class Distribute(unittest.TestCase):
         rows, calls, sent = [], [], []
         bal = {'balanceA': sol, 'balanceB': 40.0, 'sol': sol, 'price': 120.0, 'quoteUsd': 1.0}
         state = state if state is not None else {}
-        with mock.patch.object(rebalancer.config, 'PAYOUT_ENABLED', True), \
+        with mock.patch.dict(os.environ, {'LPBOT_PROFIT_WALLET_PIN': PROFIT}), \
+                mock.patch.object(rebalancer.config, 'PAYOUT_ENABLED', True), \
                 mock.patch.object(rebalancer.config, 'PAYOUT_MINT', USDC), \
                 mock.patch.object(rebalancer.config, 'PROFIT_WALLET', PROFIT), \
                 mock.patch.object(rebalancer.config, 'GAS_RESERVE_SOL', 0.05), \

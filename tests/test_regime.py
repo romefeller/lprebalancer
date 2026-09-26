@@ -139,9 +139,23 @@ class RollingTape(unittest.TestCase):
         b = (np.array([600., 900]), np.ones(2), np.ones(2), np.ones(2), np.array([30., 4]), np.ones(2))
         m = rebalancer._merge([a, b])
         self.assertEqual(list(m[0]), [0, 300, 600, 900]); self.assertEqual(list(m[4]), [1, 2, 30, 4])
-        with mock.patch.object(rebalancer, 'TAPE5_BARS', 2):
+        with mock.patch.object(rebalancer, 'tape_bars', lambda: 2):
             self.assertEqual(list(rebalancer._merge([a, b])[0]), [600, 900])
         self.assertIsNone(rebalancer._merge([None, None]))
+
+    def test_thirty_days_is_8640_bars_and_pages_back_nine_times(self):
+        import tempfile, pathlib
+        d = pathlib.Path(tempfile.mkdtemp()); now = 1_790_000_000; calls = []
+        def fake(pool, live_price=None, before=None):
+            calls.append(before); end = int(before) if before else now
+            ts = np.arange(end - 1000 * 300, end, 300, dtype=float); c = np.full(len(ts), 100.0)
+            return ts, c, c, c, c, np.ones(len(ts))
+        rebalancer._TAPE5.clear()
+        with mock.patch.object(rebalancer, 'ROOT', d), mock.patch.object(rebalancer.calm, 'tape_5m', fake), \
+                mock.patch.object(rebalancer.config, 'REGIME_TAPE_DAYS', 30):
+            b = rebalancer.tape5('POOLADDRESS2', 100.0)
+        rebalancer._TAPE5.clear()
+        self.assertEqual(len(b[0]), 8640); self.assertEqual(len(calls), 9)
 
     def test_tape_pages_back_until_full_and_survives_a_restart(self):
         import tempfile, pathlib
@@ -156,13 +170,14 @@ class RollingTape(unittest.TestCase):
         def fake(pool, live_price=None, before=None):
             calls.append(before); return page(before)
         rebalancer._TAPE5.clear()
-        with mock.patch.object(rebalancer, 'ROOT', d), mock.patch.object(rebalancer.calm, 'tape_5m', fake):
+        with mock.patch.object(rebalancer, 'ROOT', d), mock.patch.object(rebalancer.calm, 'tape_5m', fake), \
+                mock.patch.object(rebalancer, 'tape_bars', lambda: 2880):
             b = rebalancer.tape5('POOLADDRESS1', 100.0)
-            self.assertEqual(len(b[0]), rebalancer.TAPE5_BARS)
+            self.assertEqual(len(b[0]), 2880)
             self.assertEqual(len(calls), 3)                          # newest, then two pages back
             rebalancer._TAPE5.clear(); calls.clear()
             b2 = rebalancer.tape5('POOLADDRESS1', 100.0)            # from disk: one refresh only
-            self.assertEqual(len(calls), 1); self.assertEqual(len(b2[0]), rebalancer.TAPE5_BARS)
+            self.assertEqual(len(calls), 1); self.assertEqual(len(b2[0]), 2880)
             rebalancer._TAPE5.clear(); calls.clear()
             b3 = rebalancer.tape5('POOLADDRESS1', 5.0)              # wrong orientation on disk: rebuilt
             self.assertEqual(calls[0], None)

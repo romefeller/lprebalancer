@@ -95,6 +95,12 @@ SIGNERS = {'orca': str(ROOT / 'signer2.mjs'),
            'payout': str(ROOT / 'payout.mjs')}              # transfers to the profit wallet only
 
 
+def band_label(k):
+    """'+/-1.5%' for 1.015: two decimals, trailing zeros dropped. The OPEN
+    message said '+/-1%' for a +/-1.5% band (rounding) on 2026-09-26."""
+    return '+/-' + f'{(float(k) - 1) * 100:.2f}'.rstrip('0').rstrip('.') + '%'
+
+
 def stamp():
     return datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
 
@@ -218,12 +224,27 @@ def read_status(mint=None):
     return chain('status', *([mint] if mint else []))
 
 
+STATE_DEFAULTS = {'last_rebalance': 0, 'rebalance_times': [], 'failures': 0,
+                  'read_failures': 0, 'last_reopt': 0, 'last_harvest': 0,
+                  'calm_times': [], 'calm': False}
+
+
 def load():
+    """runtime.json, with every key the loop indexes present. A corrupt file
+    is set aside (runtime.json.corrupt) and the loop starts from defaults: a
+    crash loop on a bad file is worse than forgetting the rebalance clock."""
     if STATE.exists():
-        return json.loads(STATE.read_text())
-    return {'last_rebalance': 0, 'rebalance_times': [], 'failures': 0,
-            'read_failures': 0, 'last_reopt': 0, 'last_harvest': 0,
-            'calm_times': [], 'calm': False}
+        try:
+            s = json.loads(STATE.read_text())
+            if not isinstance(s, dict):
+                raise ValueError('not an object')
+            return {**STATE_DEFAULTS, **s}
+        except Exception:
+            try:
+                STATE.replace(STATE.with_suffix('.json.corrupt'))
+            except Exception:
+                pass
+    return dict(STATE_DEFAULTS)
 
 
 def save(s):
@@ -363,6 +384,14 @@ def harvest_due(state, status):
 _POOL_REC = {}
 
 
+def profit_wallet_pinned():
+    """The payout destination must match the address pinned in the service
+    environment (LPBOT_PROFIT_WALLET_PIN), which a database write cannot
+    change. payout.mjs checks the same pin itself."""
+    pin = os.environ.get('LPBOT_PROFIT_WALLET_PIN', '')
+    return bool(pin) and pin == config.PROFIT_WALLET and guards.is_address(pin)
+
+
 def pool_record():
     """The held pool's record, cached for an hour (reward programs change)."""
     key = (config.DEX, config.POOL)
@@ -397,9 +426,10 @@ def distribute_rewards(state, position):
     own = {rec['token_a']['address'], rec['token_b']['address']}
     seen = state.setdefault('reward_mints_seen', [])
     for m in rec.get('reward_mints') or []:
-        if m not in seen:
+        if guards.is_address(m) and m not in seen:
             seen.append(m)
-    mints = [m for m in seen if m not in own]
+    del seen[:-8]                                       # a bounded memory of programs
+    mints = [m for m in seen if m not in own and guards.is_address(m)]
     if not mints:
         return None
     bal = wallet(config.POOL)
@@ -415,8 +445,18 @@ def distribute_rewards(state, position):
         usd = amt * prices.get(m, 0.0)
         if amt <= 0 or usd < config.REWARD_MIN_USD:
             continue
+        if usd > config.REWARD_MAX_USD:
+            # a reward balance worth more than the cap is not swept blind: a
+            # wrong price or an unexpected token needs an operator's look
+            notify('reward_held', reason=f'${usd:.2f} of {m} exceeds reward_max_usd ${config.REWARD_MAX_USD:.2f}')
+            continue
+        before, _ = chain('balance', target, dex='payout')
         sw, err = chain('swap', m, target, f'{amt:.9f}', '--execute', dex='jupiter')
-        got = float(((sw or {}).get('bought') or {}).get('amount') or 0.0)
+        after, _ = chain('balance', target, dex='payout')
+        # Pay what actually arrived, not what the quote promised.
+        measured = float((after or {}).get('amount') or 0.0) - float((before or {}).get('amount') or 0.0)
+        quoted = float(((sw or {}).get('bought') or {}).get('amount') or 0.0)
+        got = min(measured, quoted) if measured > 0 else 0.0
         if err or not (sw or {}).get('signature') or got <= 0:
             notify('reward_swap_failed', reason=err or 'no signature', mint=m, amount=amt)
             continue
@@ -468,30 +508,55 @@ def distribute(state, position, fee_a, fee_b):
     owed = state.setdefault('payout_owed', {})
     held = {mint_a: bal['balanceA'], mint_b: bal['balanceB']}
     sent = []
+    pin_ok = profit_wallet_pinned()
     for p in parts:
         if p['kind'] != 'paid':
             db.record_payout(config.PROFILE, position, p['mint'], p['symbol'], p['amount'], p['usd'], p['kind'],
                              detail=('gas under the reserve' if p['kind'] == 'gas' else None))
             continue
-        amt = p['amount'] + float(owed.get(p['mint'], 0.0))
-        amt = min(amt, float(held.get(p['mint']) or 0.0))
+        due = p['amount'] + float(owed.get(p['mint'], 0.0))
+        amt = min(due, float(held.get(p['mint']) or 0.0))
         px = p['usd'] / p['amount'] if p['usd'] is not None and p['amount'] else None
         if amt <= 0:
             continue
+        if not pin_ok:
+            # The destination in the database does not match the address
+            # pinned in the service environment: pay nothing, keep it owed.
+            owed[p['mint']] = due
+            db.record_payout(config.PROFILE, position, p['mint'], p['symbol'], p['amount'],
+                             p['usd'], 'owed', to_address=config.PROFIT_WALLET,
+                             detail='profit wallet does not match LPBOT_PROFIT_WALLET_PIN')
+            notify('payout_refused', reason='profit_wallet in the database does not match the pinned address',
+                   symbol=p['symbol'], owed=round(due, 6))
+            continue
         out, err = chain('send', p['mint'], f'{amt:.9f}', config.PROFIT_WALLET, '--execute', dex='payout')
         if out and out.get('signature') and not err:
-            owed.pop(p['mint'], None)
+            rest = due - amt
+            if rest > 1e-9:
+                owed[p['mint']] = rest          # what the wallet could not cover this time
+            else:
+                owed.pop(p['mint'], None)
             db.record_payout(config.PROFILE, position, p['mint'], p['symbol'], amt,
                              amt * px if px else None, 'paid', to_address=config.PROFIT_WALLET,
                              signature=out['signature'])
             sent.append({'symbol': p['symbol'], 'amount': round(amt, 6),
                          'usd': round(amt * px, 4) if px else None, 'signature': out['signature']})
+        elif (out or {}).get('signature') or (out or {}).get('partial') or \
+                re.search(r'timed out|timeout|confirm', str(err), re.I):
+            # It may have landed. Never owe it, or the next harvest sends it
+            # twice (review, 2026-09-26). Recorded as uncertain for the book.
+            owed.pop(p['mint'], None)
+            db.record_payout(config.PROFILE, position, p['mint'], p['symbol'], amt,
+                             amt * px if px else None, 'uncertain', to_address=config.PROFIT_WALLET,
+                             signature=(out or {}).get('signature'), detail=err)
+            notify('payout_uncertain', reason=err, symbol=p['symbol'], amount=round(amt, 6),
+                   signature=(out or {}).get('signature'))
         else:
-            owed[p['mint']] = amt
+            owed[p['mint']] = due
             db.record_payout(config.PROFILE, position, p['mint'], p['symbol'], amt,
                              amt * px if px else None, 'owed', to_address=config.PROFIT_WALLET,
                              detail=err or 'no signature')
-            notify('payout_failed', reason=err or 'no signature', symbol=p['symbol'], owed=round(amt, 6))
+            notify('payout_failed', reason=err or 'no signature', symbol=p['symbol'], owed=round(due, 6))
     save(state)
     summary = {k: round(sum((x['usd'] or 0) for x in parts if x['kind'] == k), 4)
                for k in ('paid', 'reinvested', 'gas')}
@@ -532,7 +597,11 @@ LAST_CALM = {}                  # {'view': the latest calm.view}, for every book
 TAPE5_REFRESH = 240             # one GeckoTerminal call per five-minute bar, at most
 
 
-TAPE5_BARS = 2880               # ten days: the walk-forward's calibration (lp_research/regime.md)
+TAPE5_BARS = 8640               # default 30 days; config.REGIME_TAPE_DAYS sets it (lp_research/regime.md)
+
+
+def tape_bars():
+    return max(288, int(config.REGIME_TAPE_DAYS) * 288)
 
 
 def _tape_file(pool):
@@ -547,7 +616,7 @@ def _merge(bars_list):
             continue
         for row in zip(*b):
             rows[int(row[0])] = row
-    ks = sorted(rows)[-TAPE5_BARS:]
+    ks = sorted(rows)[-tape_bars():]
     if not ks:
         return None
     cols = list(zip(*[rows[k] for k in ks]))
@@ -576,7 +645,8 @@ def tape5(pool, price):
         fresh = None
     merged = _merge([b, fresh])
     tries = 0
-    while merged is not None and len(merged[0]) < TAPE5_BARS and tries < 3:
+    pages = int(np.ceil(tape_bars() / 1000)) + 1
+    while merged is not None and len(merged[0]) < tape_bars() and tries < pages:
         try:
             older = calm.tape_5m(pool, live_price=price, before=float(merged[0][0]))
         except Exception:
@@ -594,6 +664,16 @@ def tape5(pool, price):
             pass
         return merged
     return merged if merged is not None else b
+
+
+def voluntary_move_allowed(state):
+    """Whether a calm or regime move would pass rebalance()'s gap now. The
+    loop asks first, so a move held back by the gap is not announced on
+    every poll (review, 2026-09-26: up to five duplicate messages a move)."""
+    now = time.time()
+    recent = [t for t in state.get('calm_times', []) if now - t < 86400]
+    last_any = max([state.get('last_rebalance', 0)] + recent)
+    return now - last_any >= config.CALM_MIN_GAP
 
 
 def calm_budget_left(state):
@@ -625,6 +705,7 @@ def calm_view(state, status):
 
 
 LAST_REGIME = {}                # {'view': the latest calm.regime_view}, for every book
+REGIME_STALE_S = 900            # a newest bar older than this: the tape is stale
 
 
 def regime_view(state, status):
@@ -632,11 +713,23 @@ def regime_view(state, status):
     off or the five-minute tape is unavailable."""
     if not config.REGIME_ENABLED:
         return None
-    bars = tape5(status.get('whirlpool') or config.POOL, status['price'])
+    pool = status.get('whirlpool') or config.POOL
+    bars = tape5(pool, status['price'])
+    lq = liquidity_view(pool, config.DEX, bars)
+    theta = min(max(config.REGIME_THRESHOLD * lq['factor'], 0.05), 0.40)
     v = calm.regime_view(bars, status['price'], status['lowerPrice'], status['upperPrice'],
                          widths=config.REGIME_WIDTHS, horizon_minutes=config.REGIME_HORIZON,
-                         threshold=config.REGIME_THRESHOLD)
+                         threshold=theta)
+    if v and (v.get('bar_age_s') or 0) > REGIME_STALE_S:
+        # The newest bar is old (a data outage): the tape no longer describes
+        # the market. Choose the widest width, so an exit never reopens tight
+        # into a market nobody is measuring, and narrowing cannot happen
+        # (review, 2026-09-26: a 6-hour-old calm tape chose +/-1%).
+        v = dict(v, choice=config.REGIME_WIDTHS[-1],
+                 choice_pct=round((config.REGIME_WIDTHS[-1] - 1) * 100, 2), mode='STALE', stale=True)
     if v:
+        v['threshold_base'] = config.REGIME_THRESHOLD
+        v['liquidity'] = lq
         v['moves_24h'] = config.CALM_MAX_MOVES - calm_budget_left(state)
         v['guard'] = config.CALM_MAX_MOVES
         if state.get('regime_mode') != v['mode']:
@@ -647,14 +740,78 @@ def regime_view(state, status):
     return v
 
 
+_LIQ = {}                       # pool -> (fetched_at, record)
+LIQ_REFRESH = 300
+
+
+def liquidity_view(pool, dex, bars):
+    """Fee density against its norm, from the pool's own record and tape:
+
+      inflow  = active liquidity now / its 24-hour median (our share of fees
+                falls when liquidity floods in; the risk of a touch does not)
+      volume  = 5-minute volume over the last 6 hours / the tape's median 6h
+      factor  = clamp(volume / inflow, regime_liq_min, regime_liq_max)
+
+    The touch threshold is multiplied by `factor`. Bounded, and neutral (1.0)
+    when any input is missing, because no liquidity history exists to fit it.
+    Records a reading at most every LIQ_REFRESH seconds."""
+    out = {'factor': 1.0, 'inflow': None, 'volume_x': None, 'tvl_change_24h': None,
+           'liquidity': None, 'tvl_usd': None, 'readings': 0}
+    t, rec = _LIQ.get(pool, (0, None))
+    if rec is None or time.time() - t > LIQ_REFRESH:
+        try:
+            fresh = dexes.pool(dex, pool)
+        except Exception:
+            fresh = None
+        if fresh:
+            liq = fresh.get('liquidity') or fresh.get('active_bin_usd')
+            try:
+                db.record_pool_stats(dex, pool, liq, fresh.get('tvl_usd'), fresh.get('volume_24h_usd'),
+                                     fresh.get('price'))
+            except Exception:
+                pass
+            rec = fresh
+            _LIQ[pool] = (time.time(), rec)
+    if rec:
+        out['liquidity'] = rec.get('liquidity') or rec.get('active_bin_usd')
+        out['tvl_usd'] = rec.get('tvl_usd')
+    try:
+        summ = db.pool_stats_summary(pool)
+    except Exception:
+        summ = None
+    if summ and out['liquidity'] and summ['median_liquidity'] > 0:
+        out['inflow'] = round(float(out['liquidity']) / summ['median_liquidity'], 3)
+        out['readings'] = summ['readings']
+        if summ.get('tvl_then') and out['tvl_usd']:
+            out['tvl_change_24h'] = round(float(out['tvl_usd']) / summ['tvl_then'] - 1, 4)
+    if bars is not None and len(bars[5]) >= 288:
+        v = np.asarray(bars[5], dtype=float)
+        w = 72                                   # six hours of five-minute bars
+        recent = float(v[-w:].sum())
+        sums = np.convolve(v, np.ones(w), mode='valid')
+        med = float(np.median(sums)) if len(sums) else 0.0
+        if med > 0:
+            out['volume_x'] = round(recent / med, 3)
+    if out['inflow'] and out['volume_x']:
+        raw = out['volume_x'] / out['inflow']
+        out['factor'] = round(min(max(raw, config.REGIME_LIQ_MIN), config.REGIME_LIQ_MAX), 3)
+    return out
+
+
 def regime_choice_now(pool, price):
     """The regime's width for a fresh band at `price` on `pool`, or None."""
     if not config.REGIME_ENABLED:
         return None
     bars = tape5(pool, price)
+    try:
+        dex = config.DEX if pool == config.POOL else None
+        f = liquidity_view(pool, dex, bars)['factor'] if dex else 1.0
+    except Exception:
+        f = 1.0
+    theta = min(max(config.REGIME_THRESHOLD * f, 0.05), 0.40)
     v = calm.regime_view(bars, price, price / 1.01, price * 1.01, widths=config.REGIME_WIDTHS,
-                         horizon_minutes=config.REGIME_HORIZON, threshold=config.REGIME_THRESHOLD)
-    if not v or (v.get('bar_age_s') or 0) > 900:
+                         horizon_minutes=config.REGIME_HORIZON, threshold=theta)
+    if not v or (v.get('bar_age_s') or 0) > REGIME_STALE_S:
         return None
     return v['choice']
 
@@ -695,6 +852,11 @@ def resume_reopen(state):
             moves.append(pending['started_at'])
         pending['closed'] = True
         save(state)
+    if config.REGIME_ENABLED and time.time() - pending.get('started_at', 0) > 1800:
+        # Half an hour without fresh data: open at the widest regime width
+        # rather than leave the capital idle for a day (review, 2026-09-26).
+        reopen(state, pending['reason'], band=config.REGIME_WIDTHS[-1])
+        return True
     reopen(state, pending['reason'], band=pending['band'], recovering=True)
     return True
 
@@ -872,7 +1034,13 @@ def consider_migration(state, status, current_best):
     cur_txt = (f"{config.DEX} {config.PAIR_LABEL} +/-{(current_best['band'] - 1) * 100:.0f}% "
                f"{current_best['net_day_pct']:.3f}%/day") if current_best else 'unscorable'
     best_txt = f"{best['dex']} {best['pair']} +/-{best['band_pct']:.0f}% {best['net_day_pct']:.3f}%/day"
-    if gain is not None and gain < config.MIGRATE_MIN_GAIN:
+    if gain is None:
+        # The held pool could not be scored (a failed candle fetch): a missing
+        # number is not a reason to pay for a move (review, 2026-09-26).
+        notify('board_checked', held=cur_txt, best=best_txt,
+               verdict='the held pool could not be scored; staying')
+        return False
+    if gain < config.MIGRATE_MIN_GAIN:
         notify('board_checked', held=cur_txt, best=best_txt,
                verdict=f'{gain * 100:.0f}% gain is under the {config.MIGRATE_MIN_GAIN * 100:.0f}% threshold')
         return False
@@ -975,6 +1143,17 @@ def operator_target(spec):
     if dex == 'orca' and rec.get('adaptive_fee'):
         notify('migrate_refused', reason='adaptive-fee Orca pool: the signer cannot open it')
         return None
+    if not config.ALLOW_SWAP:
+        try:
+            held = {m for m, _ in pool_tokens()}
+        except Exception:
+            held = None
+        want = {(rec.get('token_a') or {}).get('address'), (rec.get('token_b') or {}).get('address')}
+        if held is None or want != held:
+            # Security review, 2026-09-26: with rebalance_swap on, the reopen
+            # would swap half the capital into whatever the target names.
+            notify('migrate_refused', reason='target holds a different pair and allow_swap is off')
+            return None
     return {'dex': dex, 'address': pool, 'pair': rec['pair'], 'token_a': rec['token_a'],
             'token_b': rec['token_b'], 'net_day_pct': None, 'band_pct': None}
 
@@ -1102,7 +1281,7 @@ def reopen(state, reason, band=None, recovering=False):
     state.pop('pending_reopen', None)
     save(state)
     notify_book('OPEN', pair=config.PAIR_LABEL, pool=pool, dex=config.DEX,
-           opened_band=f'+/-{(k - 1) * 100:.0f}%', calm_band=bool(band),
+           opened_band=band_label(k), calm_band=bool(band),
            lower=round(lower, 4), upper=round(upper, 4),
            deposit_usd=round(deposit_usd, 2),
            deposit_a=(out or {}).get('depositEstA'), deposit_b=(out or {}).get('depositEstB'),
@@ -1148,7 +1327,9 @@ def rebalance(state, status, reason, target=None, band=None, calm_move=False, ex
     accrued_usd = status.get('feesAccrued_USD', 0.0)
     out, err = chain('harvest', mint, '--execute')
     state['last_harvest'] = now
+    harvested = False
     if out and out.get('signature') and not err:
+        harvested = True
         db.record_harvest(mint, accrued_a, accrued_b, accrued_usd,
                               out['signature'])
         # The fees just moved from the position to the wallet. Record the
@@ -1215,6 +1396,16 @@ def rebalance(state, status, reason, target=None, band=None, calm_move=False, ex
     # rent the chain refunds. The best figure available without a second
     # read, and what per-pool P&L is measured against.
     db.close_position(mint, (out or {}).get('signature'), position_usd(status))
+    if not harvested and (accrued_usd or 0) > 0:
+        # The close collected the fees the harvest could not. Record them as
+        # realised and split them, or they vanish from the ledger and from the
+        # payout (review, 2026-09-26).
+        db.record_harvest(mint, accrued_a, accrued_b, accrued_usd,
+                          (out or {}).get('signature') or f'close:{mint}')
+        try:
+            distribute(state, mint, accrued_a, accrued_b)
+        except Exception as e:
+            notify('payout_failed', reason=f'{type(e).__name__}: {tidy(e)}')
     notify_book('CLOSE', positionMint=mint,
                 signature=(out or {}).get('signature'), reason=reason)
 
@@ -1270,7 +1461,7 @@ def main():
                 cur = best_band_for(config.POOL)
                 run, best, gain, why = board_pick(cur, config.POOL)
                 if best and best['dex'] in config.EXECUTE_DEXES and best['dex'] in SIGNERS \
-                        and (gain is None or gain >= config.MIGRATE_MIN_GAIN):
+                        and gain is not None and gain >= config.MIGRATE_MIN_GAIN:
                     notify('MIGRATE', held=f'{config.DEX} {config.PAIR_LABEL} (no position)',
                            best=f"{best['dex']} {best['pair']} {best['net_day_pct']:.3f}%/day",
                            gain_pct=None if gain is None else round(gain * 100),
@@ -1293,8 +1484,16 @@ def main():
         fc = forecast_for(status)
         cv = calm_view(state, status) if not config.REGIME_ENABLED else None
         rv = regime_view(state, status)
-        # Under regime mode every band is the regime's, whatever its width.
-        tight = bool(cv and cv.get('tight_held')) or bool(rv)
+        if rv and fc:
+            # the held band's survival over the long horizons, from the hourly
+            # tape: what the MODE section shows next to the 2-hour choice
+            rv['p_exit'] = {h: fc.get(f'p_exit_{h}h_regime', fc.get(f'p_exit_{h}h')) for h in (6, 24, 72, 168)}
+            rv['median_life_hours'] = fc.get('median_life_hours_regime', fc.get('median_life_hours'))
+        # Under regime mode every band is the regime's, whatever its width,
+        # and with or without a view this poll: without one it holds, and an
+        # exit reopens at the widest regime width. Letting the hourly rules
+        # take a +/-1% band fired PROACTIVE at once (review, 2026-09-26).
+        tight = bool(config.REGIME_ENABLED) or bool(cv and cv.get('tight_held'))
         if tight and fc:
             # The hourly six-hour rule says nothing about a +/-1% band; the
             # five-minute rule in calm.py is in charge of it.
@@ -1309,7 +1508,10 @@ def main():
 
         if not status.get('inRange'):
             side = 'above' if price > status['upperPrice'] else 'below'
-            k = (rv['choice'] if rv else calm_reopen_band(cv, state)) if tight else None
+            if config.REGIME_ENABLED:
+                k = rv['choice'] if rv else config.REGIME_WIDTHS[-1]
+            else:
+                k = calm_reopen_band(cv, state) if tight else None
             notify('OUT_OF_BAND', side=side, price=price,
                    lower=status['lowerPrice'], upper=status['upperPrice'],
                    action=('harvest, close, reopen tight' if k else 'harvest, close, re-optimise, reopen'),
@@ -1321,7 +1523,9 @@ def main():
         # Calm mode: narrow when the market goes cold, re-centre the tight
         # band before it is touched, widen when the calm ends.
         ract = calm.regime_decide(rv, widths=config.REGIME_WIDTHS, steps=config.REGIME_STEPS) if rv else None
-        if ract and calm_budget_left(state) > 0:
+        if ract == 'narrow' and rv.get('stale'):
+            ract = None                                   # never narrow on a stale tape
+        if ract and calm_budget_left(state) > 0 and voluntary_move_allowed(state):
             ev = 'REGIME_WIDEN' if ract == 'widen' else 'REGIME_NARROW'
             notify_book(ev, price=price, lower=status['lowerPrice'], upper=status['upperPrice'],
                         regime=rv, forecast=fc)
@@ -1333,6 +1537,8 @@ def main():
             continue
         act = None if rv else calm.decide(cv, enabled=config.CALM_ENABLED,
                                           budget_left=(cv or {}).get('budget_left', 0))
+        if act and not voluntary_move_allowed(state):
+            act = None                                    # inside the gap: announce nothing, try next poll
         if act:
             what = {'narrow': ('CALM_NARROW', config.CALM_BAND, 'calm: tight band'),
                     'recentre': ('CALM_RECENTRE', config.CALM_BAND, 'calm: tight band re-centred before a touch'),

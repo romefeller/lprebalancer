@@ -89,7 +89,9 @@ const CU_LIMIT = 600_000;
 const PROGRAM = new PublicKey('HpNfyc2Saw7RKkQd8nEL4khUcuPhQ7WwY1B2qjx8jxFq');
 const DEX = 'pancakeswap-v3-solana';
 const NATIVE_MINT = 'So11111111111111111111111111111111111111112';
-const STABLES = new Set(['USDC', 'USDT', 'PYUSD', 'USDS', 'DAI', 'FDUSD', 'USDE']);
+// Stablecoins by MINT (USDC, USDT, PYUSD, USDS). A symbol comes from API or token metadata an
+// attacker controls: a fake "USDC" priced at $1 would defeat every dollar cap (review 2026-09-26).
+const STABLE_MINTS = new Set(['EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', 'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB', '2b1kV6DkPAnxd5ixfnxCpjxmKwqjjaYmCZfHsFu24GXo', 'USDSwr9ApdHk5bvJKMjzff41FfuX8bSxdKcR81vTwcA']);
 const GECKO = 'https://api.geckoterminal.com/api/v2/networks/solana/pools';
 const JUPITER = 'https://lite-api.jup.ag';
 const HEADERS = { accept: 'application/json', 'user-agent': 'Mozilla/5.0' };
@@ -213,7 +215,7 @@ async function tokenUsd(mint) {
 }
 
 async function quoteUsd(symB, mintB) {
-  if (STABLES.has(symB)) return { usd: 1, source: 'stable' };
+  if (STABLE_MINTS.has(String(mintB))) return { usd: 1, source: 'stable' };
   const p = await tokenUsd(mintB);
   return p ? { usd: p, source: 'jupiter:mint' } : { usd: null, source: 'unknown' };
 }

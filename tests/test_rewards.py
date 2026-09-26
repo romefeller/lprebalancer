@@ -1,5 +1,6 @@
 """Rewards: parsed from every venue, priced into the board, swept after a harvest;
 and the pool review that keeps running while calm holds the tight band."""
+import os
 import time
 import unittest
 from unittest import mock
@@ -108,16 +109,20 @@ class CalmReview(unittest.TestCase):
 class Sweep(unittest.TestCase):
     def go(self, sol, ray_amount, price=2.0, swap=({'signature': 's', 'bought': {'amount': 3.9}}, None)):
         calls, rows, state = [], [], {}
+        target_bal = iter([10.0, 13.9])                  # the target mint before and after the swap
         def chain(*a, **k):
             calls.append((a, k.get('dex')))
-            if a[0] == 'balance':
+            if a[0] == 'balance' and a[1] == RAY:
                 return {'amount': ray_amount}, None
+            if a[0] == 'balance':
+                return {'amount': next(target_bal, 13.9)}, None
             if a[0] == 'swap':
                 return swap
             if a[0] == 'send':
                 return {'signature': 't'}, None
         rec = {'token_a': {'address': SOL}, 'token_b': {'address': USDC}, 'reward_mints': [RAY]}
-        with mock.patch.object(rebalancer.config, 'PAYOUT_ENABLED', True), \
+        with mock.patch.dict(os.environ, {'LPBOT_PROFIT_WALLET_PIN': PROFIT}), \
+                mock.patch.object(rebalancer.config, 'PAYOUT_ENABLED', True), \
                 mock.patch.object(rebalancer.config, 'REWARD_POLICY', 'payout'), \
                 mock.patch.object(rebalancer.config, 'REWARD_MIN_USD', 1.0), \
                 mock.patch.object(rebalancer.config, 'PAYOUT_MINT', USDC), \
@@ -136,20 +141,21 @@ class Sweep(unittest.TestCase):
     def test_reward_swapped_to_usdc_and_paid(self):
         calls, rows, _ = self.go(sol=0.3, ray_amount=2.0)
         ops = [c[0][0] for c in calls]
-        self.assertEqual(ops, ['balance', 'swap', 'send'])
-        self.assertEqual(calls[1][0][2], USDC); self.assertEqual(calls[2][0][3], PROFIT)
+        self.assertEqual(ops, ['balance', 'balance', 'swap', 'balance', 'send'])
+        self.assertEqual(calls[2][0][2], USDC); self.assertEqual(calls[4][0][3], PROFIT)
+        self.assertAlmostEqual(float(calls[4][0][2]), 3.9)             # what arrived
         self.assertEqual(rows, ['paid'])
 
     def test_gas_low_swaps_to_sol_and_keeps_it(self):
         calls, rows, _ = self.go(sol=0.01, ray_amount=2.0)
-        self.assertEqual([c[0][0] for c in calls], ['balance', 'swap'])
-        self.assertEqual(calls[1][0][2], SOL); self.assertEqual(rows, ['gas'])
+        self.assertEqual([c[0][0] for c in calls], ['balance', 'balance', 'swap', 'balance'])
+        self.assertEqual(calls[2][0][2], SOL); self.assertEqual(rows, ['gas'])
 
     def test_dust_waits_and_a_failed_swap_sends_nothing(self):
         calls, rows, _ = self.go(sol=0.3, ray_amount=0.2)                 # $0.40 < $1
         self.assertEqual([c[0][0] for c in calls], ['balance']); self.assertEqual(rows, [])
         calls, rows, _ = self.go(sol=0.3, ray_amount=2.0, swap=(None, 'impact'))
-        self.assertEqual([c[0][0] for c in calls], ['balance', 'swap']); self.assertEqual(rows, [])
+        self.assertEqual([c[0][0] for c in calls], ['balance', 'balance', 'swap', 'balance']); self.assertEqual(rows, [])
 
     def test_pool_tokens_are_never_swept(self):
         rec_calls = []

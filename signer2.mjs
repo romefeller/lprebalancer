@@ -95,7 +95,9 @@ async function poolInfo(pool) {
 // Dollar value of one unit of the pool's quote token. On a USDC-quoted pool
 // this is 1; on SOL/xSOL it is not, and pretending otherwise turns every
 // dollar figure the bot reports into nonsense.
-const STABLES = new Set(['USDC', 'USDT', 'PYUSD', 'USDS', 'DAI', 'FDUSD', 'USDE']);
+// Stablecoins by MINT (USDC, USDT, PYUSD, USDS). A symbol comes from API or token metadata an
+// attacker controls: a fake "USDC" priced at $1 would defeat every dollar cap (review 2026-09-26).
+const STABLE_MINTS = new Set(['EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', 'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB', '2b1kV6DkPAnxd5ixfnxCpjxmKwqjjaYmCZfHsFu24GXo', 'USDSwr9ApdHk5bvJKMjzff41FfuX8bSxdKcR81vTwcA']);
 
 // Priced by MINT, never by GeckoTerminal's idea of which token is the quote.
 // Gecko orders a pair by its own convention, so its quote_token_price_usd on
@@ -115,7 +117,7 @@ async function tokenUsd(mint) {
 }
 
 async function quoteUsd(info) {
-  if (STABLES.has(info.symbolB)) return { usd: 1, source: 'stable' };
+  if (STABLE_MINTS.has(String(info.mintB))) return { usd: 1, source: 'stable' };
   try {
     const p = await tokenUsd(info.mintB);
     if (p) return { usd: p, source: 'geckoterminal:mint' };

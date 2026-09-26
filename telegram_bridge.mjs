@@ -90,10 +90,17 @@ function render(row) {
     const probs = (Array.isArray(g.probs) ? g.probs : Object.entries(g.probs ?? {}))
       .map(([w, p]) => `${w}% ${pct(p)}`).join(' · ');
     return [`━━ REGIME ━━`,
-      `mode        ${g.mode} · holding ±${n(g.held_pct, 2)}% · market says ±${n(g.choice_pct, 2)}%`,
+      `mode        ${g.mode}${g.stale ? ' (tape stale: widest width, no narrowing)' : ''} · holding ±${n(g.held_pct, 2)}% · market says ±${n(g.choice_pct, 2)}%`,
       `vol 5m      σ ${n(g.sigma_5m_pct, 4)}% · velocity ${sign(g.velocity)}/h · instability ${n(g.instability, 3)}`,
       `P(touch ≤${g.horizon_minutes}m)  ${probs}`,
       `held band   P(touch) ${pct(g.p_held)} · rule: narrowest width ≤ ${pct(g.threshold)}, move at 2 steps, exits re-centre`,
+      ...(g.p_exit ? [`P(exit)     6h ${pct(g.p_exit[6] ?? g.p_exit['6'])}   24h ${pct(g.p_exit[24] ?? g.p_exit['24'])}`
+        + `   72h ${pct(g.p_exit[72] ?? g.p_exit['72'])}   7d ${pct(g.p_exit[168] ?? g.p_exit['168'])}`
+        + ` · median life ${g.median_life_hours != null ? n(g.median_life_hours, 0) + 'h' : '> 7d'} (hourly tape)`] : []),
+      ...(g.liquidity ? [`liquidity   ${g.liquidity.inflow != null ? n(g.liquidity.inflow, 2) + 'x its 24h median' : 'building history'}`
+        + ` · TVL ${g.liquidity.tvl_change_24h != null ? sign(g.liquidity.tvl_change_24h * 100) + '%' : '—'} 24h`
+        + ` · volume ${g.liquidity.volume_x != null ? n(g.liquidity.volume_x, 2) + 'x' : '—'}`
+        + ` → risk ×${n(g.liquidity.factor, 2)} (${pct(g.threshold_base)} → ${pct(g.threshold)})`] : []),
       `guard       ${g.moves_24h ?? '—'}/${g.guard ?? '—'} moves in 24h`];
   }
 
@@ -193,6 +200,12 @@ function render(row) {
         + (row.rewards ?? []).map(x => `$${n(x.usd, 4)} → ${x.to}${x.signature ? `\n${x.signature}` : ''}`).join('\n');
     case 'reward_swap_failed':
       return `reward swap failed · ${row.reason}\n${row.amount} of ${row.mint} stays in the LP wallet`;
+    case 'payout_uncertain':
+      return `PAYOUT UNCONFIRMED · ${row.amount} ${row.symbol} may have landed; it will not be sent again\n${row.signature ?? ''}\n${row.reason ?? ''}`;
+    case 'payout_refused':
+      return `PAYOUT REFUSED · ${row.reason}\nowed ${row.owed} ${row.symbol}; check profit_wallet and LPBOT_PROFIT_WALLET_PIN`;
+    case 'reward_held':
+      return `reward held for review · ${row.reason}`;
     case 'payout_failed':
       return `PAYOUT FAILED · ${row.reason}${row.owed != null ? `\nowed ${row.owed} ${row.symbol}, retried at the next harvest` : ''}`;
     case 'payout_skipped':

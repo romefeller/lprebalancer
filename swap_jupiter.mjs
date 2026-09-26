@@ -39,6 +39,7 @@ import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
 const { Connection, Keypair, PublicKey, VersionedTransaction } = require('@solana/web3.js');
+const spl = require('@solana/spl-token');
 
 const DIR = path.dirname(new URL(import.meta.url).pathname);
 const HALT = path.join(DIR, 'HALT');
@@ -224,6 +225,98 @@ async function buildSwapTx(quote, payer) {
 
 function stripInternal(quote) { const { __quotedAt, ...q } = quote; return q; }
 
+// --- verification: nothing Jupiter returns is signed on trust ----------------------
+// Security review, 2026-09-26: the bot signed the transaction the API built
+// without checking what it does. A compromised or intercepted API could have
+// drained the wallet. Every check below runs before `sign`, dry run included.
+export const ALLOWED_PROGRAMS = new Set([
+  'JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4',   // Jupiter aggregator v6
+  '11111111111111111111111111111111',              // System
+  'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA',   // Token
+  'TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb',   // Token-2022
+  'ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL',  // Associated Token Account
+  'ComputeBudget111111111111111111111111111111',   // Compute budget
+]);
+export const MAX_VALUE_LOSS = Number(process.env.LPBOT_MAX_VALUE_LOSS ?? 0.02);   // 2% below fair value
+const SOL_OVERHEAD_LAMPORTS = 10_000_000;           // fees + temporary account rent, 0.01 SOL at most
+
+// The quote must be the swap that was asked for, and worth what went in.
+export function verifyQuote(quote, inInfo, outInfo, rawIn) {
+  if (quote.inputMint !== inInfo.mint || quote.outputMint !== outInfo.mint) throw new Error('quote mints differ from the request; refusing');
+  if (BigInt(quote.inAmount) !== BigInt(rawIn)) throw new Error('quote inAmount differs from the request; refusing');
+  if ((quote.swapMode ?? 'ExactIn') !== 'ExactIn') throw new Error(`quote swapMode ${quote.swapMode}; refusing`);
+  if (Number(quote.slippageBps) > SLIPPAGE_BPS) throw new Error(`quote slippage ${quote.slippageBps} bps above ${SLIPPAGE_BPS}; refusing`);
+  if (BigInt(quote.otherAmountThreshold) > BigInt(quote.outAmount)) throw new Error('quote minimum exceeds its own output; refusing');
+  if (inInfo.usdPrice != null && outInfo.usdPrice != null) {
+    const inUsd = toHuman(quote.inAmount, inInfo.decimals) * inInfo.usdPrice;
+    const outUsd = toHuman(quote.otherAmountThreshold, outInfo.decimals) * outInfo.usdPrice;
+    if (outUsd < inUsd * (1 - MAX_VALUE_LOSS - Number(quote.slippageBps) / 1e4)) {
+      throw new Error(`quote pays $${outUsd.toFixed(4)} at worst for $${inUsd.toFixed(4)}; more than ${MAX_VALUE_LOSS * 100}% below fair value; refusing`);
+    }
+  }
+  return true;
+}
+
+// The transaction may pay from our wallet only and call allowed programs only.
+// Programs cannot be loaded from lookup tables, so the static keys are complete.
+export function verifyTxShape(tx, payerKey) {
+  const keys = tx.message.staticAccountKeys.map(k => k.toBase58());
+  if (keys[0] !== payerKey) throw new Error('transaction fee payer is not the wallet; refusing');
+  if (tx.message.header.numRequiredSignatures !== 1) throw new Error('transaction needs signers other than the wallet; refusing');
+  for (const ix of tx.message.compiledInstructions) {
+    const pid = keys[ix.programIdIndex];
+    if (pid === undefined || !ALLOWED_PROGRAMS.has(pid)) throw new Error(`transaction calls ${pid ?? 'a program from a lookup table'}; refusing`);
+  }
+  return true;
+}
+
+function splAmount(b64) {
+  const buf = Buffer.from(b64, 'base64');
+  return buf.length >= 72 ? buf.readBigUInt64LE(64) : 0n;
+}
+
+// Simulate the unsigned transaction and compare the wallet's balances before and after.
+async function verifyBalances(connection, payer, tx, inInfo, outInfo, rawIn, quote) {
+  const owner = payer.publicKey;
+  const acct = async (info) => {
+    if (info.mint === NATIVE_MINT) return { addr: owner, native: true };
+    const mi = await connection.getAccountInfo(new PublicKey(info.mint));
+    return { addr: spl.getAssociatedTokenAddressSync(new PublicKey(info.mint), owner, false, mi.owner), native: false };
+  };
+  const a = await acct(inInfo), b = await acct(outInfo);
+  const addrs = [a.addr, b.addr, owner].map(k => k.toBase58());
+  const uniq = [...new Set(addrs)];
+  const pre = await connection.getMultipleAccountsInfo(uniq.map(k => new PublicKey(k)));
+  const sim = await connection.simulateTransaction(tx, { sigVerify: false, replaceRecentBlockhash: true,
+    accounts: { encoding: 'base64', addresses: uniq } });
+  if (sim.value.err) throw new Error(`simulation failed: ${JSON.stringify(sim.value.err).slice(0, 160)}`);
+  const post = sim.value.accounts;
+  const val = (list, i, native) => {
+    const x = list[i];
+    if (!x) return 0n;
+    if (native) return BigInt(x.lamports);
+    const data = Array.isArray(x.data) ? x.data[0] : (x.data?.toString?.('base64') ?? x.data);
+    return splAmount(typeof data === 'string' ? data : Buffer.from(x.data).toString('base64'));
+  };
+  const ix = (k) => uniq.indexOf(k.toBase58());
+  const inPre = val(pre, ix(a.addr), a.native), inPost = val(post, ix(a.addr), a.native);
+  const outPre = val(pre, ix(b.addr), b.native), outPost = val(post, ix(b.addr), b.native);
+  const solPre = val(pre, ix(owner), true), solPost = val(post, ix(owner), true);
+  const inDrop = inPre - inPost, outGain = outPost - outPre, solDrop = solPre - solPost;
+  if (inDrop > BigInt(rawIn) + (a.native ? BigInt(SOL_OVERHEAD_LAMPORTS) : 0n)) throw new Error(`simulation takes ${inDrop} of ${inInfo.symbol}, more than ${rawIn}; refusing`);
+  if (outGain < BigInt(quote.otherAmountThreshold) - (b.native ? BigInt(SOL_OVERHEAD_LAMPORTS) : 0n)) throw new Error(`simulation pays ${outGain} of ${outInfo.symbol}, under the minimum ${quote.otherAmountThreshold}; refusing`);
+  if (!a.native && !b.native && solDrop > BigInt(SOL_OVERHEAD_LAMPORTS)) throw new Error(`simulation spends ${solDrop} lamports of SOL; refusing`);
+  return { inDrop: inDrop.toString(), outGain: outGain.toString(), solDrop: solDrop.toString() };
+}
+
+// Decimals from the mint account itself; a hint that disagrees is refused.
+async function chainDecimals(connection, info) {
+  if (info.mint === NATIVE_MINT) return 9;
+  const mi = await connection.getAccountInfo(new PublicKey(info.mint));
+  if (!mi || mi.data.length < 45) throw new Error(`mint ${info.mint} not readable on chain`);
+  return mi.data[44];
+}
+
 // --- wallet reads -------------------------------------------------------------------
 async function rawBalance(connection, owner, mint) {
   if (mint === NATIVE_MINT) return BigInt(await connection.getBalance(owner));
@@ -244,6 +337,10 @@ async function sellable(connection, owner, info) {
 // --- the swap itself -------------------------------------------------------------
 // Quote, build, (dry run: report) or (execute: sign, send once, confirm).
 async function performSwap({ connection, payer }, inInfo, outInfo, amountHuman, execute, extra = {}) {
+  for (const info of [inInfo, outInfo]) {
+    const d = await chainDecimals(connection, info);
+    if (info.decimals !== d) throw new Error(`${info.symbol} decimals ${info.decimals} disagree with the chain's ${d}; refusing`);
+  }
   const rawIn = toRaw(amountHuman, inInfo.decimals);
   if (rawIn <= 0n) throw new Error(`amount ${amountHuman} ${inInfo.symbol} rounds to zero`);
   const have = await sellable(connection, payer.publicKey, inInfo);
@@ -253,10 +350,14 @@ async function performSwap({ connection, payer }, inInfo, outInfo, amountHuman, 
       + `, asked ${amountHuman}`);
   }
   const quote = await getQuote(inInfo.mint, outInfo.mint, rawIn);
+  verifyQuote(quote, inInfo, outInfo, rawIn);
   const view = quoteView(quote, inInfo, outInfo);
   checkImpact(view);
   const { built, tx } = await buildSwapTx(quote, payer);
+  verifyTxShape(tx, payer.publicKey.toBase58());
+  const verified = await verifyBalances(connection, payer, tx, inInfo, outInfo, rawIn, quote);
   const report = {
+    verified,
     ...extra,
     sold: { mint: inInfo.mint, symbol: inInfo.symbol, amount: view.amountIn,
       usd: inInfo.usdPrice != null ? Number((view.amountIn * inInfo.usdPrice).toFixed(4)) : null },

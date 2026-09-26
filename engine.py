@@ -108,13 +108,23 @@ def screen_token(symbol, facts):
     return True, f'{symbol}: verified'
 
 
+def is_major(tok, majors=None):
+    """A major by MINT. `majors` (symbols) is honoured only for a token with
+    no address at all, as in old fixtures; a token that names a mint must be
+    that mint, so a fake "USDC" does not pass by its name."""
+    tok = tok or {}
+    if tok.get('address'):
+        return tok['address'] in MAJOR_MINTS
+    return tok.get('symbol') in (majors if majors is not None else MAJORS)
+
+
 def screening_verdict(rec, facts, majors=MAJORS):
-    """Both tokens must pass: a major passes by name, anything else on its
+    """Both tokens must pass: a major passes by mint, anything else on its
     Jupiter facts. The worst answer decides."""
     reasons = []
     for side in ('a', 'b'):
         tok = rec[f'token_{side}']
-        if tok.get('symbol') in majors:
+        if is_major(tok, majors):
             continue
         ok, why = screen_token(tok.get('symbol'), (facts or {}).get(side))
         if not ok:
@@ -133,7 +143,23 @@ def active_liquidity(pool):
         return None
 
 
-STABLES = {'USDC', 'USDT', 'PYUSD', 'USDS', 'DAI', 'FDUSD', 'USDE'}
+STABLES = {'USDC', 'USDT', 'PYUSD', 'USDS', 'DAI', 'FDUSD', 'USDE'}      # display only
+# Identity is the MINT, never the symbol: a symbol is whatever an API or a
+# token's own metadata says (security review, 2026-09-26).
+STABLE_MINTS = {'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v',   # USDC
+                'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB',   # USDT
+                '2b1kV6DkPAnxd5ixfnxCpjxmKwqjjaYmCZfHsFu24GXo',   # PYUSD
+                'USDSwr9ApdHk5bvJKMjzff41FfuX8bSxdKcR81vTwcA'}    # USDS
+MAJOR_MINTS = STABLE_MINTS | {'So11111111111111111111111111111111111111112'}   # + SOL
+
+
+def is_stable(tok):
+    """A dollar stablecoin by MINT; a token with no address at all (old
+    fixtures, raw Orca dicts) falls back to its symbol."""
+    tok = tok or {}
+    if tok.get('address'):
+        return tok['address'] in STABLE_MINTS
+    return tok.get('symbol') in STABLES
 
 
 def as_record(pool):
@@ -153,7 +179,7 @@ def pool_quote_price(pool):
     """
     rec = as_record(pool)
     b = rec.get('token_b') or {}
-    if b.get('symbol') in STABLES:
+    if is_stable(b):
         return 1.0
     mint = b.get('address')
     if not mint:
@@ -840,7 +866,7 @@ def score_board(records, capital, bands, swap_cost=SWAP_COST, max_rebal_per_day=
     # Quote-token prices in one Jupiter call, so a non-dollar quote costs no
     # GeckoTerminal budget.
     quotes = {}
-    need = [r['token_b']['address'] for r, _ in todo if r['token_b'].get('symbol') not in STABLES]
+    need = [r['token_b']['address'] for r, _ in todo if not is_stable(r['token_b'])]
     if need:
         quotes = dexes.jupiter_prices(need)
 
@@ -849,7 +875,7 @@ def score_board(records, capital, bands, swap_cost=SWAP_COST, max_rebal_per_day=
         if progress:
             progress(i, len(todo), rec)
         qsym, qmint = rec['token_b'].get('symbol'), rec['token_b'].get('address')
-        quote_usd = 1.0 if qsym in STABLES else quotes.get(qmint) or pool_quote_price(rec)
+        quote_usd = 1.0 if is_stable(rec['token_b']) else quotes.get(qmint) or pool_quote_price(rec)
         if not quote_usd:
             out.append({**base, 'skipped': 'quote token unpriced'})
             continue
@@ -885,7 +911,7 @@ def score_board(records, capital, bands, swap_cost=SWAP_COST, max_rebal_per_day=
     facts_cache = {}
     for i, r in enumerate(scored):
         r['facts'] = None
-        if all(r[f'token_{x}']['symbol'] in MAJORS for x in ('a', 'b')):
+        if all(is_major(r[f'token_{x}']) for x in ('a', 'b')):
             r['screen_ok'], r['screen_reason'] = True, 'both tokens are majors'
             continue
         if i >= screen_top:
@@ -894,7 +920,7 @@ def score_board(records, capital, bands, swap_cost=SWAP_COST, max_rebal_per_day=
         facts = {}
         for side in ('a', 'b'):
             tok = r[f'token_{side}']
-            if tok['symbol'] in MAJORS:
+            if is_major(tok):
                 continue
             m = tok['address']
             if m not in facts_cache:

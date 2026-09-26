@@ -153,6 +153,12 @@ REGIME_WIDTHS = tuple(float(x) for x in (_CFG.get('regime_widths') or [1.01, 1.0
 REGIME_HORIZON = _env('LPBOT_REGIME_HORIZON', int, int(_CFG.get('regime_horizon_minutes') or 120))
 REGIME_THRESHOLD = _env('LPBOT_REGIME_THRESHOLD', float, float(_CFG.get('regime_threshold') or 0.25))
 REGIME_STEPS = _env('LPBOT_REGIME_STEPS', int, int(_CFG.get('regime_steps') or 2))
+REGIME_TAPE_DAYS = _env('LPBOT_REGIME_TAPE_DAYS', int, int(_CFG.get('regime_tape_days') or 30))
+# Fee density scales the touch threshold: liquidity flooding in (our share of
+# fees falls, the risk of a touch does not) tightens it; volume up or
+# liquidity leaving loosens it. Bounded, because no history exists to fit it.
+REGIME_LIQ_MIN = _env('LPBOT_REGIME_LIQ_MIN', float, float(_CFG.get('regime_liq_min') or 0.6))
+REGIME_LIQ_MAX = _env('LPBOT_REGIME_LIQ_MAX', float, float(_CFG.get('regime_liq_max') or 1.25))
 # Swap to 50/50 before an open when the wallet is lopsided. Without it, an
 # open after an exit is limited by the scarcer token and most capital idles.
 REBALANCE_SWAP = _env('LPBOT_REBALANCE_SWAP', lambda s: s.lower() in ('1', 'true', 'yes'),
@@ -171,6 +177,7 @@ PAYOUT_MINT = _env('LPBOT_PAYOUT_MINT', str, _CFG.get('payout_mint') or '')
 # leaves them in the LP wallet. Balances under reward_min_usd wait.
 REWARD_POLICY = _env('LPBOT_REWARD_POLICY', str, _CFG.get('reward_policy') or 'payout')
 REWARD_MIN_USD = _env('LPBOT_REWARD_MIN_USD', float, float(_CFG.get('reward_min_usd') or 1.0))
+REWARD_MAX_USD = _env('LPBOT_REWARD_MAX_USD', float, float(_CFG.get('reward_max_usd') or 25.0))
 
 
 def policy():
