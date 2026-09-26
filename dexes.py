@@ -189,6 +189,57 @@ def attach_chain_state(records):
 
 # --- Orca --------------------------------------------------------------------
 
+# --- rewards ------------------------------------------------------------------
+#
+# Every record carries `reward_usd_day`: what the pool's reward programs pay
+# ALL its liquidity per day, in dollars, and `reward_mints`, the tokens they pay
+# in. The board prices a position's share of it exactly like fees (engine), and
+# the bot splits harvested rewards like income (rebalancer.distribute_rewards).
+# Each API reports rewards its own way; an ended or zero program counts as none.
+NULL_MINT = '11111111111111111111111111111111'
+
+
+def _rewards(usd_day, mints):
+    mints = [m for m in dict.fromkeys(mints or []) if m and m != NULL_MINT]
+    return {'reward_usd_day': max(float(usd_day or 0.0), 0.0), 'reward_mints': mints}
+
+
+def orca_rewards(p):
+    """Orca: stats.24h.rewards is the pool's reward value paid in the last day,
+    in dollars; rewards[] names the mints, `active` marks live programs."""
+    live = [r for r in (p.get('rewards') or []) if r.get('active') and _f(r.get('emissionsPerSecond')) > 0]
+    usd = _f(((p.get('stats') or {}).get('24h') or {}).get('rewards')) if live else 0.0
+    return _rewards(usd, [r.get('mint') for r in live])
+
+
+def raydium_rewards(p):
+    """Raydium: day.rewardApr is a list of APRs in percent of TVL, one per
+    program; rewardDefaultInfos names the mints and their end times."""
+    import time as _t
+    apr = sum(_f(x) for x in ((p.get('day') or {}).get('rewardApr') or []))
+    now = _t.time()
+    live = [((r.get('mint') or {}).get('address')) for r in (p.get('rewardDefaultInfos') or [])
+            if _f(r.get('perSecond')) > 0 and _f(r.get('endTime')) > now]
+    return _rewards(apr / 100 / 365 * _f(p.get('tvl')) if live else 0.0, live)
+
+
+def byreal_rewards(p):
+    """Byreal: rewards[] with an apr in percent of TVL when a program runs."""
+    rs = p.get('rewards') or []
+    apr = sum(_f(r.get('apr') or r.get('rewardApr')) for r in rs)
+    mints = [(r.get('mint') or {}).get('address') if isinstance(r.get('mint'), dict) else r.get('mint')
+             or r.get('rewardMint') for r in rs]
+    return _rewards(apr / 100 / 365 * _f(p.get('tvl')) if apr > 0 else 0.0, mints)
+
+
+def meteora_rewards(p):
+    """Meteora DLMM: farm_apr in percent of TVL while has_farm; the reward mints
+    are reward_mint_x/y, the null mint when unused."""
+    apr = _f(p.get('farm_apr')) if p.get('has_farm') else 0.0
+    return _rewards(apr / 100 / 365 * _f(p.get('tvl')) if apr > 0 else 0.0,
+                    [p.get('reward_mint_x'), p.get('reward_mint_y')] if apr > 0 else [])
+
+
 def from_orca(p):
     a, b = p['tokenA'], p['tokenB']
     stats = (p.get('stats') or {}).get('24h') or {}
@@ -206,6 +257,7 @@ def from_orca(p):
         'liquidity': _f(p.get('liquidity')) / math.sqrt(10 ** da * 10 ** db_) or None,
         'adaptive_fee': bool(p.get('adaptiveFeeEnabled')),
         'tick_spacing': p.get('tickSpacing'),
+        **orca_rewards(p),
     }
 
 
@@ -241,6 +293,7 @@ def from_raydium(p):
         'liquidity': None,                       # read from chain below
         'adaptive_fee': bool(p.get('hasDynamicFee')),
         'tick_spacing': (p.get('config') or {}).get('tickSpacing'),
+        **raydium_rewards(p),
     }
 
 
@@ -279,6 +332,7 @@ def from_byreal(p):
         'liquidity': None,
         'adaptive_fee': nominal < 1e-5 or bool(p.get('decayFeeFlag')),
         'tick_spacing': None,
+        **byreal_rewards(p),
     }
 
 
@@ -432,6 +486,7 @@ def from_meteora_dlmm(p):
         'adaptive_fee': _f(cfg.get('max_fee_pct')) > 0 or bool(_f(p.get('dynamic_fee_pct')) > base * 100 * 0.5),
         'token_usd': (_f(x.get('price')), _f(y.get('price'))),
         'blacklisted': bool(p.get('is_blacklisted')),
+        **meteora_rewards(p),
     }
 
 

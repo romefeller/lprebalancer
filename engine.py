@@ -640,14 +640,22 @@ def ladder(pool, candle_data, bands, capital, swap_cost=SWAP_COST,
         logp = np.log(px)
         M, m = forward_extrema(logp, int(pol['horizon']))
         pol['tables'] = (M, m, trailing_vol(logp))
+    # Rewards: what the pool's programs pay all its liquidity per day, shared
+    # like fees (the position's concentration against the pool's, over TVL)
+    # and paid only while in range. Added to the decision figure, kept apart
+    # as `reward_day_pct` so the board shows how much of a score is rewards.
+    reward_usd_day = float(rec.get('reward_usd_day') or 0.0)
     rows = []
     for k in bands:
         path = simulate(k, ts, px, vol, ctx, fee, capital, swap_cost, **pol)
         roll = rolling(k, ts, px, vol, ctx, fee, capital, swap_cost, horizon_hours, step_hours, **pol)
         surv = survival(px, k)
+        reward_pct = (reward_usd_day * band_concentration(k) / c_pool / tvl * 100
+                      * path['in_range_pct'] / 100) if reward_usd_day > 0 and tvl > 0 else 0.0
         rows.append({
             'band': k, 'band_pct': (k - 1) * 100,
-            'net_day_pct': roll['median_net_day'] if roll else path['net_day_pct'],
+            'reward_day_pct': reward_pct,
+            'net_day_pct': (roll['median_net_day'] if roll else path['net_day_pct']) + reward_pct,
             'rebal_per_day': roll['rebal_per_day'] if roll else path['rebal_per_day'],
             'edge_loss_pct': edge_loss(k) * 100,
             'path': path, 'roll': roll, 'survival': surv,
@@ -704,6 +712,8 @@ def _pick_row(rec, rows, meta, pick):
         'fees_24h_usd': rec.get('fees_24h_usd'), 'price': meta['price'], 'c_pool': meta['c_pool'],
         'band': pick['band'], 'band_pct': pick['band_pct'],
         'net_day_pct': pick['net_day_pct'], 'rebal_per_day': pick['rebal_per_day'],
+        'reward_day_pct': pick.get('reward_day_pct', 0.0),
+        'reward_usd_day': rec.get('reward_usd_day') or 0.0, 'reward_mints': rec.get('reward_mints') or [],
         'path_net_day': pick['path']['net_day_pct'],
         'p25_net_day': o.get('p25_net_day'), 'worst_net_day': o.get('worst_net_day'),
         'share_positive': o.get('share_positive'), 'share_beat_hold': o.get('share_beat_hold'),
@@ -752,6 +762,11 @@ def realised_check(rows):
         # like the replay's fees over capital in quote units
         share = band_concentration(r['band']) / r['c_pool'] / r['tvl_usd']
         r['realised_day_pct'] = float(r.get('fees_24h_usd') or 0) * share * 100
+        # Band-free: fees plus rewards per dollar of liquidity at the active
+        # price. Two pools compare the same at any band, so this is what calm
+        # mode ranks venues on while it holds a tight band.
+        r['density'] = ((float(r.get('fees_24h_usd') or 0) + float(r.get('reward_usd_day') or 0))
+                        / r['c_pool'] / r['tvl_usd'])
         path = r.get('path') or {}
         gross = (path.get('fees') or 0) / max(path.get('days') or 1, 1e-9)
         r['modelled_gross_day_pct'] = gross / max(r.get('capital', 190.0), 1e-9) * 100
@@ -892,7 +907,7 @@ def score_board(records, capital, bands, swap_cost=SWAP_COST, max_rebal_per_day=
 
 def print_board(rows, top=25):
     print(f"{'dex':<22}{'pair':<16}{'fee':>7}{'tvl$M':>7}{'vol$M':>7}{'cpool':>6}{'band':>6}"
-          f"{'net%/d':>8}{'real':>8}{'use':>7}{'p25':>7}{'+win':>5}{'reb/d':>6}{'S7d':>5}  screen")
+          f"{'net%/d':>8}{'rwd':>6}{'real':>8}{'use':>7}{'p25':>7}{'+win':>5}{'reb/d':>6}{'S7d':>5}  screen")
     for r in rows[:top]:
         if r.get('net_day_pct') is None:
             print(f"{r['dex']:<22}{(r.get('pair') or '?')[:15]:<16}{'':>7}{(r.get('tvl_usd') or 0) / 1e6:>7.2f}"
@@ -902,7 +917,7 @@ def print_board(rows, top=25):
         drift = r.get('liquidity_drift')
         print(f"{r['dex']:<22}{r['pair'][:15]:<16}{r['fee'] * 100:>6.3f}%{r['tvl_usd'] / 1e6:>7.2f}"
               f"{(r.get('volume_24h_usd') or 0) / 1e6:>7.2f}{r['c_pool']:>6.1f}{r['band_pct']:>5.0f}%"
-              f"{r['net_day_pct']:>8.3f}{(f'{min(drift, 99.0):.2f}x' if drift is not None else '-'):>8}"
+              f"{r['net_day_pct']:>8.3f}{(r.get('reward_day_pct') or 0):>6.3f}{(f'{min(drift, 99.0):.2f}x' if drift is not None else '-'):>8}"
               f"{(r.get('decision_day_pct') if r.get('decision_day_pct') is not None else r['net_day_pct']):>7.3f}"
               f"{(r.get('p25_net_day') or 0):>7.3f}"
               f"{(r.get('share_positive') or 0) * 100:>4.0f}%{r['rebal_per_day']:>6.2f}"

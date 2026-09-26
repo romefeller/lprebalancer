@@ -168,6 +168,11 @@ function render(row) {
         + (sent || 'nothing sent this harvest') + `\n`
         + `split  paid $${n(row.split?.paid, 4)} · reinvested $${n(row.split?.reinvested, 4)} · gas $${n(row.split?.gas, 4)}`;
     }
+    case 'REWARD_PAYOUT':
+      return `REWARDS${row.gas_low ? ' · gas low, swapped to SOL for gas' : ''}\n`
+        + (row.rewards ?? []).map(x => `$${n(x.usd, 4)} → ${x.to}${x.signature ? `\n${x.signature}` : ''}`).join('\n');
+    case 'reward_swap_failed':
+      return `reward swap failed · ${row.reason}\n${row.amount} of ${row.mint} stays in the LP wallet`;
     case 'payout_failed':
       return `PAYOUT FAILED · ${row.reason}${row.owed != null ? `\nowed ${row.owed} ${row.symbol}, retried at the next harvest` : ''}`;
     case 'payout_skipped':
@@ -205,6 +210,7 @@ function render(row) {
     case 'SCAN': {
       const top = (row.top ?? []).map(t =>
         `${t.can_open ? '▸' : '·'} ${t.dex} ${t.pair} ${t.band} ${n(t.net_day_pct, 3)}%/d`
+        + `${t.reward_day_pct ? ` +${n(t.reward_day_pct, 3)} rewards` : ''}`
         + `${t.drift != null && t.drift < 0.999 ? ` (tape ${n(t.drift, 2)}x → use ${n(t.use_day_pct, 3)})` : ''} `
         + `${n(t.rebal_per_day, 2)} reb/d $${n(t.tvl_musd, 1)}M${t.ok ? '' : ' ✗'}`).join('\n');
       const errs = row.errors ? `\nerrors: ${Object.entries(row.errors).map(([k, v]) => `${k}: ${v}`).join('; ')}` : '';

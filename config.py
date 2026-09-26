@@ -157,6 +157,11 @@ REBALANCE_SWAP = _env('LPBOT_REBALANCE_SWAP', lambda s: s.lower() in ('1', 'true
 PAYOUT_ENABLED = _env('LPBOT_PAYOUT', lambda s: s.lower() in ('1', 'true', 'yes'), bool(_CFG.get('payout_enabled')))
 PROFIT_WALLET = _env('LPBOT_PROFIT_WALLET', str, _CFG.get('profit_wallet') or '')
 PAYOUT_MINT = _env('LPBOT_PAYOUT_MINT', str, _CFG.get('payout_mint') or '')
+# Reward tokens that are not one of the pool's own: 'payout' swaps them to
+# payout_mint and sends them (to native SOL for gas while gas is low); 'hold'
+# leaves them in the LP wallet. Balances under reward_min_usd wait.
+REWARD_POLICY = _env('LPBOT_REWARD_POLICY', str, _CFG.get('reward_policy') or 'payout')
+REWARD_MIN_USD = _env('LPBOT_REWARD_MIN_USD', float, float(_CFG.get('reward_min_usd') or 1.0))
 
 
 def policy():
@@ -220,6 +225,8 @@ def summary():
         'payout_enabled': PAYOUT_ENABLED,
         'profit_wallet': PROFIT_WALLET or None,
         'payout_mint': PAYOUT_MINT or None,
+        'reward_policy': REWARD_POLICY,
+        'reward_min_usd': REWARD_MIN_USD,
     }
 
 

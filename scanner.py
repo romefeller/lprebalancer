@@ -54,6 +54,7 @@ def run_once(notify=None, progress=None):
                season_now=(round(season['profile'][db.now().hour], 2) if season.get('profile') else None),
                top=[{'dex': r['dex'], 'pair': r['pair'], 'band': f"+/-{r['band_pct']:.0f}%",
                      'net_day_pct': round(r['net_day_pct'], 3),
+                     'reward_day_pct': round(r.get('reward_day_pct') or 0.0, 3),
                      'use_day_pct': round(r.get('decision_day_pct', r['net_day_pct']), 3),
                      'drift': (round(r['liquidity_drift'], 2) if r.get('liquidity_drift') is not None else None),
                      'rebal_per_day': round(r['rebal_per_day'], 2),

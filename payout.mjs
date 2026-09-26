@@ -9,6 +9,7 @@
 // dry run by default.
 //
 //   node payout.mjs send <mint> <amount> <to> [--execute]
+//   node payout.mjs balance <mint>
 //
 // `amount` is in human units of the mint. The recipient's associated token
 // account is created if missing (idempotent instruction; the LP wallet pays
@@ -100,12 +101,33 @@ async function send(mintArg, amountArg, toArg, execute) {
   console.log(JSON.stringify({ ...report, signature, sent: true }, null, 1));
 }
 
+// What the LP wallet holds of one mint, in human units. Read-only.
+async function balance(mintArg) {
+  const connection = new Connection(RPC, 'confirmed');
+  const payer = Keypair.fromSecretKey(await secretBytes());
+  const mint = key(mintArg, 'mint');
+  if (mint.toBase58() === NATIVE_MINT) {
+    const lamports = await connection.getBalance(payer.publicKey);
+    console.log(JSON.stringify({ mint: NATIVE_MINT, amount: lamports / 1e9, decimals: 9 }, null, 1));
+    return;
+  }
+  const info = await connection.getAccountInfo(mint);
+  if (!info) throw new Error(`mint ${mint.toBase58()} not found`);
+  const m = await spl.getMint(connection, mint, 'confirmed', info.owner);
+  const ata = spl.getAssociatedTokenAddressSync(mint, payer.publicKey, false, info.owner);
+  let raw = 0n;
+  try { raw = (await spl.getAccount(connection, ata, 'confirmed', info.owner)).amount; } catch { raw = 0n; }
+  console.log(JSON.stringify({ mint: mint.toBase58(), amount: Number(raw) / 10 ** m.decimals,
+                               raw: raw.toString(), decimals: m.decimals }, null, 1));
+}
+
 async function main() {
   const args = process.argv.slice(2);
   const execute = args.includes('--execute');
   const [cmd, ...rest] = args.filter(x => x !== '--execute');
   if (cmd === 'send') return send(rest[0], rest[1], rest[2], execute);
-  console.log('commands: send <mint> <amount> <to> [--execute]   (amount in human units)');
+  if (cmd === 'balance') return balance(rest[0]);
+  console.log('commands: send <mint> <amount> <to> [--execute] | balance <mint>   (amounts in human units)');
 }
 
 main().catch(e => {

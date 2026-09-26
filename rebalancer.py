@@ -352,14 +352,84 @@ def harvest_due(state, status):
 _POOL_REC = {}
 
 
-def pool_tokens():
-    """(mint, symbol) of token A and token B of the held pool, cached."""
+def pool_record():
+    """The held pool's record, cached for an hour (reward programs change)."""
     key = (config.DEX, config.POOL)
-    if key not in _POOL_REC:
-        rec = dexes.pool(config.DEX, config.POOL)
-        _POOL_REC[key] = ((rec['token_a']['address'], rec['token_a']['symbol']),
-                          (rec['token_b']['address'], rec['token_b']['symbol']))
-    return _POOL_REC[key]
+    t, rec = _POOL_REC.get(key, (0, None))
+    if rec is None or time.time() - t > 3600:
+        fresh = dexes.pool(config.DEX, config.POOL)
+        if fresh:
+            rec = fresh
+            _POOL_REC[key] = (time.time(), rec)
+    if rec is None:
+        raise RuntimeError('pool record unavailable')
+    return rec
+
+
+def pool_tokens():
+    """(mint, symbol) of token A and token B of the held pool."""
+    rec = pool_record()
+    return ((rec['token_a']['address'], rec['token_a']['symbol']),
+            (rec['token_b']['address'], rec['token_b']['symbol']))
+
+
+def distribute_rewards(state, position):
+    """Reward tokens, after a harvest: every reward mint the pool names (and
+    every one it has named before, so a program that just ended is still
+    swept), other than the pool's own two tokens. Under the 'payout' policy a
+    balance worth at least reward_min_usd is swapped through Jupiter to the
+    payout token and sent to the profit wallet; while gas is under the
+    reserve it is swapped to native SOL and kept as gas. Never blocks a move."""
+    if not config.PAYOUT_ENABLED or config.REWARD_POLICY != 'payout':
+        return None
+    rec = pool_record()
+    own = {rec['token_a']['address'], rec['token_b']['address']}
+    seen = state.setdefault('reward_mints_seen', [])
+    for m in rec.get('reward_mints') or []:
+        if m not in seen:
+            seen.append(m)
+    mints = [m for m in seen if m not in own]
+    if not mints:
+        return None
+    bal = wallet(config.POOL)
+    gas_low = (bal.get('sol') or 0.0) < config.GAS_RESERVE_SOL
+    target = fees.NATIVE_MINT if gas_low else config.PAYOUT_MINT
+    if not target:
+        return None
+    prices = dexes.jupiter_prices(mints)
+    done = []
+    for m in mints:
+        out, err = chain('balance', m, dex='payout')
+        amt = float((out or {}).get('amount') or 0.0)
+        usd = amt * prices.get(m, 0.0)
+        if amt <= 0 or usd < config.REWARD_MIN_USD:
+            continue
+        sw, err = chain('swap', m, target, f'{amt:.9f}', '--execute', dex='jupiter')
+        got = float(((sw or {}).get('bought') or {}).get('amount') or 0.0)
+        if err or not (sw or {}).get('signature') or got <= 0:
+            notify('reward_swap_failed', reason=err or 'no signature', mint=m, amount=amt)
+            continue
+        if gas_low:
+            db.record_payout(config.PROFILE, position, target, 'SOL', got, usd, 'gas',
+                             signature=sw['signature'], detail=f'reward {m} swapped for gas')
+            done.append({'mint': m, 'usd': round(usd, 4), 'to': 'gas'})
+            continue
+        tx, err = chain('send', target, f'{got:.9f}', config.PROFIT_WALLET, '--execute', dex='payout')
+        if tx and tx.get('signature') and not err:
+            db.record_payout(config.PROFILE, position, target, 'reward', got, usd, 'paid',
+                             to_address=config.PROFIT_WALLET, signature=tx['signature'],
+                             detail=f'reward {m} swapped {sw["signature"]}')
+            done.append({'mint': m, 'usd': round(usd, 4), 'to': 'profit wallet', 'signature': tx['signature']})
+        else:
+            owed = state.setdefault('payout_owed', {})
+            owed[target] = float(owed.get(target, 0.0)) + got
+            db.record_payout(config.PROFILE, position, target, 'reward', got, usd, 'owed',
+                             to_address=config.PROFIT_WALLET, detail=err or 'no signature')
+            notify('payout_failed', reason=err or 'no signature', symbol='reward', owed=round(got, 6))
+    save(state)
+    if done:
+        notify('REWARD_PAYOUT', rewards=done, gas_low=gas_low)
+    return done
 
 
 def distribute(state, position, fee_a, fee_b):
@@ -436,6 +506,7 @@ def dividend(state, status):
                     signature=out['signature'])
         try:
             distribute(state, mint, a, b)
+            distribute_rewards(state, mint)
         except Exception as e:          # the split must never stop the loop
             notify('payout_failed', reason=f'{type(e).__name__}: {tidy(e)}')
         return True
@@ -708,6 +779,58 @@ def consider_migration(state, status, current_best):
     return True
 
 
+def density(r):
+    """Fees plus rewards per dollar of liquidity at the active price, per day:
+    band-free, so a tight band compares venues on it directly."""
+    if r.get('density') is not None:
+        return float(r['density'])
+    try:
+        return ((float(r.get('fees_24h_usd') or 0) + float(r.get('reward_usd_day') or 0))
+                / float(r['c_pool']) / float(r['tvl_usd']))
+    except (KeyError, TypeError, ValueError, ZeroDivisionError):
+        return None
+
+
+def calm_board_check(state, status):
+    """The pool review while calm mode holds the tight band. The hourly ladder
+    says nothing about a +/-1% band, but fee (and reward) density does: at any
+    band, a dollar at the active price earns in proportion to it. Moves to the
+    densest eligible pool, still tight, when it beats the held one by
+    migrate_min_gain. Returns True when a move started."""
+    if config.POOL_PINNED:
+        return False
+    run, rows = db.latest_scan(max_age_seconds=config.SCAN_INTERVAL * 3)
+    held = next((r for r in rows if r.get('address') == config.POOL and density(r)), None)
+    if not held:
+        notify('board_checked', verdict='calm: the held pool is not scored on the latest board; staying',
+               scan=(run or {}).get('id'))
+        return False
+    mints = {(held.get('token_a') or {}).get('address'), (held.get('token_b') or {}).get('address')}
+    cands = [r for r in rows
+             if r.get('address') != config.POOL and not r.get('skipped') and r.get('screen_ok')
+             and density(r) and r.get('dex') in config.EXECUTE_DEXES and r.get('dex') in SIGNERS
+             and (config.ALLOW_SWAP or {(r.get('token_a') or {}).get('address'),
+                                        (r.get('token_b') or {}).get('address')} == mints)]
+    if not cands:
+        notify('board_checked', verdict='calm: no eligible pool on the board')
+        return False
+    best = max(cands, key=density)
+    gain = density(best) / density(held) - 1
+    held_txt = f"{config.DEX} {config.PAIR_LABEL} density {density(held) * 1e4:.2f}bp/d"
+    best_txt = f"{best['dex']} {best['pair']} density {density(best) * 1e4:.2f}bp/d"
+    if gain < config.MIGRATE_MIN_GAIN:
+        notify('board_checked', held=held_txt, best=best_txt,
+               verdict=f'calm: {gain * 100:.0f}% denser is under the {config.MIGRATE_MIN_GAIN * 100:.0f}% threshold')
+        return False
+    notify('MIGRATE', held=held_txt, best=best_txt, gain_pct=round(gain * 100),
+           pool=best['address'], dex=best['dex'], calm=True)
+    db.event('MIGRATE', f'calm: {config.DEX} {config.POOL} -> {best["dex"]} {best["address"]} '
+                        f'({held_txt} -> {best_txt})')
+    rebalance(state, status, 'calm: moved to a denser pool', target=best,
+              band=config.CALM_BAND, calm_move=True)
+    return True
+
+
 def operator_target(spec):
     """Turn "<dex> <pool>" from the MIGRATE file into a board-shaped target,
     or explain why not."""
@@ -903,6 +1026,7 @@ def rebalance(state, status, reason, target=None, band=None, calm_move=False):
                signature=out['signature'])
         try:
             distribute(state, mint, accrued_a, accrued_b)
+            distribute_rewards(state, mint)
         except Exception as e:          # the split must never stop a move
             notify('payout_failed', reason=f'{type(e).__name__}: {tidy(e)}')
     else:
@@ -1118,9 +1242,13 @@ def main():
             db.event('REOPT_REQUESTED', 'operator touched REOPT')
             notify('REOPT_REQUESTED', action='board and band review now')
         if (forced or time.time() - state.get('last_reopt', 0) > config.REOPT_INTERVAL) and tight:
-            notify('reopt_checked', held='tight band', best='-',
-                   verdict='calm mode holds the tight band; the review waits until it widens')
-            state['last_reopt'] = time.time() - config.REOPT_INTERVAL + 1800; save(state)
+            # The band review waits while calm holds the tight band; the pool
+            # review does not. It ranks venues on fee and reward density,
+            # which a band does not change.
+            state['last_reopt'] = time.time(); save(state)
+            if (cv or {}).get('budget_left', 0) > 0 and calm_board_check(state, status):
+                time.sleep(config.CALM_POLL_SECONDS)
+                continue
         elif forced or time.time() - state.get('last_reopt', 0) > config.REOPT_INTERVAL:
             state['last_reopt'] = time.time(); save(state)
             best = best_band_for(status['whirlpool'])
