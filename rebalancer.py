@@ -604,12 +604,9 @@ def tape_bars():
     return max(288, int(config.REGIME_TAPE_DAYS) * 288)
 
 
-def _tape_file(pool):
-    return ROOT / f'tape5_{pool[:12]}.json'
-
-
 def _merge(bars_list):
-    """Union of five-minute bar arrays, by timestamp, newest wins, oldest first."""
+    """Union of five-minute bar arrays, by timestamp, newest wins, oldest
+    first, trimmed to the window."""
     rows = {}
     for b in bars_list:
         if b is None:
@@ -624,21 +621,25 @@ def _merge(bars_list):
 
 
 def tape5(pool, price):
-    """The pool's five-minute tape, ten days deep. Kept on disk across
-    restarts; each refresh fetches the newest 1000 bars and merges them; a
-    short tape pages back until it is full. A 3.5-day tape made the width
-    choice noisy and churned 6 to 7 moves a day in the replay."""
+    """The pool's five-minute tape, `regime_tape_days` deep, from the
+    database. Each refresh fetches the newest 1000 bars, pages back while the
+    window is short, stores the new bars and deletes those older than the
+    window. Memory holds this pool's window only (plus at most one other
+    pool, for a move in progress). A 3.5-day tape made the width choice
+    noisy and churned 6 to 7 moves a day in the replay."""
     t, b = _TAPE5.get(pool, (0, None))
-    if b is None:
-        try:
-            d = json.loads(_tape_file(pool).read_text())
-            b = tuple(np.array(c, dtype=float) for c in d['bars'])
-            if abs(b[4][-1] / price - 1) > 0.15:
-                b = None                       # another orientation or a stale file: rebuild
-        except Exception:
-            b = None
     if b is not None and time.time() - t <= TAPE5_REFRESH:
         return b
+    window_s = tape_bars() * calm.BAR_SECONDS
+    if b is None:
+        try:
+            # an hour of slack: the newest stored bar can trail the clock, and
+            # _merge trims to the window anyway
+            b = db.tape_load(pool, time.time() - window_s - 3600)
+        except Exception:
+            b = None
+        if b is not None and abs(b[4][-1] / price - 1) > 0.15:
+            b = None                           # another orientation or stale rows: rebuild
     try:
         fresh = calm.tape_5m(pool, live_price=price)
     except Exception:
@@ -660,14 +661,19 @@ def tape5(pool, price):
         n0 = len(merged[0]); merged = _merge([older, merged]); tries += 1
         if len(merged[0]) == n0:
             break
-    if merged is not None and fresh is not None:
-        _TAPE5[pool] = (time.time(), merged)
+    if merged is None:
+        return b
+    if fresh is not None:
         try:
-            _tape_file(pool).write_text(json.dumps({'pool': pool, 'bars': [list(map(float, c)) for c in merged]}))
+            db.tape_store(pool, merged, merged[0][-1] - window_s)
+            db.tape_prune_other_pools([pool], time.time() - 86400)   # pools left a day ago
         except Exception:
             pass
-        return merged
-    return merged if merged is not None else b
+        # memory: this pool, and at most one other
+        for other in [p for p in _TAPE5 if p != pool][:-1]:
+            _TAPE5.pop(other, None)
+        _TAPE5[pool] = (time.time(), merged)
+    return merged
 
 
 def voluntary_move_allowed(state):

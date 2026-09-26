@@ -143,60 +143,62 @@ class RollingTape(unittest.TestCase):
             self.assertEqual(list(rebalancer._merge([a, b])[0]), [600, 900])
         self.assertIsNone(rebalancer._merge([None, None]))
 
-    def test_older_pages_are_oriented_against_the_bar_they_join(self):
-        import tempfile, pathlib
-        d = pathlib.Path(tempfile.mkdtemp()); now = 1_790_000_000; refs = []
+    def fake_gecko(self, now, calls=None, slope=0.0):
         def fake(pool, live_price=None, before=None):
-            refs.append(live_price); end = int(before) if before else now
+            if calls is not None:
+                calls.append(before)
+            end = int(before) if before else now
             ts = np.arange(end - 1000 * 300, end, 300, dtype=float)
-            # prices fall 30% into the past: today's price would reject old pages
-            c = 100.0 * (1 - 0.3 * (now - ts) / (now - (now - 9000 * 300)))
+            c = 100.0 * (1 - slope * (now - ts) / (9000 * 300))
             if live_price and abs(c[-1] / live_price - 1) > 0.15:
                 return None
             return ts, c, c, c, c, np.ones(len(ts))
-        rebalancer._TAPE5.clear()
-        with mock.patch.object(rebalancer, 'ROOT', d), mock.patch.object(rebalancer.calm, 'tape_5m', fake), \
-                mock.patch.object(rebalancer.config, 'REGIME_TAPE_DAYS', 30):
-            b = rebalancer.tape5('POOLADDRESS3', 100.0)
-        rebalancer._TAPE5.clear()
-        self.assertEqual(len(b[0]), 8640)
+        return fake
 
-    def test_thirty_days_is_8640_bars_and_pages_back_nine_times(self):
-        import tempfile, pathlib
-        d = pathlib.Path(tempfile.mkdtemp()); now = 1_790_000_000; calls = []
-        def fake(pool, live_price=None, before=None):
-            calls.append(before); end = int(before) if before else now
-            ts = np.arange(end - 1000 * 300, end, 300, dtype=float); c = np.full(len(ts), 100.0)
-            return ts, c, c, c, c, np.ones(len(ts))
+    def setUp(self):
         rebalancer._TAPE5.clear()
-        with mock.patch.object(rebalancer, 'ROOT', d), mock.patch.object(rebalancer.calm, 'tape_5m', fake), \
+        with rebalancer.db.cursor(commit=True) as cur:
+            cur.execute('truncate tape5')
+
+    def tearDown(self):
+        rebalancer._TAPE5.clear()
+
+    def test_thirty_days_in_the_database_and_nothing_older(self):
+        now = int(time.time()) // 300 * 300; calls = []
+        with mock.patch.object(rebalancer.calm, 'tape_5m', self.fake_gecko(now, calls)), \
                 mock.patch.object(rebalancer.config, 'REGIME_TAPE_DAYS', 30):
             b = rebalancer.tape5('POOLADDRESS2', 100.0)
-        rebalancer._TAPE5.clear()
-        self.assertEqual(len(b[0]), 8640); self.assertEqual(len(calls), 9)
+        self.assertEqual(len(b[0]), 8640); self.assertEqual(len(calls), 9)       # newest + 8 pages back
+        with rebalancer.db.cursor() as cur:
+            cur.execute("select count(*) n, min(ts) lo, max(ts) hi from tape5 where pool = 'POOLADDRESS2'")
+            r = cur.fetchone()
+        self.assertEqual(r['n'], 8640); self.assertGreaterEqual(r['lo'], r['hi'] - 30 * 86400)
 
-    def test_tape_pages_back_until_full_and_survives_a_restart(self):
-        import tempfile, pathlib
-        d = pathlib.Path(tempfile.mkdtemp())
-        now = 1_790_000_000
-        def page(before=None):
-            end = int(before) if before else now
-            ts = np.arange(end - 1000 * 300, end, 300, dtype=float)
-            c = np.full(len(ts), 100.0)
-            return ts, c, c, c, c, np.ones(len(ts))
-        calls = []
-        def fake(pool, live_price=None, before=None):
-            calls.append(before); return page(before)
-        rebalancer._TAPE5.clear()
-        with mock.patch.object(rebalancer, 'ROOT', d), mock.patch.object(rebalancer.calm, 'tape_5m', fake), \
-                mock.patch.object(rebalancer, 'tape_bars', lambda: 2880):
-            b = rebalancer.tape5('POOLADDRESS1', 100.0)
-            self.assertEqual(len(b[0]), 2880)
-            self.assertEqual(len(calls), 3)                          # newest, then two pages back
+    def test_a_restart_reads_the_database_and_fetches_one_page(self):
+        now = int(time.time()) // 300 * 300; calls = []
+        with mock.patch.object(rebalancer.calm, 'tape_5m', self.fake_gecko(now, calls)), \
+                mock.patch.object(rebalancer.config, 'REGIME_TAPE_DAYS', 10):
+            rebalancer.tape5('POOLADDRESS1', 100.0)
             rebalancer._TAPE5.clear(); calls.clear()
-            b2 = rebalancer.tape5('POOLADDRESS1', 100.0)            # from disk: one refresh only
-            self.assertEqual(len(calls), 1); self.assertEqual(len(b2[0]), 2880)
-            rebalancer._TAPE5.clear(); calls.clear()
-            b3 = rebalancer.tape5('POOLADDRESS1', 5.0)              # wrong orientation on disk: rebuilt
-            self.assertEqual(calls[0], None)
-        rebalancer._TAPE5.clear()
+            b2 = rebalancer.tape5('POOLADDRESS1', 100.0)
+        self.assertEqual(calls, [None]); self.assertEqual(len(b2[0]), 2880)
+
+    def test_older_pages_are_oriented_against_the_bar_they_join(self):
+        now = int(time.time()) // 300 * 300
+        with mock.patch.object(rebalancer.calm, 'tape_5m', self.fake_gecko(now, slope=0.3)), \
+                mock.patch.object(rebalancer.config, 'REGIME_TAPE_DAYS', 30):
+            b = rebalancer.tape5('POOLADDRESS3', 100.0)
+        self.assertEqual(len(b[0]), 8640)
+
+    def test_memory_holds_at_most_two_pools_and_old_pools_leave_the_table(self):
+        now = int(time.time()) // 300 * 300
+        with rebalancer.db.cursor(commit=True) as cur:
+            cur.execute("insert into tape5 values ('GONE', %s, 1, 1, 1, 1, 1)", (now - 3 * 86400,))
+        with mock.patch.object(rebalancer.calm, 'tape_5m', self.fake_gecko(now)), \
+                mock.patch.object(rebalancer.config, 'REGIME_TAPE_DAYS', 3):
+            for p in ('P1', 'P2', 'P3'):
+                rebalancer.tape5(p, 100.0)
+        self.assertLessEqual(len(rebalancer._TAPE5), 2); self.assertIn('P3', rebalancer._TAPE5)
+        with rebalancer.db.cursor() as cur:
+            cur.execute("select count(*) n from tape5 where pool = 'GONE'")
+            self.assertEqual(cur.fetchone()['n'], 0)

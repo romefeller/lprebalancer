@@ -199,9 +199,12 @@ def latest_scan_id():
 
 
 def record_pool_stats(dex, pool, liquidity, tvl_usd, volume_24h, price):
+    """One reading; readings older than two days are deleted (the width
+    choice reads the last 24 hours)."""
     with cursor(commit=True) as cur:
         cur.execute('insert into pool_stats (ts, dex, pool, liquidity, tvl_usd, volume_24h, price) '
                     'values (%s,%s,%s,%s,%s,%s,%s)', (now(), dex, pool, liquidity, tvl_usd, volume_24h, price))
+        cur.execute("delete from pool_stats where ts < now() - interval '2 days'")
 
 
 def pool_stats_summary(pool, hours=24):
@@ -221,6 +224,44 @@ def pool_stats_summary(pool, hours=24):
     return {'median_liquidity': float(r['med_liq']), 'readings': int(r['n']),
             'tvl_then': float(r['tvl_then']) if r['tvl_then'] is not None else None,
             'since': r['first_ts']}
+
+
+def tape_load(pool, since_ts):
+    """The pool's stored five-minute bars from `since_ts`, oldest first, as
+    six float arrays, or None."""
+    import numpy as np
+    with cursor() as cur:
+        cur.execute('select ts, open, high, low, close, volume from tape5 '
+                    'where pool = %s and ts >= %s order by ts', (pool, int(since_ts)))
+        rows = cur.fetchall()
+    if not rows:
+        return None
+    a = np.array([[r['ts'], r['open'], r['high'], r['low'], r['close'], r['volume']] for r in rows], dtype=float)
+    return tuple(a[:, i].copy() for i in range(6))
+
+
+def tape_store(pool, bars, keep_from_ts):
+    """Upsert bars and delete this pool's bars older than `keep_from_ts`:
+    the table holds the window and nothing else."""
+    if bars is None or not len(bars[0]):
+        return 0
+    rows = [(pool, int(t), float(o), float(h), float(l), float(c), float(v))
+            for t, o, h, l, c, v in zip(*bars) if t >= keep_from_ts]
+    with cursor(commit=True) as cur:
+        if rows:
+            psycopg2.extras.execute_values(cur, """
+                insert into tape5 (pool, ts, open, high, low, close, volume) values %s
+                on conflict (pool, ts) do update set open = excluded.open, high = excluded.high,
+                    low = excluded.low, close = excluded.close, volume = excluded.volume
+            """, rows, page_size=1000)
+        cur.execute('delete from tape5 where pool = %s and ts < %s', (pool, int(keep_from_ts)))
+    return len(rows)
+
+
+def tape_prune_other_pools(keep_pools, older_than_ts):
+    """Drop tapes of pools no longer held once they are stale."""
+    with cursor(commit=True) as cur:
+        cur.execute('delete from tape5 where pool <> all(%s) and ts < %s', (list(keep_pools), int(older_than_ts)))
 
 
 def season():
