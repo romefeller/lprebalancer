@@ -1,0 +1,38 @@
+{
+  "candles": 25919,
+  "days": 89.99305555555556,
+  "first": "2026-06-27T20:25:00+00:00",
+  "last": "2026-09-25T20:15:00+00:00",
+  "validation_start": "2026-08-20T20:20:00+00:00",
+  "test_start": "2026-09-07T20:20:00+00:00",
+  "economics": {
+    "tvl": 27113268.657551285,
+    "concentration": 17.538192316599922,
+    "fee_rate": 0.0004,
+    "lp_fraction": 0.87,
+    "tick_spacing": 4
+  },
+  "feature_thresholds": {
+    "volatility_40pct": 0.0015271782754714795,
+    "absolute_velocity_median": 0.18861291093862967,
+    "instability_median": 0.035617935493758586,
+    "velocity_terciles": [
+      -0.17329311577702466,
+      0.04060210770937496
+    ],
+    "quiet_hours_utc": [
+      10,
+      7,
+      9,
+      11,
+      8,
+      5
+    ],
+    "training_origins": 14663
+  },
+  "dataset_sha256": "99133c4fc54501b362efd43b2928075ec38da18e9d3a40903eac8242feda2e37",
+  "implementation_sha256": {
+    "models.py": "f7af89e2f51136df77ec033acba8d25f064312d08034d3629c735d67cf6fbcf3",
+    "simulator.py": "ca6b5f34d3ad71cc9b60f21fdfc5496c703892a80d767be4e9bb223344cb4ddd"
+  }
+}

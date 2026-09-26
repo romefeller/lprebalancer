@@ -1,0 +1,21 @@
+Research protocol frozen before policy results, 2026-09-25.
+
+Objective: increase spendable LP fee income under a 50/50 payout/reinvestment rule. Compare remaining equity as a separate constraint.
+
+Data: request 90 days of five-minute Orca SOL/USDC OHLCV. Archive every response. Exclude incomplete candles. Stop and report unavailable history. Use a current Orca pool snapshot only to scale conditional fee scenarios. Historical active liquidity and trade-level fee attribution are unavailable.
+
+Split: first 60% train, next 20% validation, final 20% test. Features use only past observations. Train labels must finish before validation. Freeze selected policies after validation. Test observations do not select parameters.
+
+Experiment 1: compare unconditional survival, volatility-scaled empirical survival, and volatility-scaled survival conditioned on variance velocity. Horizons: 15, 30, 60, 120 minutes. Width: k=1.01. Use OHLC extremes for crossing labels. Report Brier scores, calibration, origin counts, and daily-block bootstrap intervals.
+
+Experiment 2: compare fixed widths 1%, 3%, 5%, 8%, clock-only control, volatility-only control, volatility-and-velocity control, and survival control. Adaptive controllers alternate 1% with 3% or 5%. Volatility threshold: training 40th percentile. Velocity and instability thresholds: training median absolute velocity and median instability. Clock controller: six quietest UTC hours from training. Survival grid: horizons 30/60 minutes and entry risk limits 5%/15%. Exit threshold: entry threshold plus 10 percentage points. Minimum 30-minute dwell, with emergency exit response. Actions decided at candle close execute at a later candle close. No candle-close instant fill.
+
+Fee scenarios: observed volume times nominal fee times assumed LP share times liquidity share. Estimate active pool liquidity with a documented constant concentration and TVL scenario from the current snapshot. Use exact CLMM token inventory, outward tick rounding when supported, and capped liquidity share. This is not historical realized P&L. Base LP fee fraction is 80% unless the snapshot provides a validated protocol split. Stress fee density at 0.5x/1x/2x. Fees in partially crossing bars receive zero in the conservative case and a close-based estimate in a sensitivity case.
+
+Accounting: initial capital $190 and $10,000. Swap cost 5/10/20 bps of actual rebalancing notional. Fixed close/open cost $0.02/$0.10/$0.50. Base case: 10 bps and $0.10. Base downtime: 5 minutes. Stress: 15 minutes. Daily fee settlement reserves operating costs, distributes half the positive remainder, and reinvests half. Include swap and fixed harvest/reinvestment costs. Report unpaid operating costs, principal, fee reserves, spendable dividends, actions, drawdown, occupancy, and modeled fee APR. APR is a linear annualization, not a forecast.
+
+Select the highest validation dividend among policies with ending capital at least 95% of initial and drawdown at most 15%. These are illustrative research constraints. If none qualifies, report no qualifying policy. Also report the unconstrained income leader. Keep test tables for all predeclared controls to expose selection effects.
+
+Interpretation: a favorable result supports this sample and stated fee/execution assumptions. It does not establish live returns, cross-venue migration gains, or a guaranteed fee APR. Clock time is a feature, not a precondition that any timezone is calm.
+
+Pre-result implementation detail: add the same eight survival candidates with an entry filter that requires estimated extra fees to cover a complete transition cycle. This filter uses trailing one-hour volume only. Its transition estimate is two fixed charges plus one capital unit times the swap cost rate. It is deliberately conservative. Also test a close-based fee attribution case. Base execution includes a five-minute decision latency followed by five minutes without LP fees. Fee reserves use quote-currency equivalents because candle data does not identify fee token composition. This approximation needs live validation. The current snapshot reports protocolFeeRate=1300, and Orca's published denominator is 10000. The scenario therefore uses an 87% LP fee fraction. None of these decisions uses validation or test policy results.

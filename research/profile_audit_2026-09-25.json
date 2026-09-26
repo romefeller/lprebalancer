@@ -1,0 +1,133 @@
+{
+  "scope": "Descriptive sample and one chronological holdout. Not a profit backtest.",
+  "first_candle_start": "2026-08-15T05:00:00+00:00",
+  "last_candle_start": "2026-09-25T19:00:00+00:00",
+  "holdout_first_candle_start": "2026-09-13T08:00:00+00:00",
+  "completed_candles": 999,
+  "train_origins": 663,
+  "test_origins": 294,
+  "training_median_hourly_sigma_pct": 0.5850690800312233,
+  "last_hourly_sigma_pct": 0.552438125742052,
+  "last_log_sigma_velocity_per_hour": -0.016859851094700656,
+  "squared_return_lag1_correlation": 0.18268127260890415,
+  "method": "24h RMS hourly returns. Velocity = log(sigma[t]/sigma[t-6])/6. First 70% for training. Training labels end before holdout. 20 pseudo-observations shrink each bucket toward training exit frequency. Origins overlap. Scores have no independence claim or confidence interval.",
+  "bands": [
+    {
+      "k": 1.01,
+      "horizon_hours": 6,
+      "test_close_exit_rate": 0.5884353741496599,
+      "test_high_low_exit_rate": 0.8469387755102041,
+      "test_exits_missed_by_closes": 76,
+      "brier_lower_is_better": {
+        "unconditional": 0.1297028151091043,
+        "volatility": 0.12998810037697223,
+        "volatility_and_velocity": 0.1307355364841253
+      },
+      "holdout_states": [
+        {
+          "state": "low_falling",
+          "origins": 102,
+          "exit_rate": 0.9019607843137255
+        },
+        {
+          "state": "low_rising",
+          "origins": 90,
+          "exit_rate": 0.7666666666666667
+        },
+        {
+          "state": "high_falling",
+          "origins": 43,
+          "exit_rate": 0.8372093023255814
+        },
+        {
+          "state": "high_rising",
+          "origins": 59,
+          "exit_rate": 0.8813559322033898
+        }
+      ]
+    },
+    {
+      "k": 1.03,
+      "horizon_hours": 6,
+      "test_close_exit_rate": 0.10204081632653061,
+      "test_high_low_exit_rate": 0.17687074829931973,
+      "test_exits_missed_by_closes": 22,
+      "brier_lower_is_better": {
+        "unconditional": 0.14697931614924659,
+        "volatility": 0.15128608102637742,
+        "volatility_and_velocity": 0.15656838621387326
+      },
+      "holdout_states": [
+        {
+          "state": "low_falling",
+          "origins": 102,
+          "exit_rate": 0.24509803921568626
+        },
+        {
+          "state": "low_rising",
+          "origins": 90,
+          "exit_rate": 0.16666666666666666
+        },
+        {
+          "state": "high_falling",
+          "origins": 43,
+          "exit_rate": 0.13953488372093023
+        },
+        {
+          "state": "high_rising",
+          "origins": 59,
+          "exit_rate": 0.1016949152542373
+        }
+      ]
+    },
+    {
+      "k": 1.05,
+      "horizon_hours": 6,
+      "test_close_exit_rate": 0.017006802721088437,
+      "test_high_low_exit_rate": 0.034013605442176874,
+      "test_exits_missed_by_closes": 5,
+      "brier_lower_is_better": {
+        "unconditional": 0.03354932876967935,
+        "volatility": 0.03360207774732043,
+        "volatility_and_velocity": 0.03443067400903629
+      },
+      "holdout_states": [
+        {
+          "state": "low_falling",
+          "origins": 102,
+          "exit_rate": 0.06862745098039216
+        },
+        {
+          "state": "low_rising",
+          "origins": 90,
+          "exit_rate": 0.011111111111111112
+        },
+        {
+          "state": "high_falling",
+          "origins": 43,
+          "exit_rate": 0.023255813953488372
+        },
+        {
+          "state": "high_rising",
+          "origins": 59,
+          "exit_rate": 0.01694915254237288
+        }
+      ]
+    }
+  ],
+  "synthetic_code_checks": {
+    "12h_live_probability": null,
+    "12h_live_act": false,
+    "6h_live_probability": 0.047,
+    "6h_replay_probability": 0.05702647657841141,
+    "in_band_example": {
+      "initial_value": 1000,
+      "price_start": 100,
+      "price_end": 102,
+      "k": 1.05,
+      "lp_value_excluding_fees": 1007.9457961143833,
+      "hold_value": 1010,
+      "loss_vs_hold": 2.0542038856167437
+    }
+  }
+}

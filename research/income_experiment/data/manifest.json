@@ -1,0 +1,165 @@
+{
+  "pool": "Czfq3xZZDmsdGdUyrNLtRhGc47cXcZtLG4crryfu44zE",
+  "requested_start": 1782591900,
+  "end_exclusive": 1790367600,
+  "pages": [
+    {
+      "url": "https://api.geckoterminal.com/api/v2/networks/solana/pools/Czfq3xZZDmsdGdUyrNLtRhGc47cXcZtLG4crryfu44zE/ohlcv/minute?aggregate=5&limit=1000&currency=usd&include_empty_intervals=true&before_timestamp=1790367900",
+      "file": "candles_5m_00.json",
+      "sha256": "114860c94429c4a0980dabfbec00a27399d4e0010d29988bbd6e85e5074d7bf7",
+      "rows": 1000
+    },
+    {
+      "url": "https://api.geckoterminal.com/api/v2/networks/solana/pools/Czfq3xZZDmsdGdUyrNLtRhGc47cXcZtLG4crryfu44zE/ohlcv/minute?aggregate=5&limit=1000&currency=usd&include_empty_intervals=true&before_timestamp=1790067899",
+      "file": "candles_5m_01.json",
+      "sha256": "d67df7d54778109381ce12168534640e96927ebfbf335915cd532015e50f7f31",
+      "rows": 1000
+    },
+    {
+      "url": "https://api.geckoterminal.com/api/v2/networks/solana/pools/Czfq3xZZDmsdGdUyrNLtRhGc47cXcZtLG4crryfu44zE/ohlcv/minute?aggregate=5&limit=1000&currency=usd&include_empty_intervals=true&before_timestamp=1789767899",
+      "file": "candles_5m_02.json",
+      "sha256": "026d5eab3c8410cac12d6ae8a4a2e18bfa49474facb99d4e036295a39938d5a6",
+      "rows": 1000
+    },
+    {
+      "url": "https://api.geckoterminal.com/api/v2/networks/solana/pools/Czfq3xZZDmsdGdUyrNLtRhGc47cXcZtLG4crryfu44zE/ohlcv/minute?aggregate=5&limit=1000&currency=usd&include_empty_intervals=true&before_timestamp=1789467899",
+      "file": "candles_5m_03.json",
+      "sha256": "522335d9881ae6ef5a96606e34ffbcb1fe430cab0d23424997635476bebb55a8",
+      "rows": 1000
+    },
+    {
+      "url": "https://api.geckoterminal.com/api/v2/networks/solana/pools/Czfq3xZZDmsdGdUyrNLtRhGc47cXcZtLG4crryfu44zE/ohlcv/minute?aggregate=5&limit=1000&currency=usd&include_empty_intervals=true&before_timestamp=1789167899",
+      "file": "candles_5m_04.json",
+      "sha256": "fc8ad2d4a45ce68d233650f38b59e94821164e70de935cc5be98efe9f53e55fd",
+      "rows": 1000
+    },
+    {
+      "url": "https://api.geckoterminal.com/api/v2/networks/solana/pools/Czfq3xZZDmsdGdUyrNLtRhGc47cXcZtLG4crryfu44zE/ohlcv/minute?aggregate=5&limit=1000&currency=usd&include_empty_intervals=true&before_timestamp=1788867899",
+      "file": "candles_5m_05.json",
+      "sha256": "65629f0327c1298dc45bdcdf2eab02adfecbe3503df4813d59430eb77da6fd4f",
+      "rows": 1000
+    },
+    {
+      "url": "https://api.geckoterminal.com/api/v2/networks/solana/pools/Czfq3xZZDmsdGdUyrNLtRhGc47cXcZtLG4crryfu44zE/ohlcv/minute?aggregate=5&limit=1000&currency=usd&include_empty_intervals=true&before_timestamp=1788567899",
+      "file": "candles_5m_06.json",
+      "sha256": "8c41d2226f523517e16281fc5ccfab78f3a57a5fafa9ffd24080a220741c0261",
+      "rows": 1000
+    },
+    {
+      "url": "https://api.geckoterminal.com/api/v2/networks/solana/pools/Czfq3xZZDmsdGdUyrNLtRhGc47cXcZtLG4crryfu44zE/ohlcv/minute?aggregate=5&limit=1000&currency=usd&include_empty_intervals=true&before_timestamp=1788267899",
+      "file": "candles_5m_07.json",
+      "sha256": "c4e2aa853c7723074691dbf39ed203175dfdda475a1016a416757f083221334c",
+      "rows": 1000
+    },
+    {
+      "url": "https://api.geckoterminal.com/api/v2/networks/solana/pools/Czfq3xZZDmsdGdUyrNLtRhGc47cXcZtLG4crryfu44zE/ohlcv/minute?aggregate=5&limit=1000&currency=usd&include_empty_intervals=true&before_timestamp=1787967899",
+      "file": "candles_5m_08.json",
+      "sha256": "7470334fd808f81bdfaa38a76d4ad84b0830cb580de9bb200f429c55e2d7edf0",
+      "rows": 1000
+    },
+    {
+      "url": "https://api.geckoterminal.com/api/v2/networks/solana/pools/Czfq3xZZDmsdGdUyrNLtRhGc47cXcZtLG4crryfu44zE/ohlcv/minute?aggregate=5&limit=1000&currency=usd&include_empty_intervals=true&before_timestamp=1787667899",
+      "file": "candles_5m_09.json",
+      "sha256": "12dfacd69094a9818671e9972ff24705ddef479c811feac55e331cb5052ac10e",
+      "rows": 1000
+    },
+    {
+      "url": "https://api.geckoterminal.com/api/v2/networks/solana/pools/Czfq3xZZDmsdGdUyrNLtRhGc47cXcZtLG4crryfu44zE/ohlcv/minute?aggregate=5&limit=1000&currency=usd&include_empty_intervals=true&before_timestamp=1787367899",
+      "file": "candles_5m_10.json",
+      "sha256": "e676b86120dd46a197386e1fbeefb42db74c2eb8b762d115807c1bb46d1e21bb",
+      "rows": 1000
+    },
+    {
+      "url": "https://api.geckoterminal.com/api/v2/networks/solana/pools/Czfq3xZZDmsdGdUyrNLtRhGc47cXcZtLG4crryfu44zE/ohlcv/minute?aggregate=5&limit=1000&currency=usd&include_empty_intervals=true&before_timestamp=1787067899",
+      "file": "candles_5m_11.json",
+      "sha256": "95127f220c8f8d7ab87ded676d6dc8f4d5b7e76990134ee074660ca1a5ee0ed3",
+      "rows": 1000
+    },
+    {
+      "url": "https://api.geckoterminal.com/api/v2/networks/solana/pools/Czfq3xZZDmsdGdUyrNLtRhGc47cXcZtLG4crryfu44zE/ohlcv/minute?aggregate=5&limit=1000&currency=usd&include_empty_intervals=true&before_timestamp=1786767899",
+      "file": "candles_5m_12.json",
+      "sha256": "94f6ec9b0d2bf8e2d17cff53ca39db84c031c125bb069e46643371b006ff9217",
+      "rows": 1000
+    },
+    {
+      "url": "https://api.geckoterminal.com/api/v2/networks/solana/pools/Czfq3xZZDmsdGdUyrNLtRhGc47cXcZtLG4crryfu44zE/ohlcv/minute?aggregate=5&limit=1000&currency=usd&include_empty_intervals=true&before_timestamp=1786467899",
+      "file": "candles_5m_13.json",
+      "sha256": "ef4f47a70147120ecdcb673ca7e63e1acc4838baf2cdd139c4a97dd09f08ce23",
+      "rows": 1000
+    },
+    {
+      "url": "https://api.geckoterminal.com/api/v2/networks/solana/pools/Czfq3xZZDmsdGdUyrNLtRhGc47cXcZtLG4crryfu44zE/ohlcv/minute?aggregate=5&limit=1000&currency=usd&include_empty_intervals=true&before_timestamp=1786167899",
+      "file": "candles_5m_14.json",
+      "sha256": "3c5d381eaa8601bfb0c4445baae0f84772ede9237403c72784ad67fef1000108",
+      "rows": 1000
+    },
+    {
+      "url": "https://api.geckoterminal.com/api/v2/networks/solana/pools/Czfq3xZZDmsdGdUyrNLtRhGc47cXcZtLG4crryfu44zE/ohlcv/minute?aggregate=5&limit=1000&currency=usd&include_empty_intervals=true&before_timestamp=1785867899",
+      "file": "candles_5m_15.json",
+      "sha256": "ce022c8280eb9c6025d9cefb15b73add69702ec1c72a8010f291d6231e1a8037",
+      "rows": 1000
+    },
+    {
+      "url": "https://api.geckoterminal.com/api/v2/networks/solana/pools/Czfq3xZZDmsdGdUyrNLtRhGc47cXcZtLG4crryfu44zE/ohlcv/minute?aggregate=5&limit=1000&currency=usd&include_empty_intervals=true&before_timestamp=1785567899",
+      "file": "candles_5m_16.json",
+      "sha256": "eca830b8743d9a0106e32b283b5eb66f227a39a4e76ddd30718e0c436824145f",
+      "rows": 1000
+    },
+    {
+      "url": "https://api.geckoterminal.com/api/v2/networks/solana/pools/Czfq3xZZDmsdGdUyrNLtRhGc47cXcZtLG4crryfu44zE/ohlcv/minute?aggregate=5&limit=1000&currency=usd&include_empty_intervals=true&before_timestamp=1785267899",
+      "file": "candles_5m_17.json",
+      "sha256": "abdd62376518733d3ec3a3769561f0eb039cf4e15623f817d9e03b21f9d9f9b3",
+      "rows": 1000
+    },
+    {
+      "url": "https://api.geckoterminal.com/api/v2/networks/solana/pools/Czfq3xZZDmsdGdUyrNLtRhGc47cXcZtLG4crryfu44zE/ohlcv/minute?aggregate=5&limit=1000&currency=usd&include_empty_intervals=true&before_timestamp=1784967899",
+      "file": "candles_5m_18.json",
+      "sha256": "a2dbf7f81ea4838b026605e9a2782ad98af9e569696787b362cd046cdb7e0239",
+      "rows": 1000
+    },
+    {
+      "url": "https://api.geckoterminal.com/api/v2/networks/solana/pools/Czfq3xZZDmsdGdUyrNLtRhGc47cXcZtLG4crryfu44zE/ohlcv/minute?aggregate=5&limit=1000&currency=usd&include_empty_intervals=true&before_timestamp=1784667899",
+      "file": "candles_5m_19.json",
+      "sha256": "4638077bbe5e84987e5e02c483b700013ca3f17f22b0c0f1e1c0a6c532c08618",
+      "rows": 1000
+    },
+    {
+      "url": "https://api.geckoterminal.com/api/v2/networks/solana/pools/Czfq3xZZDmsdGdUyrNLtRhGc47cXcZtLG4crryfu44zE/ohlcv/minute?aggregate=5&limit=1000&currency=usd&include_empty_intervals=true&before_timestamp=1784367899",
+      "file": "candles_5m_20.json",
+      "sha256": "34b3b479898c7719cb665244d84871a0ecdfc53885c6e1b4b50ccc813d549bb0",
+      "rows": 1000
+    },
+    {
+      "url": "https://api.geckoterminal.com/api/v2/networks/solana/pools/Czfq3xZZDmsdGdUyrNLtRhGc47cXcZtLG4crryfu44zE/ohlcv/minute?aggregate=5&limit=1000&currency=usd&include_empty_intervals=true&before_timestamp=1784067899",
+      "file": "candles_5m_21.json",
+      "sha256": "568c1241f859a48345deeb52e95299b319f562367c36f9cd25d7f2bf304f954d",
+      "rows": 1000
+    },
+    {
+      "url": "https://api.geckoterminal.com/api/v2/networks/solana/pools/Czfq3xZZDmsdGdUyrNLtRhGc47cXcZtLG4crryfu44zE/ohlcv/minute?aggregate=5&limit=1000&currency=usd&include_empty_intervals=true&before_timestamp=1783767899",
+      "file": "candles_5m_22.json",
+      "sha256": "475c6355ca272585b4dda873a3c968a25c0135e46802c9e8d565de2a634885d1",
+      "rows": 1000
+    },
+    {
+      "url": "https://api.geckoterminal.com/api/v2/networks/solana/pools/Czfq3xZZDmsdGdUyrNLtRhGc47cXcZtLG4crryfu44zE/ohlcv/minute?aggregate=5&limit=1000&currency=usd&include_empty_intervals=true&before_timestamp=1783467899",
+      "file": "candles_5m_23.json",
+      "sha256": "ccf3c22e33495b9a37eb0eff684612477f87d6486fc2146c304f126ac2b71f4e",
+      "rows": 1000
+    },
+    {
+      "url": "https://api.geckoterminal.com/api/v2/networks/solana/pools/Czfq3xZZDmsdGdUyrNLtRhGc47cXcZtLG4crryfu44zE/ohlcv/minute?aggregate=5&limit=1000&currency=usd&include_empty_intervals=true&before_timestamp=1783167899",
+      "file": "candles_5m_24.json",
+      "sha256": "2e35b80c9e1860fb0ea55634ee30a0a81ae0ce710329134c5f3746b26a7f3aee",
+      "rows": 1000
+    },
+    {
+      "url": "https://api.geckoterminal.com/api/v2/networks/solana/pools/Czfq3xZZDmsdGdUyrNLtRhGc47cXcZtLG4crryfu44zE/ohlcv/minute?aggregate=5&limit=1000&currency=usd&include_empty_intervals=true&before_timestamp=1782867899",
+      "file": "candles_5m_25.json",
+      "sha256": "d750335ac3e1fd6071452882e392353edaf7f03b67a3509142c6409c005e40da",
+      "rows": 1000
+    }
+  ],
+  "downloaded_at": "2026-09-25T20:31:55.762477+00:00",
+  "filter_note": "Exclude the newest candle in the first response, even if it completed before subsequent pages arrived."
+}
