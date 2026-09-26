@@ -190,6 +190,14 @@ def latest_scan(max_age_seconds=None):
     return dict(run), rows
 
 
+def latest_scan_id():
+    """The id of the newest board, or None. Cheap: one row."""
+    with cursor() as cur:
+        cur.execute('select id from scan_runs order by id desc limit 1')
+        r = cur.fetchone()
+    return r['id'] if r else None
+
+
 def season():
     """The latest hour-of-day profile the board built, or None."""
     with cursor() as cur:

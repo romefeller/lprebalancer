@@ -1241,15 +1241,16 @@ def main():
             REOPT.unlink()
             db.event('REOPT_REQUESTED', 'operator touched REOPT')
             notify('REOPT_REQUESTED', action='board and band review now')
-        if (forced or time.time() - state.get('last_reopt', 0) > config.REOPT_INTERVAL) and tight:
+        scan_id = db.latest_scan_id() if tight else None
+        if tight and (forced or scan_id != state.get('calm_review_scan')):
             # The band review waits while calm holds the tight band; the pool
             # review does not. It ranks venues on fee and reward density,
-            # which a band does not change.
-            state['last_reopt'] = time.time(); save(state)
+            # which a band does not change, once for every new board.
+            state['calm_review_scan'] = scan_id; state['last_reopt'] = time.time(); save(state)
             if (cv or {}).get('budget_left', 0) > 0 and calm_board_check(state, status):
                 time.sleep(config.CALM_POLL_SECONDS)
                 continue
-        elif forced or time.time() - state.get('last_reopt', 0) > config.REOPT_INTERVAL:
+        elif not tight and (forced or time.time() - state.get('last_reopt', 0) > config.REOPT_INTERVAL):
             state['last_reopt'] = time.time(); save(state)
             best = best_band_for(status['whirlpool'])
             # The board first: a better pool elsewhere outranks a better band
