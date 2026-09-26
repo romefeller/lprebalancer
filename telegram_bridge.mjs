@@ -87,7 +87,8 @@ function render(row) {
   function regimeBlock(g) {
     if (!g) return [];
     const pct = (x) => (x == null ? '—' : `${Math.round(Number(x) * 100)}%`);
-    const probs = Object.entries(g.probs ?? {}).map(([w, p]) => `${w}% ${pct(p)}`).join(' · ');
+    const probs = (Array.isArray(g.probs) ? g.probs : Object.entries(g.probs ?? {}))
+      .map(([w, p]) => `${w}% ${pct(p)}`).join(' · ');
     return [`━━ REGIME ━━`,
       `mode        ${g.mode} · holding ±${n(g.held_pct, 2)}% · market says ±${n(g.choice_pct, 2)}%`,
       `vol 5m      σ ${n(g.sigma_5m_pct, 4)}% · velocity ${sign(g.velocity)}/h · instability ${n(g.instability, 3)}`,
@@ -128,7 +129,7 @@ function render(row) {
         lines.push(`if closed   locks ${n(f.il_now_pct, 2)}% vs holding · price ${sign(f.since_open_pct)}% since open`);
       }
       lines.push(f.suspended
-        ? `rule        hourly rule off · the CALM block below decides (hourly figures above are context only)`
+        ? `rule        hourly rule off · the ${r.regime ? 'REGIME' : 'CALM'} block below decides (hourly figures above are context only)`
         : `rule        act at P(exit ≤${f.horizon_hours}h) ≥ ${pct(f.threshold)} · now ${pct(f.p_exit_horizon)}`
           + ` → ${f.act ? 'RE-CENTRE' : 'hold'}`);
       return lines;

@@ -279,7 +279,8 @@ def regime_view(bars, price, lower, upper, *, widths=WIDTHS, horizon_minutes=120
     return {'mode': mode, 'choice': choice, 'choice_pct': round((choice - 1) * 100, 2),
             'held': held, 'held_pct': round((half - 1) * 100, 2) if half else None,
             'inside': inside, 'p_held': None if p_held is None else round(p_held, 3),
-            'probs': {f'{(k - 1) * 100:g}': (None if p is None else round(p, 3)) for k, p in zip(widths, probs)},
+            # a list, not an object: JavaScript sorts integer-like keys first
+            'probs': [[round((k - 1) * 100, 2), None if p is None else round(p, 3)] for k, p in zip(widths, probs)],
             'sigma_5m_pct': round(s_now * 100, 4), 'velocity': round(v_now, 3),
             'instability': round(float(inst[-1]), 4),
             'horizon_minutes': horizon_minutes, 'threshold': threshold,

@@ -33,7 +33,8 @@ class Maths(unittest.TestCase):
         b = tape()
         p = float(b[4][-1])
         v = calm.regime_view(b, p, p / 1.01, p * 1.01, horizon_minutes=120, threshold=0.25)
-        ps = [v['probs'][f'{(k - 1) * 100:g}'] for k in W]
+        self.assertEqual([w for w, _ in v['probs']], [round((k - 1) * 100, 2) for k in W])
+        ps = [q for _, q in v['probs']]
         self.assertTrue(all(a >= b_ - 1e-12 for a, b_ in zip(ps, ps[1:])))           # monotone
         first_ok = next(k for k, q in zip(W, ps) if q <= 0.25)
         self.assertEqual(v['choice'], first_ok)
