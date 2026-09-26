@@ -35,3 +35,4 @@ node_modules/
 
 # --- migrated away, kept locally --------------------------------------------
 .archive/
+tape5_*.json

@@ -34,15 +34,17 @@ HALF_LIFE_BARS = 12          # one hour of five-minute bars
 BAR_SECONDS = 300
 
 
-def tape_5m(pool, live_price=None):
+def tape_5m(pool, live_price=None, before=None):
     """Five-minute OHLCV for the pool, oldest first, in the pool's own quote
     units: (ts, open, high, low, close, volume) arrays, or None.
 
     GeckoTerminal sometimes lists a pair the other way up. When the latest
     close is closer to 1/price than to price, every price column is inverted
     (high and low swap) so the series matches the pool."""
-    d = engine.curl(f'{engine.GECKO}/pools/{pool}/ohlcv/minute?aggregate=5&limit=1000&currency=token',
-                    accept='application/json;version=20230203')
+    url = f'{engine.GECKO}/pools/{pool}/ohlcv/minute?aggregate=5&limit=1000&currency=token'
+    if before:
+        url += f'&before_timestamp={int(before)}'
+    d = engine.curl(url, accept='application/json;version=20230203')
     rows = (((d or {}).get('data') or {}).get('attributes') or {}).get('ohlcv_list') or []
     rows = sorted(rows, key=lambda r: r[0])
     # The newest bar is still forming: its high and low are not final.
@@ -171,3 +173,128 @@ def decide(v, *, enabled, budget_left):
                                           v['p_touch_fresh'] < v['threshold']):
         return 'narrow'
     return None
+
+
+# --- regime mode: the band width is the market's call --------------------------
+#
+# Calm mode chose between two widths. Regime mode chooses the narrowest width
+# in a ladder (default +/-1% .. +/-5%) whose probability of a touch within
+# `horizon` stays at or under `threshold`, and keeps choosing every poll:
+#
+#   * volatility enters through the scaling of every excursion by sigma;
+#   * velocity (log change of sigma over 30 minutes) enters by conditioning
+#     on origins in the same velocity tercile, so a heating market reads
+#     wider than a cooling one at the same sigma;
+#   * survival is the quantity itself: P(no touch within the horizon).
+#
+# The held band moves on an exit (re-centred at the chosen width), when the
+# chosen width is two or more steps wider (heating: widen), or two or more
+# steps narrower (cooling: narrow). Walk-forward on 63 days of 5-minute
+# SOL/USDC at $210 (lp_research/regime.md): horizon 2 h and threshold 0.25
+# earned 2.6x the fees of the calm/ladder switch with equity kept positive in
+# 6 of 7 nine-day windows. A shorter horizon earned more and eroded equity.
+
+WIDTHS = (1.01, 1.0125, 1.015, 1.02, 1.025, 1.03, 1.04, 1.05)
+
+
+def velocity(sigma, bars_back=6):
+    """Log change of sigma over `bars_back` bars (30 minutes), per hour."""
+    s = np.asarray(sigma, dtype=float)
+    v = np.zeros(len(s))
+    v[bars_back:] = np.log(s[bars_back:] / s[:-bars_back]) * (12 / bars_back)
+    return v
+
+
+def instability(sigma, window=12):
+    """Standard deviation of the per-bar change of log sigma over an hour:
+    how unsteady volatility itself is (heteroskedasticity of the tape)."""
+    ds = np.diff(np.log(np.asarray(sigma, dtype=float)), prepend=math.log(sigma[0]))
+    k = np.ones(window) / window
+    m = np.convolve(ds, k, mode='full')[:len(ds)]
+    m2 = np.convolve(ds * ds, k, mode='full')[:len(ds)]
+    return np.sqrt(np.maximum(m2 - m * m, 0.0))
+
+
+def touch_table(high, low, close, sigma, horizon_bars, vel=None):
+    """Scaled excursions from every origin with a full horizon ahead: the
+    largest move up to a later HIGH and down to a later LOW, over sigma at
+    the origin. With `vel`, also each origin's velocity, for conditioning."""
+    close = np.asarray(close, dtype=float); n = len(close); H = int(horizon_bars)
+    if n < H + 100:
+        return None
+    up = np.zeros(n - H); dn = np.zeros(n - H); base = close[:n - H]
+    hi, lo = np.asarray(high, dtype=float), np.asarray(low, dtype=float)
+    for h in range(1, H + 1):
+        up = np.maximum(up, np.log(hi[h:n - H + h] / base))
+        dn = np.maximum(dn, np.log(base / lo[h:n - H + h]))
+    s = np.asarray(sigma, dtype=float)[:n - H]
+    t = {'u': up / s, 'd': dn / s}
+    if vel is not None:
+        t['v'] = np.asarray(vel, dtype=float)[:n - H]
+    return t
+
+
+def p_touch_cond(table, d_up, d_down, sigma_now, vel_now=None, min_origins=150):
+    """P(touch) from a touch_table at today's sigma, conditioned on the
+    velocity tercile of `vel_now` when that leaves enough origins."""
+    if table is None or not sigma_now:
+        return None
+    if d_up <= 0 or d_down <= 0:
+        return 1.0
+    u, d = table['u'], table['d']
+    if vel_now is not None and 'v' in table:
+        v = table['v']
+        q1, q2 = np.quantile(v, [1 / 3, 2 / 3])
+        g = 0 if vel_now <= q1 else 1 if vel_now < q2 else 2
+        # Boundaries include ties, so a tape with repeated velocity values
+        # still conditions instead of silently falling back.
+        sel = (v <= q1) if g == 0 else ((v > q1) & (v < q2)) if g == 1 else (v >= q2)
+        if sel.sum() >= min_origins:
+            u, d = u[sel], d[sel]
+    return float(((u > d_up / sigma_now) | (d > d_down / sigma_now)).mean())
+
+
+def regime_view(bars, price, lower, upper, *, widths=WIDTHS, horizon_minutes=120, threshold=0.25):
+    """The market's width, from the five-minute tape. Pure."""
+    if bars is None:
+        return None
+    ts, _o, high, low, close, vol = bars
+    sigma = ewma_sigma(close)
+    vel = velocity(sigma)
+    inst = instability(sigma)
+    H = max(1, round(horizon_minutes * 60 / BAR_SECONDS))
+    table = touch_table(high, low, close, sigma, H, vel)
+    s_now, v_now = float(sigma[-1]), float(vel[-1])
+    probs = []
+    for k in widths:
+        probs.append(p_touch_cond(table, math.log(k), math.log(k), s_now, v_now))
+    choice = next((k for k, p in zip(widths, probs) if p is not None and p <= threshold), widths[-1])
+    half = math.sqrt(upper / lower) if lower > 0 and upper > lower else None
+    held = min(widths, key=lambda k: abs(k - half)) if half else None
+    inside = bool(lower <= price <= upper)
+    p_held = (p_touch_cond(table, math.log(upper / price), math.log(price / lower), s_now, v_now)
+              if inside and half else (1.0 if half else None))
+    idx = widths.index(choice)
+    mode = 'CALM' if idx == 0 else 'WARM' if choice <= 1.02 else 'HOT'
+    return {'mode': mode, 'choice': choice, 'choice_pct': round((choice - 1) * 100, 2),
+            'held': held, 'held_pct': round((half - 1) * 100, 2) if half else None,
+            'inside': inside, 'p_held': None if p_held is None else round(p_held, 3),
+            'probs': {f'{(k - 1) * 100:g}': (None if p is None else round(p, 3)) for k, p in zip(widths, probs)},
+            'sigma_5m_pct': round(s_now * 100, 4), 'velocity': round(v_now, 3),
+            'instability': round(float(inst[-1]), 4),
+            'horizon_minutes': horizon_minutes, 'threshold': threshold,
+            'bar_age_s': int(time.time() - ts[-1]) if len(ts) else None}
+
+
+def regime_decide(v, *, widths=WIDTHS, steps=2):
+    """'widen' / 'narrow' / None for a held band that is still inside. An
+    exit is the loop's: it reopens at v['choice']."""
+    if not v or v.get('held') is None or not v['inside']:
+        return None
+    i_held, i_choice = widths.index(v['held']), widths.index(v['choice'])
+    if i_choice >= i_held + steps:
+        return 'widen'
+    if i_choice <= i_held - steps:
+        return 'narrow'
+    return None
+

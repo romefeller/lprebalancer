@@ -72,7 +72,7 @@ function render(row) {
         + `${r.expected_next_hours_fees_per_day_usd != null ? ` → ~$${n(r.expected_next_hours_fees_per_day_usd, 2)}/day` : ''}`
         + ` · peak ${String(r.season.peak_hour_utc).padStart(2, '0')}h trough ${String(r.season.trough_hour_utc).padStart(2, '0')}h`] : []),
       ...band(r),
-      ...calmBlock(r.calm),
+      ...(r.regime ? regimeBlock(r.regime) : calmBlock(r.calm)),
       `in range    ${n(r.in_range_pct, 0)}%   over ${n(r.tracked_days, 2)}d`,
       `activity    ${plural(r.positions_opened, 'position')} · ${plural(r.rebands, 'reband')} · `
         + `${plural(r.harvests, 'harvest')}${r.failures ? ` · ${plural(r.failures, 'failure')}` : ''}`,
@@ -83,6 +83,19 @@ function render(row) {
   // made one this poll; otherwise the figures recorded at the last poll.
   // Calm mode: five-minute volatility against the cut, and the tight band's
   // own touch risk. Present only when calm mode is on.
+  // Regime mode: the width the market allows, and the survival behind it.
+  function regimeBlock(g) {
+    if (!g) return [];
+    const pct = (x) => (x == null ? '—' : `${Math.round(Number(x) * 100)}%`);
+    const probs = Object.entries(g.probs ?? {}).map(([w, p]) => `${w}% ${pct(p)}`).join(' · ');
+    return [`━━ REGIME ━━`,
+      `mode        ${g.mode} · holding ±${n(g.held_pct, 2)}% · market says ±${n(g.choice_pct, 2)}%`,
+      `vol 5m      σ ${n(g.sigma_5m_pct, 4)}% · velocity ${sign(g.velocity)}/h · instability ${n(g.instability, 3)}`,
+      `P(touch ≤${g.horizon_minutes}m)  ${probs}`,
+      `held band   P(touch) ${pct(g.p_held)} · rule: narrowest width ≤ ${pct(g.threshold)}, move at 2 steps, exits re-centre`,
+      `guard       ${g.moves_24h ?? '—'}/${g.guard ?? '—'} moves in 24h`];
+  }
+
   function calmBlock(c) {
     if (!c) return [];
     const pct = (x) => (x == null ? '—' : `${Math.round(Number(x) * 100)}%`);
@@ -150,6 +163,12 @@ function render(row) {
         + `price ${n(row.price, 4)} · band ${n(row.lower, 4)} — ${n(row.upper, 4)}\n${row.action}\n` + book(row);
     case 'recentre_deferred':
       return `re-centre deferred · P(exit within ${row.horizon_hours}h) ${Math.round(row.p_exit * 100)}%\n${row.reason}`;
+    case 'REGIME_WIDEN':
+      return `HEATING · widening ±${n(row.regime?.held_pct, 2)}% → ±${n(row.regime?.choice_pct, 2)}% (${row.regime?.mode})\n`
+        + `σ ${n(row.regime?.sigma_5m_pct, 4)}% · velocity ${sign(row.regime?.velocity)}/h\n` + book(row);
+    case 'REGIME_NARROW':
+      return `COOLING · narrowing ±${n(row.regime?.held_pct, 2)}% → ±${n(row.regime?.choice_pct, 2)}% (${row.regime?.mode})\n`
+        + `σ ${n(row.regime?.sigma_5m_pct, 4)}% · velocity ${sign(row.regime?.velocity)}/h\n` + book(row);
     case 'CALM_NARROW':
       return `CALM · narrowing to ±${n(row.calm?.band_pct, 1)}%\nsigma ${n(row.calm?.sigma_5m_pct, 4)}% under the cut ${n(row.calm?.cut_pct, 4)}%\n` + book(row);
     case 'CALM_RECENTRE':

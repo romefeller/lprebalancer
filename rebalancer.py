@@ -66,6 +66,8 @@ import sys
 import time
 from datetime import datetime, timezone
 
+import numpy as np
+
 import calm
 import config
 import db
@@ -158,6 +160,8 @@ def notify_book(event, **payload):
     # ones where it matters.
     if config.CALM_ENABLED and payload.get('calm') is None and LAST_CALM.get('view'):
         payload = dict(payload, calm=LAST_CALM['view'])
+    if config.REGIME_ENABLED and payload.get('regime') is None and LAST_REGIME.get('view'):
+        payload = dict(payload, regime=LAST_REGIME['view'])
     return notify(event, **{**payload, **db.stats()})
 
 
@@ -528,17 +532,68 @@ LAST_CALM = {}                  # {'view': the latest calm.view}, for every book
 TAPE5_REFRESH = 240             # one GeckoTerminal call per five-minute bar, at most
 
 
+TAPE5_BARS = 2880               # ten days: the walk-forward's calibration (lp_research/regime.md)
+
+
+def _tape_file(pool):
+    return ROOT / f'tape5_{pool[:12]}.json'
+
+
+def _merge(bars_list):
+    """Union of five-minute bar arrays, by timestamp, newest wins, oldest first."""
+    rows = {}
+    for b in bars_list:
+        if b is None:
+            continue
+        for row in zip(*b):
+            rows[int(row[0])] = row
+    ks = sorted(rows)[-TAPE5_BARS:]
+    if not ks:
+        return None
+    cols = list(zip(*[rows[k] for k in ks]))
+    return tuple(np.array(c, dtype=float) for c in cols)
+
+
 def tape5(pool, price):
+    """The pool's five-minute tape, ten days deep. Kept on disk across
+    restarts; each refresh fetches the newest 1000 bars and merges them; a
+    short tape pages back until it is full. A 3.5-day tape made the width
+    choice noisy and churned 6 to 7 moves a day in the replay."""
     t, b = _TAPE5.get(pool, (0, None))
-    if b is None or time.time() - t > TAPE5_REFRESH:
+    if b is None:
         try:
-            fresh = calm.tape_5m(pool, live_price=price)
+            d = json.loads(_tape_file(pool).read_text())
+            b = tuple(np.array(c, dtype=float) for c in d['bars'])
+            if abs(b[4][-1] / price - 1) > 0.15:
+                b = None                       # another orientation or a stale file: rebuild
         except Exception:
-            fresh = None
-        if fresh is not None:
-            b = fresh
-            _TAPE5[pool] = (time.time(), b)
-    return b
+            b = None
+    if b is not None and time.time() - t <= TAPE5_REFRESH:
+        return b
+    try:
+        fresh = calm.tape_5m(pool, live_price=price)
+    except Exception:
+        fresh = None
+    merged = _merge([b, fresh])
+    tries = 0
+    while merged is not None and len(merged[0]) < TAPE5_BARS and tries < 3:
+        try:
+            older = calm.tape_5m(pool, live_price=price, before=float(merged[0][0]))
+        except Exception:
+            older = None
+        if older is None:
+            break
+        n0 = len(merged[0]); merged = _merge([older, merged]); tries += 1
+        if len(merged[0]) == n0:
+            break
+    if merged is not None and fresh is not None:
+        _TAPE5[pool] = (time.time(), merged)
+        try:
+            _tape_file(pool).write_text(json.dumps({'pool': pool, 'bars': [list(map(float, c)) for c in merged]}))
+        except Exception:
+            pass
+        return merged
+    return merged if merged is not None else b
 
 
 def calm_budget_left(state):
@@ -567,6 +622,41 @@ def calm_view(state, status):
         v['moves_24h'] = config.CALM_MAX_MOVES - v['budget_left']
         LAST_CALM['view'] = v
     return v
+
+
+LAST_REGIME = {}                # {'view': the latest calm.regime_view}, for every book
+
+
+def regime_view(state, status):
+    """calm.regime_view for the held position, or None when regime mode is
+    off or the five-minute tape is unavailable."""
+    if not config.REGIME_ENABLED:
+        return None
+    bars = tape5(status.get('whirlpool') or config.POOL, status['price'])
+    v = calm.regime_view(bars, status['price'], status['lowerPrice'], status['upperPrice'],
+                         widths=config.REGIME_WIDTHS, horizon_minutes=config.REGIME_HORIZON,
+                         threshold=config.REGIME_THRESHOLD)
+    if v:
+        v['moves_24h'] = config.CALM_MAX_MOVES - calm_budget_left(state)
+        v['guard'] = config.CALM_MAX_MOVES
+        if state.get('regime_mode') != v['mode']:
+            db.event('REGIME', f"{state.get('regime_mode')} -> {v['mode']}: choice +/-{v['choice_pct']}% "
+                               f"sigma {v['sigma_5m_pct']}% velocity {v['velocity']}")
+            state['regime_mode'] = v['mode']; save(state)
+        LAST_REGIME['view'] = v
+    return v
+
+
+def regime_choice_now(pool, price):
+    """The regime's width for a fresh band at `price` on `pool`, or None."""
+    if not config.REGIME_ENABLED:
+        return None
+    bars = tape5(pool, price)
+    v = calm.regime_view(bars, price, price / 1.01, price * 1.01, widths=config.REGIME_WIDTHS,
+                         horizon_minutes=config.REGIME_HORIZON, threshold=config.REGIME_THRESHOLD)
+    if not v or (v.get('bar_age_s') or 0) > 900:
+        return None
+    return v['choice']
 
 
 def calm_reopen_band(v, state):
@@ -855,8 +945,9 @@ def calm_board_check(state, status):
            pool=best['address'], dex=best['dex'], calm=True)
     db.event('MIGRATE', f'calm: {config.DEX} {config.POOL} -> {best["dex"]} {best["address"]} '
                         f'({held_txt} -> {best_txt})')
-    rebalance(state, status, 'calm: moved to a denser pool', target=best,
-              band=config.CALM_BAND, calm_move=True)
+    k = (regime_choice_now(best['address'], status['price']) or config.REGIME_WIDTHS[0]) \
+        if config.REGIME_ENABLED else config.CALM_BAND
+    rebalance(state, status, 'moved to a denser pool', target=best, band=k, calm_move=True)
     return True
 
 
@@ -922,7 +1013,13 @@ def reopen(state, reason, band=None, recovering=False):
     if 'balanceA' not in bal:
         notify('idle', reason='could not read the wallet; opening nothing')
         return False
-    if recovering and band:
+    if recovering and band and config.REGIME_ENABLED:
+        k_now = regime_choice_now(pool, bal['price'])
+        if k_now is None:
+            notify('idle', reason='regime recovery waits for fresh five-minute data')
+            return False
+        band = k_now
+    elif recovering and band:
         if not config.CALM_ENABLED:
             band = None
         else:
@@ -1017,7 +1114,7 @@ def reopen(state, reason, band=None, recovering=False):
     return True
 
 
-def rebalance(state, status, reason, target=None, band=None, calm_move=False):
+def rebalance(state, status, reason, target=None, band=None, calm_move=False, exit_move=False):
     """Harvest, close, and reopen: on the same pool, or on `target` (a board
     row) after repointing the profile. The close runs on the DEX the position
     is on, whatever the profile says by then.
@@ -1031,7 +1128,8 @@ def rebalance(state, status, reason, target=None, band=None, calm_move=False):
     recent = [t for t in state['rebalance_times'] if now - t < 86400]
     calm_recent = [t for t in state.get('calm_times', []) if now - t < 86400]
     last_any = max([state['last_rebalance']] + calm_recent)
-    gap = config.CALM_MIN_GAP if calm_move else config.MIN_REBALANCE_GAP
+    # An exit under regime mode never waits: out of range earns nothing.
+    gap = 0 if (exit_move and config.REGIME_ENABLED) else (config.CALM_MIN_GAP if calm_move else config.MIN_REBALANCE_GAP)
     last = last_any if calm_move else state['last_rebalance']
     if now - last < gap:
         notify('rebalance_deferred', seconds_remaining=int(gap - (now - last)),
@@ -1179,19 +1277,29 @@ def main():
                            pool=best['address'], dex=best['dex'])
                     db.event('MIGRATE', f'{config.DEX} {config.POOL} -> {best["dex"]} {best["address"]} (no position)')
                     repoint(best)
-            reopen(state, 'no position held')
+            k0 = None
+            if config.REGIME_ENABLED:
+                try:
+                    b0 = wallet(config.POOL)
+                    k0 = regime_choice_now(config.POOL, b0['price']) if 'price' in b0 else None
+                except Exception:
+                    k0 = None
+            reopen(state, 'no position held', band=k0)
             time.sleep(config.POLL_SECONDS)
             continue
 
         price = status['price']
         wusd = wallet(status['whirlpool']).get('walletUsd')
         fc = forecast_for(status)
-        cv = calm_view(state, status)
-        tight = bool(cv and cv.get('tight_held'))
+        cv = calm_view(state, status) if not config.REGIME_ENABLED else None
+        rv = regime_view(state, status)
+        # Under regime mode every band is the regime's, whatever its width.
+        tight = bool(cv and cv.get('tight_held')) or bool(rv)
         if tight and fc:
             # The hourly six-hour rule says nothing about a +/-1% band; the
             # five-minute rule in calm.py is in charge of it.
-            fc = dict(fc, act=False, suspended='tight band: the five-minute calm rule is in charge')
+            fc = dict(fc, act=False, suspended=('regime mode: the five-minute width rule is in charge' if rv
+                                                  else 'tight band: the five-minute calm rule is in charge'))
         db.snapshot(status['positionMint'], price, status.get('inRange'),
                         status.get('liquidity'),
                         status.get('feesAccruedA', 0.0),
@@ -1201,19 +1309,30 @@ def main():
 
         if not status.get('inRange'):
             side = 'above' if price > status['upperPrice'] else 'below'
-            k = calm_reopen_band(cv, state) if tight else None
+            k = (rv['choice'] if rv else calm_reopen_band(cv, state)) if tight else None
             notify('OUT_OF_BAND', side=side, price=price,
                    lower=status['lowerPrice'], upper=status['upperPrice'],
                    action=('harvest, close, reopen tight' if k else 'harvest, close, re-optimise, reopen'),
                    forecast=fc, calm=cv)
-            rebalance(state, status, f'price went {side}', band=k, calm_move=tight)
+            rebalance(state, status, f'price went {side}', band=k, calm_move=tight, exit_move=True)
             time.sleep(config.POLL_SECONDS)
             continue
 
         # Calm mode: narrow when the market goes cold, re-centre the tight
         # band before it is touched, widen when the calm ends.
-        act = calm.decide(cv, enabled=config.CALM_ENABLED,
-                          budget_left=(cv or {}).get('budget_left', 0))
+        ract = calm.regime_decide(rv, widths=config.REGIME_WIDTHS, steps=config.REGIME_STEPS) if rv else None
+        if ract and calm_budget_left(state) > 0:
+            ev = 'REGIME_WIDEN' if ract == 'widen' else 'REGIME_NARROW'
+            notify_book(ev, price=price, lower=status['lowerPrice'], upper=status['upperPrice'],
+                        regime=rv, forecast=fc)
+            db.event(ev, f"+/-{rv['held_pct']}% -> +/-{rv['choice_pct']}% ({rv['mode']}) "
+                         f"sigma {rv['sigma_5m_pct']}% velocity {rv['velocity']}")
+            rebalance(state, status, f"regime {rv['mode']}: +/-{rv['held_pct']}% -> +/-{rv['choice_pct']}%",
+                      band=rv['choice'], calm_move=True)
+            time.sleep(config.CALM_POLL_SECONDS)
+            continue
+        act = None if rv else calm.decide(cv, enabled=config.CALM_ENABLED,
+                                          budget_left=(cv or {}).get('budget_left', 0))
         if act:
             what = {'narrow': ('CALM_NARROW', config.CALM_BAND, 'calm: tight band'),
                     'recentre': ('CALM_RECENTRE', config.CALM_BAND, 'calm: tight band re-centred before a touch'),
@@ -1272,7 +1391,8 @@ def main():
                 # While calm holds the tight band, the move keeps it: reopen
                 # tight on the new pool (if still calm) instead of at the
                 # ladder band, which would cost a second move to narrow again.
-                k = calm_reopen_band(cv, state) if tight else None
+                k = (regime_choice_now(target['address'], price) or rv['choice'] if rv
+                     else calm_reopen_band(cv, state)) if tight else None
                 rebalance(state, status, 'operator requested move', target=target,
                           band=k, calm_move=bool(k))
                 time.sleep(config.POLL_SECONDS)
@@ -1299,7 +1419,7 @@ def main():
             # review does not. It ranks venues on fee and reward density,
             # which a band does not change, once for every new board.
             state['calm_review_scan'] = scan_id; state['last_reopt'] = time.time(); save(state)
-            if (cv or {}).get('budget_left', 0) > 0 and calm_board_check(state, status):
+            if calm_budget_left(state) > 0 and calm_board_check(state, status):
                 time.sleep(config.CALM_POLL_SECONDS)
                 continue
         elif not tight and (forced or time.time() - state.get('last_reopt', 0) > config.REOPT_INTERVAL):
@@ -1355,7 +1475,7 @@ def main():
             state['last_book'] = time.time()
             notify_book('in_band', price=price, lower=status['lowerPrice'],
                         upper=status['upperPrice'],
-                        liquidity=status.get('liquidity'), forecast=fc, calm=cv)
+                        liquidity=status.get('liquidity'), forecast=fc, calm=cv, regime=rv)
         time.sleep(config.CALM_POLL_SECONDS if tight else config.POLL_SECONDS)
 
 

@@ -144,6 +144,15 @@ CALM_THRESHOLD = _env('LPBOT_CALM_THRESHOLD', float, float(_CFG.get('calm_thresh
 CALM_MIN_GAP = _env('LPBOT_CALM_MIN_GAP', int, int(_CFG.get('calm_min_gap_seconds') or 600))
 CALM_MAX_MOVES = _env('LPBOT_CALM_MAX_MOVES', int, int(_CFG.get('calm_max_moves_per_day') or 0))
 CALM_POLL_SECONDS = _env('LPBOT_CALM_POLL', int, int(_CFG.get('calm_poll_seconds') or 120))
+# Regime mode (calm.regime_view): the narrowest width in REGIME_WIDTHS whose
+# P(touch within REGIME_HORIZON) <= REGIME_THRESHOLD, chosen every poll. When
+# on, it holds every band; calm mode's two-width switch and the hourly rule
+# stand aside. CALM_MAX_MOVES remains as the runaway guard.
+REGIME_ENABLED = _env('LPBOT_REGIME', lambda s: s.lower() in ('1', 'true', 'yes'), bool(_CFG.get('regime_enabled')))
+REGIME_WIDTHS = tuple(float(x) for x in (_CFG.get('regime_widths') or [1.01, 1.0125, 1.015, 1.02, 1.025, 1.03, 1.04, 1.05]))
+REGIME_HORIZON = _env('LPBOT_REGIME_HORIZON', int, int(_CFG.get('regime_horizon_minutes') or 120))
+REGIME_THRESHOLD = _env('LPBOT_REGIME_THRESHOLD', float, float(_CFG.get('regime_threshold') or 0.25))
+REGIME_STEPS = _env('LPBOT_REGIME_STEPS', int, int(_CFG.get('regime_steps') or 2))
 # Swap to 50/50 before an open when the wallet is lopsided. Without it, an
 # open after an exit is limited by the scarcer token and most capital idles.
 REBALANCE_SWAP = _env('LPBOT_REBALANCE_SWAP', lambda s: s.lower() in ('1', 'true', 'yes'),
@@ -222,6 +231,10 @@ def summary():
         'calm_sigma_cut_pct': round(CALM_SIGMA_CUT * 100, 4),
         'calm_max_moves_per_day': CALM_MAX_MOVES,
         'rebalance_swap': REBALANCE_SWAP,
+        'regime_enabled': REGIME_ENABLED,
+        'regime_widths_pct': [round((k - 1) * 100, 2) for k in REGIME_WIDTHS],
+        'regime_horizon_minutes': REGIME_HORIZON,
+        'regime_threshold': REGIME_THRESHOLD,
         'payout_enabled': PAYOUT_ENABLED,
         'profit_wallet': PROFIT_WALLET or None,
         'payout_mint': PAYOUT_MINT or None,
