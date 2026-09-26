@@ -32,6 +32,7 @@
 //   node signer_raydium.mjs close <position> [--execute]
 import fs from 'node:fs';
 import { positionRent } from './position_rent.mjs';
+import { PRICE_SLIPPAGE_BPS, SLIPPAGE_REFUSAL, openToleranceBps, safeBase } from './slippage.mjs';
 import { executeBuilt, isProgramFailure, signerError } from './signer_errors.mjs';
 import path from 'node:path';
 import { createRequire } from 'node:module';
@@ -491,9 +492,15 @@ async function open(pool, lower, upper, maxA, maxB, execute) {
       throw new Error(`depositing ${nativeIn.toFixed(4)} SOL would leave ${(sol - nativeIn).toFixed(4)}, below the ${GAS_RESERVE_SOL} gas reserve`);
     }
 
-    // The binding side goes in exactly; the other side's ceiling is its cap.
-    const base = quote.binding === 'A' ? 'MintA' : 'MintB';
-    const baseAmount = base === 'MintA' ? toRaw(estA, info.decimalsA) : toRaw(estB, info.decimalsB);
+    // One side goes in exactly, the other up to its cap. The fixed side is
+    // sized so the other fits under its cap anywhere in the price range
+    // (slippage.mjs): with the binding side fixed at its cap, a small price
+    // move asked for more than the cap and opens failed with 6017.
+    const sb_ = safeBase(price, band.tickLowerPrice, band.tickUpperPrice, maxA, maxB,
+                         openToleranceBps(band.tickLowerPrice, band.tickUpperPrice));
+    if (!sb_) throw new Error('nothing to deposit inside the price range');
+    const base = sb_.base === 'A' ? 'MintA' : 'MintB';
+    const baseAmount = base === 'MintA' ? toRaw(sb_.amount, info.decimalsA) : toRaw(sb_.amount, info.decimalsB);
     const otherAmountMax = base === 'MintA' ? toRaw(maxB, info.decimalsB) : toRaw(maxA, info.decimalsA);
     if (baseAmount.isZero()) throw new Error('nothing to deposit: the binding side rounds to zero');
 
@@ -558,6 +565,17 @@ async function findPositions(raydium, pool, address) {
 
 // decreaseLiquidity with liquidity 0 collects fees and rewards only; with the
 // whole liquidity and closePosition it empties the position and closes it.
+function closeMinimumsRaw(sqrtPriceX64, p) {
+  const f = Math.sqrt(1 + PRICE_SLIPPAGE_BPS / 1e4);
+  const S = 1_000_000_000_000;
+  const up = sqrtPriceX64.mul(new BN(Math.round(f * S))).div(new BN(S));
+  const dn = sqrtPriceX64.mul(new BN(S)).div(new BN(Math.round(f * S)));
+  const lo = TickUtil.getSqrtPriceAtTick(p.tickLower), hi = TickUtil.getSqrtPriceAtTick(p.tickUpper);
+  const atUp = LiquidityMathUtil.getAmountsForLiquidity(up, lo, hi, p.liquidity, false);
+  const atDn = LiquidityMathUtil.getAmountsForLiquidity(dn, lo, hi, p.liquidity, false);
+  return { minA: atUp.amountA, minB: atDn.amountB };
+}
+
 async function buildDecrease(raydium, r, p, liquidity, minA, minB, closePosition) {
   return raydium.clmm.decreaseLiquidity({
     poolInfo: r.poolInfo, poolKeys: r.poolKeys, ownerPosition: p,
@@ -609,9 +627,11 @@ async function close(address, execute) {
       const am = positionAmounts(p, r, tickOf);
       ests.push(am);
       // All liquidity out, fees and rewards collected, NFT burnt, accounts
-      // closed. The minimums are the current amounts less the slippage.
-      const minA = am.amountA.muln(10000 - SLIPPAGE_BPS).divn(10000);
-      const minB = am.amountB.muln(10000 - SLIPPAGE_BPS).divn(10000);
+      // closed. Slippage is a PRICE range (slippage.mjs): each minimum is
+      // what the position holds if the price moves PRICE_SLIPPAGE_BPS against
+      // that token. A 1% cut of each amount was a ~0.01% price tolerance on a
+      // +/-1% band, and closes failed with PriceSlippageCheck (6017).
+      const { minA, minB } = closeMinimumsRaw(r.rpcPoolInfo.sqrtPriceX64, p);
       builts.push(await buildDecrease(raydium, r, p, p.liquidity, minA, minB, true));
     }
     const sum = (k) => ests.reduce((n, e) => n.add(e[k]), new BN(0));
@@ -636,6 +656,22 @@ async function close(address, execute) {
   });
 }
 
+// Up to three builds on fresh pool state when the chain refuses on slippage.
+// Only a single-transaction open or close is rebuilt: a refused transaction
+// reverted whole. A partial multi-transaction send is never retried.
+async function rebuildOnSlippage(fn, execute, attempts = 3) {
+  for (let i = 1; ; i++) {
+    try {
+      return await fn();
+    } catch (e) {
+      const m = signerError(e);
+      if (!execute || i >= attempts || !SLIPPAGE_REFUSAL.test(m) || /partial send/.test(m)) throw e;
+      console.error(`slippage refusal; rebuilding on fresh pool state (attempt ${i + 1}/${attempts})`);
+      await new Promise(res => setTimeout(res, 1500));
+    }
+  }
+}
+
 async function main() {
   const args = process.argv.slice(2);
   const execute = args.includes('--execute');
@@ -646,8 +682,8 @@ async function main() {
   if (cmd === 'positions') return positions();
   if (cmd === 'status') return status(rest[0]);
   if (cmd === 'harvest') return harvest(rest[0], execute);
-  if (cmd === 'close') return close(rest[0], execute);
-  if (cmd === 'open') return open(rest[0], rest[1], rest[2], rest[3], rest[4], execute);
+  if (cmd === 'close') return rebuildOnSlippage(() => close(rest[0], execute), execute);
+  if (cmd === 'open') return rebuildOnSlippage(() => open(rest[0], rest[1], rest[2], rest[3], rest[4], execute), execute);
   if (cmd === 'pool') {
     // Read-only: no key is loaded.
     const pool = poolArg(rest[0]);

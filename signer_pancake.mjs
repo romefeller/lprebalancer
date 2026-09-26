@@ -51,6 +51,7 @@
 // Extra env: LPBOT_PRIORITY_MICROLAMPORTS (compute unit price, default 20000).
 import fs from 'node:fs';
 import { positionRent } from './position_rent.mjs';
+import { SLIPPAGE_REFUSAL } from './slippage.mjs';
 import path from 'node:path';
 import { createRequire } from 'node:module';
 
@@ -757,6 +758,21 @@ async function harvestOrClose(kind, id, execute) {
   });
 }
 
+// Up to three builds on fresh pool state when the chain refuses on slippage
+// (a refused transaction reverted whole; nothing else is retried here).
+async function rebuildOnSlippage(fn, execute, attempts = 3) {
+  for (let i = 1; ; i++) {
+    try {
+      return await fn();
+    } catch (e) {
+      const m = String(e?.message ?? e) + ' ' + (e?.logs ?? []).join(' ');
+      if (!execute || i >= attempts || !SLIPPAGE_REFUSAL.test(m) || /partial send/.test(m) || e?.sent) throw e;
+      console.error(`slippage refusal; rebuilding on fresh pool state (attempt ${i + 1}/${attempts})`);
+      await new Promise(res => setTimeout(res, 1500));
+    }
+  }
+}
+
 async function main() {
   const args = process.argv.slice(2);
   const execute = args.includes('--execute');
@@ -767,8 +783,8 @@ async function main() {
   if (cmd === 'positions') return positions();
   if (cmd === 'status') return status(rest[0]);
   if (cmd === 'harvest') { if (!rest[0]) throw new Error('usage: harvest <position> [--execute]'); return harvestOrClose('harvest', rest[0], execute); }
-  if (cmd === 'close') { if (!rest[0]) throw new Error('usage: close <position> [--execute]'); return harvestOrClose('close', rest[0], execute); }
-  if (cmd === 'open') return open(rest[0], rest[1], rest[2], rest[3], rest[4], execute);
+  if (cmd === 'close') { if (!rest[0]) throw new Error('usage: close <position> [--execute]'); return rebuildOnSlippage(() => harvestOrClose('close', rest[0], execute), execute); }
+  if (cmd === 'open') return rebuildOnSlippage(() => open(rest[0], rest[1], rest[2], rest[3], rest[4], execute), execute);
   if (cmd === 'pool') {
     const pool = poolArg(rest[0]);
     return withRpc(async ({ connection }) => {
