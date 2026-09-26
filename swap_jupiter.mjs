@@ -100,20 +100,30 @@ async function withRpc(fn) {
 }
 
 // --- Jupiter HTTP -----------------------------------------------------------------
+// Jupiter's free API rate-limits by IP, and the scanner shares it. A 429 on a
+// read or on building a transaction is retried with backoff: neither sends
+// anything. Sending is never retried (see SentError).
+const JUP_RETRY_MS = [1500, 4000, 9000];
+async function jfetch(url, init) {
+  for (let attempt = 0; ; attempt++) {
+    const r = await fetch(url, init);
+    const text = await r.text();
+    let j; try { j = JSON.parse(text); } catch { j = null; }
+    if (r.status === 429 && attempt < JUP_RETRY_MS.length) {
+      await new Promise(res => setTimeout(res, JUP_RETRY_MS[attempt]));
+      continue;
+    }
+    if (!r.ok) throw new Error(`Jupiter ${r.status} on ${new URL(url).pathname}: ${(j?.error ?? text).toString().slice(0, 200)}`);
+    return j;
+  }
+}
+
 async function jget(url) {
-  const r = await fetch(url, { headers: HEADERS });
-  const text = await r.text();
-  let j; try { j = JSON.parse(text); } catch { j = null; }
-  if (!r.ok) throw new Error(`Jupiter ${r.status} on ${new URL(url).pathname}: ${(j?.error ?? text).toString().slice(0, 200)}`);
-  return j;
+  return jfetch(url, { headers: HEADERS });
 }
 
 async function jpost(url, body) {
-  const r = await fetch(url, { method: 'POST', headers: { ...HEADERS, 'content-type': 'application/json' }, body: JSON.stringify(body) });
-  const text = await r.text();
-  let j; try { j = JSON.parse(text); } catch { j = null; }
-  if (!r.ok) throw new Error(`Jupiter ${r.status} on ${new URL(url).pathname}: ${(j?.error ?? text).toString().slice(0, 200)}`);
-  return j;
+  return jfetch(url, { method: 'POST', headers: { ...HEADERS, 'content-type': 'application/json' }, body: JSON.stringify(body) });
 }
 
 function assertMint(m, what) {
