@@ -157,6 +157,59 @@ def decode_clmm_state(raw):
             'mint_a': b58(raw[73:105]), 'mint_b': b58(raw[105:137])}
 
 
+REWARD_INFOS_OFFSET = 8 + 1 + 32 * 7 + 40 + 2 + 2 + 16 * 2 + 8 * 2 + 16 * 4 + 1 + 7   # 397
+REWARD_INFO_LEN = 169
+
+
+def decode_rewards(raw, now=None):
+    """The live reward programs of a Raydium-layout pool (Raydium, Byreal,
+    PancakeSwap all share it): up to three RewardInfo slots after the swap
+    counters. A slot is live while open_time <= now < end_time and it emits.
+    Returns [(mint, emissions per second in RAW units)]. Verified on chain:
+    PancakeSwap SOL/USDC pays CAKE, Raydium SOL/USDC's RAY program ended."""
+    import time as _t
+    now = now or _t.time()
+    out = []
+    for i in range(3):
+        b = raw[REWARD_INFOS_OFFSET + i * REWARD_INFO_LEN: REWARD_INFOS_OFFSET + (i + 1) * REWARD_INFO_LEN]
+        if len(b) < REWARD_INFO_LEN or b[0] == 0:
+            continue
+        open_t = int.from_bytes(b[1:9], 'little'); end_t = int.from_bytes(b[9:17], 'little')
+        eps = int.from_bytes(b[25:41], 'little') / 2 ** 64
+        mint = b58(b[57:89])
+        if eps > 0 and open_t <= now < end_t and mint != NULL_MINT:
+            out.append((mint, eps))
+    return out
+
+
+def attach_chain_rewards(records, accounts):
+    """reward_usd_day and reward_mints from the pool accounts, for records
+    whose API reports none. The chain is the authority: PancakeSwap has no
+    reward API at all, and it was paying CAKE the board could not see."""
+    live = {}
+    for r in records:
+        progs = decode_rewards(accounts.get(r['address'], b''))
+        if progs:
+            live[r['address']] = progs
+    if not live:
+        return records
+    mints = sorted({m for progs in live.values() for m, _ in progs})
+    prices = jupiter_prices(mints)
+    decs = {}
+    for m, raw in pool_accounts(mints).items():
+        # SPL mint layout (both programs): decimals at byte 44
+        if len(raw) > 44:
+            decs[m] = raw[44]
+    for r in records:
+        progs = live.get(r['address'])
+        if not progs or (r.get('reward_usd_day') or 0) > 0:
+            continue
+        usd = sum(eps / 10 ** decs.get(m, 9) * 86400 * prices.get(m, 0.0) for m, eps in progs)
+        r['reward_usd_day'] = usd
+        r['reward_mints'] = list(dict.fromkeys((r.get('reward_mints') or []) + [m for m, _ in progs]))
+    return records
+
+
 def decode_amm_config(raw):
     """Raydium's AmmConfig: bump, index, owner, then the fee rates in ppm."""
     o = 8
@@ -184,6 +237,10 @@ def attach_chain_state(records):
         if r.get('price') and abs(st['price'] / r['price'] - 1) > 0.05:
             r['liquidity'] = None
             r['note'] = f'chain price {st["price"]:.6g} disagrees with API price {r["price"]:.6g}'
+    try:
+        attach_chain_rewards(records, accounts)
+    except Exception:
+        pass                     # rewards are extra; a failed read leaves the API's figure
     return records
 
 
@@ -392,7 +449,7 @@ def pancakeswap(limit=50):
             'tvl_usd': _f(at.get('reserve_in_usd')),
             'volume_24h_usd': _f((at.get('volume_usd') or {}).get('h24')),
             'fees_24h_usd': 0.0, 'liquidity': None, 'adaptive_fee': False,
-            'tick_spacing': None,
+            'tick_spacing': None, 'reward_usd_day': 0.0, 'reward_mints': [],
             '_gecko': {base: (names[0] if len(names) > 0 else '?', _f(at.get('base_token_price_usd'))),
                        quote: (names[1] if len(names) > 1 else '?', _f(at.get('quote_token_price_usd')))},
         })
@@ -419,6 +476,10 @@ def pancakeswap(limit=50):
         r['fees_24h_usd'] = r['volume_24h_usd'] * r['fee']
         if r['fee'] > 0:
             out.append(r)
+    try:
+        attach_chain_rewards(out, accounts)
+    except Exception:
+        pass
     return out
 
 

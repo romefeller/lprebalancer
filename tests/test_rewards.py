@@ -162,3 +162,36 @@ class Sweep(unittest.TestCase):
                 mock.patch.object(rebalancer, 'save', lambda s: None):
             self.assertIsNone(rebalancer.distribute_rewards({}, 'M'))
         self.assertEqual(rec_calls, [])
+
+
+class ChainRewards(unittest.TestCase):
+    def slot(self, state, open_t, end_t, eps, mint_bytes):
+        b = bytes([state]) + open_t.to_bytes(8, 'little') + end_t.to_bytes(8, 'little') + bytes(8)
+        b += int(eps * 2 ** 64).to_bytes(16, 'little') + bytes(16) + mint_bytes + bytes(32 * 2 + 16)
+        assert len(b) == dexes.REWARD_INFO_LEN
+        return b
+
+    def test_decode_live_and_ended_slots(self):
+        now = 1_790_000_000
+        mint = bytes(range(1, 33))
+        raw = bytes(dexes.REWARD_INFOS_OFFSET) + self.slot(2, now - 10, now + 10, 1000.5, mint) \
+            + self.slot(3, now - 100, now - 1, 50.0, mint) + bytes(dexes.REWARD_INFO_LEN)
+        out = dexes.decode_rewards(raw, now=now)
+        self.assertEqual(len(out), 1); self.assertAlmostEqual(out[0][1], 1000.5, places=3)
+        self.assertEqual(out[0][0], dexes.b58(mint))
+        self.assertEqual(dexes.decode_rewards(b'', now=now), [])
+
+    def test_chain_rewards_priced_by_mint_decimals(self):
+        now_mint = bytes(range(1, 33))
+        import time as _t
+        raw = bytes(dexes.REWARD_INFOS_OFFSET) + self.slot(2, 0, int(_t.time()) + 999, 1e6, now_mint) \
+            + bytes(dexes.REWARD_INFO_LEN * 2)
+        m = dexes.b58(now_mint)
+        mint_acct = bytes(44) + bytes([6]) + bytes(40)
+        recs = [{'address': 'P', 'reward_usd_day': 0.0, 'reward_mints': []}]
+        with mock.patch.object(dexes, 'jupiter_prices', lambda ms: {m: 2.0}), \
+                mock.patch.object(dexes, 'pool_accounts', lambda addrs: {m: mint_acct}):
+            dexes.attach_chain_rewards(recs, {'P': raw})
+        # 1e6 raw/s at 6 decimals = 1 token/s -> 86400/day at $2
+        self.assertAlmostEqual(recs[0]['reward_usd_day'], 172800.0)
+        self.assertEqual(recs[0]['reward_mints'], [m])

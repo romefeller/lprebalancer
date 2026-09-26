@@ -1222,7 +1222,12 @@ def main():
                 notify('MIGRATE', held=f'{config.DEX} {config.PAIR_LABEL}',
                        best=f"{target['dex']} {target['pair']} (operator)", gain_pct=None,
                        pool=target['address'], dex=target['dex'])
-                rebalance(state, status, 'operator requested move', target=target)
+                # While calm holds the tight band, the move keeps it: reopen
+                # tight on the new pool (if still calm) instead of at the
+                # ladder band, which would cost a second move to narrow again.
+                k = calm_reopen_band(cv, state) if tight else None
+                rebalance(state, status, 'operator requested move', target=target,
+                          band=k, calm_move=bool(k))
                 time.sleep(config.POLL_SECONDS)
                 continue
 

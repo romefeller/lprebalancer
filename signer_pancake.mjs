@@ -443,7 +443,9 @@ async function status(positionArg) {
 // The personal position PDA is ["position", nftMint] on every Raydium-layout
 // program; the NFT sits in one of the owner's token accounts.
 async function rentOf(connection, owner, nftMints, programId) {
-  return positionRent(connection, owner, nftMints, programId);
+  // The close burns the Token-2022 position mint and refunds its rent
+  // (seen on chain, 2026-09-26: mint DAaooK… returned 0.0016764 SOL).
+  return positionRent(connection, owner, nftMints, programId, { refundMint: true });
 }
 
 async function rentUsdOf(info, rentSol) {
