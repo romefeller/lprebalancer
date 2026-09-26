@@ -69,6 +69,7 @@ function render(row) {
         + `${r.expected_next_hours_fees_per_day_usd != null ? ` → ~$${n(r.expected_next_hours_fees_per_day_usd, 2)}/day` : ''}`
         + ` · peak ${String(r.season.peak_hour_utc).padStart(2, '0')}h trough ${String(r.season.trough_hour_utc).padStart(2, '0')}h`] : []),
       ...band(r),
+      ...calmBlock(r.calm),
       `in range    ${n(r.in_range_pct, 0)}%   over ${n(r.tracked_days, 2)}d`,
       `activity    ${plural(r.positions_opened, 'position')} · ${plural(r.rebands, 'reband')} · `
         + `${plural(r.harvests, 'harvest')}${r.failures ? ` · ${plural(r.failures, 'failure')}` : ''}`,
@@ -77,6 +78,20 @@ function render(row) {
 
   // The survival block. The full forecast rides on the event when the loop
   // made one this poll; otherwise the figures recorded at the last poll.
+  // Calm mode: five-minute volatility against the cut, and the tight band's
+  // own touch risk. Present only when calm mode is on.
+  function calmBlock(c) {
+    if (!c) return [];
+    const pct = (x) => (x == null ? '—' : `${Math.round(Number(x) * 100)}%`);
+    return [`━━ CALM ━━`,
+      `sigma 5m    ${n(c.sigma_5m_pct, 4)}% · cut ${n(c.cut_pct, 4)}% (${n(c.ratio, 2)}x) · leave above ${n(c.exit_cut_pct, 4)}%`,
+      `state       ${c.calm ? 'CALM' : 'normal'} · ${c.tight_held ? `holding ±${n(c.band_pct, 1)}%` : 'normal band'}`
+        + ` · calm ${pct(c.calm_share_24h)} of last 24h`,
+      `touch ≤${c.horizon_minutes}m  ${c.tight_held ? `held ${pct(c.p_touch)} · ` : ''}fresh ±${n(c.band_pct, 1)}% ${pct(c.p_touch_fresh)}`
+        + ` · act at ${pct(c.threshold)}`,
+      `budget      ${c.moves_24h ?? '—'} calm moves in 24h · ${c.budget_left ?? '—'} left`];
+  }
+
   function band(r) {
     const f = r.forecast;
     const pct = (x) => (x == null ? '—' : `${Math.round(Number(x) * 100)}%`);
@@ -130,6 +145,18 @@ function render(row) {
         + `price ${n(row.price, 4)} · band ${n(row.lower, 4)} — ${n(row.upper, 4)}\n${row.action}\n` + book(row);
     case 'recentre_deferred':
       return `re-centre deferred · P(exit within ${row.horizon_hours}h) ${Math.round(row.p_exit * 100)}%\n${row.reason}`;
+    case 'CALM_NARROW':
+      return `CALM · narrowing to ±${n(row.calm?.band_pct, 1)}%\nsigma ${n(row.calm?.sigma_5m_pct, 4)}% under the cut ${n(row.calm?.cut_pct, 4)}%\n` + book(row);
+    case 'CALM_RECENTRE':
+      return `CALM · re-centring the tight band · P(touch ≤${row.calm?.horizon_minutes}m) ${Math.round((row.calm?.p_touch ?? 0) * 100)}%\n` + book(row);
+    case 'CALM_WIDEN':
+      return `CALM OVER · widening to the ladder band\nsigma ${n(row.calm?.sigma_5m_pct, 4)}% vs leave-above ${n(row.calm?.exit_cut_pct, 4)}%\n` + book(row);
+    case 'SWAP':
+      return `SWAP · $${n(row.usd, 2)} to 50/50 before the open · impact ${n(row.price_impact_pct, 3)}\n${row.signature ?? ''}`;
+    case 'swap_skipped':
+      return `swap skipped · ${row.reason}`;
+    case 'swap_failed':
+      return `SWAP FAILED · ${row.reason}\nfailures ${row.failures} · nothing opened`;
     case 'DIVIDEND':
       return `DIVIDEND · $${n(row.collected_usd, 4)} harvested to the wallet\n${row.signature ?? ''}\n` + book(row);
     case 'move_deferred':

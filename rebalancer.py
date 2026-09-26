@@ -65,6 +65,7 @@ import sys
 import time
 from datetime import datetime, timezone
 
+import calm
 import config
 import db
 import dexes
@@ -193,7 +194,8 @@ def load():
     if STATE.exists():
         return json.loads(STATE.read_text())
     return {'last_rebalance': 0, 'rebalance_times': [], 'failures': 0,
-            'read_failures': 0, 'last_reopt': 0, 'last_harvest': 0}
+            'read_failures': 0, 'last_reopt': 0, 'last_harvest': 0,
+            'calm_times': [], 'calm': False}
 
 
 def save(s):
@@ -324,6 +326,115 @@ def dividend(state, status):
         return True
     notify('harvest_skipped', reason=err or 'no signature returned', kind='dividend')
     return False
+
+
+# --- calm mode: a tight band while the market is cold ---------------------------
+
+_TAPE5 = {}                     # pool -> (fetched_at, bars)
+TAPE5_REFRESH = 240             # one GeckoTerminal call per five-minute bar, at most
+
+
+def tape5(pool, price):
+    t, b = _TAPE5.get(pool, (0, None))
+    if b is None or time.time() - t > TAPE5_REFRESH:
+        try:
+            fresh = calm.tape_5m(pool, live_price=price)
+        except Exception:
+            fresh = None
+        if fresh is not None:
+            b = fresh
+            _TAPE5[pool] = (time.time(), b)
+    return b
+
+
+def calm_budget_left(state):
+    now = time.time()
+    used = [t for t in state.get('calm_times', []) if now - t < 86400]
+    return max(config.CALM_MAX_MOVES - len(used), 0)
+
+
+def calm_view(state, status):
+    """calm.view for the held position, or None when calm mode is off or the
+    five-minute tape is unavailable. Remembers the calm state across polls,
+    which the hysteresis needs."""
+    if not config.CALM_ENABLED:
+        return None
+    bars = tape5(status.get('whirlpool') or config.POOL, status['price'])
+    v = calm.view(bars, status['price'], status['lowerPrice'], status['upperPrice'],
+                  was_calm=bool(state.get('calm')), cut=config.CALM_SIGMA_CUT,
+                  exit_mult=config.CALM_EXIT_MULT, band=config.CALM_BAND,
+                  horizon_minutes=config.CALM_HORIZON_MINUTES, threshold=config.CALM_THRESHOLD)
+    if v:
+        if bool(state.get('calm')) != v['calm']:
+            state['calm'] = v['calm']; save(state)
+            db.event('CALM_ON' if v['calm'] else 'CALM_OFF',
+                     f"sigma {v['sigma_5m_pct']}% vs cut {v['cut_pct']}%")
+        v['budget_left'] = calm_budget_left(state)
+        v['moves_24h'] = config.CALM_MAX_MOVES - v['budget_left']
+    return v
+
+
+def calm_reopen_band(v, state):
+    """The band to reopen at after a tight band exits: tight again while calm,
+    budget left and a fresh tight band is unlikely to be touched soon;
+    otherwise None, which means the ladder's band."""
+    if not v or not v.get('calm') or calm_budget_left(state) <= 0:
+        return None
+    pf = v.get('p_touch_fresh')
+    if pf is not None and pf >= config.CALM_THRESHOLD:
+        return None
+    return config.CALM_BAND
+
+
+def balance_wallet(state, bal, rec):
+    """Swap the wallet to about 50/50 through Jupiter before an open, when
+    either side holds less than half the capital, which is what a centred
+    band needs of each. Returns the wallet as it is after, or None when a
+    swap failed (counted as a failure; the caller opens nothing).
+
+    The audit of the calm study showed why the gate is "short of half" and
+    not "empty": with swaps only on a one-sided wallet, every in-range move
+    reopens capped by the scarcer token and the tight band's gain turns
+    negative. The swap script itself does nothing within 2% of target.
+
+    Without this an open after an exit is limited by the scarcer token: a
+    band that left above holds only the quote token, and the reopen deposits
+    a sliver of the capital. See SWAP_HOOK.md for the contract."""
+    if not config.REBALANCE_SWAP or not rec:
+        return bal
+    q = bal.get('quoteUsd') or 1.0
+    res = config.GAS_RESERVE_SOL
+    usd_a = max(bal['balanceA'] - (res if bal.get('nativeSide') == 'A' else 0), 0) * bal['price'] * q
+    usd_b = max(bal['balanceB'] - (res if bal.get('nativeSide') == 'B' else 0), 0) * q
+    C = config.CAPITAL_USD
+    if min(usd_a, usd_b) >= 0.5 * C:
+        return bal
+    mint_a = (rec.get('token_a') or {}).get('address')
+    mint_b = (rec.get('token_b') or {}).get('address')
+    if not (guards.is_address(mint_a) and guards.is_address(mint_b)):
+        notify('swap_skipped', reason='pool record has no mints')
+        return bal
+    target = f'{C * config.SIDE_CAP_FRACTION:.2f}'
+    out, err = chain('rebalance', mint_a, mint_b, target, target, '--execute', dex='jupiter')
+    if out and out.get('noop'):
+        notify('swap_skipped', reason='already at target', usd_a=round(usd_a, 2), usd_b=round(usd_b, 2))
+        return bal
+    if err or not out or out.get('partial') or not out.get('sent'):
+        state['failures'] += 1; save(state)
+        db.event('swap_failed', err or 'no signature')
+        notify('swap_failed', reason=err or 'no signature', failures=state['failures'],
+               signature=(out or {}).get('signature'))
+        if state['failures'] >= config.MAX_CONSECUTIVE_FAILURES:
+            halt(f'{state["failures"]} consecutive failures')
+        return None
+    db.event('SWAP', f"{out.get('signature')} usd {out.get('swapUsdValue')}")
+    notify('SWAP', signature=out.get('signature'), usd=out.get('swapUsdValue'),
+           sold=out.get('sold'), bought=out.get('bought'),
+           price_impact_pct=out.get('priceImpactPct'), route=out.get('routePlan'),
+           before_usd_a=round(usd_a, 2), before_usd_b=round(usd_b, 2))
+    time.sleep(5)
+    after = wallet(config.POOL)
+    return after if 'balanceA' in after else None
 
 
 def best_band_for(pool, dex=None):
@@ -485,19 +596,27 @@ def repoint(target):
         'config did not reload to the target pool'
 
 
-def reopen(state, reason):
-    """Open a fresh position at the best band, sized to what the wallet holds."""
+def reopen(state, reason, band=None):
+    """Open a fresh position at the best band, or at `band` when calm mode
+    asks for the tight one, sized to what the wallet holds (after a swap to
+    50/50 when `rebalance_swap` is on and the wallet is lopsided)."""
     pool = config.POOL
     best = best_band_for(pool)
     if not best:
         notify('idle', reason='could not price the pool; opening nothing')
         return False
-    price = best['price']
-    lower, upper = price / best['band'], price * best['band']
+    k = band or best['band']
     bal = wallet(pool)
     if 'balanceA' not in bal:
         notify('idle', reason='could not read the wallet; opening nothing')
         return False
+    bal = balance_wallet(state, bal, best.get('record'))
+    if bal is None:
+        return False
+    # A tight band is centred on the LIVE price: the ladder's price can be
+    # minutes old, and on a +/-1% band that is a large part of the width.
+    price = bal['price'] if band else best['price']
+    lower, upper = price / k, price * k
     cap_a, cap_b = deposit_caps(bal)
     if cap_a * price + cap_b < config.CAPITAL_USD * 0.1 / (bal.get('quoteUsd') or 1):
         notify('idle', reason=f'wallet holds too little {bal["tokenA"]} and '
@@ -556,10 +675,10 @@ def reopen(state, reason):
     if deposit_usd is None:
         deposit_usd = min(config.CAPITAL_USD, cap_a * price + cap_b)
     db.open_position(mint, pool, config.PAIR_LABEL, lower, upper,
-                     (best['band'] - 1) * 100, (out or {}).get('signature'),
+                     (k - 1) * 100, (out or {}).get('signature'),
                      deposit_usd, reason, config_name=config.PROFILE, dex=config.DEX)
     notify_book('OPEN', pair=config.PAIR_LABEL, pool=pool, dex=config.DEX,
-           band=f'+/-{(best["band"] - 1) * 100:.0f}%',
+           band=f'+/-{(k - 1) * 100:.0f}%', calm_band=bool(band),
            lower=round(lower, 4), upper=round(upper, 4),
            deposit_usd=round(deposit_usd, 2),
            deposit_a=(out or {}).get('depositEstA'), deposit_b=(out or {}).get('depositEstB'),
@@ -570,18 +689,30 @@ def reopen(state, reason):
     return True
 
 
-def rebalance(state, status, reason, target=None):
+def rebalance(state, status, reason, target=None, band=None, calm_move=False):
     """Harvest, close, and reopen: on the same pool, or on `target` (a board
     row) after repointing the profile. The close runs on the DEX the position
-    is on, whatever the profile says by then."""
+    is on, whatever the profile says by then.
+
+    A calm move (narrow, re-centre, widen, or the exit of a tight band) has
+    its own gap (`calm_min_gap_seconds`) and its own budget, counted apart
+    from the normal ones; both together sit under one hard ceiling,
+    max_rebalances_per_day + calm_max_moves_per_day, past which the bot
+    halts as before."""
     now = time.time()
-    if now - state['last_rebalance'] < config.MIN_REBALANCE_GAP:
-        notify('rebalance_deferred',
-               seconds_remaining=int(config.MIN_REBALANCE_GAP -
-                                     (now - state['last_rebalance'])))
-        return
     recent = [t for t in state['rebalance_times'] if now - t < 86400]
-    if len(recent) >= config.MAX_REBALANCES_PER_DAY:
+    calm_recent = [t for t in state.get('calm_times', []) if now - t < 86400]
+    last_any = max([state['last_rebalance']] + calm_recent)
+    gap = config.CALM_MIN_GAP if calm_move else config.MIN_REBALANCE_GAP
+    last = last_any if calm_move else state['last_rebalance']
+    if now - last < gap:
+        notify('rebalance_deferred', seconds_remaining=int(gap - (now - last)),
+               kind='calm' if calm_move else 'normal')
+        return
+    if len(recent) + len(calm_recent) >= config.MAX_REBALANCES_PER_DAY + config.CALM_MAX_MOVES:
+        halt(f'{len(recent) + len(calm_recent)} rebalances in 24h, at the hard ceiling')
+        return
+    if not calm_move and len(recent) >= config.MAX_REBALANCES_PER_DAY:
         halt(f'{len(recent)} rebalances in 24h, at the ceiling')
         return
     mint = status['positionMint']
@@ -632,13 +763,16 @@ def rebalance(state, status, reason, target=None):
     notify_book('CLOSE', positionMint=mint,
                 signature=(out or {}).get('signature'), reason=reason)
 
-    state['last_rebalance'] = now
-    state['rebalance_times'] = recent + [now]
+    if calm_move:
+        state['calm_times'] = calm_recent + [now]
+    else:
+        state['last_rebalance'] = now
+        state['rebalance_times'] = recent + [now]
     save(state)
     if target:
         repoint(target)
         notify('REPOINTED', dex=config.DEX, pool=config.POOL, pair=config.PAIR_LABEL)
-    reopen(state, reason)
+    reopen(state, reason, band=band)
 
 
 def main():
@@ -690,6 +824,12 @@ def main():
         price = status['price']
         wusd = wallet(status['whirlpool']).get('walletUsd')
         fc = forecast_for(status)
+        cv = calm_view(state, status)
+        tight = bool(cv and cv.get('tight_held'))
+        if tight and fc:
+            # The hourly six-hour rule says nothing about a +/-1% band; the
+            # five-minute rule in calm.py is in charge of it.
+            fc = dict(fc, act=False, suspended='tight band: the five-minute calm rule is in charge')
         db.snapshot(status['positionMint'], price, status.get('inRange'),
                         status.get('liquidity'),
                         status.get('feesAccruedA', 0.0),
@@ -699,11 +839,29 @@ def main():
 
         if not status.get('inRange'):
             side = 'above' if price > status['upperPrice'] else 'below'
+            k = calm_reopen_band(cv, state) if tight else None
             notify('OUT_OF_BAND', side=side, price=price,
                    lower=status['lowerPrice'], upper=status['upperPrice'],
-                   action='harvest, close, re-optimise, reopen', forecast=fc)
-            rebalance(state, status, f'price went {side}')
+                   action=('harvest, close, reopen tight' if k else 'harvest, close, re-optimise, reopen'),
+                   forecast=fc, calm=cv)
+            rebalance(state, status, f'price went {side}', band=k, calm_move=tight)
             time.sleep(config.POLL_SECONDS)
+            continue
+
+        # Calm mode: narrow when the market goes cold, re-centre the tight
+        # band before it is touched, widen when the calm ends.
+        act = calm.decide(cv, enabled=config.CALM_ENABLED,
+                          budget_left=(cv or {}).get('budget_left', 0))
+        if act:
+            what = {'narrow': ('CALM_NARROW', config.CALM_BAND, 'calm: tight band'),
+                    'recentre': ('CALM_RECENTRE', config.CALM_BAND, 'calm: tight band re-centred before a touch'),
+                    'widen': ('CALM_WIDEN', None, 'calm over: back to the ladder band')}[act]
+            notify_book(what[0], price=price, lower=status['lowerPrice'], upper=status['upperPrice'],
+                        calm=cv, forecast=fc)
+            db.event(what[0], f"sigma {cv['sigma_5m_pct']}% cut {cv['cut_pct']}% "
+                              f"p_touch {cv.get('p_touch')} fresh {cv.get('p_touch_fresh')}")
+            rebalance(state, status, what[2], band=what[1], calm_move=True)
+            time.sleep(config.CALM_POLL_SECONDS if what[1] else config.POLL_SECONDS)
             continue
 
         # Still inside, but likely not for long: re-centre now, at this price,
@@ -768,7 +926,11 @@ def main():
             REOPT.unlink()
             db.event('REOPT_REQUESTED', 'operator touched REOPT')
             notify('REOPT_REQUESTED', action='board and band review now')
-        if forced or time.time() - state.get('last_reopt', 0) > config.REOPT_INTERVAL:
+        if (forced or time.time() - state.get('last_reopt', 0) > config.REOPT_INTERVAL) and tight:
+            notify('reopt_checked', held='tight band', best='-',
+                   verdict='calm mode holds the tight band; the review waits until it widens')
+            state['last_reopt'] = time.time() - config.REOPT_INTERVAL + 1800; save(state)
+        elif forced or time.time() - state.get('last_reopt', 0) > config.REOPT_INTERVAL:
             state['last_reopt'] = time.time(); save(state)
             best = best_band_for(status['whirlpool'])
             # The board first: a better pool elsewhere outranks a better band
@@ -817,10 +979,12 @@ def main():
                            verdict=f'{gain * 100:.0f}% gain is under the '
                                    f'{config.REOPT_MIN_GAIN * 100:.0f}% threshold')
 
-        notify_book('in_band', price=price, lower=status['lowerPrice'],
-                    upper=status['upperPrice'],
-                    liquidity=status.get('liquidity'), forecast=fc)
-        time.sleep(config.POLL_SECONDS)
+        if time.time() - state.get('last_book', 0) >= config.POLL_SECONDS - 5:
+            state['last_book'] = time.time()
+            notify_book('in_band', price=price, lower=status['lowerPrice'],
+                        upper=status['upperPrice'],
+                        liquidity=status.get('liquidity'), forecast=fc, calm=cv)
+        time.sleep(config.CALM_POLL_SECONDS if tight else config.POLL_SECONDS)
 
 
 if __name__ == '__main__':

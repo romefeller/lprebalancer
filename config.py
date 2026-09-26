@@ -132,6 +132,24 @@ HARVEST_INTERVAL = _env('LPBOT_HARVEST_INTERVAL_HOURS', int, int(_CFG.get('harve
 MIN_HARVEST_USD = _env('LPBOT_MIN_HARVEST_USD', float, float(_CFG.get('min_harvest_usd') or 0))
 
 
+# --- calm mode ----------------------------------------------------------------
+# A tight band while five-minute volatility is low (calm.py). Off by default:
+# with calm_enabled false the loop never calls calm.py and nothing changes.
+CALM_ENABLED = _env('LPBOT_CALM', lambda s: s.lower() in ('1', 'true', 'yes'), bool(_CFG.get('calm_enabled')))
+CALM_BAND = _env('LPBOT_CALM_BAND', float, float(_CFG.get('calm_band') or 1.01))
+CALM_SIGMA_CUT = _env('LPBOT_CALM_CUT', float, float(_CFG.get('calm_sigma_cut') or 0.0015272))
+CALM_EXIT_MULT = _env('LPBOT_CALM_EXIT_MULT', float, float(_CFG.get('calm_exit_mult') or 1.25))
+CALM_HORIZON_MINUTES = _env('LPBOT_CALM_HORIZON', int, int(_CFG.get('calm_horizon_minutes') or 30))
+CALM_THRESHOLD = _env('LPBOT_CALM_THRESHOLD', float, float(_CFG.get('calm_threshold') or 0.25))
+CALM_MIN_GAP = _env('LPBOT_CALM_MIN_GAP', int, int(_CFG.get('calm_min_gap_seconds') or 600))
+CALM_MAX_MOVES = _env('LPBOT_CALM_MAX_MOVES', int, int(_CFG.get('calm_max_moves_per_day') or 0))
+CALM_POLL_SECONDS = _env('LPBOT_CALM_POLL', int, int(_CFG.get('calm_poll_seconds') or 120))
+# Swap to 50/50 before an open when the wallet is lopsided. Without it, an
+# open after an exit is limited by the scarcer token and most capital idles.
+REBALANCE_SWAP = _env('LPBOT_REBALANCE_SWAP', lambda s: s.lower() in ('1', 'true', 'yes'),
+                      bool(_CFG.get('rebalance_swap')))
+
+
 def policy():
     """The proactive rule as the engine takes it."""
     return {'horizon': PROACTIVE_HORIZON, 'threshold': PROACTIVE_THRESHOLD}
@@ -185,6 +203,11 @@ def summary():
         'proactive_threshold': PROACTIVE_THRESHOLD,
         'harvest_every_hours': HARVEST_INTERVAL / 3600,
         'min_harvest_usd': MIN_HARVEST_USD,
+        'calm_enabled': CALM_ENABLED,
+        'calm_band_pct': round((CALM_BAND - 1) * 100, 2),
+        'calm_sigma_cut_pct': round(CALM_SIGMA_CUT * 100, 4),
+        'calm_max_moves_per_day': CALM_MAX_MOVES,
+        'rebalance_swap': REBALANCE_SWAP,
     }
 
 

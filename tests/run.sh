@@ -12,5 +12,5 @@ export SOLANA_RPC_URL="${SOLANA_RPC_URL:-https://api.mainnet-beta.solana.com}"
 if [ $# -gt 0 ]; then
   python3 -m unittest -v "$@"
 else
-  python3 -m unittest -v test_engine test_rebalancer test_db test_signer_live
+  python3 -m unittest -v test_engine test_rebalancer test_db test_calm test_signer_live
 fi

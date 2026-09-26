@@ -521,6 +521,12 @@ async function open(pool, lower, upper, maxA, maxB, execute) {
       ownerInfo: { useSOLBalance: true },
       tickLower: band.tickLower, tickUpper: band.tickUpper,
       base, baseAmount, otherAmountMax,
+      // LPBOT_RAYDIUM_LEAN=1: no Metaplex metadata and a Token-2022 position
+      // NFT. The legacy path leaves about 0.0148 SOL per open on chain that
+      // close never refunds (metadata account and fee, legacy mint), $1.80 a
+      // cycle. Open simulates green both ways; close of a Token-2022 position
+      // has not run live yet, so the lean path stays off until it has.
+      ...(process.env.LPBOT_RAYDIUM_LEAN === '1' ? { withMetadata: 'no-create', nft2022: true } : {}),
       txVersion: TX_VERSION,
     });
     const report = {
