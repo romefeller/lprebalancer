@@ -114,8 +114,10 @@ function render(row) {
       if (f.il_now_pct != null) {
         lines.push(`if closed   locks ${n(f.il_now_pct, 2)}% vs holding · price ${sign(f.since_open_pct)}% since open`);
       }
-      lines.push(`rule        act at P(exit ≤${f.horizon_hours}h) ≥ ${pct(f.threshold)} · now ${pct(f.p_exit_horizon)}`
-        + ` → ${f.act ? 'RE-CENTRE' : 'hold'}`);
+      lines.push(f.suspended
+        ? `rule        hourly rule off · the CALM block below decides (hourly figures above are context only)`
+        : `rule        act at P(exit ≤${f.horizon_hours}h) ≥ ${pct(f.threshold)} · now ${pct(f.p_exit_horizon)}`
+          + ` → ${f.act ? 'RE-CENTRE' : 'hold'}`);
       return lines;
     }
     const b = r.band;

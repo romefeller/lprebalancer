@@ -347,3 +347,22 @@ class AuditFixes(unittest.TestCase):
                 mock.patch.object(rebalancer, 'reopen', side_effect=AssertionError('replayed')):
             self.assertFalse(rebalancer.resume_reopen(state))
         self.assertNotIn('pending_reopen', state)
+
+
+class EveryBookCarriesCalm(unittest.TestCase):
+    def test_open_and_close_books_get_the_latest_view(self):
+        sent = []
+        with mock.patch.object(rebalancer.config, 'CALM_ENABLED', True), \
+                mock.patch.dict(rebalancer.LAST_CALM, {'view': {'calm': True, 'sigma_5m_pct': 0.13}}), \
+                mock.patch.object(rebalancer, 'notify', lambda ev, **kw: sent.append(kw)), \
+                mock.patch.object(rebalancer.db, 'stats', lambda: {'equity_usd': 1}):
+            rebalancer.notify_book('OPEN', pair='SOL/USDC')
+            rebalancer.notify_book('in_band', calm={'calm': False})
+        self.assertEqual(sent[0]['calm']['sigma_5m_pct'], 0.13)
+        self.assertEqual(sent[1]['calm'], {'calm': False})          # an explicit view wins
+        with mock.patch.object(rebalancer.config, 'CALM_ENABLED', False), \
+                mock.patch.dict(rebalancer.LAST_CALM, {'view': {'calm': True}}), \
+                mock.patch.object(rebalancer, 'notify', lambda ev, **kw: sent.append(kw)), \
+                mock.patch.object(rebalancer.db, 'stats', lambda: {}):
+            rebalancer.notify_book('OPEN')
+        self.assertNotIn('calm', sent[-1])

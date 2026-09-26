@@ -153,6 +153,11 @@ def notify_book(event, **payload):
     convenient label without risking a duplicate-keyword error at the one moment
     the bot most needs to report something.
     """
+    # Every book carries the latest calm view while calm mode is on, not only
+    # the in-band one: the OPEN/CLOSE books after a calm move are exactly the
+    # ones where it matters.
+    if config.CALM_ENABLED and payload.get('calm') is None and LAST_CALM.get('view'):
+        payload = dict(payload, calm=LAST_CALM['view'])
     return notify(event, **{**payload, **db.stats()})
 
 
@@ -441,6 +446,7 @@ def dividend(state, status):
 # --- calm mode: a tight band while the market is cold ---------------------------
 
 _TAPE5 = {}                     # pool -> (fetched_at, bars)
+LAST_CALM = {}                  # {'view': the latest calm.view}, for every book
 TAPE5_REFRESH = 240             # one GeckoTerminal call per five-minute bar, at most
 
 
@@ -481,6 +487,7 @@ def calm_view(state, status):
                      f"sigma {v['sigma_5m_pct']}% vs cut {v['cut_pct']}%")
         v['budget_left'] = calm_budget_left(state)
         v['moves_24h'] = config.CALM_MAX_MOVES - v['budget_left']
+        LAST_CALM['view'] = v
     return v
 
 
