@@ -195,3 +195,28 @@ class ChainRewards(unittest.TestCase):
         # 1e6 raw/s at 6 decimals = 1 token/s -> 86400/day at $2
         self.assertAlmostEqual(recs[0]['reward_usd_day'], 172800.0)
         self.assertEqual(recs[0]['reward_mints'], [m])
+
+
+class CloseRetry(unittest.TestCase):
+    def test_a_rate_limited_close_is_retried_once_when_the_position_is_still_there(self):
+        calls, sent = [], []
+        results = iter([({'signature': 'h'}, None), (None, 'RPC rate limited'), ({'closed': 'M', 'signature': 'c'}, None)])
+        state = {'last_rebalance': 0, 'rebalance_times': [], 'calm_times': [], 'failures': 0}
+        with mock.patch.object(rebalancer, 'chain', lambda *a, **k: (calls.append(a[0]) or next(results))), \
+                mock.patch.object(rebalancer, 'read_status', lambda *a: ({'positionMint': 'M'}, None)), \
+                mock.patch.object(rebalancer, 'notify', lambda ev, **kw: sent.append(ev)), \
+                mock.patch.object(rebalancer, 'notify_book', lambda ev, **kw: sent.append(ev)), \
+                mock.patch.object(rebalancer, 'wallet', lambda p: {}), \
+                mock.patch.object(rebalancer, 'save', lambda s: None), \
+                mock.patch.object(rebalancer, 'reopen', lambda *a, **k: sent.append('REOPEN')), \
+                mock.patch.object(rebalancer, 'distribute', lambda *a, **k: None), \
+                mock.patch.object(rebalancer, 'distribute_rewards', lambda *a, **k: None), \
+                mock.patch.object(rebalancer.time, 'sleep', lambda s: None), \
+                mock.patch.object(rebalancer.db, 'record_harvest', lambda *a: None), \
+                mock.patch.object(rebalancer.db, 'snapshot', lambda *a, **k: None), \
+                mock.patch.object(rebalancer.db, 'close_position', lambda *a: None), \
+                mock.patch.object(rebalancer.db, 'event', lambda *a: None):
+            rebalancer.rebalance(state, {'positionMint': 'M', 'price': 100, 'whirlpool': 'P'}, 'x')
+        self.assertEqual(calls, ['harvest', 'close', 'close'])
+        self.assertIn('close_retry', sent); self.assertIn('REOPEN', sent)
+        self.assertEqual(state['failures'], 0)

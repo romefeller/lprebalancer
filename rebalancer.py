@@ -1044,6 +1044,15 @@ def rebalance(state, status, reason, target=None, band=None, calm_move=False):
         save(state)
 
     out, err = chain('close', mint, '--execute')
+    if err and re.search(r'rate limit|429|timeout|timed out|ECONNRESET|blockhash', str(err), re.I):
+        # A transport failure: if the position is provably still there, the
+        # close did not land and one more try is safe. On 2026-09-26 a
+        # rate-limited close left a move half-done until the next poll.
+        time.sleep(15)
+        check, _ = read_status()
+        if check is not None and check.get('positionMint') == mint:
+            notify('close_retry', reason=err)
+            out, err = chain('close', mint, '--execute')
     if err:
         # A close that reports failure may have landed. This exact false
         # negative left a position closed and the capital idle in production.
