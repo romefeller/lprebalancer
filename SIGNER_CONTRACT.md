@@ -38,8 +38,10 @@ and a `DRY RUN` line, and send nothing. A dry run that returns early proves
 nothing.
 
 Errors go to stderr as `ERROR: <message>` with exit code 1. Anything the loop
-must parse goes to stdout as one JSON object. The loop takes the first `{` to
-the last `}` of combined stdout+stderr, so never print two JSON objects.
+must parse goes to stdout as one JSON object. The loop decodes stdout separately
+from stderr and treats a nonzero exit, `error`, or `partial` as a failure.
+Never print multiple result objects. After a submission may have occurred,
+the signer must not retry the whole operation on another RPC endpoint.
 
 ## Output fields the loop reads
 
@@ -60,10 +62,13 @@ liquidity (string; any monotone measure of size is fine),
 lowerPrice, upperPrice, price, inRange (bool),
 closeEstA, closeEstB (what a close would return now, human units),
 positionUsd, feesAccruedA, feesAccruedB, feesAccrued_quote, feesAccrued_USD,
-rentSol, rentUsd (lamports held by the position accounts and their NFT token
-  accounts, refunded on close; the loop adds rentUsd to the mark, so a wide
+rentSol, rentUsd (lamports held by the position accounts, their NFT token
+  accounts, and refundable Token-2022 NFT mints, counted once per address;
+  the loop adds rentUsd to the principal mark, so a wide
   DLMM position does not read as a loss the size of its 0.2 SOL of rent)
 ```
+Equity is wallet value + position principal + refundable rent + uncollected
+fees. `positionUsd` excludes both rent and fees; they are separate fields.
 `status` with no position: exactly `{"positions": 0, "positionMint": null, "pool": <pool>}`.
 The loop must be able to tell "read worked, nothing there" from "read failed".
 

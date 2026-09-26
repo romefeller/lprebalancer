@@ -31,6 +31,8 @@
 //   node signer_raydium.mjs harvest <position> [--execute]
 //   node signer_raydium.mjs close <position> [--execute]
 import fs from 'node:fs';
+import { positionRent } from './position_rent.mjs';
+import { executeBuilt, isProgramFailure, signerError } from './signer_errors.mjs';
 import path from 'node:path';
 import { createRequire } from 'node:module';
 
@@ -194,7 +196,7 @@ async function withRpc(fn, opts) {
       try {
         return await fn(await connect(url, opts));
       } catch (e) {
-        if (e?.sent) throw e;
+        if (e?.sent || isProgramFailure(e)) throw e;
         const msg = String(e?.message ?? e);
         if (!TRANSPORT.test(msg)) throw e;                    // the chain answered; that is the answer
         lastErr = e;
@@ -351,22 +353,8 @@ async function status(positionArg) {
 // The personal position PDA is ["position", nftMint] on every Raydium-layout
 // program; the NFT sits in one of the owner's token accounts.
 async function rentOf(connection, owner, nftMints, programId) {
-  const pdas = nftMints.map(m => PublicKey.findProgramAddressSync(
-    [Buffer.from('position'), m.toBuffer()], programId)[0]);
-  const infos = await connection.getMultipleAccountsInfo(pdas);
-  let lamports = infos.reduce((n, a) => n + (a?.lamports ?? 0), 0);
-  for (const m of nftMints) {
-    for (const prog of [TOKEN_PROGRAM_ID_RENT, TOKEN_2022_PROGRAM_ID_RENT]) {
-      try {
-        const r = await connection.getTokenAccountsByOwner(owner, { mint: m }, { programId: prog });
-        lamports += (r.value ?? []).reduce((n, a) => n + (a.account?.lamports ?? 0), 0);
-      } catch { /* one of the two programs owns it; the other answers empty or errors */ }
-    }
-  }
-  return lamports / 1e9;
+  return positionRent(connection, owner, nftMints, programId, { refundMint: true });
 }
-const TOKEN_PROGRAM_ID_RENT = new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA');
-const TOKEN_2022_PROGRAM_ID_RENT = new PublicKey('TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb');
 
 async function rentUsdOf(info, rentSol) {
   const su = info.nativeSide === 'A' && info.quoteUsd != null ? info.price * info.quoteUsd
@@ -451,8 +439,7 @@ async function sendBuilt(built) {
   const log = console.log;
   console.log = () => {};
   try {
-    const { txId } = await built.execute({ sendAndConfirm: true, skipPreflight: false });
-    return txId;
+    return await executeBuilt(built);
   } finally { console.log = log; }
 }
 
@@ -673,6 +660,6 @@ async function main() {
 
 // Braces in an error text would look like JSON to the loop; flatten them.
 main().catch(e => {
-  console.error('ERROR:', String(e?.message ?? e).replace(/[{}]/g, ' '));
+  console.error('ERROR:', signerError(e).replace(/[{}]/g, ' '));
   process.exitCode = 1;
 });

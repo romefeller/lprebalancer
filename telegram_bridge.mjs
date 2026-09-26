@@ -57,7 +57,7 @@ function render(row) {
         `all pools   fees $${n(r.fees_total_usd, 4)}   P&L ${r.pnl_all_pools_usd != null ? sign(r.pnl_all_pools_usd) : '—'}`,
       ] : []),
       `━━ BOOK ━━`,
-      `equity      $${n(r.equity_usd)}   P&L ${sign(r.pnl_usd)}`,
+      `equity      $${n(r.equity_usd)}   P&L ${sign(r.pnl_usd)} · includes pending fees`,
       `rate        ${r.fees_per_day_usd != null ? '$' + n(r.fees_per_day_usd, 4) + '/day' : '— (needs an hour)'}`
         + `${r.apr_pct != null ? `   APR ${n(r.apr_pct, 1)}%` : ''} since start`,
       ...(r.fees_per_day_6h_usd != null ? [
@@ -176,11 +176,11 @@ function render(row) {
     case 'CLOSE':
       return `CLOSED · ${row.reason}\n${row.signature ?? ''}\n` + book(row);
     case 'OPEN':
-      return `OPENED · ${row.dex ? row.dex + ' ' : ''}${row.pair} ${row.band}\n`
+      return `OPENED · ${row.dex ? row.dex + ' ' : ''}${row.pair} ${row.opened_band ?? (typeof row.band === 'string' ? row.band : '')}\n`
         + `range ${n(row.lower, 4)} — ${n(row.upper, 4)}\n`
         + `deposited $${n(row.deposit_usd)} · caps ${row.cap_a ?? '—'} · ${row.cap_b ?? '—'}\n`
-        + `modelled ${n(row.expected_net_day_pct, 3)}%/day at `
-        + `${n(row.modelled_rebalances_per_day, 2)} rebalances/day\n`
+        + (row.expected_net_day_pct != null && row.modelled_rebalances_per_day != null
+          ? `modelled ${n(row.expected_net_day_pct, 3)}%/day at ${n(row.modelled_rebalances_per_day, 2)} rebalances/day\n` : '')
         + `${row.reason}\n${row.signature ?? ''}\n` + book(row);
     case 'REBAND':
       return `REBANDED · ${row.old_band} → ${row.new_band}\n`

@@ -243,8 +243,9 @@ def open_position(mint, pool, pair, lower, upper, band_pct, sig,
 
 def close_position(mint, sig, withdraw_usd):
     with cursor(commit=True) as cur:
-        cur.execute('update positions set closed_at = %s, close_sig = %s, '
-                    'withdraw_usd = %s where mint = %s',
+        cur.execute('update positions set closed_at = coalesce(closed_at, %s), '
+                    'close_sig = coalesce(close_sig, %s), '
+                    'withdraw_usd = coalesce(withdraw_usd, %s) where mint = %s',
                     (now(), sig, withdraw_usd, mint))
 
 
@@ -274,10 +275,12 @@ def record_harvest(mint, fee_a, fee_b, fee_usd, sig):
 
 def snapshot(mint, price, in_range, liquidity, accrued_a, accrued_b,
              accrued_usd, wallet_usd, position_usd, forecast=None):
-    # Equity is the wallet plus the position. If either could not be read
+    # Equity includes the wallet, position principal/rent, and pending fees.
+    # A harvest transfers value between these components without creating P&L.
+    # If either principal component could not be read
     # this poll, equity is unknown — not "the other half", which would show up
     # as a $170 loss in the P&L for one poll and a $170 gain in the next.
-    equity = ((wallet_usd + position_usd)
+    equity = ((wallet_usd + position_usd + (accrued_usd or 0))
               if (wallet_usd is not None and position_usd is not None) else None)
     # The forecast made at this poll is kept next to the observation, so the
     # survival model can be checked against what happened (see forecasts()).
@@ -306,6 +309,33 @@ def event(kind, detail=''):
 
 def _f(x):
     return float(x) if x is not None else 0.0
+
+
+def fees_between(start, end=None):
+    """Accrual earned between two UTC boundaries, including closed positions.
+
+    The latest observation before the start is the baseline, so collecting
+    yesterday's fees today cannot count them as today's earnings.
+    """
+    with cursor() as cur:
+        cur.execute("""
+            with per_mint as (
+                select mint,
+                    (array_agg(a order by ts desc, kind desc, id desc))[1]
+                      - coalesce((array_agg(a order by ts desc, kind desc, id desc)
+                                  filter (where ts <= %(start)s))[1], 0) a,
+                    (array_agg(b order by ts desc, kind desc, id desc))[1]
+                      - coalesce((array_agg(b order by ts desc, kind desc, id desc)
+                                  filter (where ts <= %(start)s))[1], 0) b,
+                    (array_agg(usd order by ts desc, kind desc, id desc))[1]
+                      - coalesce((array_agg(usd order by ts desc, kind desc, id desc)
+                                  filter (where ts <= %(start)s))[1], 0) usd
+                from fee_points where ts <= %(end)s group by mint
+            )
+            select coalesce(sum(a), 0) a, coalesce(sum(b), 0) b,
+                   coalesce(sum(usd), 0) usd from per_mint
+        """, {'start': start, 'end': end or now()})
+        return dict(cur.fetchone())
 
 
 def trailing_rate(hours):
@@ -432,11 +462,6 @@ def stats(token_a=None, token_b=None):
                     'coalesce(sum(fee_usd),0) usd, count(*) n from harvests')
         r = cur.fetchone()
 
-        cur.execute("select coalesce(sum(fee_a),0) a, coalesce(sum(fee_b),0) b, "
-                    "coalesce(sum(fee_usd),0) usd from harvests "
-                    "where ts >= date_trunc('day', now() at time zone 'utc')")
-        rt = cur.fetchone()
-
         # The latest snapshot, and whether the position it describes still
         # exists. Unrealised fees are what is sitting in an OPEN position. A
         # snapshot of a position that has since been harvested and closed
@@ -452,17 +477,6 @@ def stats(token_a=None, token_b=None):
         latest = cur.fetchone()
         if latest and not latest['open']:
             latest = dict(latest, accrued_a=0, accrued_b=0, accrued_usd=0)
-
-        # The first snapshot of today FOR THIS POSITION, so "today" counts what
-        # accrued since midnight rather than everything the open position has
-        # ever earned. Filtering by mint matters: after a rebalance the day's
-        # first snapshot belongs to a position that no longer exists, and its
-        # accrual has nothing to do with the new one's.
-        cur.execute("select accrued_a, accrued_b, accrued_usd from snapshots "
-                    "where ts >= date_trunc('day', now() at time zone 'utc') "
-                    "and mint = %s order by id asc limit 1",
-                    (latest['mint'] if latest else None,))
-        day0 = cur.fetchone()
 
         # The clock starts when the first position opened, not when the first
         # snapshot landed. A restart must not reset the denominator of the rate.
@@ -513,9 +527,7 @@ def stats(token_a=None, token_b=None):
         equity = last_priced and last_priced['equity_usd']
     started = first_eq and first_eq['equity_usd']
 
-    du_a = max(u_a - _f(day0 and day0['accrued_a']), 0.0)
-    du_b = max(u_b - _f(day0 and day0['accrued_b']), 0.0)
-    du_usd = max(u_usd - _f(day0 and day0['accrued_usd']), 0.0)
+    today = fees_between(now().replace(hour=0, minute=0, second=0, microsecond=0))
 
     days = None
     if latest and span and span['t0']:
@@ -553,9 +565,9 @@ def stats(token_a=None, token_b=None):
                                        if pools else None),
         'token_a': token_a or cfg.get('token_a') or 'A',
         'token_b': token_b or cfg.get('token_b') or 'B',
-        'fees_today_a': rnd(_f(rt['a']) + du_a),
-        'fees_today_b': rnd(_f(rt['b']) + du_b),
-        'fees_today_usd': round(_f(rt['usd']) + du_usd, 4),
+        'fees_today_a': rnd(today['a']),
+        'fees_today_b': rnd(today['b']),
+        'fees_today_usd': round(_f(today['usd']), 4),
         'fees_realised_a': rnd(r['a']), 'fees_realised_b': rnd(r['b']),
         'fees_realised_usd': round(_f(r['usd']), 4),
         'fees_unrealised_a': rnd(u_a), 'fees_unrealised_b': rnd(u_b),
@@ -651,42 +663,28 @@ def daily():
     """
     with cursor() as cur:
         cur.execute("""
-            with pts as (
-                -- every snapshot, marked with the position's total to date
-                select s.ts, s.mint,
-                       s.accrued_a + coalesce((select sum(h.fee_a) from harvests h
-                                               where h.mint = s.mint and h.ts <= s.ts), 0) a,
-                       s.accrued_b + coalesce((select sum(h.fee_b) from harvests h
-                                               where h.mint = s.mint and h.ts <= s.ts), 0) b,
-                       s.accrued_usd + coalesce((select sum(h.fee_usd) from harvests h
-                                                 where h.mint = s.mint and h.ts <= s.ts), 0) usd
-                from snapshots s
-                union all
-                -- and every harvest, as the moment accrual became realised
-                select h.ts, h.mint,
-                       (select sum(fee_a) from harvests x where x.mint = h.mint and x.ts <= h.ts),
-                       (select sum(fee_b) from harvests x where x.mint = h.mint and x.ts <= h.ts),
-                       (select sum(fee_usd) from harvests x where x.mint = h.mint and x.ts <= h.ts)
-                from harvests h
-                union all
-                -- and every open, at zero: what accrued before the first
-                -- snapshot is still the day's earning
-                select p.opened_at, p.mint, 0, 0, 0 from positions p
+            with last_per_day as (
+                select distinct on ((ts at time zone 'utc')::date, mint)
+                       (ts at time zone 'utc')::date d, mint, a, b, usd
+                from fee_points
+                order by (ts at time zone 'utc')::date, mint, ts desc, kind desc, id desc
             ), per_mint as (
-                select date_trunc('day', ts) d, mint,
-                       max(a) - min(a) a, max(b) - min(b) b, max(usd) - min(usd) usd
-                from pts group by 1, 2
+                select d, mint,
+                       a - coalesce(lag(a) over w, 0) a,
+                       b - coalesce(lag(b) over w, 0) b,
+                       usd - coalesce(lag(usd) over w, 0) usd
+                from last_per_day window w as (partition by mint order by d)
             ), f as (
-                select d, sum(a) a, sum(b) b, sum(usd) usd from per_mint group by 1
+                select d, sum(a) a, sum(b) b, sum(usd) usd from per_mint group by d
             ), s as (
-                select date_trunc('day', ts) d,
+                select (ts at time zone 'utc')::date d,
                        avg(case when in_range then 1.0 else 0.0 end) ir,
                        max(equity_usd) eq
                 from snapshots group by 1
             )
             , where_ as (
                 -- the pools the money sat in that day, most-snapshotted first
-                select date_trunc('day', s.ts) d,
+                select (s.ts at time zone 'utc')::date d,
                        string_agg(distinct p.dex || ' ' || p.pair_label, ', ') pools
                 from snapshots s join positions p on p.mint = s.mint group by 1
             )

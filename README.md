@@ -443,7 +443,7 @@ exactly one row is active, enforced by a partial unique index, so the bot never
 has to guess which parameters are its own.
 
 ```sh
-psql -d rebalancer -f sql/001_schema.sql -f sql/002_any_pool.sql -f sql/003_multi_dex.sql -f sql/004_seasonality.sql -f sql/005_proactive.sql
+for migration in sql/*.sql; do psql -v ON_ERROR_STOP=1 -d rebalancer -f "$migration"; done
 python3 db.py seed                          # a first profile, SOL/USDC
 python3 db.py add wif-usdc <pool> capital_usd=200   # describe another pool
 python3 db.py config                        # show the active profile
@@ -682,6 +682,8 @@ never been watched.
 | `sql/003_multi_dex.sql` | the board tables and the pool-move parameters |
 | `sql/004_seasonality.sql` | the hour-of-day profile on each scan and the quiet-hours switch |
 | `sql/005_proactive.sql` | the proactive rule, the dividend schedule, and the forecast columns on snapshots |
+| `sql/006_calm.sql` | tight CALM bands, their move budget, and pre-open swaps |
+| `sql/007_fee_accounting.sql` | pending fees in equity and cumulative fee observations for UTC-day attribution |
 | `ops/*.service` | systemd units |
 | `tests/` | the test suite, below |
 
@@ -691,7 +693,7 @@ never been watched.
 
 ```sh
 createdb rebalancer_test
-psql -d rebalancer_test -f sql/001_schema.sql -f sql/002_any_pool.sql
+for migration in sql/*.sql; do psql -v ON_ERROR_STOP=1 -d rebalancer_test -f "$migration"; done
 tests/run.sh                                        # offline suites
 WALLET_SECRET_PATH=/path/to/key tests/run.sh        # plus the live signer reads
 ```

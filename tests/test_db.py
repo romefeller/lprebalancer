@@ -115,8 +115,7 @@ class Ledger(unittest.TestCase):
         self.assertAlmostEqual(s3['fees_total_usd'], 0.30)
         self.assertAlmostEqual(s3['fees_total_a'], 0.0015)
         self.assertAlmostEqual(s3['fees_total_b'], 0.15)
-        # today = harvested today + accrual since the first snapshot of today.
-        # A day-0 snapshot of m1 at 0 makes the accrual delta of m2 read 0.10.
+        # Today's earnings include both positions, without double-counting harvests.
         self.assertAlmostEqual(s3['fees_today_usd'], 0.30)
 
     def test_token_amounts_survive_exactly(self):
@@ -133,8 +132,66 @@ class Ledger(unittest.TestCase):
         self.snap('m1', 0, 0, 0.1, wallet=80.5, pos=161.0)
         s = db.stats()
         self.assertAlmostEqual(s['equity_start_usd'], 240.0)
-        self.assertAlmostEqual(s['equity_usd'], 241.5)
-        self.assertAlmostEqual(s['pnl_usd'], 1.5)
+        self.assertAlmostEqual(s['equity_usd'], 241.6)
+        self.assertAlmostEqual(s['pnl_usd'], 1.6)
+
+    def test_harvest_moves_fees_without_creating_equity(self):
+        db.open_position('m1', LIVE_POOL, 'SOL/USDC', 95, 105, 5, 's', 190, 't')
+        self.snap('m1', 0.001, 0.1, 0.2, wallet=80, pos=160)
+        before = db.stats()
+        db.record_harvest('m1', 0.001, 0.1, 0.2, 'h')
+        self.snap('m1', 0, 0, 0, wallet=80.2, pos=160)
+        after = db.stats()
+        self.assertEqual(before['equity_usd'], after['equity_usd'])
+        self.assertEqual(before['fees_total_usd'], after['fees_total_usd'])
+        self.assertEqual(after['pnl_usd'], 0)
+
+    def test_recovered_close_preserves_the_confirmed_withdrawal(self):
+        db.open_position('m1', LIVE_POOL, 'SOL/USDC', 95, 105, 5, 's', 190, 't')
+        db.close_position('m1', 'confirmed', 191)
+        with db.cursor() as cur:
+            cur.execute("select * from positions where mint='m1'")
+            before = dict(cur.fetchone())
+        db.close_position('m1', None, 190)
+        with db.cursor() as cur:
+            cur.execute("select * from positions where mint='m1'")
+            self.assertEqual(dict(cur.fetchone()), before)
+
+    def test_today_excludes_inherited_fees_even_after_close_and_new_open(self):
+        from datetime import timedelta
+        from unittest.mock import patch
+        midnight = db.now().replace(hour=0, minute=0, second=0, microsecond=0)
+        with patch.object(db, 'now', return_value=midnight - timedelta(hours=2)):
+            db.open_position('old', LIVE_POOL, 'SOL/USDC', 95, 105, 5, 's', 190, 't')
+        with patch.object(db, 'now', return_value=midnight - timedelta(minutes=1)):
+            self.snap('old', .005, .15, .65)
+        with patch.object(db, 'now', return_value=midnight + timedelta(seconds=1)):
+            db.record_harvest('old', .005, .17, .67, 'h')
+            self.snap('old', 0, 0, 0)
+            db.close_position('old', 'c', 190)
+            db.open_position('new', LIVE_POOL, 'SOL/USDC', 95, 105, 1, 's2', 190, 'calm: tight band')
+        with patch.object(db, 'now', return_value=midnight + timedelta(seconds=2)):
+            self.snap('new', .001, .01, .11)
+        with patch.object(db, 'now', return_value=midnight + timedelta(seconds=3)):
+            self.assertAlmostEqual(db.stats()['fees_today_usd'], .13)
+            daily = {r['day']: r for r in db.daily()}
+            self.assertAlmostEqual(float(daily[midnight.date()]['fee_usd']), .13)
+
+    def test_equity_repair_is_idempotent_and_preserves_unknown_values(self):
+        from pathlib import Path
+        self.snap('m', 0, .65, .65, wallet=38, pos=210)
+        self.snap('m', 0, .65, .65, wallet=None, pos=210)
+        with db.cursor(commit=True) as cur:
+            cur.execute('update snapshots set equity_usd = wallet_usd + position_usd')
+        sql = (Path(db.__file__).parent / 'sql' / '007_fee_accounting.sql').read_text()
+        for _ in range(2):
+            with db.cursor(commit=True) as cur:
+                cur.execute(sql)
+        with db.cursor() as cur:
+            cur.execute('select equity_usd from snapshots order by id')
+            rows = cur.fetchall()
+        self.assertEqual(rows[0]['equity_usd'], Decimal('248.65'))
+        self.assertIsNone(rows[1]['equity_usd'])
 
     def test_events_count_failures_and_rebands(self):
         db.event('REBAND', '5% -> 12%'); db.event('open_failed', 'x'); db.event('BREAKER', 'y')

@@ -50,6 +50,7 @@
 // connection.simulateTransaction; the report carries the simulation logs.
 // Extra env: LPBOT_PRIORITY_MICROLAMPORTS (compute unit price, default 20000).
 import fs from 'node:fs';
+import { positionRent } from './position_rent.mjs';
 import path from 'node:path';
 import { createRequire } from 'node:module';
 
@@ -442,22 +443,8 @@ async function status(positionArg) {
 // The personal position PDA is ["position", nftMint] on every Raydium-layout
 // program; the NFT sits in one of the owner's token accounts.
 async function rentOf(connection, owner, nftMints, programId) {
-  const pdas = nftMints.map(m => PublicKey.findProgramAddressSync(
-    [Buffer.from('position'), m.toBuffer()], programId)[0]);
-  const infos = await connection.getMultipleAccountsInfo(pdas);
-  let lamports = infos.reduce((n, a) => n + (a?.lamports ?? 0), 0);
-  for (const m of nftMints) {
-    for (const prog of [TOKEN_PROGRAM_ID_RENT, TOKEN_2022_PROGRAM_ID_RENT]) {
-      try {
-        const r = await connection.getTokenAccountsByOwner(owner, { mint: m }, { programId: prog });
-        lamports += (r.value ?? []).reduce((n, a) => n + (a.account?.lamports ?? 0), 0);
-      } catch { /* one of the two programs owns it; the other answers empty or errors */ }
-    }
-  }
-  return lamports / 1e9;
+  return positionRent(connection, owner, nftMints, programId);
 }
-const TOKEN_PROGRAM_ID_RENT = new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA');
-const TOKEN_2022_PROGRAM_ID_RENT = new PublicKey('TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb');
 
 async function rentUsdOf(info, rentSol) {
   const su = info.nativeSide === 'A' && info.quoteUsd != null ? info.price * info.quoteUsd

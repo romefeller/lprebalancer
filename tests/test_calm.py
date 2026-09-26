@@ -3,6 +3,9 @@ pieces that carry it. Offline."""
 import math
 import time
 import unittest
+import contextlib
+import pathlib
+import tempfile
 from unittest import mock
 
 import numpy as np
@@ -209,3 +212,82 @@ class Loop(unittest.TestCase):
             rebalancer.rebalance({'last_rebalance': 0, 'rebalance_times': [now - 9000] * 6, 'calm_times': []},
                                  {'positionMint': 'M'}, 'x')
             self.assertIn('at the ceiling', halted[-1])
+
+
+class Recovery(unittest.TestCase):
+    def setUp(self):
+        self.stack = contextlib.ExitStack()
+        self.addCleanup(self.stack.close)
+        tmp = self.stack.enter_context(tempfile.TemporaryDirectory())
+        self.patch(rebalancer, 'STATE', pathlib.Path(tmp) / 'runtime.json')
+        self.patch(rebalancer.time, 'sleep', lambda _: None)
+        self.events = []
+        self.patch(rebalancer, 'notify', lambda ev, **kw: self.events.append((ev, kw)))
+        self.patch(rebalancer, 'notify_book', lambda ev, **kw: self.events.append((ev, kw)))
+        for name in ['open_position', 'close_position', 'snapshot', 'record_harvest', 'event']:
+            self.patch(rebalancer.db, name, mock.Mock())
+        self.patch(rebalancer.config, 'CALM_ENABLED', True)
+        self.patch(rebalancer.config, 'CALM_MAX_MOVES', 12)
+        self.patch(rebalancer.config, 'CALM_THRESHOLD', .25)
+        self.patch(rebalancer.config, 'DEX', 'orca')
+        self.patch(rebalancer.config, 'EXECUTE_DEXES', ('orca',))
+        self.patch(rebalancer.config, 'CAPITAL_USD', 190)
+        self.patch(rebalancer.config, 'MAX_USD', 260)
+        self.bal = dict(price=100, quoteUsd=1, balanceA=1.2, balanceB=120,
+                        nativeSide='A', tokenA='SOL', tokenB='USDC')
+        self.patch(rebalancer, 'wallet', lambda _: dict(self.bal))
+        self.patch(rebalancer, 'best_band_for', lambda _: dict(
+            band=1.08, price=100, record={}, net_day_pct=.2, rebal_per_day=.1))
+        self.fresh = dict(calm=True, bar_age_s=420, p_touch_fresh=.06)
+        self.patch(rebalancer, 'calm_view', lambda *a: self.fresh)
+        self.sent = []
+        def chain(*args, **kwargs):
+            self.sent.append(args)
+            if args[0] == 'open':
+                return dict(positionMint='new', signature='open-sig', depositUsd=200), None
+            return {'signature': args[0] + '-sig'}, None
+        self.patch(rebalancer, 'chain', chain)
+        self.patch(rebalancer, 'read_status', lambda *a: (dict(positionMint='new', positionUsd=200), None))
+        self.state = dict(last_rebalance=0, rebalance_times=[], calm_times=[], failures=0)
+        self.status = dict(positionMint='old', whirlpool=config.POOL, price=100,
+                           inRange=True, liquidity=1, positionUsd=200, feesAccrued_USD=.1)
+
+    def patch(self, obj, name, value):
+        return self.stack.enter_context(mock.patch.object(obj, name, value))
+
+    def fail_then_resume(self, fresh=None):
+        self.patch(rebalancer, 'balance_wallet', mock.Mock(side_effect=[None, self.bal]))
+        rebalancer.rebalance(self.state, self.status, 'calm: tight band re-centred before a touch',
+                             band=1.01, calm_move=True)
+        self.assertEqual([a[0] for a in self.sent], ['harvest', 'close'])
+        self.assertTrue(self.state['pending_reopen']['closed'])
+        restarted = rebalancer.load()
+        self.assertEqual(restarted['pending_reopen']['band'], 1.01)
+        if fresh is not None:
+            self.fresh = fresh
+        self.assertTrue(rebalancer.resume_reopen(restarted))
+        return restarted
+
+    def test_swap_failure_and_restart_reopen_tight_once_without_spending_another_move(self):
+        state = self.fail_then_resume()
+        self.assertEqual([a[0] for a in self.sent], ['harvest', 'close', 'open'])
+        args = self.sent[-1]
+        self.assertAlmostEqual(float(args[2]), 100/1.01, places=5)
+        self.assertEqual(float(args[3]), 101)
+        self.assertEqual(len(state['calm_times']), 1)
+        self.assertNotIn('pending_reopen', rebalancer.load())
+        opened = next(kw for ev, kw in self.events if ev == 'OPEN')
+        self.assertTrue(opened['calm_band'])
+        self.assertIsNone(opened['expected_net_day_pct'])
+        self.assertIsNone(opened['modelled_rebalances_per_day'])
+
+    def test_recovery_widens_once_if_calm_has_actually_ended(self):
+        self.fail_then_resume(dict(calm=False, bar_age_s=420, p_touch_fresh=.4))
+        self.assertAlmostEqual(float(self.sent[-1][2]), 100/1.08, places=5)
+        self.assertEqual(float(self.sent[-1][3]), 108)
+
+    def test_recovery_waits_for_fresh_data_instead_of_opening_a_temporary_wide_band(self):
+        state = self.fail_then_resume(dict(calm=True, bar_age_s=1800, p_touch_fresh=.06))
+        self.assertEqual([a[0] for a in self.sent], ['harvest', 'close'])
+        self.assertIn('pending_reopen', state)
+        self.assertEqual(len(state['calm_times']), 1)

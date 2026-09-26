@@ -67,6 +67,12 @@ class Nearest(unittest.TestCase):
 
 
 class Tidy(unittest.TestCase):
+    def test_program_failure_wins_over_earlier_rpc_noise(self):
+        for err in ['429 Too Many Requests\nPriceSlippageCheck: price slippage check',
+                    '429 earlier; failed on chain: {"InstructionError":[2,{"Custom":6017}]}']:
+            self.assertIn('PriceSlippageCheck (6017)', rebalancer.tidy(err))
+        self.assertNotEqual(rebalancer.tidy('transaction abc429xyz failed'), 'RPC rate limited')
+
     def test_rate_limit_dumps_become_one_line(self):
         wall = 'Error: {"status":429,"headers":{"set-cookie":"x"},"body":"Too Many Requests"} ' * 20
         self.assertEqual(rebalancer.tidy(wall), 'RPC rate limited')
@@ -77,11 +83,11 @@ class Tidy(unittest.TestCase):
 
 
 class Chain(unittest.TestCase):
-    def fake(self, stdout='', stderr='', raise_timeout=False):
+    def fake(self, stdout='', stderr='', raise_timeout=False, returncode=0):
         def run(*a, **kw):
             if raise_timeout:
                 raise subprocess.TimeoutExpired(a, 1)
-            return subprocess.CompletedProcess(a, 0, stdout, stderr)
+            return subprocess.CompletedProcess(a, returncode, stdout, stderr)
         return run
 
     def test_extracts_json_from_noisy_output(self):
@@ -104,6 +110,20 @@ class Chain(unittest.TestCase):
         with mock.patch('subprocess.run', self.fake(stdout='{"positions": 0, "positionMint": null}')):
             j, err = rebalancer.chain('status')
         self.assertIsNotNone(j); self.assertIsNone(j['positionMint'])
+
+    def test_partial_json_result_and_nonzero_exit_are_not_success(self):
+        with mock.patch('subprocess.run', self.fake(
+                stdout='{"signature":"s", "partial":true, "error":"PriceSlippageCheck"}',
+                stderr='earlier RPC 429', returncode=1)):
+            out, err = rebalancer.chain('close', 'M', '--execute')
+        self.assertEqual(out['signature'], 's')
+        self.assertIn('PriceSlippageCheck', err)
+
+    def test_error_json_on_stderr_is_not_a_status(self):
+        with mock.patch('subprocess.run', self.fake(stderr='ERROR: {"status":429}', returncode=1)):
+            out, err = rebalancer.chain('status')
+        self.assertIsNone(out)
+        self.assertEqual(err, 'RPC rate limited')
 
 
 class PositionUsd(unittest.TestCase):

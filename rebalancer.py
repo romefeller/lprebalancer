@@ -60,6 +60,7 @@ best band, subject to the same gap and daily limits as an automatic one.
 import json
 import os
 import pathlib
+import re
 import subprocess
 import sys
 import time
@@ -104,14 +105,21 @@ def tidy(err, limit=140):
     if not err:
         return None
     s = ' '.join(str(err).split())
+    # A program rejection is authoritative even if earlier RPC retries logged 429.
+    if re.search(r'PriceSlippageCheck|price slippage check|0x1781\b|Custom["\s:]+6017\b', s, re.I):
+        return 'PriceSlippageCheck (6017): price moved beyond the slippage limit'
+    program = re.search(r'(?:InstructionError|custom program error|failed on chain|simulation failed).*', s, re.I)
+    if program:
+        return program.group(0)[:limit]
     for needle, plain in (
-            ('429', 'RPC rate limited'),
             ('Too Many Requests', 'RPC rate limited'),
             ('timeout', 'RPC timeout'),
             ('ECONNRESET', 'RPC connection reset'),
             ('blockhash', 'blockhash expired')):
         if needle.lower() in s.lower():
             return plain
+    if re.search(r'\b429\b', s):
+        return 'RPC rate limited'
     return s[:limit]
 
 
@@ -172,13 +180,21 @@ def chain(*args, dex=None, timeout=420):
     except subprocess.TimeoutExpired:
         return None, 'signer timed out'
     text = (r.stdout or '') + (r.stderr or '')
-    i = text.find('{')
-    if i < 0:
-        return None, tidy(text)
-    try:
-        return json.loads(text[i:text.rindex('}') + 1]), None
-    except Exception:
-        return None, tidy(text)
+    # Only stdout carries signer results. Decode one object despite trailing logs.
+    # An error/partial JSON result is never silently turned into success.
+    decoder = json.JSONDecoder()
+    for match in re.finditer(r'(?m)^\s*\{', r.stdout or ''):
+        try:
+            out, _ = decoder.raw_decode(r.stdout[match.start():].lstrip())
+        except ValueError:
+            continue
+        if not isinstance(out, dict):
+            continue
+        err = out.get('error') or ('partial transaction execution' if out.get('partial') else None)
+        if r.returncode or err:
+            return out, tidy(err or r.stderr or text) or f'signer exited {r.returncode}'
+        return out, None
+    return None, tidy(text) or (f'signer exited {r.returncode}' if r.returncode else 'no signer result')
 
 
 def read_status(mint=None):
@@ -199,7 +215,9 @@ def load():
 
 
 def save(s):
-    STATE.write_text(json.dumps(s, indent=1, default=str))
+    tmp = STATE.with_suffix('.tmp')
+    tmp.write_text(json.dumps(s, indent=1, default=str))
+    tmp.replace(STATE)
 
 
 def halt(reason):
@@ -316,7 +334,7 @@ def dividend(state, status):
     a, b, usd = status.get('feesAccruedA', 0.0), status.get('feesAccruedB', 0.0), status.get('feesAccrued_USD', 0.0)
     out, err = chain('harvest', mint, '--execute')
     state['last_harvest'] = time.time(); save(state)
-    if out and out.get('signature'):
+    if out and out.get('signature') and not err:
         db.record_harvest(mint, a, b, usd, out['signature'])
         db.snapshot(mint, status['price'], status.get('inRange'), status.get('liquidity'),
                     0.0, 0.0, 0.0, wallet(status['whirlpool']).get('walletUsd'), position_usd(status))
@@ -384,6 +402,30 @@ def calm_reopen_band(v, state):
     if pf is not None and pf >= config.CALM_THRESHOLD:
         return None
     return config.CALM_BAND
+
+
+def resume_reopen(state):
+    """Resume a confirmed CALM close without a pool review or a second move.
+
+    The persisted intent survives a swap/open failure and a service restart.
+    Reopen rechecks current conditions; missing data means wait, not wide-then-tight.
+    """
+    pending = state.get('pending_reopen')
+    if not pending:
+        return False
+    if (pending['pool'], pending['dex']) != (config.POOL, config.DEX):
+        halt('pending reopen belongs to a different pool; refusing to spend its funds elsewhere')
+        return True
+    if not pending.get('closed'):
+        # The process may have stopped after close landed but before recording it.
+        db.close_position(pending['mint'], None, pending.get('withdraw_usd'))
+        moves = state.setdefault('calm_times', [])
+        if pending['started_at'] not in moves:
+            moves.append(pending['started_at'])
+        pending['closed'] = True
+        save(state)
+    reopen(state, pending['reason'], band=pending['band'], recovering=True)
+    return True
 
 
 def balance_wallet(state, bal, rec):
@@ -596,7 +638,7 @@ def repoint(target):
         'config did not reload to the target pool'
 
 
-def reopen(state, reason, band=None):
+def reopen(state, reason, band=None, recovering=False):
     """Open a fresh position at the best band, or at `band` when calm mode
     asks for the tight one, sized to what the wallet holds (after a swap to
     50/50 when `rebalance_swap` is on and the wallet is lopsided)."""
@@ -605,11 +647,23 @@ def reopen(state, reason, band=None):
     if not best:
         notify('idle', reason='could not price the pool; opening nothing')
         return False
-    k = band or best['band']
     bal = wallet(pool)
     if 'balanceA' not in bal:
         notify('idle', reason='could not read the wallet; opening nothing')
         return False
+    if recovering and band:
+        if not config.CALM_ENABLED:
+            band = None
+        else:
+            price = bal['price']
+            v = calm_view(state, {'price': price, 'whirlpool': pool,
+                                 'lowerPrice': price / band, 'upperPrice': price * band})
+            if not v or v['bar_age_s'] > 900 or v.get('p_touch_fresh') is None:
+                notify('idle', reason='CALM recovery waits for fresh five-minute data')
+                return False
+            if not v['calm'] or v['p_touch_fresh'] >= config.CALM_THRESHOLD:
+                band = None
+    k = band or best['band']
     bal = balance_wallet(state, bal, best.get('record'))
     if bal is None:
         return False
@@ -642,7 +696,7 @@ def reopen(state, reason, band=None):
         return False
     out, err = chain('open', pool, f'{lower:.6f}', f'{upper:.6f}',
                      f'{cap_a:.9f}', f'{cap_b:.9f}', '--execute')
-    if err and not out:
+    if err:
         # The open may still have landed. Ask the chain before believing this.
         time.sleep(15)
         status, _ = read_status()
@@ -677,14 +731,17 @@ def reopen(state, reason, band=None):
     db.open_position(mint, pool, config.PAIR_LABEL, lower, upper,
                      (k - 1) * 100, (out or {}).get('signature'),
                      deposit_usd, reason, config_name=config.PROFILE, dex=config.DEX)
+    state.pop('pending_reopen', None)
+    save(state)
     notify_book('OPEN', pair=config.PAIR_LABEL, pool=pool, dex=config.DEX,
-           band=f'+/-{(k - 1) * 100:.0f}%', calm_band=bool(band),
+           opened_band=f'+/-{(k - 1) * 100:.0f}%', calm_band=bool(band),
            lower=round(lower, 4), upper=round(upper, 4),
            deposit_usd=round(deposit_usd, 2),
            deposit_a=(out or {}).get('depositEstA'), deposit_b=(out or {}).get('depositEstB'),
            cap_a=f'{cap_a:.6f} {bal["tokenA"]}', cap_b=f'{cap_b:.6f} {bal["tokenB"]}',
-           expected_net_day_pct=round(best['net_day_pct'], 3),
-           modelled_rebalances_per_day=round(best['rebal_per_day'], 2),
+           expected_net_day_pct=None if band else round(best['net_day_pct'], 3),
+           modelled_rebalances_per_day=None if band else round(best['rebal_per_day'], 2),
+           model_scope='CALM policy not modelled by hourly ladder' if band else 'hourly ladder',
            signature=(out or {}).get('signature'), reason=reason)
     return True
 
@@ -722,7 +779,7 @@ def rebalance(state, status, reason, target=None, band=None, calm_move=False):
     accrued_usd = status.get('feesAccrued_USD', 0.0)
     out, err = chain('harvest', mint, '--execute')
     state['last_harvest'] = now
-    if out and out.get('signature'):
+    if out and out.get('signature') and not err:
         db.record_harvest(mint, accrued_a, accrued_b, accrued_usd,
                               out['signature'])
         # The fees just moved from the position to the wallet. Record the
@@ -736,9 +793,20 @@ def rebalance(state, status, reason, target=None, band=None, calm_move=False):
                signature=out['signature'])
     else:
         notify('harvest_skipped', reason=err or 'no signature returned')
+        state['failures'] += 1
+        save(state)
+        if state['failures'] >= config.MAX_CONSECUTIVE_FAILURES:
+            halt(f'{state["failures"]} consecutive harvest failures')
+        return
+
+    if calm_move and target is None:
+        state['pending_reopen'] = {'mint': mint, 'pool': config.POOL, 'dex': config.DEX,
+                                   'band': band, 'reason': reason, 'started_at': now,
+                                   'withdraw_usd': position_usd(status), 'closed': False}
+        save(state)
 
     out, err = chain('close', mint, '--execute')
-    if err and not out:
+    if err:
         # A close that reports failure may have landed. This exact false
         # negative left a position closed and the capital idle in production.
         time.sleep(15)
@@ -765,6 +833,8 @@ def rebalance(state, status, reason, target=None, band=None, calm_move=False):
 
     if calm_move:
         state['calm_times'] = calm_recent + [now]
+        if state.get('pending_reopen'):
+            state['pending_reopen']['closed'] = True
     else:
         state['last_rebalance'] = now
         state['rebalance_times'] = recent + [now]
@@ -805,6 +875,9 @@ def main():
 
         if not status.get('positionMint'):
             notify('no_position', detail='chain reports no open position')
+            if resume_reopen(state):
+                time.sleep(config.CALM_POLL_SECONDS)
+                continue
             # Nothing is held, so nothing is closed: choose the pool first.
             if not config.POOL_PINNED:
                 cur = best_band_for(config.POOL)
