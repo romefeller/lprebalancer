@@ -20,6 +20,8 @@ WorkingDirectory=/opt/rebalancer
 Environment=LPBOT_WALLET=/path/to/your/solana-keypair.json
 Environment=LPBOT_RPC=https://api.mainnet-beta.solana.com
 Environment=LPBOT_DSN=dbname=rebalancer
+# Raydium open without Metaplex metadata, Token-2022 NFT (saves ~0.0148 SOL a cycle)
+Environment=LPBOT_RAYDIUM_LEAN=1
 # Environment=LPBOT_PROFILE=sol-usdc
 ExecStart=/usr/bin/python3 -u /opt/rebalancer/rebalancer.py
 Restart=on-failure
