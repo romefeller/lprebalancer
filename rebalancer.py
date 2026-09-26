@@ -554,6 +554,13 @@ def balance_wallet(state, bal, rec):
         return bal
     target = f'{C * config.SIDE_CAP_FRACTION:.2f}'
     out, err = chain('rebalance', mint_a, mint_b, target, target, '--execute', dex='jupiter')
+    if (err or not out) and not (out or {}).get('signature') and not (out or {}).get('partial') \
+            and re.search(r'rate limit|429|timeout|timed out|ECONNRESET|blockhash', str(err), re.I):
+        # Nothing left this process: a transport failure is safe to repeat
+        # once. Two rate-limited swaps in a row on 2026-09-26 left the bot one
+        # failure from a halt with its capital idle in the wallet.
+        time.sleep(15)
+        out, err = chain('rebalance', mint_a, mint_b, target, target, '--execute', dex='jupiter')
     if out and out.get('noop'):
         notify('swap_skipped', reason='already at target', usd_a=round(usd_a, 2), usd_b=round(usd_b, 2))
         return bal

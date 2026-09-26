@@ -107,3 +107,33 @@ class Capital(unittest.TestCase):
                 mock.patch.object(rebalancer.config, 'CAPITAL_USD', 190.0), \
                 mock.patch.object(rebalancer.db, 'reinvested_usd', side_effect=AssertionError('read')):
             self.assertEqual(rebalancer.capital(), 190.0)
+
+
+class SwapRetry(unittest.TestCase):
+    BAL = {'price': 100.0, 'quoteUsd': 1.0, 'balanceA': 0.06, 'balanceB': 300.0, 'nativeSide': 'A'}
+    REC = {'token_a': {'address': SOL}, 'token_b': {'address': USDC}}
+
+    def go(self, results):
+        calls, state = [], {'failures': 0}
+        it = iter(results)
+        with mock.patch.object(rebalancer, 'chain', lambda *a, **k: (calls.append(a) or next(it))), \
+                mock.patch.object(rebalancer, 'wallet', lambda p: dict(self.BAL, balanceA=1.0, balanceB=100.0)), \
+                mock.patch.object(rebalancer, 'notify', lambda *a, **k: None), \
+                mock.patch.object(rebalancer, 'save', lambda s: None), \
+                mock.patch.object(rebalancer.db, 'event', lambda *a: None), \
+                mock.patch.object(rebalancer.time, 'sleep', lambda s: None), \
+                mock.patch.object(rebalancer.config, 'REBALANCE_SWAP', True), \
+                mock.patch.object(rebalancer.config, 'CAPITAL_USD', 190.0), \
+                mock.patch.object(rebalancer.config, 'PAYOUT_ENABLED', False):
+            out = rebalancer.balance_wallet(state, dict(self.BAL), self.REC)
+        return out, calls, state
+
+    def test_a_rate_limited_swap_is_retried_once(self):
+        out, calls, state = self.go([(None, 'RPC rate limited'), ({'sent': True, 'signature': 's'}, None)])
+        self.assertEqual(len(calls), 2); self.assertIsNotNone(out); self.assertEqual(state['failures'], 0)
+
+    def test_a_program_failure_or_a_sent_swap_is_not_retried(self):
+        _, calls, state = self.go([(None, 'PriceSlippageCheck (6017): price moved beyond the slippage limit')])
+        self.assertEqual(len(calls), 1); self.assertEqual(state['failures'], 1)
+        _, calls, state = self.go([({'signature': 's', 'partial': True}, 'confirm timed out')])
+        self.assertEqual(len(calls), 1); self.assertEqual(state['failures'], 1)
