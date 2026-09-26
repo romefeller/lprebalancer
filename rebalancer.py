@@ -815,6 +815,31 @@ def liquidity_view(pool, dex, bars):
     return out
 
 
+FORECAST_SAMPLE_S = 600         # one touch forecast recorded per ten minutes
+
+
+def track_touch_forecasts(state, rv, status):
+    """Record the regime's forecast (every width, centred on the price) at
+    most every FORECAST_SAMPLE_S, and resolve the ones whose horizon has
+    passed. Stale views are not recorded: they are not forecasts."""
+    if not rv or rv.get('stale') or not rv.get('probs'):
+        return
+    pool = status.get('whirlpool') or config.POOL
+    try:
+        if time.time() - state.get('last_touch_forecast', 0) >= FORECAST_SAMPLE_S:
+            state['last_touch_forecast'] = time.time(); save(state)
+            db.record_touch_forecast(pool, status['price'], rv['horizon_minutes'], rv['threshold'],
+                                     rv['choice'], rv['probs'])
+            db.resolve_touch_forecasts(pool)
+        if time.time() - state.get('last_touch_calibration', 0) >= 3600:
+            state['last_touch_calibration'] = time.time(); save(state)
+            LAST_REGIME['calibration'] = db.touch_calibration(7, pool)
+    except Exception as e:
+        notify('forecast_track_failed', reason=tidy(e))
+    if LAST_REGIME.get('calibration'):
+        rv['calibration'] = LAST_REGIME['calibration']
+
+
 def regime_choice_now(pool, price):
     """The regime's width for a fresh band at `price` on `pool`, or None."""
     if not config.REGIME_ENABLED:
@@ -1584,6 +1609,7 @@ def main():
         sample_fee_growth(state, status)
         cv = calm_view(state, status) if not config.REGIME_ENABLED else None
         rv = regime_view(state, status)
+        track_touch_forecasts(state, rv, status)
         if rv and fc:
             # the held band's survival over the long horizons, from the hourly
             # tape: what the MODE section shows next to the 2-hour choice

@@ -290,6 +290,67 @@ def fee_state_span(pool, hours=24):
     return first, last, (last['ts'] - first['ts']).total_seconds()
 
 
+def record_touch_forecast(pool, price, horizon_min, threshold, choice, probs):
+    with cursor(commit=True) as cur:
+        cur.execute('insert into touch_forecasts (ts, pool, price, horizon_min, threshold, choice, probs) '
+                    'values (%s,%s,%s,%s,%s,%s,%s)',
+                    (now(), pool, price, horizon_min, threshold, choice, json.dumps(probs)))
+        cur.execute("delete from touch_forecasts where ts < now() - interval '30 days'")
+
+
+def resolve_touch_forecasts(pool):
+    """Resolve every forecast of `pool` whose horizon has passed, from the
+    five-minute highs and lows in tape5. A band of half-width w centred at
+    the forecast price was touched if any bar starting inside the horizon
+    reached price * (1 + w) or price / (1 + w). Forecasts whose horizon the
+    tape does not fully cover stay open. Returns the number resolved."""
+    n = 0
+    with cursor(commit=True) as cur:
+        cur.execute("""select id, extract(epoch from ts) t0, price, horizon_min, probs from touch_forecasts
+                       where pool = %s and not resolved
+                         and ts < now() - make_interval(mins => horizon_min + 10)
+                       order by ts limit 500""", (pool,))
+        rows = cur.fetchall()
+        for r in rows:
+            t0 = float(r['t0']); t1 = t0 + r['horizon_min'] * 60
+            cur.execute('select max(high) hi, min(low) lo, count(*) n, max(ts) last from tape5 '
+                        'where pool = %s and ts >= %s and ts < %s', (pool, int(t0), int(t1)))
+            b = cur.fetchone()
+            need = int(r['horizon_min'] * 60 / 300)
+            if not b or not b['n'] or b['n'] < need * 0.9:
+                continue                      # the tape does not cover this horizon (yet)
+            p = float(r['price'])
+            touched = [bool(b['hi'] >= p * (1 + w / 100) or b['lo'] <= p / (1 + w / 100)) for w, _ in r['probs']]
+            cur.execute('update touch_forecasts set resolved = true, touched = %s where id = %s',
+                        (json.dumps(touched), r['id']))
+            n += 1
+    return n
+
+
+def touch_calibration(days=7, pool=None):
+    """Predicted against realised touch rates, per width and for the chosen
+    width, over resolved forecasts of the last `days`. Brier is the mean
+    squared error of the probability; 'said' the mean prediction, 'saw' the
+    share of bands actually touched."""
+    with cursor() as cur:
+        cur.execute("""select choice, probs, touched from touch_forecasts
+                       where resolved and ts >= now() - make_interval(days => %s)
+                         and (%s::text is null or pool = %s)""", (days, pool, pool))
+        rows = cur.fetchall()
+    per, chosen = {}, {'n': 0, 'said': 0.0, 'saw': 0.0, 'sq': 0.0}
+    for r in rows:
+        for (w, p), t in zip(r['probs'], r['touched'] or []):
+            if p is None:
+                continue
+            d = per.setdefault(float(w), {'n': 0, 'said': 0.0, 'saw': 0.0, 'sq': 0.0})
+            d['n'] += 1; d['said'] += p; d['saw'] += float(t); d['sq'] += (p - float(t)) ** 2
+            if abs(float(w) - (float(r['choice']) - 1) * 100) < 1e-6:
+                chosen['n'] += 1; chosen['said'] += p; chosen['saw'] += float(t); chosen['sq'] += (p - float(t)) ** 2
+    fmt = lambda d: ({'n': d['n'], 'said': round(d['said'] / d['n'], 3), 'saw': round(d['saw'] / d['n'], 3),
+                      'brier': round(d['sq'] / d['n'], 4)} if d['n'] else {'n': 0})
+    return {'days': days, 'widths': {f'{w:g}': fmt(d) for w, d in sorted(per.items())}, 'chosen': fmt(chosen)}
+
+
 def season():
     """The latest hour-of-day profile the board built, or None."""
     with cursor() as cur:
@@ -1062,6 +1123,15 @@ if __name__ == '__main__':
                   f"in_range {r['in_range']!s:<5}  accrued "
                   f"${float(r['accrued_usd'] or 0):.4f}  "
                   f"equity ${float(r['equity_usd'] or 0):.2f}")
+    elif cmd == 'touches':
+        cal = touch_calibration(int(arg) if arg else 7)
+        c = cal['chosen']
+        print(f"regime touch forecasts, last {cal['days']} days (P(touch) within the horizon, centred bands)")
+        if c['n']:
+            print(f"  chosen width   said {c['said']:.0%}  saw {c['saw']:.0%}  Brier {c['brier']}  n={c['n']}")
+        for w, x in cal['widths'].items():
+            if x['n']:
+                print(f"  +/-{w:<5}%      said {x['said']:.0%}  saw {x['saw']:.0%}  Brier {x['brier']}  n={x['n']}")
     elif cmd == 'forecasts':
         for h, r in forecasts().items():
             print(f"P(exit within {h}h): {r['n']} forecasts resolved, Brier {r['brier']}")

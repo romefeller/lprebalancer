@@ -104,6 +104,11 @@ function render(row) {
         + ` · TVL ${g.liquidity.tvl_change_24h != null ? sign(g.liquidity.tvl_change_24h * 100) + '%' : '—'} 24h`
         + ` → risk ×${n(g.liquidity.factor, 2)} (${pct(g.threshold_base)} → ${pct(g.threshold)})`
         + ` · volume ${g.liquidity.volume_x != null ? n(g.liquidity.volume_x, 2) + 'x' : '—'} (info)`] : []),
+      ...(g.calibration && g.calibration.chosen && g.calibration.chosen.n
+        ? [`check 7d    chosen width said ${pct(g.calibration.chosen.said)} saw ${pct(g.calibration.chosen.saw)}`
+          + ` (n ${g.calibration.chosen.n})` + (g.calibration.widths && g.calibration.widths['1'] && g.calibration.widths['1'].n
+            ? ` · ±1% said ${pct(g.calibration.widths['1'].said)} saw ${pct(g.calibration.widths['1'].saw)}` : '')]
+        : [`check 7d    building: forecasts resolve 2h after they are made`]),
       `guard       ${g.moves_24h ?? '—'}/${g.guard ?? '—'} moves in 24h`];
   }
 
