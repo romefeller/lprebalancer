@@ -99,8 +99,8 @@ function render(row) {
         + ` · median life ${g.median_life_hours != null ? n(g.median_life_hours, 0) + 'h' : '> 7d'} (hourly tape)`] : []),
       ...(g.liquidity ? [`liquidity   ${g.liquidity.inflow != null ? n(g.liquidity.inflow, 2) + 'x its 24h median' : 'building history'}`
         + ` · TVL ${g.liquidity.tvl_change_24h != null ? sign(g.liquidity.tvl_change_24h * 100) + '%' : '—'} 24h`
-        + ` · volume ${g.liquidity.volume_x != null ? n(g.liquidity.volume_x, 2) + 'x' : '—'}`
-        + ` → risk ×${n(g.liquidity.factor, 2)} (${pct(g.threshold_base)} → ${pct(g.threshold)})`] : []),
+        + ` → risk ×${n(g.liquidity.factor, 2)} (${pct(g.threshold_base)} → ${pct(g.threshold)})`
+        + ` · volume ${g.liquidity.volume_x != null ? n(g.liquidity.volume_x, 2) + 'x' : '—'} (info)`] : []),
       `guard       ${g.moves_24h ?? '—'}/${g.guard ?? '—'} moves in 24h`];
   }
 

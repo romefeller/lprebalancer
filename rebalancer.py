@@ -755,12 +755,13 @@ LIQ_REFRESH = 300
 
 
 def liquidity_view(pool, dex, bars):
-    """Fee density against its norm, from the pool's own record and tape:
+    """Liquidity inflow against its norm, from the pool's own record:
 
       inflow  = active liquidity now / its 24-hour median (our share of fees
                 falls when liquidity floods in; the risk of a touch does not)
-      volume  = 5-minute volume over the last 6 hours / the tape's median 6h
-      factor  = clamp(volume / inflow, regime_liq_min, regime_liq_max)
+      factor  = clamp(1 / inflow, regime_liq_min, regime_liq_max)
+      volume  = last 6 hours of 5-minute volume / the tape's median 6h, and
+      tvl_change_24h, both reported for the book only
 
     The touch threshold is multiplied by `factor`. Bounded, and neutral (1.0)
     when any input is missing, because no liquidity history exists to fit it.
@@ -802,8 +803,12 @@ def liquidity_view(pool, dex, bars):
         med = float(np.median(sums)) if len(sums) else 0.0
         if med > 0:
             out['volume_x'] = round(recent / med, 3)
-    if out['inflow'] and out['volume_x']:
-        raw = out['volume_x'] / out['inflow']
+    if out['inflow']:
+        # Liquidity only. Volume is shown but does not scale the budget: it
+        # falls every night and weekend, when the market is calm, and the
+        # survival estimate already carries the variance that moves with it
+        # (weekend study, 2026-09-26: volume per unit variance is unchanged).
+        raw = 1.0 / out['inflow']
         out['factor'] = round(min(max(raw, config.REGIME_LIQ_MIN), config.REGIME_LIQ_MAX), 3)
     return out
 

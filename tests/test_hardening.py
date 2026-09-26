@@ -228,12 +228,14 @@ class Liquidity(unittest.TestCase):
                 mock.patch.object(rebalancer.config, 'REGIME_LIQ_MAX', 1.25):
             return rebalancer.liquidity_view('P', 'raydium-clmm', bars)
 
-    def test_inflow_tightens_volume_loosens_and_both_are_bounded(self):
+    def test_inflow_tightens_outflow_loosens_bounded_and_volume_is_only_reported(self):
         self.assertAlmostEqual(self.lv(100, 100, 1.0)['factor'], 1.0)
         self.assertAlmostEqual(self.lv(125, 100, 1.0)['factor'], 0.8)        # liquidity floods in
-        self.assertAlmostEqual(self.lv(100, 100, 1.1)['factor'], 1.1)        # volume up
+        self.assertAlmostEqual(self.lv(90, 100, 1.0)['factor'], 1.111, places=3)   # liquidity leaves
         self.assertAlmostEqual(self.lv(300, 100, 1.0)['factor'], 0.6)        # bounded below
-        self.assertAlmostEqual(self.lv(50, 100, 2.0)['factor'], 1.25)        # bounded above
+        self.assertAlmostEqual(self.lv(50, 100, 1.0)['factor'], 1.25)        # bounded above
+        v = self.lv(100, 100, 0.5)                                         # a quiet night
+        self.assertAlmostEqual(v['factor'], 1.0); self.assertAlmostEqual(v['volume_x'], 0.5, places=2)
 
     def test_missing_history_is_neutral(self):
         rebalancer._LIQ.clear()
