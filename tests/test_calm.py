@@ -291,3 +291,59 @@ class Recovery(unittest.TestCase):
         self.assertEqual([a[0] for a in self.sent], ['harvest', 'close'])
         self.assertIn('pending_reopen', state)
         self.assertEqual(len(state['calm_times']), 1)
+
+
+class AuditFixes(unittest.TestCase):
+    """2026-09-26 audit of the recovery branch."""
+
+    def test_empty_harvest_does_not_block_the_close(self):
+        calls, sent = [], []
+        def chain(*a, **k):
+            calls.append(a[0])
+            if a[0] == 'harvest':
+                return {'harvested': 'M', 'signature': None, 'note': 'nothing to claim'}, None
+            if a[0] == 'close':
+                return {'closed': 'M', 'signature': 'c'}, None
+            return None, 'unexpected'
+        state = {'last_rebalance': 0, 'rebalance_times': [], 'calm_times': [], 'failures': 0}
+        with mock.patch.object(rebalancer, 'chain', chain), \
+                mock.patch.object(rebalancer, 'notify', lambda ev, **kw: sent.append(ev)), \
+                mock.patch.object(rebalancer, 'notify_book', lambda ev, **kw: sent.append(ev)), \
+                mock.patch.object(rebalancer, 'save', lambda s: None), \
+                mock.patch.object(rebalancer, 'reopen', lambda *a, **k: sent.append('REOPEN')), \
+                mock.patch.object(rebalancer.db, 'close_position', lambda *a: None), \
+                mock.patch.object(rebalancer.db, 'event', lambda *a: None):
+            rebalancer.rebalance(state, {'positionMint': 'M', 'price': 100, 'positionUsd': 190},
+                                 'price went above')
+        self.assertEqual(calls, ['harvest', 'close'])
+        self.assertIn('harvest_skipped', sent); self.assertIn('REOPEN', sent)
+        self.assertEqual(state['failures'], 0)
+
+    def test_failed_close_clears_the_reopen_intent(self):
+        state = {'last_rebalance': 0, 'rebalance_times': [], 'calm_times': [], 'failures': 0}
+        def chain(*a, **k):
+            if a[0] == 'harvest':
+                return {'signature': 'h'}, None
+            return None, 'close exploded'
+        with mock.patch.object(rebalancer, 'chain', chain), \
+                mock.patch.object(rebalancer, 'read_status', lambda *a: ({'positionMint': 'M'}, None)), \
+                mock.patch.object(rebalancer, 'notify', lambda *a, **k: None), \
+                mock.patch.object(rebalancer, 'wallet', lambda p: {}), \
+                mock.patch.object(rebalancer, 'save', lambda s: None), \
+                mock.patch.object(rebalancer.time, 'sleep', lambda s: None), \
+                mock.patch.object(rebalancer.db, 'record_harvest', lambda *a: None), \
+                mock.patch.object(rebalancer.db, 'snapshot', lambda *a, **k: None), \
+                mock.patch.object(rebalancer.db, 'event', lambda *a: None):
+            rebalancer.rebalance(state, {'positionMint': 'M', 'price': 100, 'whirlpool': 'P'},
+                                 'calm: tight band', band=1.01, calm_move=True)
+        self.assertNotIn('pending_reopen', state)
+        self.assertEqual(state['failures'], 1)
+
+    def test_intent_older_than_a_day_is_dropped(self):
+        state = {'pending_reopen': {'mint': 'M', 'pool': config.POOL, 'dex': config.DEX, 'band': 1.01,
+                                    'reason': 'x', 'started_at': time.time() - 90000, 'closed': True}}
+        with mock.patch.object(rebalancer, 'save', lambda s: None), \
+                mock.patch.object(rebalancer, 'notify', lambda *a, **k: None), \
+                mock.patch.object(rebalancer, 'reopen', side_effect=AssertionError('replayed')):
+            self.assertFalse(rebalancer.resume_reopen(state))
+        self.assertNotIn('pending_reopen', state)

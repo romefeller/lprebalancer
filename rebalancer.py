@@ -413,6 +413,10 @@ def resume_reopen(state):
     pending = state.get('pending_reopen')
     if not pending:
         return False
+    if time.time() - pending.get('started_at', 0) > 86400:
+        state.pop('pending_reopen', None); save(state)
+        notify('idle', reason='dropped a CALM reopen intent older than a day')
+        return False
     if (pending['pool'], pending['dex']) != (config.POOL, config.DEX):
         halt('pending reopen belongs to a different pool; refusing to spend its funds elsewhere')
         return True
@@ -792,12 +796,12 @@ def rebalance(state, status, reason, target=None, band=None, calm_move=False):
         notify('HARVEST', collected_usd=round(accrued_usd, 4),
                signature=out['signature'])
     else:
-        notify('harvest_skipped', reason=err or 'no signature returned')
-        state['failures'] += 1
-        save(state)
-        if state['failures'] >= config.MAX_CONSECUTIVE_FAILURES:
-            halt(f'{state["failures"]} consecutive harvest failures')
-        return
+        # Never let a harvest block the close. An out-of-range position must
+        # move, and the close collects any fees the harvest could not: the
+        # Meteora and Byreal signers answer "nothing to claim" with no
+        # signature, and treating that as a failure would leave the band out
+        # of range until the bot halted.
+        notify('harvest_skipped', reason=err or (out or {}).get('note') or 'no signature returned')
 
     if calm_move and target is None:
         state['pending_reopen'] = {'mint': mint, 'pool': config.POOL, 'dex': config.DEX,
@@ -818,6 +822,10 @@ def rebalance(state, status, reason, target=None, band=None, calm_move=False):
                           'treating it as closed', error=err)
             out = {'signature': None}
         else:
+            # The position is still open: nothing to resume later. A stale
+            # intent would replay after an unrelated failure, on a pool the
+            # bot may have left by then.
+            state.pop('pending_reopen', None)
             state['failures'] += 1; save(state)
             db.event('close_failed', err)
             notify('close_failed', reason=err, failures=state['failures'])
