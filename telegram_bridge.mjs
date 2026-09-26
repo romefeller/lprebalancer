@@ -73,6 +73,9 @@ function render(row) {
         + ` · peak ${String(r.season.peak_hour_utc).padStart(2, '0')}h trough ${String(r.season.trough_hour_utc).padStart(2, '0')}h`] : []),
       ...band(r),
       ...(r.regime ? regimeBlock(r.regime) : calmBlock(r.calm)),
+      ...(Array.isArray(r.venues) && r.venues.length ? [`venues      ±1% on chain: ` + r.venues.map(v =>
+        `${v.held ? '▸' : ''}${v.dex.replace('-clmm', '').replace('-v3-solana', '')} ${n(v.total_pct_day, 2)}%/d`
+        + `${v.reward_pct_day > 0.001 ? ` (+${n(v.reward_pct_day, 2)} rwd)` : ''} ${n(v.hours, 1)}h`).join(' · ')] : []),
       `in range    ${n(r.in_range_pct, 0)}%   over ${n(r.tracked_days, 2)}d`,
       `activity    ${plural(r.positions_opened, 'position')} · ${plural(r.rebands, 'reband')} · `
         + `${plural(r.harvests, 'harvest')}${r.failures ? ` · ${plural(r.failures, 'failure')}` : ''}`,

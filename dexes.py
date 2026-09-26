@@ -185,6 +185,103 @@ def decode_rewards(raw, now=None):
     return out
 
 
+# --- fee counters: what liquidity at the active price actually earned -----------
+#
+# Both layouts keep the pool's cumulative fees per unit of liquidity, per
+# token, as a Q64 fixed-point number that only grows (it wraps at 2^128).
+# Raydium's PoolState (Raydium, Byreal, PancakeSwap): after tick_current and
+# two u16 paddings. Orca's Whirlpool: fee_growth_global_a after vault_a,
+# fee_growth_global_b after vault_b. Verified on chain 2026-09-26: both grow,
+# and a 75-second delta gives a +/-1% position 1.14%/day on Raydium.
+FEE_LAYOUT_DEXES = {'raydium-clmm': 'raydium', 'byreal': 'raydium',
+                    'pancakeswap-v3-solana': 'raydium', 'orca': 'orca'}
+
+
+def decode_fee_state(raw, layout):
+    """sqrt price (Q64), fee growth per token (Q64), mints, and for the
+    Raydium layout the decimals and reward growth per reward mint."""
+    u = lambda a, b: int.from_bytes(raw[a:b], 'little')
+    if layout == 'raydium':
+        o = 8 + 1 + 32 * 7
+        if len(raw) < REWARD_INFOS_OFFSET + 3 * REWARD_INFO_LEN:
+            return None
+        rewards = []
+        for i in range(3):
+            b = raw[REWARD_INFOS_OFFSET + i * REWARD_INFO_LEN: REWARD_INFOS_OFFSET + (i + 1) * REWARD_INFO_LEN]
+            mint = b58(b[57:89])
+            if b[0] != 0 and mint != NULL_MINT:
+                rewards.append([mint, str(int.from_bytes(b[153:169], 'little'))])
+        return {'sqrt_price': u(o + 20, o + 36), 'g0': u(o + 44, o + 60), 'g1': u(o + 60, o + 76),
+                'dec_a': raw[o], 'dec_b': raw[o + 1], 'mint_a': b58(raw[73:105]), 'mint_b': b58(raw[105:137]),
+                'rewards': rewards}
+    if layout == 'orca':
+        if len(raw) < 261:
+            return None
+        return {'sqrt_price': u(65, 81), 'g0': u(165, 181), 'g1': u(245, 261),
+                'mint_a': b58(raw[101:133]), 'mint_b': b58(raw[181:213]), 'dec_a': None, 'dec_b': None,
+                'rewards': []}
+    return None
+
+
+_MINT_DECIMALS = {}
+
+
+def mint_decimals(mints):
+    need = [m for m in mints if m not in _MINT_DECIMALS]
+    if need:
+        for m, raw in pool_accounts(need).items():
+            if len(raw) > 44:
+                _MINT_DECIMALS[m] = raw[44]
+    return {m: _MINT_DECIMALS.get(m) for m in mints}
+
+
+def fee_states(pools):
+    """{address: state} for [(dex, address)] of the known layouts, one RPC
+    call for the pools and one for any mint decimals Orca needs."""
+    known = [(d, a) for d, a in pools if d in FEE_LAYOUT_DEXES]
+    raws = pool_accounts([a for _, a in known])
+    out = {}
+    for d, a in known:
+        st = decode_fee_state(raws.get(a, b''), FEE_LAYOUT_DEXES[d])
+        if st:
+            out[a] = st
+    need = sorted({m for st in out.values() if st['dec_a'] is None for m in (st['mint_a'], st['mint_b'])})
+    if need:
+        decs = mint_decimals(need)
+        for st in out.values():
+            if st['dec_a'] is None:
+                st['dec_a'], st['dec_b'] = decs.get(st['mint_a']), decs.get(st['mint_b'])
+    return {a: st for a, st in out.items() if st['dec_a'] is not None and st['dec_b'] is not None}
+
+
+Q64 = 2 ** 64
+U128 = 2 ** 128
+
+
+def band_income(first, last, seconds, band, usd_a, usd_b, reward_usd=None):
+    """Fee (and reward) income of a position centred at the LAST price with
+    half-width `band` (1.01 = +/-1%), in % of its value per day, from two
+    samples of a pool's counters `seconds` apart. None if unusable."""
+    if seconds <= 0 or not usd_a or not usd_b:
+        return None
+    dg0 = (int(last['g0']) - int(first['g0'])) % U128
+    dg1 = (int(last['g1']) - int(first['g1'])) % U128
+    fee_usd = (dg0 / Q64 / 10 ** last['dec_a'] * usd_a + dg1 / Q64 / 10 ** last['dec_b'] * usd_b)
+    rw_usd = 0.0
+    if reward_usd:
+        before = {m: int(g) for m, g in (first.get('rewards') or [])}
+        for m, g in (last.get('rewards') or []):
+            if m in before and reward_usd.get(m) and m in _MINT_DECIMALS:
+                rw_usd += ((int(g) - before[m]) % U128) / Q64 / 10 ** _MINT_DECIMALS[m] * reward_usd[m]
+    sp = int(last['sqrt_price']) / Q64
+    sa, sb = sp / math.sqrt(band), sp * math.sqrt(band)
+    value = (1 / sp - 1 / sb) / 10 ** last['dec_a'] * usd_a + (sp - sa) / 10 ** last['dec_b'] * usd_b
+    if value <= 0:
+        return None
+    return {'fee_pct_day': (fee_usd / value) / seconds * 86400 * 100,
+            'reward_pct_day': (rw_usd / value) / seconds * 86400 * 100}
+
+
 def attach_chain_rewards(records, accounts):
     """reward_usd_day and reward_mints from the pool accounts, for records
     whose API reports none. The chain is the authority: PancakeSwap has no

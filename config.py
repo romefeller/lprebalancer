@@ -159,6 +159,11 @@ REGIME_TAPE_DAYS = _env('LPBOT_REGIME_TAPE_DAYS', int, int(_CFG.get('regime_tape
 # liquidity leaving loosens it. Bounded, because no history exists to fit it.
 REGIME_LIQ_MIN = _env('LPBOT_REGIME_LIQ_MIN', float, float(_CFG.get('regime_liq_min') or 0.6))
 REGIME_LIQ_MAX = _env('LPBOT_REGIME_LIQ_MAX', float, float(_CFG.get('regime_liq_max') or 1.25))
+# Venues are ranked by what their on-chain fee counters say liquidity at the
+# active price earned: sampled every VENUE_SAMPLE_S, and a move needs at least
+# VENUE_MIN_HOURS of evidence on both the held pool and the target.
+VENUE_SAMPLE_S = _env('LPBOT_VENUE_SAMPLE_S', int, int(_CFG.get('venue_sample_seconds') or 600))
+VENUE_MIN_HOURS = _env('LPBOT_VENUE_MIN_HOURS', int, int(_CFG.get('venue_min_hours') or 6))
 # Swap to 50/50 before an open when the wallet is lopsided. Without it, an
 # open after an exit is limited by the scarcer token and most capital idles.
 REBALANCE_SWAP = _env('LPBOT_REBALANCE_SWAP', lambda s: s.lower() in ('1', 'true', 'yes'),

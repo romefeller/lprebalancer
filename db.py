@@ -264,6 +264,32 @@ def tape_prune_other_pools(keep_pools, older_than_ts):
         cur.execute('delete from tape5 where pool <> all(%s) and ts < %s', (list(keep_pools), int(older_than_ts)))
 
 
+def record_fee_state(dex, pool, st):
+    """One sample of a pool's counters; samples older than two days go."""
+    with cursor(commit=True) as cur:
+        cur.execute('insert into fee_growth (ts, dex, pool, sqrt_price, g0, g1, rewards, dec_a, dec_b, mint_a, mint_b) '
+                    'values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)',
+                    (now(), dex, pool, st['sqrt_price'], st['g0'], st['g1'], json.dumps(st.get('rewards') or []),
+                     st['dec_a'], st['dec_b'], st['mint_a'], st['mint_b']))
+        cur.execute("delete from fee_growth where ts < now() - interval '2 days'")
+
+
+def fee_state_span(pool, hours=24):
+    """The oldest sample within `hours` and the newest, for one pool, with
+    the seconds between them; or None with fewer than two samples."""
+    with cursor() as cur:
+        cur.execute("""
+            (select * from fee_growth where pool = %s and ts >= now() - make_interval(hours => %s) order by ts asc limit 1)
+            union all
+            (select * from fee_growth where pool = %s order by ts desc limit 1)
+        """, (pool, hours, pool))
+        rows = [dict(r) for r in cur.fetchall()]
+    if len(rows) < 2 or rows[0]['id'] == rows[1]['id']:
+        return None
+    first, last = rows
+    return first, last, (last['ts'] - first['ts']).total_seconds()
+
+
 def season():
     """The latest hour-of-day profile the board built, or None."""
     with cursor() as cur:

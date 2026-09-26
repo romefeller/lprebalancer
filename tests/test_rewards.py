@@ -74,37 +74,42 @@ class Board(unittest.TestCase):
 
 
 class CalmReview(unittest.TestCase):
-    def row(self, addr, dex, fees24, tvl=1e7, c=20.0, ok=True):
-        return {'address': addr, 'dex': dex, 'pair': 'SOL/USDC', 'screen_ok': ok, 'skipped': None,
-                'fees_24h_usd': fees24, 'reward_usd_day': 0.0, 'c_pool': c, 'tvl_usd': tvl,
+    """The venue review ranks on on-chain income and needs evidence."""
+    def row(self, addr, dex):
+        return {'address': addr, 'dex': dex, 'pair': 'SOL/USDC', 'screen_ok': True, 'skipped': None,
                 'token_a': {'address': SOL, 'symbol': 'SOL'}, 'token_b': {'address': USDC, 'symbol': 'USDC'}}
 
-    def go(self, rows):
+    def go(self, venues):
         moved, sent = [], []
-        with mock.patch.object(rebalancer.db, 'latest_scan', lambda max_age_seconds=None: ({'id': 1}, rows)), \
+        with mock.patch.object(rebalancer, 'venue_view', lambda price, q=1.0: venues), \
                 mock.patch.object(rebalancer, 'notify', lambda ev, **kw: sent.append((ev, kw))), \
                 mock.patch.object(rebalancer.db, 'event', lambda *a: None), \
                 mock.patch.object(rebalancer, 'rebalance', lambda *a, **k: moved.append(k)), \
+                mock.patch.object(rebalancer, 'regime_choice_now', lambda pool, price: 1.0125), \
                 mock.patch.object(rebalancer.config, 'POOL', 'HELD'), \
                 mock.patch.object(rebalancer.config, 'POOL_PINNED', False), \
                 mock.patch.object(rebalancer.config, 'MIGRATE_MIN_GAIN', 0.25), \
-                mock.patch.object(rebalancer.config, 'EXECUTE_DEXES', ('orca', 'raydium-clmm')), \
-                mock.patch.object(rebalancer.config, 'CALM_BAND', 1.01):
-            r = rebalancer.calm_board_check({}, {'positionMint': 'M'})
+                mock.patch.object(rebalancer.config, 'VENUE_MIN_HOURS', 6), \
+                mock.patch.object(rebalancer.config, 'REGIME_ENABLED', True), \
+                mock.patch.object(rebalancer.config, 'EXECUTE_DEXES', ('orca', 'raydium-clmm')):
+            r = rebalancer.calm_board_check({}, {'positionMint': 'M', 'price': 121.0})
         return r, moved, sent
 
-    def test_moves_tight_to_a_denser_pool(self):
-        r, moved, _ = self.go([self.row('HELD', 'raydium-clmm', 1e4), self.row('O', 'orca', 2e4)])
-        self.assertTrue(r); self.assertEqual(moved[0]['band'], 1.01); self.assertTrue(moved[0]['calm_move'])
-        self.assertEqual(moved[0]['target']['address'], 'O')
+    def v(self, addr, dex, pct, hours, held=False):
+        return {'address': addr, 'dex': dex, 'held': held, 'pair': 'SOL/USDC', 'total_pct_day': pct,
+                'fee_pct_day': pct, 'reward_pct_day': 0.0, 'hours': hours, 'row': None if held else self.row(addr, dex)}
 
-    def test_stays_under_the_gain_or_on_an_unarmed_or_unscreened_venue(self):
-        self.assertFalse(self.go([self.row('HELD', 'raydium-clmm', 1e4), self.row('O', 'orca', 1.1e4)])[0])
-        self.assertFalse(self.go([self.row('HELD', 'raydium-clmm', 1e4), self.row('P', 'byreal', 9e4)])[0])
-        self.assertFalse(self.go([self.row('HELD', 'raydium-clmm', 1e4), self.row('O', 'orca', 9e4, ok=False)])[0])
-        r, _, sent = self.go([self.row('O', 'orca', 9e4)])                      # held pool unscored
-        self.assertFalse(r); self.assertIn('not scored', sent[-1][1]['verdict'])
+    def test_moves_to_a_pool_that_earns_25pct_more_on_chain(self):
+        r, moved, _ = self.go([self.v('O', 'orca', 1.4, 8), self.v('HELD', 'raydium-clmm', 1.0, 8, True)])
+        self.assertTrue(r); self.assertEqual(moved[0]['target']['address'], 'O'); self.assertEqual(moved[0]['band'], 1.0125)
 
+    def test_stays_without_enough_evidence_gain_or_signer(self):
+        self.assertFalse(self.go([self.v('O', 'orca', 1.4, 3), self.v('HELD', 'raydium-clmm', 1.0, 8, True)])[0])
+        self.assertFalse(self.go([self.v('O', 'orca', 1.4, 8), self.v('HELD', 'raydium-clmm', 1.0, 2, True)])[0])
+        self.assertFalse(self.go([self.v('O', 'orca', 1.2, 8), self.v('HELD', 'raydium-clmm', 1.0, 8, True)])[0])
+        self.assertFalse(self.go([self.v('P', 'pancakeswap-v3-solana', 3.0, 8), self.v('HELD', 'raydium-clmm', 1.0, 8, True)])[0])
+        r, _, sent = self.go([self.v('O', 'orca', 1.4, 8)])                       # no held-pool evidence
+        self.assertFalse(r); self.assertIn('held pool', sent[-1][1]['verdict'])
 
 class Sweep(unittest.TestCase):
     def go(self, sol, ray_amount, price=2.0, swap=({'signature': 's', 'bought': {'amount': 3.9}}, None)):

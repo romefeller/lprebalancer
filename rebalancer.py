@@ -168,6 +168,8 @@ def notify_book(event, **payload):
         payload = dict(payload, calm=LAST_CALM['view'])
     if config.REGIME_ENABLED and payload.get('regime') is None and LAST_REGIME.get('view'):
         payload = dict(payload, regime=LAST_REGIME['view'])
+    if payload.get('venues') is None and LAST_VENUES.get('view'):
+        payload = dict(payload, venues=LAST_VENUES['view'][:4])
     return notify(event, **{**payload, **db.stats()})
 
 
@@ -1081,16 +1083,76 @@ def consider_migration(state, status, current_best):
     return True
 
 
-def density(r):
-    """Fees plus rewards per dollar of liquidity at the active price, per day:
-    band-free, so a tight band compares venues on it directly."""
-    if r.get('density') is not None:
-        return float(r['density'])
+LAST_VENUES = {}                # {'view': [...]} the latest on-chain venue ranking, for every book
+
+
+def venue_candidates():
+    """(dex, address, pair row) of the held pool and every screened pool of
+    the same pair on the latest board, on a venue whose counters we read."""
+    run, rows = db.latest_scan(max_age_seconds=config.SCAN_INTERVAL * 3)
     try:
-        return ((float(r.get('fees_24h_usd') or 0) + float(r.get('reward_usd_day') or 0))
-                / float(r['c_pool']) / float(r['tvl_usd']))
-    except (KeyError, TypeError, ValueError, ZeroDivisionError):
+        mints = {m for m, _ in pool_tokens()}
+    except Exception:
+        mints = None
+    out = {config.POOL: (config.DEX, config.POOL, None)}
+    for r in rows or []:
+        if r.get('skipped') or not r.get('screen_ok') or r.get('dex') not in dexes.FEE_LAYOUT_DEXES:
+            continue
+        pair = {(r.get('token_a') or {}).get('address'), (r.get('token_b') or {}).get('address')}
+        if mints and not config.ALLOW_SWAP and pair != mints:
+            continue
+        out[r['address']] = (r['dex'], r['address'], r)
+    return list(out.values())
+
+
+def sample_fee_growth(state, status=None):
+    """Every VENUE_SAMPLE_S: one RPC call reads the fee counters of the held
+    pool and every same-pair candidate, stores one sample each, and refreshes
+    the ranking the book shows."""
+    if time.time() - state.get('last_fee_sample', 0) < config.VENUE_SAMPLE_S:
+        return
+    state['last_fee_sample'] = time.time(); save(state)
+    try:
+        cands = venue_candidates()
+        states = dexes.fee_states([(d, a) for d, a, _ in cands])
+        for d, a, _ in cands:
+            if a in states:
+                db.record_fee_state(d, a, states[a])
+        if status:
+            venue_view(status['price'], status.get('quoteUsd') or 1.0)
+    except Exception as e:
+        notify('venue_sample_failed', reason=tidy(e))
+
+
+def venue_income(pool, usd_a, usd_b, band=1.01):
+    """The pool's on-chain income for a centred band, % per day, over up to
+    the last 24 hours of samples, with the hours of evidence."""
+    span = db.fee_state_span(pool)
+    if not span:
         return None
+    first, last, secs = span
+    rw_mints = [m for m, _ in (last.get('rewards') or [])]
+    rw_usd = dexes.jupiter_prices(rw_mints) if rw_mints else {}
+    if rw_mints:
+        dexes.mint_decimals(rw_mints)
+    inc = dexes.band_income(first, last, secs, band, usd_a, usd_b, rw_usd)
+    if not inc:
+        return None
+    return dict(inc, total_pct_day=inc['fee_pct_day'] + inc['reward_pct_day'], hours=round(secs / 3600, 1))
+
+
+def venue_view(price, quote_usd=1.0):
+    """Every candidate's on-chain +/-1% income, best first."""
+    out = []
+    for d, a, row in venue_candidates():
+        inc = venue_income(a, price * quote_usd, quote_usd)
+        if inc:
+            out.append({'dex': d, 'address': a, 'held': a == config.POOL,
+                        'pair': (row or {}).get('pair') or config.PAIR_LABEL, **inc, 'row': row})
+    out.sort(key=lambda v: -v['total_pct_day'])
+    LAST_VENUES['view'] = [{k: (round(v, 4) if isinstance(v, float) else v) for k, v in x.items() if k != 'row'}
+                           for x in out]
+    return out
 
 
 def calm_board_check(state, status):
@@ -1101,36 +1163,40 @@ def calm_board_check(state, status):
     migrate_min_gain. Returns True when a move started."""
     if config.POOL_PINNED:
         return False
-    run, rows = db.latest_scan(max_age_seconds=config.SCAN_INTERVAL * 3)
-    held = next((r for r in rows if r.get('address') == config.POOL and density(r)), None)
-    if not held:
-        notify('board_checked', verdict='calm: the held pool is not scored on the latest board; staying',
-               scan=(run or {}).get('id'))
+    # On-chain evidence first: the board's density put PancakeSwap 18% above
+    # Raydium and live it earned half (2026-09-26). A move needs at least
+    # VENUE_MIN_HOURS of counter samples on both pools.
+    try:
+        venues = venue_view(status['price'], status.get('quoteUsd') or 1.0)
+    except Exception as e:
+        venues = []
+        notify('venue_sample_failed', reason=tidy(e))
+    held_v = next((v for v in venues if v['held']), None)
+    ok = [v for v in venues if not v['held'] and v['hours'] >= config.VENUE_MIN_HOURS and v.get('row')
+          and v['dex'] in config.EXECUTE_DEXES and v['dex'] in SIGNERS]
+    if not held_v or held_v['hours'] < config.VENUE_MIN_HOURS:
+        notify('board_checked', verdict=f'on-chain income: under {config.VENUE_MIN_HOURS}h of evidence on the held pool; staying')
         return False
-    mints = {(held.get('token_a') or {}).get('address'), (held.get('token_b') or {}).get('address')}
-    cands = [r for r in rows
-             if r.get('address') != config.POOL and not r.get('skipped') and r.get('screen_ok')
-             and density(r) and r.get('dex') in config.EXECUTE_DEXES and r.get('dex') in SIGNERS
-             and (config.ALLOW_SWAP or {(r.get('token_a') or {}).get('address'),
-                                        (r.get('token_b') or {}).get('address')} == mints)]
-    if not cands:
-        notify('board_checked', verdict='calm: no eligible pool on the board')
+    if not ok:
+        notify('board_checked', held=f"{config.DEX} {held_v['total_pct_day']:.2f}%/d on chain",
+               verdict='on-chain income: no other pool with enough evidence; staying')
         return False
-    best = max(cands, key=density)
-    gain = density(best) / density(held) - 1
-    held_txt = f"{config.DEX} {config.PAIR_LABEL} density {density(held) * 1e4:.2f}bp/d"
-    best_txt = f"{best['dex']} {best['pair']} density {density(best) * 1e4:.2f}bp/d"
+    top = ok[0]
+    gain = top['total_pct_day'] / max(held_v['total_pct_day'], 1e-9) - 1
+    held_txt = f"{config.DEX} {config.PAIR_LABEL} {held_v['total_pct_day']:.2f}%/d at ±1% on chain ({held_v['hours']}h)"
+    best_txt = f"{top['dex']} {top['pair']} {top['total_pct_day']:.2f}%/d at ±1% on chain ({top['hours']}h)"
     if gain < config.MIGRATE_MIN_GAIN:
         notify('board_checked', held=held_txt, best=best_txt,
-               verdict=f'calm: {gain * 100:.0f}% denser is under the {config.MIGRATE_MIN_GAIN * 100:.0f}% threshold')
+               verdict=f'on-chain: {gain * 100:.0f}% more income is under the {config.MIGRATE_MIN_GAIN * 100:.0f}% threshold')
         return False
+    best = top['row']
     notify('MIGRATE', held=held_txt, best=best_txt, gain_pct=round(gain * 100),
            pool=best['address'], dex=best['dex'], calm=True)
-    db.event('MIGRATE', f'calm: {config.DEX} {config.POOL} -> {best["dex"]} {best["address"]} '
+    db.event('MIGRATE', f'on-chain: {config.DEX} {config.POOL} -> {best["dex"]} {best["address"]} '
                         f'({held_txt} -> {best_txt})')
     k = (regime_choice_now(best['address'], status['price']) or config.REGIME_WIDTHS[0]) \
         if config.REGIME_ENABLED else config.CALM_BAND
-    rebalance(state, status, 'moved to a denser pool', target=best, band=k, calm_move=True)
+    rebalance(state, status, 'moved to the pool that earns more on chain', target=best, band=k, calm_move=True)
     return True
 
 
@@ -1497,6 +1563,7 @@ def main():
         price = status['price']
         wusd = wallet(status['whirlpool']).get('walletUsd')
         fc = forecast_for(status)
+        sample_fee_growth(state, status)
         cv = calm_view(state, status) if not config.REGIME_ENABLED else None
         rv = regime_view(state, status)
         if rv and fc:
