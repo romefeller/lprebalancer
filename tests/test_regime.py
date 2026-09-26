@@ -143,6 +143,24 @@ class RollingTape(unittest.TestCase):
             self.assertEqual(list(rebalancer._merge([a, b])[0]), [600, 900])
         self.assertIsNone(rebalancer._merge([None, None]))
 
+    def test_older_pages_are_oriented_against_the_bar_they_join(self):
+        import tempfile, pathlib
+        d = pathlib.Path(tempfile.mkdtemp()); now = 1_790_000_000; refs = []
+        def fake(pool, live_price=None, before=None):
+            refs.append(live_price); end = int(before) if before else now
+            ts = np.arange(end - 1000 * 300, end, 300, dtype=float)
+            # prices fall 30% into the past: today's price would reject old pages
+            c = 100.0 * (1 - 0.3 * (now - ts) / (now - (now - 9000 * 300)))
+            if live_price and abs(c[-1] / live_price - 1) > 0.15:
+                return None
+            return ts, c, c, c, c, np.ones(len(ts))
+        rebalancer._TAPE5.clear()
+        with mock.patch.object(rebalancer, 'ROOT', d), mock.patch.object(rebalancer.calm, 'tape_5m', fake), \
+                mock.patch.object(rebalancer.config, 'REGIME_TAPE_DAYS', 30):
+            b = rebalancer.tape5('POOLADDRESS3', 100.0)
+        rebalancer._TAPE5.clear()
+        self.assertEqual(len(b[0]), 8640)
+
     def test_thirty_days_is_8640_bars_and_pages_back_nine_times(self):
         import tempfile, pathlib
         d = pathlib.Path(tempfile.mkdtemp()); now = 1_790_000_000; calls = []

@@ -648,7 +648,11 @@ def tape5(pool, price):
     pages = int(np.ceil(tape_bars() / 1000)) + 1
     while merged is not None and len(merged[0]) < tape_bars() and tries < pages:
         try:
-            older = calm.tape_5m(pool, live_price=price, before=float(merged[0][0]))
+            # The orientation of a historical page is checked against the bar
+            # it joins (the oldest one held), not today's price: SOL moved
+            # more than 15% in a month, and the check threw every older page
+            # away, capping the tape at ten days.
+            older = calm.tape_5m(pool, live_price=float(merged[4][0]), before=float(merged[0][0]))
         except Exception:
             older = None
         if older is None:
