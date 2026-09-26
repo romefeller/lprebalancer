@@ -47,6 +47,9 @@ function render(row) {
       `realised    ${tok(r.fees_realised_a)} ${A}   ${tok(r.fees_realised_b, 4)} ${B}   $${n(r.fees_realised_usd, 4)}`,
       `unrealised  ${tok(r.fees_unrealised_a)} ${A}   ${tok(r.fees_unrealised_b, 4)} ${B}   $${n(r.fees_unrealised_usd, 4)}`,
       `TOTAL       ${tok(r.fees_total_a)} ${A}   ${tok(r.fees_total_b, 4)} ${B}   $${n(r.fees_total_usd, 4)}`,
+      ...(r.split ? [
+        `profit      $${n(r.split.paid_usd, 4)} paid to the profit wallet · $${n(r.split.paid_today_usd, 4)} today`,
+        `reinvested  $${n(r.split.reinvested_usd, 4)} back in the LP · gas $${n(r.split.gas_usd, 4)}`] : []),
       ...(Array.isArray(r.by_pool) && r.by_pool.length > 1 ? [
         `━━ POOLS ━━`,
         ...r.by_pool.slice(0, 5).map(p =>
@@ -157,6 +160,16 @@ function render(row) {
       return `swap skipped · ${row.reason}`;
     case 'swap_failed':
       return `SWAP FAILED · ${row.reason}\nfailures ${row.failures} · nothing opened`;
+    case 'PAYOUT': {
+      const sent = (row.sent ?? []).map(x => `${x.amount} ${x.symbol} ($${n(x.usd, 4)}) → profit wallet\n${x.signature}`).join('\n');
+      return `PAYOUT${row.gas_low ? ' · gas low, SOL refilled gas, payout reinvested' : ''}\n`
+        + (sent || 'nothing sent this harvest') + `\n`
+        + `split  paid $${n(row.split?.paid, 4)} · reinvested $${n(row.split?.reinvested, 4)} · gas $${n(row.split?.gas, 4)}`;
+    }
+    case 'payout_failed':
+      return `PAYOUT FAILED · ${row.reason}${row.owed != null ? `\nowed ${row.owed} ${row.symbol}, retried at the next harvest` : ''}`;
+    case 'payout_skipped':
+      return `payout skipped · ${row.reason}`;
     case 'DIVIDEND':
       return `DIVIDEND · $${n(row.collected_usd, 4)} harvested to the wallet\n${row.signature ?? ''}\n` + book(row);
     case 'move_deferred':

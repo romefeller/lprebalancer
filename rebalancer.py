@@ -71,6 +71,7 @@ import config
 import db
 import dexes
 import engine
+import fees
 import guards
 import scanner
 
@@ -88,7 +89,8 @@ SIGNERS = {'orca': str(ROOT / 'signer2.mjs'),
            'raydium-clmm': str(ROOT / 'signer_raydium.mjs'),
            'byreal': str(ROOT / 'signer_byreal.mjs'),
            'pancakeswap-v3-solana': str(ROOT / 'signer_pancake.mjs'),
-           'jupiter': str(ROOT / 'swap_jupiter.mjs')}       # swaps, not positions
+           'jupiter': str(ROOT / 'swap_jupiter.mjs'),       # swaps, not positions
+           'payout': str(ROOT / 'payout.mjs')}              # transfers to the profit wallet only
 
 
 def stamp():
@@ -173,7 +175,8 @@ def chain(*args, dex=None, timeout=420):
                LPBOT_POOL=config.POOL,
                LPBOT_MAX_USD=str(config.MAX_USD),
                LPBOT_SLIPPAGE_BPS=str(config.SLIPPAGE_BPS),
-               LPBOT_GAS_RESERVE_SOL=str(config.GAS_RESERVE_SOL))
+               LPBOT_GAS_RESERVE_SOL=str(config.GAS_RESERVE_SOL),
+               LPBOT_PROFIT_WALLET=config.PROFIT_WALLET)
     try:
         r = subprocess.run(['node', script, *args], capture_output=True,
                            text=True, timeout=timeout, env=env)
@@ -243,6 +246,20 @@ def wallet(pool):
     return out or {}
 
 
+def capital():
+    """The sizing base: the configured capital plus every fee reinvested
+    under the split, held under the ceiling a deposit of it must respect
+    (each side is at most side_cap_fraction of it, and the signer refuses an
+    open worth more than max_usd)."""
+    base = config.CAPITAL_USD
+    if config.PAYOUT_ENABLED:
+        try:
+            base += db.reinvested_usd(config.PROFILE)
+        except Exception:
+            pass
+    return min(base, config.MAX_USD / (2 * config.SIDE_CAP_FRACTION))
+
+
 def deposit_caps(bal):
     """Per-token deposit caps for an open, from what the wallet actually holds.
 
@@ -253,7 +270,7 @@ def deposit_caps(bal):
     """
     price = bal['price']
     quote_usd = bal.get('quoteUsd') or 1.0
-    capital_quote = config.CAPITAL_USD / quote_usd
+    capital_quote = capital() / quote_usd
     reserve = config.GAS_RESERVE_SOL
     avail_a = bal['balanceA'] - (reserve if bal.get('nativeSide') == 'A' else 0)
     avail_b = bal['balanceB'] - (reserve if bal.get('nativeSide') == 'B' else 0)
@@ -327,6 +344,77 @@ def harvest_due(state, status):
     return time.time() - state.get('last_harvest', 0) >= config.HARVEST_INTERVAL
 
 
+_POOL_REC = {}
+
+
+def pool_tokens():
+    """(mint, symbol) of token A and token B of the held pool, cached."""
+    key = (config.DEX, config.POOL)
+    if key not in _POOL_REC:
+        rec = dexes.pool(config.DEX, config.POOL)
+        _POOL_REC[key] = ((rec['token_a']['address'], rec['token_a']['symbol']),
+                          (rec['token_b']['address'], rec['token_b']['symbol']))
+    return _POOL_REC[key]
+
+
+def distribute(state, position, fee_a, fee_b):
+    """Split one harvest by the owner's rule (fees.py): payout-token fees to
+    the profit wallet now, native SOL to gas while it is under the reserve,
+    the rest reinvested. A failed transfer is owed and retried with the next
+    harvest; it never blocks a move and never counts toward a halt."""
+    if not config.PAYOUT_ENABLED or not (fee_a or fee_b):
+        return None
+    try:
+        (mint_a, sym_a), (mint_b, sym_b) = pool_tokens()
+    except Exception as e:
+        notify('payout_skipped', reason=f'pool tokens unreadable: {tidy(e)}')
+        return None
+    bal = wallet(config.POOL)
+    if 'balanceA' not in bal:
+        notify('payout_skipped', reason='could not read the LP wallet; the fees stay in it')
+        return None
+    q = bal.get('quoteUsd') or 1.0
+    px_a, px_b = bal['price'] * q, q
+    native_fee = fee_a if mint_a == fees.NATIVE_MINT else fee_b if mint_b == fees.NATIVE_MINT else 0.0
+    sol_before = (bal.get('sol') or 0.0) - (native_fee or 0.0)
+    parts = fees.split([(mint_a, sym_a, fee_a, px_a), (mint_b, sym_b, fee_b, px_b)],
+                       config.PAYOUT_MINT, sol_before, config.GAS_RESERVE_SOL)
+    owed = state.setdefault('payout_owed', {})
+    held = {mint_a: bal['balanceA'], mint_b: bal['balanceB']}
+    sent = []
+    for p in parts:
+        if p['kind'] != 'paid':
+            db.record_payout(config.PROFILE, position, p['mint'], p['symbol'], p['amount'], p['usd'], p['kind'],
+                             detail=('gas under the reserve' if p['kind'] == 'gas' else None))
+            continue
+        amt = p['amount'] + float(owed.get(p['mint'], 0.0))
+        amt = min(amt, float(held.get(p['mint']) or 0.0))
+        px = p['usd'] / p['amount'] if p['usd'] is not None and p['amount'] else None
+        if amt <= 0:
+            continue
+        out, err = chain('send', p['mint'], f'{amt:.9f}', config.PROFIT_WALLET, '--execute', dex='payout')
+        if out and out.get('signature') and not err:
+            owed.pop(p['mint'], None)
+            db.record_payout(config.PROFILE, position, p['mint'], p['symbol'], amt,
+                             amt * px if px else None, 'paid', to_address=config.PROFIT_WALLET,
+                             signature=out['signature'])
+            sent.append({'symbol': p['symbol'], 'amount': round(amt, 6),
+                         'usd': round(amt * px, 4) if px else None, 'signature': out['signature']})
+        else:
+            owed[p['mint']] = amt
+            db.record_payout(config.PROFILE, position, p['mint'], p['symbol'], amt,
+                             amt * px if px else None, 'owed', to_address=config.PROFIT_WALLET,
+                             detail=err or 'no signature')
+            notify('payout_failed', reason=err or 'no signature', symbol=p['symbol'], owed=round(amt, 6))
+    save(state)
+    summary = {k: round(sum((x['usd'] or 0) for x in parts if x['kind'] == k), 4)
+               for k in ('paid', 'reinvested', 'gas')}
+    notify('PAYOUT', sent=sent, split=summary, gas_low=sol_before < config.GAS_RESERVE_SOL,
+           sol_before=round(sol_before, 6), to=config.PROFIT_WALLET,
+           parts=[{k: (round(v, 6) if isinstance(v, float) else v) for k, v in x.items()} for x in parts])
+    return parts
+
+
 def dividend(state, status):
     """Harvest into the wallet and report it. The ledger counts it once: the
     snapshot after the harvest records the position's counter at zero."""
@@ -341,6 +429,10 @@ def dividend(state, status):
         db.event('DIVIDEND', f'${usd:.4f} harvested to the wallet')
         notify_book('DIVIDEND', collected_usd=round(usd, 4), collected_a=a, collected_b=b,
                     signature=out['signature'])
+        try:
+            distribute(state, mint, a, b)
+        except Exception as e:          # the split must never stop the loop
+            notify('payout_failed', reason=f'{type(e).__name__}: {tidy(e)}')
         return True
     notify('harvest_skipped', reason=err or 'no signature returned', kind='dividend')
     return False
@@ -452,7 +544,7 @@ def balance_wallet(state, bal, rec):
     res = config.GAS_RESERVE_SOL
     usd_a = max(bal['balanceA'] - (res if bal.get('nativeSide') == 'A' else 0), 0) * bal['price'] * q
     usd_b = max(bal['balanceB'] - (res if bal.get('nativeSide') == 'B' else 0), 0) * q
-    C = config.CAPITAL_USD
+    C = capital()
     if min(usd_a, usd_b) >= 0.5 * C:
         return bal
     mint_a = (rec.get('token_a') or {}).get('address')
@@ -676,7 +768,7 @@ def reopen(state, reason, band=None, recovering=False):
     price = bal['price'] if band else best['price']
     lower, upper = price / k, price * k
     cap_a, cap_b = deposit_caps(bal)
-    if cap_a * price + cap_b < config.CAPITAL_USD * 0.1 / (bal.get('quoteUsd') or 1):
+    if cap_a * price + cap_b < capital() * 0.1 / (bal.get('quoteUsd') or 1):
         notify('idle', reason=f'wallet holds too little {bal["tokenA"]} and '
                               f'{bal["tokenB"]} to open; nothing to do',
                balanceA=bal['balanceA'], balanceB=bal['balanceB'])
@@ -688,7 +780,7 @@ def reopen(state, reason, band=None, recovering=False):
     try:
         guards.open_request(pool=pool, dex=config.DEX, price=bal['price'], model_price=price,
                             lower=lower, upper=upper, cap_a=cap_a, cap_b=cap_b,
-                            capital_usd=config.CAPITAL_USD, max_usd=config.MAX_USD,
+                            capital_usd=capital(), max_usd=config.MAX_USD,
                             quote_usd=bal.get('quoteUsd') or 1.0,
                             execute_dexes=config.EXECUTE_DEXES, signers=SIGNERS)
     except guards.Refused as e:
@@ -731,7 +823,7 @@ def reopen(state, reason, band=None, recovering=False):
     if deposit_usd is None:
         deposit_usd = (out or {}).get('depositUsd')
     if deposit_usd is None:
-        deposit_usd = min(config.CAPITAL_USD, cap_a * price + cap_b)
+        deposit_usd = min(capital(), cap_a * price + cap_b)
     db.open_position(mint, pool, config.PAIR_LABEL, lower, upper,
                      (k - 1) * 100, (out or {}).get('signature'),
                      deposit_usd, reason, config_name=config.PROFILE, dex=config.DEX)
@@ -795,6 +887,10 @@ def rebalance(state, status, reason, target=None, band=None, calm_move=False):
                     position_usd(status))
         notify('HARVEST', collected_usd=round(accrued_usd, 4),
                signature=out['signature'])
+        try:
+            distribute(state, mint, accrued_a, accrued_b)
+        except Exception as e:          # the split must never stop a move
+            notify('payout_failed', reason=f'{type(e).__name__}: {tidy(e)}')
     else:
         # Never let a harvest block the close. An out-of-range position must
         # move, and the close collects any fees the harvest could not: the

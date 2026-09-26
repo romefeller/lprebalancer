@@ -150,6 +150,15 @@ REBALANCE_SWAP = _env('LPBOT_REBALANCE_SWAP', lambda s: s.lower() in ('1', 'true
                       bool(_CFG.get('rebalance_swap')))
 
 
+# --- the fee split ---------------------------------------------------------------
+# Fees in `payout_mint` go to `profit_wallet` on every harvest; the rest are
+# reinvested. Native-SOL fees refill gas first when it is under the reserve
+# (fees.py). Off unless `payout_enabled`; nothing here names a token or address.
+PAYOUT_ENABLED = _env('LPBOT_PAYOUT', lambda s: s.lower() in ('1', 'true', 'yes'), bool(_CFG.get('payout_enabled')))
+PROFIT_WALLET = _env('LPBOT_PROFIT_WALLET', str, _CFG.get('profit_wallet') or '')
+PAYOUT_MINT = _env('LPBOT_PAYOUT_MINT', str, _CFG.get('payout_mint') or '')
+
+
 def policy():
     """The proactive rule as the engine takes it."""
     return {'horizon': PROACTIVE_HORIZON, 'threshold': PROACTIVE_THRESHOLD}
@@ -208,6 +217,9 @@ def summary():
         'calm_sigma_cut_pct': round(CALM_SIGMA_CUT * 100, 4),
         'calm_max_moves_per_day': CALM_MAX_MOVES,
         'rebalance_swap': REBALANCE_SWAP,
+        'payout_enabled': PAYOUT_ENABLED,
+        'profit_wallet': PROFIT_WALLET or None,
+        'payout_mint': PAYOUT_MINT or None,
     }
 
 

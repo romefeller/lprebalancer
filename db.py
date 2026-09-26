@@ -299,6 +299,38 @@ def snapshot(mint, price, in_range, liquidity, accrued_a, accrued_b,
               f.get('position')))
 
 
+def record_payout(config_name, position, token_mint, symbol, amount, usd, kind,
+                  to_address=None, signature=None, detail=None):
+    with cursor(commit=True) as cur:
+        cur.execute('insert into payouts (ts, config_name, position, token_mint, symbol, amount, usd, '
+                    'kind, to_address, signature, detail) values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)',
+                    (now(), config_name, position, token_mint, symbol, amount, usd, kind,
+                     to_address, signature, detail))
+
+
+def reinvested_usd(config_name):
+    """Dollars of fees reinvested so far: they raise the sizing base."""
+    with cursor() as cur:
+        cur.execute("select coalesce(sum(usd), 0) usd from payouts "
+                    "where config_name = %s and kind = 'reinvested'", (config_name,))
+        return float(cur.fetchone()['usd'])
+
+
+def payout_totals(config_name=None):
+    """Fee split so far, in dollars, by kind; and today's payout."""
+    with cursor() as cur:
+        cur.execute("""
+            select kind, coalesce(sum(usd), 0) usd, count(*) n,
+                   coalesce(sum(usd) filter (where ts >= date_trunc('day', now() at time zone 'utc')), 0) today
+            from payouts where (%s::text is null or config_name = %s) group by kind
+        """, (config_name, config_name))
+        rows = {r['kind']: r for r in cur.fetchall()}
+    g = lambda k, f='usd': round(float(rows[k][f]), 4) if k in rows else 0.0
+    return {'paid_usd': g('paid'), 'paid_today_usd': g('paid', 'today'),
+            'reinvested_usd': g('reinvested'), 'gas_usd': g('gas'),
+            'payouts': int(rows['paid']['n']) if 'paid' in rows else 0}
+
+
 def event(kind, detail=''):
     with cursor(commit=True) as cur:
         cur.execute('insert into events (ts, kind, detail) values (%s,%s,%s)',
@@ -599,6 +631,7 @@ def stats(token_a=None, token_b=None):
         'in_range_pct': (round(_f(span['ir']) * 100, 1)
                          if span and span['ir'] is not None else None),
         'tracked_days': round(days, 3) if days else None,
+        'split': payout_totals(cfg.get('name')) if cfg.get('payout_enabled') else None,
         'last_price': _f(latest and latest['price']) or None,
         'last_seen': latest['ts'].isoformat() if latest else None,
         # the survival figures recorded at the last poll of the open position
