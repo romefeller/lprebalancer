@@ -137,3 +137,31 @@ class SwapRetry(unittest.TestCase):
         self.assertEqual(len(calls), 1); self.assertEqual(state['failures'], 1)
         _, calls, state = self.go([({'signature': 's', 'partial': True}, 'confirm timed out')])
         self.assertEqual(len(calls), 1); self.assertEqual(state['failures'], 1)
+
+
+class SwapGate(unittest.TestCase):
+    """The swap tops a side up to its deposit cap, not merely to half."""
+    def go(self, a_sol, b_usdc):
+        calls = []
+        with mock.patch.object(rebalancer, 'chain', lambda *a, **k: (calls.append(a) or ({'sent': True, 'signature': 's'}, None))), \
+                mock.patch.object(rebalancer, 'wallet', lambda p: {'balanceA': 1.0, 'balanceB': 100.0, 'price': 100.0}), \
+                mock.patch.object(rebalancer, 'notify', lambda *a, **k: None), \
+                mock.patch.object(rebalancer.db, 'event', lambda *a: None), \
+                mock.patch.object(rebalancer.time, 'sleep', lambda s: None), \
+                mock.patch.object(rebalancer.config, 'REBALANCE_SWAP', True), \
+                mock.patch.object(rebalancer.config, 'CAPITAL_USD', 190.0), \
+                mock.patch.object(rebalancer.config, 'SIDE_CAP_FRACTION', 0.55), \
+                mock.patch.object(rebalancer.config, 'GAS_RESERVE_SOL', 0.05), \
+                mock.patch.object(rebalancer.config, 'PAYOUT_ENABLED', False):
+            rebalancer.balance_wallet({'failures': 0}, {'price': 100.0, 'quoteUsd': 1.0, 'balanceA': a_sol,
+                                                        'balanceB': b_usdc, 'nativeSide': 'A'},
+                                      {'token_a': {'address': SOL}, 'token_b': {'address': USDC}})
+        return len(calls)
+
+    def test_the_2026_09_26_case_now_swaps(self):
+        # SOL side worth $97.6 after reserve and headroom, USDC $143: deposit would cap at ~$195
+        self.assertEqual(self.go(1.035, 143.0), 1)
+
+    def test_both_sides_at_the_cap_or_balanced_do_not_swap(self):
+        self.assertEqual(self.go(1.2, 110.0), 0)             # both above 0.55 * 190 * 0.97
+        self.assertEqual(self.go(0.559, 50.0), 0)            # small but balanced: nothing to gain

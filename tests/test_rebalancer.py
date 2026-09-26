@@ -26,12 +26,12 @@ class DepositCaps(unittest.TestCase):
 
     def test_gas_reserve_comes_off_the_native_side_only(self):
         a, _ = rebalancer.deposit_caps(self.bal(balanceA=0.6))
-        self.assertAlmostEqual(a, 0.6 - config.GAS_RESERVE_SOL)
+        self.assertAlmostEqual(a, 0.6 - config.GAS_RESERVE_SOL - rebalancer.OPEN_RENT_HEADROOM_SOL)
         # native on the B side: reserve leaves A alone
         a2, b2 = rebalancer.deposit_caps(self.bal(price=0.01, quoteUsd=100.0, balanceA=5000.0,
                                                   balanceB=0.6, nativeSide='B',
                                                   tokenA='WIF', tokenB='SOL'))
-        self.assertAlmostEqual(b2, 0.6 - config.GAS_RESERVE_SOL)
+        self.assertAlmostEqual(b2, 0.6 - config.GAS_RESERVE_SOL - rebalancer.OPEN_RENT_HEADROOM_SOL)
         self.assertAlmostEqual(a2, min(5000.0, config.CAPITAL_USD / 100.0
                                        * config.SIDE_CAP_FRACTION / 0.01))
 

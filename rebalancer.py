@@ -265,6 +265,9 @@ def capital():
     return min(base, config.MAX_USD / (2 * config.SIDE_CAP_FRACTION))
 
 
+OPEN_RENT_HEADROOM_SOL = 0.009       # position accounts + two tick arrays, Raydium layout
+
+
 def deposit_caps(bal):
     """Per-token deposit caps for an open, from what the wallet actually holds.
 
@@ -276,7 +279,11 @@ def deposit_caps(bal):
     price = bal['price']
     quote_usd = bal.get('quoteUsd') or 1.0
     capital_quote = capital() / quote_usd
-    reserve = config.GAS_RESERVE_SOL
+    # The gas reserve, plus the rent the open itself takes: a position's
+    # accounts (0.0053 SOL on Raydium-layout venues) and any tick array its
+    # range is first to use (0.0018 each, two at most). Without it every open
+    # left gas below the reserve (0.0429 of 0.05 on 2026-09-26).
+    reserve = config.GAS_RESERVE_SOL + OPEN_RENT_HEADROOM_SOL
     avail_a = bal['balanceA'] - (reserve if bal.get('nativeSide') == 'A' else 0)
     avail_b = bal['balanceB'] - (reserve if bal.get('nativeSide') == 'B' else 0)
     cap_a = min(max(avail_a, 0), capital_quote * config.SIDE_CAP_FRACTION / price)
@@ -619,11 +626,17 @@ def balance_wallet(state, bal, rec):
     if not config.REBALANCE_SWAP or not rec:
         return bal
     q = bal.get('quoteUsd') or 1.0
-    res = config.GAS_RESERVE_SOL
+    res = config.GAS_RESERVE_SOL + OPEN_RENT_HEADROOM_SOL
     usd_a = max(bal['balanceA'] - (res if bal.get('nativeSide') == 'A' else 0), 0) * bal['price'] * q
     usd_b = max(bal['balanceB'] - (res if bal.get('nativeSide') == 'B' else 0), 0) * q
     C = capital()
-    if min(usd_a, usd_b) >= 0.5 * C:
+    # Swap when either side is short of what the open may deposit of it (the
+    # side cap, less 3% for price movement), not merely short of half: a side
+    # at 51% capped a deposit at $195 while $45 sat idle (2026-09-26). The
+    # swap script itself does nothing within 2% of target.
+    need = C * config.SIDE_CAP_FRACTION * 0.97
+    balanced = abs(usd_a - usd_b) <= 0.04 * (usd_a + usd_b)
+    if min(usd_a, usd_b) >= need or balanced:
         return bal
     mint_a = (rec.get('token_a') or {}).get('address')
     mint_b = (rec.get('token_b') or {}).get('address')
