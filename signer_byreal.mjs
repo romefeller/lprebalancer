@@ -31,6 +31,7 @@
 //   node signer_byreal.mjs close <position> [--execute]
 import fs from 'node:fs';
 import { positionRent } from './position_rent.mjs';
+import { consistentFees, BYREAL_LAYOUT } from './fee_snapshot.mjs';
 import { SLIPPAGE_REFUSAL } from './slippage.mjs';
 import path from 'node:path';
 import { createRequire } from 'node:module';
@@ -252,7 +253,17 @@ async function positionView(chain, raw, info) {
   const ua = (x) => Number(x.toString()) / 10 ** info.decimalsA;
   const ub = (x) => Number(x.toString()) / 10 ** info.decimalsB;
   const estA = ua(d.tokenA.amount), estB = ub(d.tokenB.amount);
-  const feeA = ua(d.tokenA.feeAmount), feeB = ub(d.tokenB.feeAmount);
+  // Fees from ONE read of pool, position and tick arrays (fee_snapshot.mjs).
+  // The SDK reads them in separate calls; a tick crossed between those reads
+  // mixes two states, which on Raydium booked $6,237 of fees on a $230
+  // position (2026-09-27). A read that fails the invariants reports the
+  // settled tokenFeesOwed: stale, never more than was earned.
+  const snap = await consistentFees(chain.connection, BYREAL_CLMM_PROGRAM_ID, new PublicKey(info.pool),
+    [{ nftMint: raw.nftMint, tickLower: raw.tickLower, tickUpper: raw.tickUpper }],
+    d.rawPoolInfo.tickSpacing, {}, BYREAL_LAYOUT);
+  const fee = snap.ok ? snap.fees[0] : { feeA: raw.tokenFeesOwedA, feeB: raw.tokenFeesOwedB };
+  const feesSource = snap.ok ? 'feeGrowth' : `tokenFeesOwed (stale: ${snap.reason})`;
+  const feeA = ua(fee.feeA), feeB = ub(fee.feeB);
   const out = {
     positionMint: raw.nftMint.toBase58(), whirlpool: info.pool, pool: info.pool, dex: DEX,
     pair: `${info.symbolA}/${info.symbolB}`, tokenA: info.symbolA, tokenB: info.symbolB,
@@ -267,7 +278,7 @@ async function positionView(chain, raw, info) {
     closeEstA: estA, closeEstB: estB,
     feesAccruedA: feeA, feesAccruedB: feeB,
     feesAccrued_quote: Number((feeA * info.price + feeB).toFixed(9)),
-    rawFeesA: d.tokenA.feeAmount.toString(), rawFeesB: d.tokenB.feeAmount.toString(),
+    rawFeesA: fee.feeA.toString(), rawFeesB: fee.feeB.toString(), feesSource,
   };
   if (info.quoteUsd != null) {
     out.positionUsd = Number(((estA * info.price + estB) * info.quoteUsd).toFixed(4));

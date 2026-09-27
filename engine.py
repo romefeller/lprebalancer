@@ -76,12 +76,23 @@ def curl(url, accept='application/json', retries=2):
             d = json.loads(r.stdout)
         except Exception:
             d = None
-        # A rate-limit answer is JSON too: {"status": {"error_code": 429}}.
-        if isinstance(d, dict) and str((d.get('status') or {}).get('error_code')) == '429':
+        if rate_limited(d):
             time.sleep(5.0 * (attempt + 1))
             continue
         return d
     return None
+
+
+def rate_limited(d):
+    """Whether a JSON answer is a rate limit. GeckoTerminal answers in more
+    than one shape: {"status": {"error_code": 429}}, and also {"status": 429}
+    (2026-09-27: the second shape raised AttributeError and failed the board
+    scan). Any JSON value goes in; this never raises."""
+    if not isinstance(d, dict):
+        return False
+    st = d.get('status')
+    code = st.get('error_code') if isinstance(st, dict) else st
+    return any(str(c).strip() == '429' for c in (code, d.get('error_code')) if not isinstance(c, (dict, list)))
 
 
 # Jupiter tags that name an instrument the bot must not hold: leveraged and

@@ -49,7 +49,7 @@ class Split(unittest.TestCase):
 
 
 class Distribute(unittest.TestCase):
-    def run_it(self, sol, chain_result=({'signature': 'sig'}, None), state=None):
+    def run_it(self, sol, chain_result=({'signature': 'sig'}, None), state=None, fee_a=0.002, fee_b=0.3):
         rows, calls, sent = [], [], []
         bal = {'balanceA': sol, 'balanceB': 40.0, 'sol': sol, 'price': 120.0, 'quoteUsd': 1.0}
         state = state if state is not None else {}
@@ -64,7 +64,7 @@ class Distribute(unittest.TestCase):
                 mock.patch.object(rebalancer, 'save', lambda s: None), \
                 mock.patch.object(rebalancer, 'notify', lambda ev, **kw: sent.append(ev)), \
                 mock.patch.object(rebalancer.db, 'record_payout', lambda *a, **k: rows.append(a[6])):
-            rebalancer.distribute(state, 'M', 0.002, 0.3)
+            rebalancer.distribute(state, 'M', fee_a, fee_b)
         return rows, calls, sent, state
 
     def test_pays_usdc_to_the_profit_wallet_and_records_the_rest(self):
@@ -80,6 +80,13 @@ class Distribute(unittest.TestCase):
         rows, calls, _, _ = self.run_it(sol=0.03)
         self.assertEqual(calls, [])
         self.assertEqual(sorted(rows), ['gas', 'reinvested'])
+
+    def test_fees_larger_than_the_wallet_are_a_bad_read_and_split_nothing(self):
+        # 2026-09-27: a $6,237 fee read on a $230 position booked $2,830 as gas
+        for fa, fb in ((23.16, 0.3), (0.002, 3403.6)):
+            rows, calls, sent, _ = self.run_it(sol=0.09, fee_a=fa, fee_b=fb)
+            self.assertEqual((rows, calls), ([], []))
+            self.assertIn('payout_skipped', sent)
 
     def test_failed_transfer_is_owed_and_retried_next_time(self):
         rows, _, sent, state = self.run_it(sol=0.07, chain_result=(None, 'rpc down'))

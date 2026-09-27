@@ -299,3 +299,102 @@ def regime_decide(v, *, widths=WIDTHS, steps=2):
         return 'narrow'
     return None
 
+
+
+# --- the risk profile, for the book ------------------------------------------
+# Every poll the loop stores these next to the regime's choice (table
+# rebalancer.risk_profile), so the volatility the bot acted on can be read
+# back later. Per-bar figures are in percent of a five-minute bar.
+#
+#   rms_*_pct        root mean square of the five-minute log return
+#   vol_ratio        rms over the last hour / rms over the last day
+#   park_1h_pct      Parkinson high-low volatility over the last hour
+#   vol_of_vol_24h   std of the per-bar change of log sigma over a day
+#   acf_r2_lag1_24h  autocorrelation of squared returns at lag 1 (clustering)
+#   arch_lm_24h      Engle's ARCH-LM statistic, 6 lags, over a day; with its
+#                    p-value (chi-square, 6 degrees of freedom): a small p is
+#                    heteroskedasticity the tape shows
+#   kurtosis_24h     excess kurtosis of the returns over a day
+
+DAY_BARS = 288
+ARCH_LAGS = 6
+
+
+def chi2_sf_even(x, k):
+    """P(X > x) for a chi-square with an even number k of degrees of freedom:
+    exp(-x/2) * sum_{i < k/2} (x/2)^i / i!. Exact; no scipy."""
+    if k <= 0 or k % 2:
+        raise ValueError('k must be a positive even integer')
+    if x <= 0:
+        return 1.0
+    h, term, total = x / 2.0, 1.0, 1.0
+    for i in range(1, k // 2):
+        term *= h / i
+        total += term
+    return min(1.0, math.exp(-h) * total)
+
+
+def arch_lm(r, lags=ARCH_LAGS):
+    """(LM statistic, p-value) of Engle's test: regress r^2 on a constant and
+    its `lags` lags; LM = n * R^2. None when the sample is too short or has
+    no variance."""
+    r = np.asarray(r, dtype=float)
+    e = r * r
+    n = len(e) - lags
+    if n < 5 * (lags + 1):
+        return None
+    y = e[lags:]
+    X = np.column_stack([np.ones(n)] + [e[lags - j:len(e) - j] for j in range(1, lags + 1)])
+    ss_tot = float(((y - y.mean()) ** 2).sum())
+    if ss_tot <= 1e-12 * float((y * y).sum()):        # no variance, up to float noise
+        return None
+    beta, *_ = np.linalg.lstsq(X, y, rcond=None)
+    ss_res = float(((y - X @ beta) ** 2).sum())
+    r2 = min(max(1.0 - ss_res / ss_tot, 0.0), 1.0)
+    lm = n * r2
+    return lm, chi2_sf_even(lm, lags)
+
+
+def _rms(r):
+    return float(np.sqrt(np.mean(r * r))) if len(r) else None
+
+
+def risk_metrics(bars):
+    """The risk profile of a five-minute tape (see above). Pure. Every field
+    is None when the tape is too short to support it."""
+    keys = ('n_bars', 'rms_1h_pct', 'rms_6h_pct', 'rms_24h_pct', 'vol_ratio_1h_24h', 'park_1h_pct',
+            'vol_of_vol_24h', 'acf_r2_lag1_24h', 'arch_lm_24h', 'arch_lm_p_24h', 'kurtosis_24h')
+    out = dict.fromkeys(keys)
+    if bars is None:
+        return out
+    _ts, _o, high, low, close, _v = bars
+    close = np.asarray(close, dtype=float)
+    out['n_bars'] = int(len(close))
+    if len(close) < 13:
+        return out
+    r = np.diff(np.log(close))
+    pct = lambda x: None if x is None else round(100 * x, 5)
+    out['rms_1h_pct'] = pct(_rms(r[-12:]))
+    if len(r) >= 72:
+        out['rms_6h_pct'] = pct(_rms(r[-72:]))
+    hl = np.log(np.asarray(high, dtype=float)[-12:] / np.asarray(low, dtype=float)[-12:])
+    out['park_1h_pct'] = pct(float(np.sqrt(np.mean(hl * hl) / (4 * math.log(2)))))
+    if len(r) >= DAY_BARS:
+        d = r[-DAY_BARS:]
+        rms24 = _rms(d)
+        out['rms_24h_pct'] = pct(rms24)
+        if rms24 > 0:
+            out['vol_ratio_1h_24h'] = round(_rms(r[-12:]) / rms24, 4)
+        s = ewma_sigma(close)[-(DAY_BARS + 1):]
+        out['vol_of_vol_24h'] = round(float(np.std(np.diff(np.log(s)))), 5)
+        e = d * d
+        tiny = 1e-6 * float(np.mean(e))                  # float noise, not variance
+        if np.std(e[1:]) > tiny and np.std(e[:-1]) > tiny:
+            out['acf_r2_lag1_24h'] = round(float(np.corrcoef(e[1:], e[:-1])[0, 1]), 4)
+        a = arch_lm(d)
+        if a:
+            out['arch_lm_24h'], out['arch_lm_p_24h'] = round(a[0], 3), round(a[1], 6)
+        sd = float(np.std(d))
+        if sd > 1e-6 * rms24:
+            out['kurtosis_24h'] = round(float(np.mean(((d - d.mean()) / sd) ** 4) - 3.0), 4)
+    return out

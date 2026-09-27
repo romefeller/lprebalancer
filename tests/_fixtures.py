@@ -40,3 +40,22 @@ def ensure_profile(name='sol-usdc', **over):
                     'on conflict (name) do update set active = true',
                     list(p.values()))
     return db.load_config(name)
+
+
+# Tests never read transactions from the chain. A harvest in a test carries a
+# made-up signature; without this, txfees.fetch would retry it against the
+# public RPC for ten seconds and then fall back. A test that wants a measured
+# harvest patches txfees.fetch itself.
+import txfees  # noqa: E402
+txfees.network_fetch = txfees.fetch                # the real one, for its own test
+txfees.fetch = lambda rpc, signature, **kw: None
+
+
+# Tests never write the live feed. events.jsonl is tailed by the Telegram
+# bridge, so a test notification there reaches the owner's phone: on
+# 2026-09-27 test rows ("fee_read_rejected", "$1,000 rejected") did. Every
+# notify() in a test goes to a scratch file instead.
+import tempfile  # noqa: E402
+import rebalancer  # noqa: E402
+FEED = pathlib.Path(tempfile.mkdtemp(prefix='lp_bot_test_feed_')) / 'events.jsonl'
+rebalancer.FEED = FEED

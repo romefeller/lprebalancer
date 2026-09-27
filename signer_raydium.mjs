@@ -15,8 +15,10 @@
 // Fees: the SDK's PositionUtils.GetPositionFees recomputes accrued fees from
 // the pool's fee growth and the two boundary ticks, so `feesAccruedA/B` are the
 // live figures, not the stale `tokenFeesOwed` the program settles only when
-// the position is touched. If the tick accounts cannot be read, the stale
-// figure is reported and `feesSource` says so.
+// the position is touched. The pool, positions and tick arrays come from one
+// read (fee_snapshot.mjs), so all inputs share a slot. If that read is
+// unreadable or fails its invariants, the stale figure is reported and
+// `feesSource` says so.
 //
 // The key is read from WALLET_SECRET_PATH inside this process, handed to the
 // SDK as the owner, and never printed. The pool comes from --pool <address> or
@@ -34,6 +36,7 @@ import fs from 'node:fs';
 import { positionRent } from './position_rent.mjs';
 import { PRICE_SLIPPAGE_BPS, SLIPPAGE_REFUSAL, openToleranceBps, safeBase } from './slippage.mjs';
 import { executeBuilt, isProgramFailure, signerError } from './signer_errors.mjs';
+import { consistentFees } from './fee_snapshot.mjs';
 import path from 'node:path';
 import { createRequire } from 'node:module';
 
@@ -41,8 +44,7 @@ import { createRequire } from 'node:module';
 // that this file, the SDK and web3.js share one copy of PublicKey and BN.
 const require = createRequire(import.meta.url);
 const {
-  Raydium, TxVersion, TickUtil, TickArrayUtil, PositionUtils, LiquidityMathUtil,
-  TickArrayLayout, getPdaTickArrayAddress, CLMM_PROGRAM_ID,
+  Raydium, TxVersion, TickUtil, TickArrayUtil, LiquidityMathUtil, CLMM_PROGRAM_ID,
 } = require('@raydium-io/raydium-sdk-v2');
 const { Connection, Keypair, PublicKey } = require('@solana/web3.js');
 const BN = require('bn.js');
@@ -245,35 +247,32 @@ async function positionsOnPool(raydium, pool) {
   return all.filter(p => p.poolId.toBase58() === pool).sort((x, y) => x.tickLower - y.tickLower);
 }
 
-// The boundary tick states of every position, one RPC call. A tick that was
-// never initialised has no account and reads as null.
+// The accrued fees of every position, from ONE consistent read of the pool,
+// the positions and their tick arrays (fee_snapshot.mjs). Three separate
+// reads booked $6,237 of fees on a $230 position on 2026-09-27, when the
+// price crossed a boundary tick between them. A read that fails the
+// invariants reports the settled tokenFeesOwed instead: stale, but never more
+// than the position earned.
 async function tickStates(connection, pool, list, spacing) {
-  const starts = [...new Set(list.flatMap(p => [p.tickLower, p.tickUpper])
-    .map(t => TickArrayUtil.getTickArrayStartIndex(t, spacing)))];
-  const keys = starts.map(s => getPdaTickArrayAddress(PROGRAM_ID, new PublicKey(pool), s).publicKey);
-  const accounts = keys.length ? await connection.getMultipleAccountsInfo(keys) : [];
-  const arrays = new Map();
-  accounts.forEach((a, i) => { if (a) arrays.set(starts[i], TickArrayLayout.decode(a.data)); });
-  return (tick) => {
-    const arr = arrays.get(TickArrayUtil.getTickArrayStartIndex(tick, spacing));
-    return arr ? arr.ticks[TickArrayUtil.getTickOffsetInArray(tick, spacing)] : null;
+  const snap = list.length
+    ? await consistentFees(connection, PROGRAM_ID, new PublicKey(pool), list, spacing)
+    : { ok: true, fees: [] };
+  const byMint = new Map(list.map((p, i) => [p.nftMint.toBase58(), snap.fees[i]]));
+  return (p) => {
+    const f = byMint.get(p.nftMint.toBase58());
+    if (snap.ok && f) return { feeA: f.feeA, feeB: f.feeB, feesSource: 'feeGrowth' };
+    return { feeA: p.tokenFeesOwedA, feeB: p.tokenFeesOwedB,
+             feesSource: `tokenFeesOwed (stale: ${snap.reason || 'no snapshot'})` };
   };
 }
 
 // What the position holds now and what it has earned, in raw units.
-function positionAmounts(p, r, tickOf) {
+function positionAmounts(p, r, feeOf) {
   const rpc = r.rpcPoolInfo;
   const { amountA, amountB } = LiquidityMathUtil.getAmountsForLiquidity(
     rpc.sqrtPriceX64, TickUtil.getSqrtPriceAtTick(p.tickLower), TickUtil.getSqrtPriceAtTick(p.tickUpper),
     p.liquidity, false);
-  let feeA = p.tokenFeesOwedA, feeB = p.tokenFeesOwedB, feesSource = 'tokenFeesOwed (stale)';
-  const lo = tickOf(p.tickLower), hi = tickOf(p.tickUpper);
-  if (lo && hi) {
-    try {
-      const f = PositionUtils.GetPositionFees(rpc, p, lo, hi);
-      feeA = f.tokenFeeAmountA; feeB = f.tokenFeeAmountB; feesSource = 'feeGrowth';
-    } catch { /* the stale figure stands */ }
-  }
+  const { feeA, feeB, feesSource } = feeOf(p);
   return { amountA, amountB, feeA, feeB, feesSource };
 }
 

@@ -76,6 +76,7 @@ import engine
 import fees
 import guards
 import scanner
+import txfees
 
 ROOT = pathlib.Path(__file__).resolve().parent
 STATE = ROOT / 'runtime.json'
@@ -222,8 +223,54 @@ def read_status(mint=None):
     LPBOT_POOL in its environment (see chain); a positional argument is a
     POSITION filter, never the pool. Passing the pool there once made the
     Meteora signer answer "no position" for a position it held, and the loop
-    went to open a second one."""
-    return chain('status', *([mint] if mint else []))
+    went to open a second one.
+
+    Every answer with a position passes guards.fee_read_problem. An
+    impossible fee figure is read once more; if it is still impossible, the
+    fees of the last snapshot stand in (a lower bound: never more than was
+    earned), `feesSuspect` says why, and nothing downstream (the harvest
+    record, the split, the gas refill) sees the bad number."""
+    out, err = chain('status', *([mint] if mint else []))
+    if not (out and out.get('positionMint')):
+        return out, err
+    why = fee_problem(out)
+    if not why:
+        return out, err
+    time.sleep(5)
+    again, err2 = chain('status', *([mint] if mint else []))
+    if again and again.get('positionMint') == out['positionMint'] and not fee_problem(again):
+        return again, err2
+    return sanitised(out, why), err
+
+
+def fee_problem(status):
+    try:
+        prev = db.last_fees(status['positionMint'])
+    except Exception:
+        prev = None
+    return guards.fee_read_problem(status, (prev or {}).get('accrued_usd'), (prev or {}).get('hours'))
+
+
+def sanitised(status, why):
+    """`status` with its fee figures replaced by the last snapshot's."""
+    try:
+        prev = db.last_fees(status['positionMint']) or {}
+    except Exception:
+        prev = {}
+    out = dict(status)
+    out['feesAccruedA'] = prev.get('accrued_a') or 0.0
+    out['feesAccruedB'] = prev.get('accrued_b') or 0.0
+    out['feesAccrued_USD'] = prev.get('accrued_usd') or 0.0
+    q = out.get('quoteUsd') or 1.0
+    out['feesAccrued_quote'] = out['feesAccrued_USD'] / q
+    out['feesSuspect'] = why
+    out['feesRejected'] = {k: status.get(k) for k in ('feesAccruedA', 'feesAccruedB', 'feesAccrued_USD')}
+    try:
+        db.event('fee_read_rejected', f'{status["positionMint"]}: {why}; read {out["feesRejected"]}')
+    except Exception:
+        pass
+    notify('fee_read_rejected', reason=why, rejected=out['feesRejected'])
+    return out
 
 
 STATE_DEFAULTS = {'last_rebalance': 0, 'rebalance_times': [], 'failures': 0,
@@ -505,6 +552,16 @@ def distribute(state, position, fee_a, fee_b):
     px_a, px_b = bal['price'] * q, q
     native_fee = fee_a if mint_a == fees.NATIVE_MINT else fee_b if mint_b == fees.NATIVE_MINT else 0.0
     sol_before = (bal.get('sol') or 0.0) - (native_fee or 0.0)
+    # The harvest has landed, so the wallet holds every fee it names. A fee
+    # larger than the wallet is a bad read, not income: on 2026-09-27 a
+    # $6,237 claim on a $230 position put sol_before at -23 SOL and booked
+    # $2,830 as gas and $3,408 as reinvested. Split nothing; the fees stay in
+    # the wallet.
+    if sol_before < 0 or (fee_a or 0.0) > float(bal['balanceA'] or 0.0) + 1e-9 \
+            or (fee_b or 0.0) > float(bal['balanceB'] or 0.0) + 1e-9:
+        notify('payout_skipped', reason=f'fees {fee_a} {sym_a} + {fee_b} {sym_b} exceed the LP wallet; '
+                                        'the fee read is wrong, nothing split')
+        return None
     parts = fees.split([(mint_a, sym_a, fee_a, px_a), (mint_b, sym_b, fee_b, px_b)],
                        config.PAYOUT_MINT, sol_before, config.GAS_RESERVE_SOL)
     owed = state.setdefault('payout_owed', {})
@@ -568,6 +625,35 @@ def distribute(state, position, fee_a, fee_b):
     return parts
 
 
+def measured_fees(out, status, a, b, usd):
+    """What the harvest really took out of the pool, from its transactions
+    (txfees.py): (a, b, usd). The status figures stand when the transactions
+    cannot be read; a disagreement is reported. The status read is an
+    estimate made before the harvest; the transaction is what happened."""
+    try:
+        (mint_a, _), (mint_b, _) = pool_tokens()
+        sigs = (out or {}).get('signatures') or [(out or {}).get('signature')]
+        m = txfees.harvested(config.RPC, sigs, status.get('whirlpool') or config.POOL, mint_a, mint_b)
+    except Exception as e:
+        m = None
+        notify('harvest_unmeasured', reason=f'{type(e).__name__}: {tidy(e)}')
+    if m is None:
+        why = fee_problem(dict(status, feesAccruedA=a, feesAccruedB=b, feesAccrued_USD=usd))
+        if why:
+            # Neither the transaction nor the status read can be trusted: the
+            # last snapshot's figures, a lower bound, are booked instead.
+            s2 = sanitised(status, why)
+            return s2['feesAccruedA'], s2['feesAccruedB'], s2['feesAccrued_USD']
+        notify('harvest_unmeasured', reason='harvest transactions unreadable; the status figures stand')
+        return a, b, usd
+    ma, mb = m
+    musd = (ma * status['price'] + mb) * (status.get('quoteUsd') or 1.0)
+    if abs(musd - (usd or 0.0)) > max(0.01, 0.05 * musd):
+        notify('harvest_measured', reported_a=a, reported_b=b, reported_usd=usd,
+               measured_a=ma, measured_b=mb, measured_usd=round(musd, 6))
+    return ma, mb, musd
+
+
 def dividend(state, status):
     """Harvest into the wallet and report it. The ledger counts it once: the
     snapshot after the harvest records the position's counter at zero."""
@@ -576,6 +662,7 @@ def dividend(state, status):
     out, err = chain('harvest', mint, '--execute')
     state['last_harvest'] = time.time(); save(state)
     if out and out.get('signature') and not err:
+        a, b, usd = measured_fees(out, status, a, b, usd)
         db.record_harvest(mint, a, b, usd, out['signature'])
         db.snapshot(mint, status['price'], status.get('inRange'), status.get('liquidity'),
                     0.0, 0.0, 0.0, wallet(status['whirlpool']).get('walletUsd'), position_usd(status))
@@ -742,6 +829,7 @@ def regime_view(state, status):
     if v:
         v['threshold_base'] = config.REGIME_THRESHOLD
         v['liquidity'] = lq
+        LAST_REGIME['risk'] = calm.risk_metrics(bars)
         v['moves_24h'] = config.CALM_MAX_MOVES - calm_budget_left(state)
         v['guard'] = config.CALM_MAX_MOVES
         if state.get('regime_mode') != v['mode']:
@@ -838,6 +926,18 @@ def track_touch_forecasts(state, rv, status):
         notify('forecast_track_failed', reason=tidy(e))
     if LAST_REGIME.get('calibration'):
         rv['calibration'] = LAST_REGIME['calibration']
+
+
+def record_risk(status, rv, fc):
+    """The risk profile of this poll, to rebalancer.risk_profile. Never
+    blocks the loop: a failure is reported and the poll goes on."""
+    if not rv:
+        return
+    try:
+        db.record_risk_profile(status.get('whirlpool') or config.POOL, status.get('positionMint'),
+                               status['price'], rv, LAST_REGIME.get('risk'), fc)
+    except Exception as e:
+        notify('risk_record_failed', reason=f'{type(e).__name__}: {tidy(e)}')
 
 
 def regime_choice_now(pool, price):
@@ -1454,6 +1554,7 @@ def rebalance(state, status, reason, target=None, band=None, calm_move=False, ex
     harvested = False
     if out and out.get('signature') and not err:
         harvested = True
+        accrued_a, accrued_b, accrued_usd = measured_fees(out, status, accrued_a, accrued_b, accrued_usd)
         db.record_harvest(mint, accrued_a, accrued_b, accrued_usd,
                               out['signature'])
         # The fees just moved from the position to the wallet. Record the
@@ -1631,6 +1732,7 @@ def main():
                         status.get('feesAccruedB', 0.0),
                         status.get('feesAccrued_USD', 0.0),
                         wusd, position_usd(status), forecast=fc)
+        record_risk(status, rv, fc)
 
         if not status.get('inRange'):
             side = 'above' if price > status['upperPrice'] else 'below'

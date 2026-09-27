@@ -30,6 +30,7 @@ import {
   closePosition, harvestPosition, closePositionInstructions,
 } from '@orca-so/whirlpools';
 import { createSolanaRpc, address } from '@solana/kit';
+import { consistentOrcaFees } from './orca_fees.mjs';
 
 const DIR = path.dirname(new URL(import.meta.url).pathname);
 const HALT = path.join(DIR, 'HALT');
@@ -378,16 +379,24 @@ async function status(mintArg) {
             ((out.closeEstA * price + out.closeEstB) * q.usd).toFixed(4));
         }
       }
-      if (cq?.feesQuote) {
-        out.feesAccruedA = ua(cq.feesQuote.feeOwedA);
-        out.feesAccruedB = ub(cq.feesQuote.feeOwedB);
-        // Value the fees in quote units first, then in dollars. Collapsing
-        // straight to dollars assumes token B is a dollar, which is true of
-        // USDC pools and of nothing else.
-        const inQuote = out.feesAccruedA * price + out.feesAccruedB;
-        out.feesAccrued_quote = Number(inQuote.toFixed(9));
-        if (q.usd != null) out.feesAccrued_USD = Number((inQuote * q.usd).toFixed(6));
-      }
+    } catch { /* reporting only: never fail a status read over the close quote */ }
+    try {
+      // Fees from ONE read of position, whirlpool, tick arrays and mints
+      // (orca_fees.mjs), not from the quote above: the SDK builds it from
+      // separate reads, and a tick crossed between them mixes two states
+      // (on Raydium: $6,237 of fees on a $230 position, 2026-09-27). A read
+      // that fails the invariants reports the settled feeOwed: stale, never
+      // more than was earned.
+      const snap = await consistentOrcaFees(rpc, address(d.positionMint), address(d.whirlpool));
+      out.feesSource = snap.ok ? 'feeGrowth' : `feeOwed (stale: ${snap.reason})`;
+      out.feesAccruedA = ua(snap.feeA);
+      out.feesAccruedB = ub(snap.feeB);
+      // Value the fees in quote units first, then in dollars. Collapsing
+      // straight to dollars assumes token B is a dollar, which is true of
+      // USDC pools and of nothing else.
+      const inQuote = out.feesAccruedA * price + out.feesAccruedB;
+      out.feesAccrued_quote = Number(inQuote.toFixed(9));
+      if (q.usd != null) out.feesAccrued_USD = Number((inQuote * q.usd).toFixed(6));
     } catch { /* reporting only: never fail a status read over fee accounting */ }
     console.log(JSON.stringify(out, null, 1));
     return out;

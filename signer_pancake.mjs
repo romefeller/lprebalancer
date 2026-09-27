@@ -52,6 +52,7 @@
 import fs from 'node:fs';
 import { positionRent } from './position_rent.mjs';
 import { SLIPPAGE_REFUSAL } from './slippage.mjs';
+import { consistentFees } from './fee_snapshot.mjs';
 import path from 'node:path';
 import { createRequire } from 'node:module';
 
@@ -337,24 +338,16 @@ async function ownerPositions(connection, owner, p) {
 }
 
 // Fees accrued but not collected: position vs pool fee growth, through the
-// two boundary ticks (PositionUtils.GetPositionFees). When a tick array is
-// unreadable the report falls back to tokenFeesOwed and says so.
-async function positionFees(connection, p, d) {
-  const ts = p.state.tickSpacing;
-  const starts = [TickArrayUtil.getTickArrayStartIndex(d.tickLower, ts), TickArrayUtil.getTickArrayStartIndex(d.tickUpper, ts)];
-  const addrs = starts.map(s => getPdaTickArrayAddress(PROGRAM, p.id, s).publicKey);
-  const accs = await connection.getMultipleAccountsInfo(addrs);
-  const ticks = accs.map((acc, i) => {
-    if (!acc || acc.data.length !== TickArrayLayout.span) return null;
-    const ta = TickArrayLayout.decode(acc.data);
-    const tick = ta.ticks[TickArrayUtil.getTickOffsetInArray(i === 0 ? d.tickLower : d.tickUpper, ts)];
-    return tick;
-  });
-  if (ticks.every(Boolean)) {
-    const f = PositionUtils.GetPositionFees(p.state, d, ticks[0], ticks[1]);
-    return { feeA: f.tokenFeeAmountA, feeB: f.tokenFeeAmountB, source: 'feeGrowth' };
-  }
-  return { feeA: d.tokenFeesOwedA, feeB: d.tokenFeesOwedB, source: 'tokenFeesOwed-only (tick array unreadable)' };
+// two boundary ticks. The pool, the position and the tick arrays come from
+// ONE read (fee_snapshot.mjs): separate reads booked $6,237 of fees on a $230
+// Raydium position on 2026-09-27, when the price crossed a boundary tick
+// between them. A read that is unreadable or fails the invariants reports
+// tokenFeesOwed and says so.
+async function positionFees(connection, p, d, nftMint) {
+  const snap = await consistentFees(connection, PROGRAM, p.id,
+    [{ nftMint, tickLower: d.tickLower, tickUpper: d.tickUpper }], p.state.tickSpacing);
+  if (snap.ok) return { feeA: snap.fees[0].feeA, feeB: snap.fees[0].feeB, source: 'feeGrowth' };
+  return { feeA: d.tokenFeesOwedA, feeB: d.tokenFeesOwedB, source: `tokenFeesOwed-only (${snap.reason})` };
 }
 
 async function positionView(connection, pos, p, info) {
@@ -363,7 +356,7 @@ async function positionView(connection, pos, p, info) {
   const ub = (x) => Number(x.toString()) / 10 ** info.decimalsB;
   const sqrtL = TickUtil.getSqrtPriceAtTick(d.tickLower), sqrtU = TickUtil.getSqrtPriceAtTick(d.tickUpper);
   const amounts = LiquidityMathUtil.getAmountsForLiquidity(p.state.sqrtPriceX64, sqrtL, sqrtU, d.liquidity, false);
-  const fees = await positionFees(connection, p, d);
+  const fees = await positionFees(connection, p, d, pos.nftMint);
   const estA = ua(amounts.amountA), estB = ub(amounts.amountB);
   const feeA = ua(fees.feeA), feeB = ub(fees.feeB);
   const out = {
@@ -721,7 +714,7 @@ async function harvestOrClose(kind, id, execute) {
       const d = pos.data;
       const sqrtL = TickUtil.getSqrtPriceAtTick(d.tickLower), sqrtU = TickUtil.getSqrtPriceAtTick(d.tickUpper);
       const amounts = LiquidityMathUtil.getAmountsForLiquidity(p.state.sqrtPriceX64, sqrtL, sqrtU, d.liquidity, false);
-      const fees = await positionFees(connection, p, d);
+      const fees = await positionFees(connection, p, d, pos.nftMint);
       totA = totA.add(amounts.amountA); totB = totB.add(amounts.amountB);
       feeA = feeA.add(fees.feeA); feeB = feeB.add(fees.feeB);
       const body = kind === 'close'

@@ -290,6 +290,47 @@ def fee_state_span(pool, hours=24):
     return first, last, (last['ts'] - first['ts']).total_seconds()
 
 
+RISK_COLUMNS = ('mode', 'choice_pct', 'held_pct', 'inside', 'p_held', 'threshold', 'threshold_base',
+                'horizon_min', 'stale', 'bar_age_s', 'probs',
+                'sigma_5m_pct', 'velocity', 'instability', 'rms_1h_pct', 'rms_6h_pct', 'rms_24h_pct',
+                'vol_ratio_1h_24h', 'park_1h_pct', 'vol_of_vol_24h', 'acf_r2_lag1_24h', 'arch_lm_24h',
+                'arch_lm_p_24h', 'kurtosis_24h', 'n_bars',
+                'sigma_24h_pct', 'vol_regime_x', 'p_exit_6h', 'p_exit_24h', 'p_exit_72h', 'p_exit_168h',
+                'band_position', 'liquidity_factor', 'inflow', 'volume_x')
+
+
+def risk_row(regime, metrics, forecast):
+    """One risk_profile row from the regime view, calm.risk_metrics and the
+    hourly forecast. Pure; unknown figures are None."""
+    v, m, f = regime or {}, metrics or {}, forecast or {}
+    lq = v.get('liquidity') or {}
+    row = {'mode': v.get('mode'), 'choice_pct': v.get('choice_pct'), 'held_pct': v.get('held_pct'),
+           'inside': v.get('inside'), 'p_held': v.get('p_held'), 'threshold': v.get('threshold'),
+           'threshold_base': v.get('threshold_base'), 'horizon_min': v.get('horizon_minutes'),
+           'stale': bool(v.get('stale')), 'bar_age_s': v.get('bar_age_s'),
+           'probs': json.dumps(v['probs']) if v.get('probs') is not None else None,
+           'sigma_5m_pct': v.get('sigma_5m_pct'), 'velocity': v.get('velocity'),
+           'instability': v.get('instability'),
+           'sigma_24h_pct': f.get('sigma_24h_pct'), 'vol_regime_x': f.get('vol_regime_x'),
+           'band_position': f.get('position'),
+           'liquidity_factor': lq.get('factor'), 'inflow': lq.get('inflow'), 'volume_x': lq.get('volume_x')}
+    for h in (6, 24, 72, 168):
+        row[f'p_exit_{h}h'] = f.get(f'p_exit_{h}h_regime', f.get(f'p_exit_{h}h'))
+    for k in ('rms_1h_pct', 'rms_6h_pct', 'rms_24h_pct', 'vol_ratio_1h_24h', 'park_1h_pct', 'vol_of_vol_24h',
+              'acf_r2_lag1_24h', 'arch_lm_24h', 'arch_lm_p_24h', 'kurtosis_24h', 'n_bars'):
+        row[k] = m.get(k)
+    return row
+
+
+def record_risk_profile(pool, mint, price, regime, metrics, forecast):
+    row = risk_row(regime, metrics, forecast)
+    cols = ('ts', 'pool', 'mint', 'price') + RISK_COLUMNS
+    vals = (now(), pool, mint, price) + tuple(row[c] for c in RISK_COLUMNS)
+    with cursor(commit=True) as cur:
+        cur.execute(f"insert into risk_profile ({', '.join(cols)}) values ({', '.join(['%s'] * len(cols))})", vals)
+        cur.execute("delete from risk_profile where ts < now() - interval '30 days'")
+
+
 def record_touch_forecast(pool, price, horizon_min, threshold, choice, probs):
     with cursor(commit=True) as cur:
         cur.execute('insert into touch_forecasts (ts, pool, price, horizon_min, threshold, choice, probs) '
@@ -458,6 +499,19 @@ def snapshot(mint, price, in_range, liquidity, accrued_a, accrued_b,
               f.get('p_exit_24h_regime', f.get('p_exit_24h')),
               f.get('p_exit_72h_regime', f.get('p_exit_72h')),
               f.get('position')))
+
+
+def last_fees(mint):
+    """The accrued fees at the last snapshot of `mint`, and its age in hours;
+    None when there is none. The yardstick of guards.fee_read_problem."""
+    with cursor() as cur:
+        cur.execute("""select accrued_a, accrued_b, accrued_usd,
+                              extract(epoch from (now() - ts)) / 3600.0 hours
+                       from snapshots where mint = %s order by ts desc, id desc limit 1""", (mint,))
+        r = cur.fetchone()
+    if not r:
+        return None
+    return {k: (float(r[k]) if r[k] is not None else None) for k in ('accrued_a', 'accrued_b', 'accrued_usd', 'hours')}
 
 
 def record_payout(config_name, position, token_mint, symbol, amount, usd, kind,

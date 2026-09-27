@@ -25,27 +25,23 @@ def split(fees, payout_mint, sol_before, gas_reserve):
     dicts {mint, symbol, amount, usd, kind} with kind 'paid', 'reinvested' or
     'gas'; amounts of zero are dropped."""
     gas_low = sol_before is not None and sol_before < gas_reserve
-    need = max(gas_reserve - (sol_before or 0.0), 0.0) if gas_low else 0.0
+    need = max(gas_reserve - sol_before, 0.0) if gas_low else 0.0
     out = []
 
     def add(mint, sym, amt, px, kind):
+        # the one place a zero amount is dropped
         if amt > 0:
             out.append({'mint': mint, 'symbol': sym, 'amount': amt,
                         'usd': (amt * px) if px is not None else None, 'kind': kind})
 
     for mint, sym, amt, px in fees:
         amt = float(amt or 0.0)
-        if amt <= 0:
-            continue
-        if mint == NATIVE_MINT and need > 0:
+        if amt < 0:
+            continue                    # a negative fee is no fee, and must not raise the gas need
+        if mint == NATIVE_MINT:
             g = min(amt, need)
             need -= g
             add(mint, sym, g, px, 'gas')
             amt -= g
-            if amt <= 0:
-                continue
-        if payout_mint and mint == payout_mint and not gas_low:
-            add(mint, sym, amt, px, 'paid')
-        else:
-            add(mint, sym, amt, px, 'reinvested')
+        add(mint, sym, amt, px, 'paid' if mint == payout_mint and not gas_low else 'reinvested')
     return out

@@ -107,3 +107,45 @@ def migration_target(target, *, execute_dexes, signers, known):
     if target['token_a']['address'] == target['token_b']['address']:
         raise Refused('both tokens are the same mint')
     return True
+
+
+# A fee read the chain cannot have produced. On 2026-09-27 a Raydium status
+# read the pool, the position and the tick arrays at different slots while
+# the price crossed a boundary tick, and reported $6,237 of fees on a $230
+# position. The gas split then booked $2,830 as gas and $3,408 as reinvested.
+# The signers now read atomically; this check stands behind them for every
+# venue. Bounds, generous on purpose (the fastest real rate so far is about
+# 0.03% of the position an hour):
+FEE_MAX_FRACTION = 0.10         # accrued fees above 10% of the position
+FEE_MAX_RISE_PER_HOUR = 0.01    # a rise of more than 1% of the position an hour
+FEE_RISE_SLACK = 0.002          # plus 0.2% of the position, for short gaps
+
+
+def _nonneg(x):
+    return x is None or (isinstance(x, (int, float)) and not isinstance(x, bool)
+                         and math.isfinite(x) and x >= 0)
+
+
+def fee_read_problem(status, prev_usd=None, hours=None):
+    """None when the fee figures of a status read are possible, else why not.
+
+    `status` is a signer's status answer; `prev_usd` the accrued fees in
+    dollars at the last snapshot of the same position, `hours` the time since.
+    A fall is always possible (a harvest resets the counter); a rise or a
+    level no position of this size can earn is not."""
+    a, b, usd = status.get('feesAccruedA'), status.get('feesAccruedB'), status.get('feesAccrued_USD')
+    for x, n in ((a, 'feesAccruedA'), (b, 'feesAccruedB'), (usd, 'feesAccrued_USD')):
+        if not _nonneg(x):
+            return f'{n} is {x!r}, not a non-negative finite number'
+    pos = status.get('positionUsd')
+    if not isinstance(pos, (int, float)) or not math.isfinite(pos) or pos <= 0 or usd is None:
+        return None
+    if usd > FEE_MAX_FRACTION * pos:
+        return f'fees ${usd:.4f} exceed {FEE_MAX_FRACTION:.0%} of the ${pos:.2f} position'
+    if prev_usd is not None and hours is not None and hours >= 0:
+        rise = usd - float(prev_usd)
+        allowed = pos * (FEE_MAX_RISE_PER_HOUR * hours + FEE_RISE_SLACK)
+        if rise > allowed:
+            return (f'fees rose ${rise:.4f} in {hours:.2f}h on a ${pos:.2f} position '
+                    f'(at most ${allowed:.4f} is possible)')
+    return None

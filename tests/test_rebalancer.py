@@ -379,6 +379,7 @@ class Proactive(unittest.TestCase):
                 mock.patch.object(rebalancer, 'notify_book', lambda ev, **kw: sent.append(ev)), \
                 mock.patch.object(rebalancer.db, 'record_harvest', lambda *a: harvests.append(a)), \
                 mock.patch.object(rebalancer.db, 'snapshot', lambda *a, **k: snaps.append(a)), \
+                mock.patch.object(rebalancer, 'pool_tokens', lambda: (('A', 'SOL'), ('B', 'USDC'))), \
                 mock.patch.object(rebalancer.db, 'event', lambda *a: None):
             self.assertTrue(rebalancer.dividend(state, status))
         self.assertEqual(sent, ['DIVIDEND']); self.assertEqual(len(harvests), 1)
