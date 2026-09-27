@@ -331,6 +331,83 @@ def record_risk_profile(pool, mint, price, regime, metrics, forecast):
         cur.execute("delete from risk_profile where ts < now() - interval '30 days'")
 
 
+# risk_profile column -> band_profile mean column
+BAND_MEANS = {'sigma_5m_pct': 'sigma_mean', 'velocity': 'velocity_mean', 'instability': 'instability_mean',
+              'vol_of_vol_24h': 'vol_of_vol_mean', 'arch_lm_24h': 'arch_lm_mean', 'arch_lm_p_24h': 'arch_lm_p_mean',
+              'acf_r2_lag1_24h': 'acf_r2_mean', 'kurtosis_24h': 'kurtosis_mean', 'vol_ratio_1h_24h': 'vol_ratio_mean',
+              'rms_1h_pct': 'rms_1h_mean', 'rms_24h_pct': 'rms_24h_mean', 'park_1h_pct': 'park_1h_mean',
+              'liquidity_factor': 'liquidity_factor_mean', 'volume_x': 'volume_x_mean'}
+# risk_profile column -> band_profile column, read at the first poll of the band
+BAND_OPEN = {'mode': 'mode_open', 'sigma_5m_pct': 'sigma_open', 'velocity': 'velocity_open',
+             'instability': 'instability_open', 'arch_lm_p_24h': 'arch_lm_p_open', 'vol_ratio_1h_24h': 'vol_ratio_open',
+             'choice_pct': 'choice_pct_open', 'p_held': 'p_held_open', 'p_exit_6h': 'p_exit_6h_open'}
+BAND_CLOSE = {'mode': 'mode_close', 'sigma_5m_pct': 'sigma_close', 'velocity': 'velocity_close'}
+
+
+def record_band_profile(mint, event, reason=None, at=None):
+    """Write the one band_profile row of `mint` (sql/017): at a harvest the
+    running figures, at the rebalance that ends the band the final ones, with
+    the time of that rebalance. Every figure is derived from risk_profile,
+    snapshots and harvests, so a second write of the same state gives the same
+    row. Returns the row, or None when the position is unknown."""
+    if event not in ('harvest', 'rebalance'):
+        raise ValueError(f'event must be harvest or rebalance, not {event!r}')
+    at = at or now()
+    means = ', '.join(f'avg(r.{k}) {v}' for k, v in BAND_MEANS.items())
+    opens = ', '.join(f'o.{k} {v}' for k, v in BAND_OPEN.items())
+    closes = ', '.join(f'c.{k} {v}' for k, v in BAND_CLOSE.items())
+    cols = (['mint', 'updated_at', 'last_event', 'final', 'rebalanced_at', 'exit_reason', 'survived_hours',
+             'polls', 'in_range_share', 'mode_main', 'mode_share', 'sigma_max', 'velocity_abs_mean',
+             'fees_a', 'fees_b', 'fees_usd', 'harvests', 'fees_per_hour_usd']
+            + list(BAND_MEANS.values()) + list(BAND_OPEN.values()) + list(BAND_CLOSE.values()))
+    keep = {'mint', 'rebalanced_at', 'exit_reason'}
+    updates = ', '.join(f'{c} = excluded.{c}' for c in cols if c not in keep)
+    sql = f"""
+        with p as (
+            select mint, opened_at, coalesce(closed_at, %(at)s) end_at, closed_at is not null closed
+            from positions where mint = %(mint)s
+        ), r as (
+            select r.* from risk_profile r, p where r.mint = p.mint and r.ts between p.opened_at and p.end_at
+        ), o as (select * from r order by ts asc, id asc limit 1),
+           c as (select * from r order by ts desc, id desc limit 1),
+           m as (select mode, count(*) n from r where mode is not null group by mode),
+           agg as (select count(*) polls, max(sigma_5m_pct) sigma_max, avg(abs(velocity)) velocity_abs_mean,
+                          {means} from r),
+           s as (select avg(case when in_range then 1.0 else 0.0 end) in_range_share
+                 from snapshots sn, p where sn.mint = p.mint and sn.ts between p.opened_at and p.end_at),
+           h as (select coalesce(sum(fee_a), 0) fees_a, coalesce(sum(fee_b), 0) fees_b,
+                        coalesce(sum(fee_usd), 0) fees_usd, count(*) harvests
+                 from harvests where mint = %(mint)s),
+           band as (
+            select p.mint, now() updated_at, %(event)s last_event,
+                   (%(event)s = 'rebalance' and p.closed) final,
+                   case when %(event)s = 'rebalance' then %(at)s end rebalanced_at,
+                   %(reason)s exit_reason,
+                   extract(epoch from (p.end_at - p.opened_at)) / 3600.0 survived_hours,
+                   agg.polls, s.in_range_share,
+                   (select mode from m order by n desc, mode limit 1) mode_main,
+                   (select jsonb_object_agg(mode, round(n::numeric / nullif(agg.polls, 0), 4)) from m) mode_share,
+                   agg.sigma_max, agg.velocity_abs_mean,
+                   h.fees_a, h.fees_b, h.fees_usd, h.harvests,
+                   h.fees_usd / nullif(extract(epoch from (p.end_at - p.opened_at)) / 3600.0, 0) fees_per_hour_usd,
+                   {', '.join('agg.' + v for v in BAND_MEANS.values())},
+                   {opens}, {closes}
+            from p cross join agg cross join s cross join h
+                 left join o on true left join c on true
+           )
+        insert into band_profile ({', '.join(cols)})
+        select {', '.join(cols)} from band
+        on conflict (mint) do update set {updates},
+            rebalanced_at = coalesce(band_profile.rebalanced_at, excluded.rebalanced_at),
+            exit_reason = coalesce(band_profile.exit_reason, excluded.exit_reason)   -- the rebalance that ended it
+        returning *
+    """
+    with cursor(commit=True) as cur:
+        cur.execute(sql, {'mint': mint, 'event': event, 'reason': reason, 'at': at})
+        r = cur.fetchone()
+    return dict(r) if r else None
+
+
 def record_touch_forecast(pool, price, horizon_min, threshold, choice, probs):
     with cursor(commit=True) as cur:
         cur.execute('insert into touch_forecasts (ts, pool, price, horizon_min, threshold, choice, probs) '

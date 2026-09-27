@@ -654,6 +654,15 @@ def measured_fees(out, status, a, b, usd):
     return ma, mb, musd
 
 
+def band_profile(mint, event, reason=None):
+    """The band's lifetime profile (db.record_band_profile), after a harvest
+    or the rebalance that ends it. Never blocks a move."""
+    try:
+        db.record_band_profile(mint, event, reason)
+    except Exception as e:
+        notify('band_profile_failed', reason=f'{type(e).__name__}: {tidy(e)}', mint=mint, event=event)
+
+
 def dividend(state, status):
     """Harvest into the wallet and report it. The ledger counts it once: the
     snapshot after the harvest records the position's counter at zero."""
@@ -667,6 +676,7 @@ def dividend(state, status):
         db.snapshot(mint, status['price'], status.get('inRange'), status.get('liquidity'),
                     0.0, 0.0, 0.0, wallet(status['whirlpool']).get('walletUsd'), position_usd(status))
         db.event('DIVIDEND', f'${usd:.4f} harvested to the wallet')
+        band_profile(mint, 'harvest')
         notify_book('DIVIDEND', collected_usd=round(usd, 4), collected_a=a, collected_b=b,
                     signature=out['signature'])
         try:
@@ -989,6 +999,7 @@ def resume_reopen(state):
     if not pending.get('closed'):
         # The process may have stopped after close landed but before recording it.
         db.close_position(pending['mint'], None, pending.get('withdraw_usd'))
+        band_profile(pending['mint'], 'rebalance', pending.get('reason'))
         moves = state.setdefault('calm_times', [])
         if pending['started_at'] not in moves:
             moves.append(pending['started_at'])
@@ -1631,6 +1642,7 @@ def rebalance(state, status, reason, target=None, band=None, calm_move=False, ex
             distribute(state, mint, accrued_a, accrued_b)
         except Exception as e:
             notify('payout_failed', reason=f'{type(e).__name__}: {tidy(e)}')
+    band_profile(mint, 'rebalance', reason)
     notify_book('CLOSE', positionMint=mint,
                 signature=(out or {}).get('signature'), reason=reason)
 

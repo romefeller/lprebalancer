@@ -24,7 +24,7 @@ BTC_QUOTE_POOL = 'CeaZcxBNLpJWtxzt58qQmfMBtJY8pQLvursXTJYGQpbN' # SOL/cbBTC, quo
 
 def reset_ledger():
     with db.cursor(commit=True) as cur:
-        cur.execute('truncate positions, harvests, snapshots, events')
+        cur.execute('truncate positions, band_profile, harvests, snapshots, events')
 
 
 def ensure_profile(name='sol-usdc', **over):

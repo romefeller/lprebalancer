@@ -55,12 +55,16 @@ TARGETS = {
                 PY_TESTS('test_money_paths.RiskRecord', 'test_fee_integrity.RiskProfileRecord', 'test_fee_integrity.Replay')),
     'record_risk': ('rebalancer.py', ['record_risk'], PY_TESTS('test_money_paths.RiskRecord', 'test_fee_integrity.RiskProfileRecord')),
     'rate_limit': ('engine.py', ['rate_limited', 'curl'], PY_TESTS('test_rate_limit')),
+    'band_profile': ('db.py', ['record_band_profile'], PY_TESTS('test_band_profile')),
+    'band_hooks': ('rebalancer.py', ['band_profile'], PY_TESTS('test_band_profile.Hooks')),
     'orca_fees': ('orca_fees.mjs', ['growthInside', 'ownFees', 'checkOrca', 'transferFeeOf', 'feesFromOrcaSnapshot',
                                     'snapshotAddresses', 'consistentOrcaFees'], NODE_TESTS('test_orca_fees.mjs')),
     'fee_snapshot': ('fee_snapshot.mjs', ['wrappingSubU128', 'checkFees', 'feesFromSnapshot', 'snapshotKeys',
                                           'decodeSnapshot', 'consistentFees'],
                      NODE_TESTS('test_fee_snapshot.mjs')),
 }
+
+SQL_TARGETS = {'band_profile'}
 
 # Mutants that cannot change behaviour, with the reason. Keyed by
 # (target, function, description) as the report prints them.
@@ -293,6 +297,39 @@ def js_mutants(src, functions):
     return out
 
 
+# --- SQL mutants: text swaps inside the SQL a Python function runs -----------------
+
+SQL_SWAPS = [
+    (' asc', ' desc'), (' desc', ' asc'), ('avg(', 'max('), ('max(', 'min('), ('count(*) polls', '(count(*) + 1) polls'),
+    ('coalesce(closed_at, %(at)s)', 'coalesce(%(at)s, closed_at)'),
+    ('between p.opened_at and p.end_at', "between p.opened_at - interval '1 hour' and p.end_at"),
+    ('between p.opened_at and p.end_at', "between p.opened_at and p.end_at + interval '2 hours'"),
+    ('then 1.0 else 0.0', 'then 0.0 else 1.0'), ('n desc, mode', 'n asc, mode'), ('3600.0', '60.0'),
+    ('coalesce(band_profile.rebalanced_at, excluded.rebalanced_at)', 'coalesce(excluded.rebalanced_at, band_profile.rebalanced_at)'),
+    ('coalesce(excluded.exit_reason, band_profile.exit_reason)', 'coalesce(band_profile.exit_reason, excluded.exit_reason)'),
+    ("= 'rebalance' and p.closed", "= 'rebalance' or p.closed"), ("= 'rebalance' then", "= 'harvest' then"),
+    ('r.mint = p.mint', 'r.pool = r.pool'), ('sn.mint = p.mint', 'sn.pool = sn.pool' if False else 'true'),
+    ('where mint = %(mint)s),', 'where true),'), ('sum(fee_usd)', 'max(fee_usd)'), ('abs(velocity)', 'velocity'),
+    ('nullif(agg.polls, 0)', 'nullif(agg.polls + 1, 0)'), ('limit 1) mode_main', 'offset 1 limit 1) mode_main'),
+]
+
+
+def sql_mutants(src, functions):
+    tree = ast.parse(src)
+    lines = src.splitlines(keepends=True)
+    out = []
+    for fn in [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name in functions]:
+        a = sum(len(l) for l in lines[:fn.lineno - 1]); b = sum(len(l) for l in lines[:fn.end_lineno])
+        body = src[a:b]
+        for old, new in SQL_SWAPS:
+            start = 0
+            while (i := body.find(old, start)) >= 0:
+                mutated = body[:i] + new + body[i + len(old):]
+                out.append((fn.name, f'sql {old!r} -> {new!r} @{i}', src[:a] + mutated + src[b:]))
+                start = i + len(old)
+    return out
+
+
 # --- running -------------------------------------------------------------------------
 
 def worker_setup(i):
@@ -326,6 +363,8 @@ def main(names):
         f, fns, cmd = TARGETS[name]
         src = (ROOT / f).read_text()
         muts = js_mutants(src, fns) if f.endswith('.mjs') else py_mutants(src, fns)
+        if name in SQL_TARGETS:
+            muts += sql_mutants(src, fns)
         todo += [(name, f, cmd, fn, desc, code) for fn, desc, code in muts]
     print(f'{len(todo)} mutants over {len(names or TARGETS)} targets, {WORKERS} workers', flush=True)
     setups = [worker_setup(i) for i in range(WORKERS)]
