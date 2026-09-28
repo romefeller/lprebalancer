@@ -26,6 +26,7 @@ import json
 import os
 from contextlib import contextmanager
 from datetime import datetime, timezone
+import datetime as dt
 
 import psycopg2
 import psycopg2.extras
@@ -772,6 +773,155 @@ def _paid_usd(config_name):
         return 0.0
 
 
+def daily_line(day):
+    """One UTC day of the book: re-centres (bands opened), fees harvested, and
+    the value of the book (equity plus what was paid out) against a 50/50
+    SOL/USDC hold of the day's opening equity. `day` is a date. None when the
+    day has no snapshot with equity. Assumes no deposits or withdrawals other
+    than the payouts: the ledger does not record them."""
+    start = dt.datetime.combine(day, dt.time(0), tzinfo=dt.timezone.utc)
+    end = start + dt.timedelta(days=1)
+    w = {'s': start, 'e': end}
+    with cursor() as cur:
+        cur.execute("""select (array_agg(equity_usd order by ts asc, id asc))[1] e0,
+                              (array_agg(price order by ts asc, id asc))[1] p0,
+                              (array_agg(equity_usd order by ts desc, id desc))[1] e1,
+                              (array_agg(price order by ts desc, id desc))[1] p1
+                       from snapshots where ts >= %(s)s and ts < %(e)s and equity_usd is not null""", w)
+        a = cur.fetchone()                    # an aggregate: always one row
+        if a['e0'] is None:
+            return None
+        cur.execute('select count(*) n from positions where opened_at >= %(s)s and opened_at < %(e)s', w)
+        n = cur.fetchone()['n']
+        cur.execute('select coalesce(sum(fee_usd), 0) f from harvests where ts >= %(s)s and ts < %(e)s', w)
+        f = float(cur.fetchone()['f'])
+        cur.execute("select coalesce(sum(usd), 0) u from payouts where kind in ('paid', 'uncertain') "
+                    "and ts >= %(s)s and ts < %(e)s", w)
+        paid = float(cur.fetchone()['u'])
+    e0, p0, e1, p1 = float(a['e0']), float(a['p0']), float(a['e1']), float(a['p1'])
+    value = e1 + paid
+    hold = e0 * (0.5 + 0.5 * p1 / p0) if p0 > 0 else None
+    return {'day': day.isoformat(), 'complete': now() >= end,
+            'recentres': int(n), 'fees_usd': round(f, 4),
+            'fees_per_recentre_usd': round(f / n, 4) if n else None,
+            'price_open': round(p0, 4), 'price_close': round(p1, 4),
+            'equity_open': round(e0, 4), 'equity_close': round(e1, 4), 'paid_out_usd': round(paid, 4),
+            'value_change_usd': round(value - e0, 4),
+            'hold_50_50_usd': round(hold, 4) if hold is not None else None,
+            'vs_hold_usd': round(value - hold, 4) if hold is not None else None}
+
+
+def daily_lines(days=2):
+    """The last `days` UTC days, newest first (today is the running one)."""
+    today = now().date()
+    out = []
+    for k in range(days):
+        line = daily_line(today - dt.timedelta(days=k))
+        if line:
+            out.append(line)
+    return out
+
+
+def since_start(extra_usd=0.0):
+    """Profit since the bot started, against the capital it started with and
+    every deposit or withdrawal since (capital_flows), not against the first
+    snapshot. `extra_usd` is value the snapshots do not count (rent in empty
+    token accounts, reward dust), from the equity audit. Benchmarks: holding
+    what the baseline held (SOL-denominated) plus the flows, and a 50/50 hold
+    of the baseline. None without a baseline or a snapshot."""
+    with cursor() as cur:
+        cur.execute("select ts, sol, usdc, usd, price from capital_flows where kind = 'baseline'")
+        base = cur.fetchone()
+        cur.execute("select equity_usd, price, ts from snapshots where equity_usd is not null order by ts desc, id desc limit 1")
+        last = cur.fetchone()
+        if not base or not last:
+            return None
+        cur.execute("""select coalesce(sum(case when kind = 'deposit' then usd else -usd end), 0) net_usd,
+                              coalesce(sum(case when kind = 'deposit' then sol else -sol end), 0) net_sol,
+                              coalesce(sum(case when kind = 'deposit' then usdc else -usdc end), 0) net_usdc
+                       from capital_flows where kind in ('deposit', 'withdrawal')""")
+        fl = cur.fetchone()
+        cur.execute("select coalesce(sum(usd), 0) u from payouts where kind in ('paid', 'uncertain') and ts >= %s",
+                    (base['ts'],))
+        paid = float(cur.fetchone()['u'])
+    p0, p1 = float(base['price']), float(last['price'])
+    start = float(base['usd']) + float(fl['net_usd'])
+    value = float(last['equity_usd']) + float(extra_usd or 0.0) + paid
+    hold = (float(base['sol']) + float(fl['net_sol'])) * p1 + float(base['usdc']) + float(fl['net_usdc'])
+    hold_50 = float(base['usd']) * (0.5 + 0.5 * p1 / p0) + float(fl['net_usd'])
+    days = (last['ts'] - base['ts']).total_seconds() / 86400
+    return {'since': base['ts'].isoformat(), 'days': round(days, 2),
+            'start_usd': round(start, 4), 'start_sol': round(float(base['sol']) + float(fl['net_sol']), 6),
+            'price_start': p0, 'price_now': round(p1, 4),
+            'equity_usd': round(float(last['equity_usd']), 4), 'uncounted_usd': round(float(extra_usd or 0.0), 4),
+            'paid_out_usd': round(paid, 4), 'value_usd': round(value, 4),
+            'profit_usd': round(value - start, 4), 'profit_pct': round((value / start - 1) * 100, 3) if start else None,
+            'hold_start_assets_usd': round(hold, 4), 'vs_hold_start_assets_usd': round(value - hold, 4),
+            'hold_50_50_usd': round(hold_50, 4), 'vs_hold_50_50_usd': round(value - hold_50, 4)}
+
+
+def _since_start_or_none():
+    try:
+        return since_start(float(audit_value('uncounted_usd') or 0.0))
+    except Exception:
+        return None
+
+
+def audit_value(key):
+    """A value the audits keep (audit_state), or None."""
+    with cursor() as cur:
+        cur.execute('select value from audit_state where key = %s', (key,))
+        r = cur.fetchone()
+    return r['value'] if r else None
+
+
+def set_audit_value(key, value):
+    with cursor(commit=True) as cur:
+        cur.execute('insert into audit_state (key, value, ts) values (%s, %s, now()) '
+                    'on conflict (key) do update set value = excluded.value, ts = excluded.ts', (key, str(value)))
+
+
+def record_audit(run_id, check_name, status, detail):
+    if status not in ('ok', 'warn', 'fail'):
+        raise ValueError(f'status must be ok, warn or fail, not {status!r}')
+    with cursor(commit=True) as cur:
+        cur.execute('insert into audits (run_id, check_name, status, detail) values (%s,%s,%s,%s)',
+                    (run_id, check_name, status, json.dumps(detail, default=str)))
+        cur.execute("delete from audits where ts < now() - interval '30 days'")
+
+
+def record_flow(ts, kind, sol, usdc, usd, price, signature, detail):
+    """A deposit or withdrawal the flows audit found. One row per signature."""
+    if kind not in ('deposit', 'withdrawal'):
+        raise ValueError(f'kind must be deposit or withdrawal, not {kind!r}')
+    with cursor(commit=True) as cur:
+        cur.execute('insert into capital_flows (ts, kind, sol, usdc, usd, price, signature, detail) '
+                    'values (%s,%s,%s,%s,%s,%s,%s,%s) on conflict (signature) do nothing',
+                    (ts, kind, sol, usdc, usd, price, signature, detail))
+        return cur.rowcount == 1
+
+
+def _daily_or_none():
+    try:
+        return daily_lines(2)
+    except Exception:
+        return None             # the book never fails over its daily line
+
+
+def _deployment(latest, equity):
+    """What is in the LP position and what is in the wallet, from the latest
+    snapshot. The position mark is zero when the latest snapshot's position is
+    closed (the money is back in the wallet)."""
+    if not latest:
+        return {'lp_usd': None, 'wallet_usd': None, 'deployed_pct': None}
+    lp = _f(latest.get('position_usd')) if latest.get('open') else 0.0
+    wallet = latest.get('wallet_usd')
+    eq = _f(equity) if equity is not None else None
+    return {'lp_usd': round(lp, 2),
+            'wallet_usd': round(_f(wallet), 2) if wallet is not None else None,
+            'deployed_pct': round(lp / eq * 100, 1) if eq else None}
+
+
 def stats(token_a=None, token_b=None):
     """Everything cumulative, in both tokens and in dollars.
 
@@ -801,7 +951,7 @@ def stats(token_a=None, token_b=None):
         # reported as $0.51 of fees.
         cur.execute('select s.ts, s.mint, s.price, s.accrued_a, s.accrued_b, '
                     's.accrued_usd, s.equity_usd, s.in_range, s.p_exit_6h, s.p_exit_24h, '
-                    's.p_exit_72h, s.band_position, p.opened_at, '
+                    's.p_exit_72h, s.band_position, s.position_usd, s.wallet_usd, p.opened_at, '
                     '(p.mint is not null and p.closed_at is null) as open '
                     'from snapshots s left join positions p on p.mint = s.mint '
                     'order by s.id desc limit 1')
@@ -924,6 +1074,8 @@ def stats(token_a=None, token_b=None):
         'positions_opened': pos['total'], 'positions_open_now': pos['open_now'],
         'rebands': ev['rebands'], 'failures': ev['failures'],
         'equity_usd': round(_f(equity), 2) if equity is not None else None,
+        # what is in the LP position (its mark, rent included) and what is not
+        **_deployment(latest, equity),
         'equity_start_usd': round(_f(started), 2) if started is not None else None,
         # Payouts leave the LP wallet by design; they are income, not a loss
         # (review, 2026-09-26: the book counted every payout against P&L).
@@ -933,6 +1085,8 @@ def stats(token_a=None, token_b=None):
                          if span and span['ir'] is not None else None),
         'tracked_days': round(days, 3) if days else None,
         'split': payout_totals(cfg.get('name')) if cfg.get('payout_enabled') else None,
+        'daily': _daily_or_none(),
+        'since_start': _since_start_or_none(),
         'last_price': _f(latest and latest['price']) or None,
         'last_seen': latest['ts'].isoformat() if latest else None,
         # the survival figures recorded at the last poll of the open position

@@ -213,11 +213,46 @@ function checkImpact(view) {
   }
 }
 
-async function buildSwapTx(quote, payer) {
-  const built = await jpost(`${JUPITER}/swap/v1/swap`, {
-    quoteResponse: stripInternal(quote), userPublicKey: payer.publicKey.toBase58(),
+// The priority fee: Jupiter's 'auto', the cheapest of its options when
+// measured live (2026-09-28: auto ~100k lamports, 43k on average over the
+// last days; 'medium' 1.6M). Every built swap is then checked against a hard
+// ceiling before it is signed, so an anomaly can cost at most
+// PRIORITY_MAX_LAMPORTS (500k lamports, about $0.06), never millions.
+export const PRIORITY_MAX_LAMPORTS = Number(process.env.LPBOT_PRIORITY_MAX_LAMPORTS ?? 500_000);
+
+export function swapRequestBody(quote, payerKey) {
+  return {
+    quoteResponse: stripInternal(quote), userPublicKey: payerKey,
     wrapAndUnwrapSol: true, dynamicComputeUnitLimit: true, prioritizationFeeLamports: 'auto',
-  });
+  };
+}
+
+// The priority fee a transaction pays, in lamports: compute-unit limit times
+// compute-unit price (micro-lamports), from its ComputeBudget instructions.
+// Without a SetComputeUnitLimit the runtime default of 200k units per
+// instruction applies, capped at 1.4M.
+const COMPUTE_BUDGET = 'ComputeBudget111111111111111111111111111111';
+export function priorityFeeLamports(tx) {
+  const keys = tx.message.staticAccountKeys.map(k => k.toBase58());
+  let limit = null, price = 0n, others = 0;
+  for (const ix of tx.message.compiledInstructions) {
+    const d = Buffer.from(ix.data);
+    if (keys[ix.programIdIndex] !== COMPUTE_BUDGET) { others += 1; continue; }
+    if (d[0] === 2 && d.length >= 5) limit = BigInt(d.readUInt32LE(1));
+    if (d[0] === 3 && d.length >= 9) price = d.readBigUInt64LE(1);
+  }
+  const units = limit ?? BigInt(Math.min(200_000 * others, 1_400_000));
+  return (units * price + 999_999n) / 1_000_000n;
+}
+
+export function verifyPriorityFee(tx, cap = PRIORITY_MAX_LAMPORTS) {
+  const fee = priorityFeeLamports(tx);
+  if (fee > BigInt(cap)) throw new Error(`priority fee ${fee} lamports exceeds the ${cap} cap; refusing`);
+  return true;
+}
+
+async function buildSwapTx(quote, payer) {
+  const built = await jpost(`${JUPITER}/swap/v1/swap`, swapRequestBody(quote, payer.publicKey.toBase58()));
   if (!built?.swapTransaction) throw new Error(`swap build returned no transaction: ${JSON.stringify(built).slice(0, 200)}`);
   const tx = VersionedTransaction.deserialize(Buffer.from(built.swapTransaction, 'base64'));
   return { built, tx };
@@ -355,6 +390,7 @@ async function performSwap({ connection, payer }, inInfo, outInfo, amountHuman, 
   checkImpact(view);
   const { built, tx } = await buildSwapTx(quote, payer);
   verifyTxShape(tx, payer.publicKey.toBase58());
+  verifyPriorityFee(tx);
   const verified = await verifyBalances(connection, payer, tx, inInfo, outInfo, rawIn, quote);
   const report = {
     verified,

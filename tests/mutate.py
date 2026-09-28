@@ -57,6 +57,21 @@ TARGETS = {
     'rate_limit': ('engine.py', ['rate_limited', 'curl'], PY_TESTS('test_rate_limit')),
     'band_profile': ('db.py', ['record_band_profile'], PY_TESTS('test_band_profile')),
     'band_hooks': ('rebalancer.py', ['band_profile'], PY_TESTS('test_band_profile.Hooks')),
+    'daily': ('db.py', ['daily_line', 'daily_lines', '_daily_or_none'], PY_TESTS('test_daily')),
+    'daily_report': ('rebalancer.py', ['daily_report'], PY_TESTS('test_daily.Report')),
+    'priority_fee': ('swap_jupiter.mjs', ['swapRequestBody', 'priorityFeeLamports', 'verifyPriorityFee'],
+                     NODE_TESTS('test_priority_fee.mjs', 'test_security.mjs')),
+    'audit_checks': ('audit.py', ['check_idle', 'check_gas', 'check_equity', 'classify_tx', 'check_flows', 'check_harvest',
+                                  'payout_received', 'check_positions', 'check_owed', 'check_empty', 'check_fee_reads',
+                                  'keep_mints', 'known_signatures'], PY_TESTS('test_audit', 'test_audit_runner')),
+    'audit_run': ('audit.py', ['run'], PY_TESTS('test_audit.Runner', 'test_audit_runner')),
+    'capital_db': ('db.py', ['since_start', 'record_flow', 'audit_value', 'set_audit_value', 'record_audit',
+                             '_since_start_or_none'], PY_TESTS('test_audit.SinceStart', 'test_audit.Runner', 'test_audit_more.SinceStartEdges')),
+    'deploy_all': ('rebalancer.py', ['deployable_usd', 'capital', 'side_target_fraction', 'deposit_caps', 'balance_wallet'],
+                   PY_TESTS('test_deploy_all', 'test_audit_more.QuoteFallbacks', 'test_rebalancer.DepositCaps', 'test_payout.SwapGate', 'test_payout.SwapRetry')),
+    'loop_hooks': ('rebalancer.py', ['janitor', 'run_audits'], PY_TESTS('test_audit.Hooks', 'test_audit_more.Hooks')),
+    'janitor_js': ('janitor.mjs', ['planClose', 'closeInstructions', 'verifyCloseTx'], NODE_TESTS('test_janitor.mjs')),
+    'book_format': ('book_format.mjs', ['equityLine', 'lpLine', 'sinceStartLine'], NODE_TESTS('test_book_format.mjs')),
     'orca_fees': ('orca_fees.mjs', ['growthInside', 'ownFees', 'checkOrca', 'transferFeeOf', 'feesFromOrcaSnapshot',
                                     'snapshotAddresses', 'consistentOrcaFees'], NODE_TESTS('test_orca_fees.mjs')),
     'fee_snapshot': ('fee_snapshot.mjs', ['wrappingSubU128', 'checkFees', 'feesFromSnapshot', 'snapshotKeys',
@@ -64,7 +79,7 @@ TARGETS = {
                      NODE_TESTS('test_fee_snapshot.mjs')),
 }
 
-SQL_TARGETS = {'band_profile'}
+SQL_TARGETS = {'band_profile', 'daily', 'capital_db'}
 
 # Mutants that cannot change behaviour, with the reason. Keyed by
 # (target, function, description) as the report prints them.
@@ -93,6 +108,12 @@ EQUIVALENT = {
     ('orca_fees', 'feesFromOrcaSnapshot', '\\?\\? -> || @L111'): 'an error message is never empty: ?? and || agree',
     ('fee_snapshot', 'decodeSnapshot', '\\?(?=\\s) -> && false ? @L141'):
         'the array key is only echoed back inside the parsed container; no fee depends on it',
+    ('daily', 'daily_line', 'swap GtE->Gt @L804'): 'only the exact instant of midnight differs; now() is never that instant in a test or a poll',
+    ('audit_checks', 'known_signatures', "skip if body @L218"): "a cheap prefilter: a line without the word is skipped either way by the lookups below",
+    ('audit_checks', 'keep_mints', 'drop operand 1 @L402'): "a None reward list raises inside the try, which keeps the base set either way",
+    ('capital_db', 'record_flow', "sql 'on conflict (signature) do nothing' -> 'on conflict do nothing' @466"):
+        "the only other unique constraint is on the baseline, which record_flow cannot write",
+    ('janitor_js', 'planClose', '\\?\\? -> || @L45'): "a withheld amount is a number or absent: ?? and || agree",
 }
 # measured_fees line 651 only decides whether a disagreement is notified; the
 # figures booked do not depend on it.
@@ -311,6 +332,14 @@ SQL_SWAPS = [
     ('r.mint = p.mint', 'r.pool = r.pool'), ('sn.mint = p.mint', 'sn.pool = sn.pool' if False else 'true'),
     ('where mint = %(mint)s),', 'where true),'), ('sum(fee_usd)', 'max(fee_usd)'), ('abs(velocity)', 'velocity'),
     ('nullif(agg.polls, 0)', 'nullif(agg.polls + 1, 0)'), ('limit 1) mode_main', 'offset 1 limit 1) mode_main'),
+    ('ts >= %(s)s and ts < %(e)s', 'ts > %(s)s and ts <= %(e)s'), ('opened_at < %(e)s', 'opened_at <= %(e)s + interval \'1 day\''),
+    ("kind in ('paid', 'uncertain')", "kind in ('paid')"), ("kind in ('paid', 'uncertain')", "kind in ('paid', 'uncertain', 'owed')"),
+    ('equity_usd is not null', 'true'), ('sum(fee_usd)', 'avg(fee_usd)'),
+    ("when kind = 'deposit' then usd else -usd", "when kind = 'deposit' then usd else usd"),
+    ("when kind = 'deposit' then sol else -sol", "when kind = 'deposit' then sol else sol"),
+    ("when kind = 'deposit' then usdc else -usdc", "when kind = 'deposit' then usdc else usdc"),
+    ("kind in ('deposit', 'withdrawal')", "kind in ('deposit')"), ("and ts >= %s", "and ts >= %s - interval '30 days'"),
+    ("on conflict (signature) do nothing", "on conflict do nothing"), ("interval '30 days'\")", "interval '30 minutes'\")"),
 ]
 
 

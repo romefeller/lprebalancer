@@ -65,6 +65,7 @@ import subprocess
 import sys
 import time
 from datetime import datetime, timezone
+import datetime as dt
 
 import numpy as np
 
@@ -77,6 +78,7 @@ import fees
 import guards
 import scanner
 import txfees
+import audit
 
 ROOT = pathlib.Path(__file__).resolve().parent
 STATE = ROOT / 'runtime.json'
@@ -93,7 +95,8 @@ SIGNERS = {'orca': str(ROOT / 'signer2.mjs'),
            'byreal': str(ROOT / 'signer_byreal.mjs'),
            'pancakeswap-v3-solana': str(ROOT / 'signer_pancake.mjs'),
            'jupiter': str(ROOT / 'swap_jupiter.mjs'),       # swaps, not positions
-           'payout': str(ROOT / 'payout.mjs')}              # transfers to the profit wallet only
+           'payout': str(ROOT / 'payout.mjs'),              # transfers to the profit wallet only
+           'janitor': str(ROOT / 'janitor.mjs')}            # closes empty token accounts, rent to the wallet
 
 
 def band_label(k):
@@ -325,18 +328,41 @@ def wallet(pool):
     return out or {}
 
 
-def capital():
-    """The sizing base: the configured capital plus every fee reinvested
-    under the split, held under the ceiling a deposit of it must respect
-    (each side is at most side_cap_fraction of it, and the signer refuses an
-    open worth more than max_usd)."""
-    base = config.CAPITAL_USD
-    if config.PAYOUT_ENABLED:
-        try:
-            base += db.reinvested_usd(config.PROFILE)
-        except Exception:
-            pass
+def deployable_usd(bal):
+    """What the wallet can put into a position, in dollars: every unit of the
+    pool's two tokens, less the gas reserve and the open's rent on the native
+    side. The only money that stays out is the gas the bot needs."""
+    q = bal.get('quoteUsd') or 1.0
+    res = config.GAS_RESERVE_SOL + OPEN_RENT_HEADROOM_SOL
+    a = max(float(bal.get('balanceA') or 0.0) - (res if bal.get('nativeSide') == 'A' else 0.0), 0.0)
+    b = max(float(bal.get('balanceB') or 0.0) - (res if bal.get('nativeSide') == 'B' else 0.0), 0.0)
+    return (a * float(bal['price']) + b) * q
+
+
+def capital(bal=None):
+    """The sizing base, held under the ceiling a deposit must respect (each
+    side is at most side_cap_fraction of it, and the signer refuses an open
+    worth more than max_usd). With deploy_all and a wallet read, it is
+    everything the wallet can deploy (deployable_usd); otherwise the
+    configured capital plus every fee reinvested under the split."""
+    if config.DEPLOY_ALL and bal and 'balanceA' in bal and bal.get('price'):
+        base = deployable_usd(bal)
+    else:
+        base = config.CAPITAL_USD
+        if config.PAYOUT_ENABLED:
+            try:
+                base += db.reinvested_usd(config.PROFILE)
+            except Exception:
+                pass
     return min(base, config.MAX_USD / (2 * config.SIDE_CAP_FRACTION))
+
+
+def side_target_fraction():
+    """The share of the capital each side should hold before an open. A
+    centred band takes exactly half in value (both sides are L*sqrt(P)*(1 -
+    1/sqrt(k))), so when the capital is the whole wallet each side aims at
+    one half; when it is a slice, each side may hold up to the side cap."""
+    return 0.5 if config.DEPLOY_ALL else config.SIDE_CAP_FRACTION
 
 
 OPEN_RENT_HEADROOM_SOL = 0.009       # position accounts + two tick arrays, Raydium layout
@@ -352,7 +378,7 @@ def deposit_caps(bal):
     """
     price = bal['price']
     quote_usd = bal.get('quoteUsd') or 1.0
-    capital_quote = capital() / quote_usd
+    capital_quote = capital(bal) / quote_usd
     # The gas reserve, plus the rent the open itself takes: a position's
     # accounts (0.0053 SOL on Raydium-layout venues) and any tick array its
     # range is first to use (0.0018 each, two at most). Without it every open
@@ -950,6 +976,76 @@ def record_risk(status, rv, fc):
         notify('risk_record_failed', reason=f'{type(e).__name__}: {tidy(e)}')
 
 
+def daily_report(state):
+    """Once per UTC day, after it closes: the day's line of the book (re-
+    centres, fees, value against a 50/50 hold) to the feed and the events
+    table. Never blocks the loop."""
+    try:
+        today = datetime.now(timezone.utc).date()
+        day = today - dt.timedelta(days=1)
+        if state.get('last_daily') == day.isoformat():
+            return None
+        line = db.daily_line(day)
+        state['last_daily'] = day.isoformat(); save(state)
+        if not line:
+            return None
+        notify('DAILY', **line)
+        db.event('DAILY', f"{line['day']}: {line['recentres']} re-centres, fees ${line['fees_usd']:.2f}, "
+                          f"vs 50/50 hold {line['vs_hold_usd']:+.2f}")
+        return line
+    except Exception as e:
+        notify('daily_report_failed', reason=f'{type(e).__name__}: {tidy(e)}')
+        return None
+
+
+AUDIT_EVERY_S = 3600
+
+
+def run_audits(state):
+    """The hourly audit (audit.py). Never blocks the loop."""
+    if time.time() - state.get('last_audit', 0) < AUDIT_EVERY_S:
+        return None
+    state['last_audit'] = time.time(); save(state)
+    try:
+        return audit.run(sys.modules[__name__], db, config, txfees, notify)
+    except Exception as e:
+        notify('audit_failed', reason=f'{type(e).__name__}: {tidy(e)}')
+        return None
+
+
+def janitor(state):
+    """Once a day: reclaim the rent of empty token accounts the bot does not
+    use (janitor.mjs). A dry run first, which costs nothing; a close only when
+    there is rent to reclaim. The rent returns to the LP wallet and the next
+    open deploys it. Never blocks the loop."""
+    today = datetime.now(timezone.utc).date().isoformat()
+    if state.get('last_janitor') == today:
+        return None
+    state['last_janitor'] = today; save(state)
+    try:
+        (mint_a, _), (mint_b, _) = pool_tokens()
+        keep = sorted(audit.keep_mints(sys.modules[__name__], mint_a, mint_b))
+        plan, err = chain('close-empty', *keep, dex='janitor')
+        if err or not plan:
+            notify('janitor_failed', reason=err or 'no answer')
+            return None
+        if not plan.get('closable'):
+            return plan
+        out, err = chain('close-empty', *keep, '--execute', dex='janitor')
+        if err or not (out or {}).get('signature'):
+            notify('janitor_failed', reason=err or 'no signature')
+            return None
+        state['last_audit'] = 0; save(state)          # re-audit next poll, on fresh reads
+        db.event('JANITOR', f"closed {len(out['closable'])} empty token accounts, "
+                            f"{out['reclaimSol']:.6f} SOL of rent back to the wallet")
+        notify('JANITOR', accounts=[a['mint'] for a in out['closable']], reclaim_sol=out['reclaimSol'],
+               signature=out['signature'])
+        return out
+    except Exception as e:
+        notify('janitor_failed', reason=f'{type(e).__name__}: {tidy(e)}')
+        return None
+
+
 def regime_choice_now(pool, price):
     """The regime's width for a fresh band at `price` on `pool`, or None."""
     if not config.REGIME_ENABLED:
@@ -1034,12 +1130,12 @@ def balance_wallet(state, bal, rec):
     res = config.GAS_RESERVE_SOL + OPEN_RENT_HEADROOM_SOL
     usd_a = max(bal['balanceA'] - (res if bal.get('nativeSide') == 'A' else 0), 0) * bal['price'] * q
     usd_b = max(bal['balanceB'] - (res if bal.get('nativeSide') == 'B' else 0), 0) * q
-    C = capital()
-    # Swap when either side is short of what the open may deposit of it (the
-    # side cap, less 3% for price movement), not merely short of half: a side
-    # at 51% capped a deposit at $195 while $45 sat idle (2026-09-26). The
-    # swap script itself does nothing within 2% of target.
-    need = C * config.SIDE_CAP_FRACTION * 0.97
+    C = capital(bal)
+    # Swap when either side is short of what the open may deposit of it (its
+    # target share, less 3% for price movement), not merely short of half: a
+    # side at 51% capped a deposit at $195 while $45 sat idle (2026-09-26).
+    # The swap script itself does nothing within 2% of target.
+    need = C * side_target_fraction() * 0.97
     balanced = abs(usd_a - usd_b) <= 0.04 * (usd_a + usd_b)
     if min(usd_a, usd_b) >= need or balanced:
         return bal
@@ -1048,7 +1144,15 @@ def balance_wallet(state, bal, rec):
     if not (guards.is_address(mint_a) and guards.is_address(mint_b)):
         notify('swap_skipped', reason='pool record has no mints')
         return bal
-    target = f'{C * config.SIDE_CAP_FRACTION:.2f}'
+    # The swap script keeps the gas reserve out of what it sells, but not the
+    # open's rent headroom: the native side's target carries it, or an open
+    # after a buy of SOL comes up short by the headroom and leaves the other
+    # token idle.
+    head_usd = OPEN_RENT_HEADROOM_SOL * bal['price'] * q if bal.get('nativeSide') == 'A' else \
+        (OPEN_RENT_HEADROOM_SOL * q if bal.get('nativeSide') == 'B' else 0.0)
+    share = C * side_target_fraction()
+    target_a = f"{share + (head_usd if bal.get('nativeSide') == 'A' else 0.0):.2f}"
+    target_b = f"{share + (head_usd if bal.get('nativeSide') == 'B' else 0.0):.2f}"
     # Prices and decimals the loop already has, so the swap needs no call to
     # Jupiter's rate-limited price API for the pool's own tokens.
     hints = {}
@@ -1060,14 +1164,14 @@ def balance_wallet(state, bal, rec):
     except (KeyError, TypeError, ValueError):
         hints = {}
     env = {'LPBOT_TOKEN_HINTS': json.dumps(hints)} if hints else None
-    out, err = chain('rebalance', mint_a, mint_b, target, target, '--execute', dex='jupiter', extra_env=env)
+    out, err = chain('rebalance', mint_a, mint_b, target_a, target_b, '--execute', dex='jupiter', extra_env=env)
     if (err or not out) and not (out or {}).get('signature') and not (out or {}).get('partial') \
             and re.search(r'rate limit|429|timeout|timed out|ECONNRESET|blockhash', str(err), re.I):
         # Nothing left this process: a transport failure is safe to repeat
         # once. Two rate-limited swaps in a row on 2026-09-26 left the bot one
         # failure from a halt with its capital idle in the wallet.
         time.sleep(15)
-        out, err = chain('rebalance', mint_a, mint_b, target, target, '--execute', dex='jupiter', extra_env=env)
+        out, err = chain('rebalance', mint_a, mint_b, target_a, target_b, '--execute', dex='jupiter', extra_env=env)
     if (err or not out) and not (out or {}).get('signature') and not (out or {}).get('partial'):
         # Nothing was sent. Open with what the wallet holds: a smaller
         # position earning fees beats capital idle until the next poll.
@@ -1454,7 +1558,7 @@ def reopen(state, reason, band=None, recovering=False):
     price = bal['price'] if band else best['price']
     lower, upper = price / k, price * k
     cap_a, cap_b = deposit_caps(bal)
-    if cap_a * price + cap_b < capital() * 0.1 / (bal.get('quoteUsd') or 1):
+    if cap_a * price + cap_b < capital(bal) * 0.1 / (bal.get('quoteUsd') or 1):
         notify('idle', reason=f'wallet holds too little {bal["tokenA"]} and '
                               f'{bal["tokenB"]} to open; nothing to do',
                balanceA=bal['balanceA'], balanceB=bal['balanceB'])
@@ -1466,7 +1570,7 @@ def reopen(state, reason, band=None, recovering=False):
     try:
         guards.open_request(pool=pool, dex=config.DEX, price=bal['price'], model_price=price,
                             lower=lower, upper=upper, cap_a=cap_a, cap_b=cap_b,
-                            capital_usd=capital(), max_usd=config.MAX_USD,
+                            capital_usd=capital(bal), max_usd=config.MAX_USD,
                             quote_usd=bal.get('quoteUsd') or 1.0,
                             execute_dexes=config.EXECUTE_DEXES, signers=SIGNERS)
     except guards.Refused as e:
@@ -1509,7 +1613,7 @@ def reopen(state, reason, band=None, recovering=False):
     if deposit_usd is None:
         deposit_usd = (out or {}).get('depositUsd')
     if deposit_usd is None:
-        deposit_usd = min(capital(), cap_a * price + cap_b)
+        deposit_usd = min(capital(bal), cap_a * price + cap_b)
     db.open_position(mint, pool, config.PAIR_LABEL, lower, upper,
                      (k - 1) * 100, (out or {}).get('signature'),
                      deposit_usd, reason, config_name=config.PROFILE, dex=config.DEX)
@@ -1745,6 +1849,9 @@ def main():
                         status.get('feesAccrued_USD', 0.0),
                         wusd, position_usd(status), forecast=fc)
         record_risk(status, rv, fc)
+        daily_report(state)
+        run_audits(state)               # before the janitor: an RPC read just after a close is stale
+        janitor(state)
 
         if not status.get('inRange'):
             side = 'above' if price > status['upperPrice'] else 'below'

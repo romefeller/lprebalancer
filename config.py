@@ -168,6 +168,10 @@ VENUE_MIN_HOURS = _env('LPBOT_VENUE_MIN_HOURS', int, int(_CFG.get('venue_min_hou
 # open after an exit is limited by the scarcer token and most capital idles.
 REBALANCE_SWAP = _env('LPBOT_REBALANCE_SWAP', lambda s: s.lower() in ('1', 'true', 'yes'),
                       bool(_CFG.get('rebalance_swap')))
+# Deploy the whole wallet (owner, 2026-09-28): size every open from what the
+# wallet holds, less only the gas reserve and the open's rent, under the
+# max_usd ceiling. Off falls back to capital_usd plus reinvested fees.
+DEPLOY_ALL = _env('LPBOT_DEPLOY_ALL', lambda s: s.lower() in ('1', 'true', 'yes'), True)
 
 
 # --- the fee split ---------------------------------------------------------------
@@ -243,6 +247,7 @@ def summary():
         'calm_sigma_cut_pct': round(CALM_SIGMA_CUT * 100, 4),
         'calm_max_moves_per_day': CALM_MAX_MOVES,
         'rebalance_swap': REBALANCE_SWAP,
+        'deploy_all': DEPLOY_ALL,
         'regime_enabled': REGIME_ENABLED,
         'regime_widths_pct': [round((k - 1) * 100, 2) for k in REGIME_WIDTHS],
         'regime_horizon_minutes': REGIME_HORIZON,

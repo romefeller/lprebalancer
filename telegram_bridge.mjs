@@ -7,6 +7,7 @@
 // Needs TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID in the environment.
 import fs from 'fs';
 import path from 'path';
+import { equityLine, lpLine, sinceStartLine } from './book_format.mjs';
 
 const token = process.env.TELEGRAM_BOT_TOKEN;
 const chatId = process.env.TELEGRAM_CHAT_ID;
@@ -60,7 +61,8 @@ function render(row) {
         `all pools   fees $${n(r.fees_total_usd, 4)}   P&L ${r.pnl_all_pools_usd != null ? sign(r.pnl_all_pools_usd) : '—'}`,
       ] : []),
       `━━ BOOK ━━`,
-      `equity      $${n(r.equity_usd)}   P&L ${sign(r.pnl_usd)} · includes pending fees`,
+      equityLine(r),
+      ...[lpLine(r), sinceStartLine(r)].filter(Boolean),
       `rate        ${r.fees_per_day_usd != null ? '$' + n(r.fees_per_day_usd, 4) + '/day' : '— (needs an hour)'}`
         + `${r.apr_pct != null ? `   APR ${n(r.apr_pct, 1)}%` : ''} since start`,
       ...(r.fees_per_day_6h_usd != null ? [

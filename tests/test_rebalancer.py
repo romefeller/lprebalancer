@@ -12,6 +12,10 @@ import rebalancer  # noqa: E402
 
 
 class DepositCaps(unittest.TestCase):
+    # the configured-capital sizing (deploy_all off); tests/test_deploy_all.py covers the default
+    def setUp(self):
+        p = mock.patch.object(config, 'DEPLOY_ALL', False); p.start(); self.addCleanup(p.stop)
+
     def bal(self, **kw):
         base = dict(price=100.0, quoteUsd=1.0, balanceA=10.0, balanceB=1000.0,
                     nativeSide='A', tokenA='SOL', tokenB='USDC')

@@ -166,6 +166,7 @@ class SwapGate(unittest.TestCase):
                 mock.patch.object(rebalancer.config, 'CAPITAL_USD', 190.0), \
                 mock.patch.object(rebalancer.config, 'SIDE_CAP_FRACTION', 0.55), \
                 mock.patch.object(rebalancer.config, 'GAS_RESERVE_SOL', 0.05), \
+                mock.patch.object(rebalancer.config, 'DEPLOY_ALL', False), \
                 mock.patch.object(rebalancer.config, 'PAYOUT_ENABLED', False):
             rebalancer.balance_wallet({'failures': 0}, {'price': 100.0, 'quoteUsd': 1.0, 'balanceA': a_sol,
                                                         'balanceB': b_usdc, 'nativeSide': 'A'},
