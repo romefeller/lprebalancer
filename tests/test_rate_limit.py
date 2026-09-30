@@ -68,6 +68,16 @@ class Curl(unittest.TestCase):
         self.assertEqual(calls[0][1], {'capture_output': True, 'text': True})
         self.assertEqual(calls[0][0][-1], 'https://example.test/x')
 
+    def test_the_timeout_is_40s_by_default_and_the_callers_otherwise(self):
+        calls = []
+        def fake(cmd, **k):
+            calls.append(cmd); return mock.Mock(stdout='[]')
+        with mock.patch.object(engine.subprocess, 'run', fake):
+            engine.curl('https://example.test/x')
+            engine.curl('https://example.test/y', max_time=10)
+        at = [c.index('--max-time') for c in calls]
+        self.assertEqual([c[i + 1] for c, i in zip(calls, at)], ['40', '10'])
+
     def test_geckoterminal_calls_are_spaced_by_the_gate(self):
         clock = [1000.0]
         sleeps = []

@@ -21,7 +21,7 @@ origin, read at today's volatility. Highs and lows decide a touch, not closes:
 on a 1% band, closes miss a third of the exits.
 
 Everything here is pure except `tape_5m`, which reads GeckoTerminal through
-the engine's shared rate gate.
+the engine's shared rate gate, and `binance_5m`, which reads Binance.
 """
 import math
 import time
@@ -63,6 +63,167 @@ def tape_5m(pool, live_price=None, before=None):
         elif abs(c / live_price - 1) > 0.15:
             return None
     return a[:, 0], a[:, 1], a[:, 2], a[:, 3], a[:, 4], a[:, 5]
+
+
+# --- the surrogate tape: another venue's klines, where GeckoTerminal has no bar ---
+# 2026-09-29 10:55-11:40Z GeckoTerminal stopped indexing every Solana pool while
+# the pools traded every second. A lone bar after the gap looked fresh and the
+# bot narrowed, then widened again. The rule: GeckoTerminal first; a slot it
+# lacks is filled from the first surrogate in SURROGATES that prices the pool.
+# A surrogate bar never replaces a GeckoTerminal bar and is never stored.
+#
+# Binance, measured on 30 days of the held SOL/USDC pool against SOLUSDC:
+# closes within 2.6 bp (p5-p95), five-minute return correlation 0.989, EWMA
+# sigma ratio 0.995 (median). The pool's high-low range is 1.15x Binance's
+# (arbitrage lags on chain), so a Binance bar's range is scaled 1.15x;
+# unscaled, the regime chose one width narrower in 6 of 60 hours.
+#
+# Every surrogate bar passes three checks, or the whole fetch is refused:
+#   1. the bar itself: aligned slot, finite, positive, low <= open, close <= high
+#   2. the level: the newest close within SURROGATE_MATCH of the pool's live
+#      price (either way up; the other way up is inverted)
+#   3. the join: where GeckoTerminal has bars in the same slots, the median
+#      close difference is at most SURROGATE_BASIS_MAX
+
+BINANCE_KLINES = 'https://data-api.binance.vision/api/v3/klines'
+SURROGATE_MATCH = 0.005      # the newest surrogate close within 0.5% of the pool's price
+SURROGATE_BASIS_MAX = 0.002  # median |log close ratio| to GeckoTerminal, where both have bars
+SURROGATE_JOIN_MIN = 3       # overlapping bars needed before the join check applies
+SURROGATE_TIMEOUT_S = 10     # a surrogate fetch never holds the loop longer than this
+GECKO_GRACE_S = 120          # GeckoTerminal may publish a closed bar this late
+FRESH_BARS = 6               # the last half hour of bars must be complete
+FRESH_MAX_AGE_S = 900        # and its newest bar no older than this
+TOKEN_ALIASES = {'WSOL': 'SOL', 'WETH': 'ETH', 'WBTC': 'BTC', 'CBBTC': 'BTC'}
+
+
+def pair_tokens(pair):
+    """('SOL', 'USDC') from 'SOL/USDC' (aliases applied, upper case), or None. Pure."""
+    parts = [p.strip().upper() for p in str(pair or '').replace('-', '/').split('/')]
+    if len(parts) != 2 or not all(p.isalnum() for p in parts):
+        return None
+    return tuple(TOKEN_ALIASES.get(p, p) for p in parts)
+
+
+def clean_bars(rows, now):
+    """Six arrays (ts, open, high, low, close, volume), oldest first, from rows
+    of six numbers: closed, slot-aligned, finite, positive and consistent
+    (low <= open, close <= high) bars only, one per slot. None when none
+    pass. Pure; any junk goes in, nothing raises."""
+    out = {}
+    for r in rows or []:
+        try:
+            t, o, h, l, c, v = (float(x) for x in r[:6])
+        except (TypeError, ValueError, IndexError):
+            continue
+        vals = (t, o, h, l, c)
+        if not all(math.isfinite(x) for x in vals) or min(o, h, l, c) <= 0:
+            continue
+        if t % BAR_SECONDS or t + BAR_SECONDS > now or not (l <= min(o, c) and max(o, c) <= h):
+            continue
+        out[int(t)] = (t, o, h, l, c, v if math.isfinite(v) and v >= 0 else 0.0)
+    if not out:
+        return None
+    a = np.array([out[k] for k in sorted(out)], dtype=float)
+    return tuple(a[:, i].copy() for i in range(6))
+
+
+def fit_surrogate(bars, live_price, ref=None, range_scale=1.0):
+    """The surrogate's bars in the pool's quote units, or None when they do not
+    describe this pool (check 2 and 3 above). Inverts a pair listed the other
+    way up; widens the high-low range `range_scale` times around each bar.
+    Pure."""
+    if bars is None or not len(bars[0]) or not live_price or not math.isfinite(live_price) or live_price <= 0:
+        return None
+    ts, o, h, l, c, v = (np.asarray(x, dtype=float).copy() for x in bars)
+    if abs(c[-1] / live_price - 1) > SURROGATE_MATCH:
+        if abs((1 / c[-1]) / live_price - 1) > SURROGATE_MATCH:
+            return None
+        o, h, l, c = 1 / o, 1 / l, 1 / h, 1 / c
+    if ref is not None and len(ref[0]):
+        at = {int(t): float(x) for t, x in zip(ref[0], ref[4])}
+        d = [abs(math.log(at[int(t)] / x)) for t, x in zip(ts, c) if int(t) in at and at[int(t)] > 0]
+        if len(d) >= SURROGATE_JOIN_MIN and float(np.median(d)) > SURROGATE_BASIS_MAX:
+            return None
+    if range_scale != 1.0:
+        e = np.exp((max(range_scale, 1.0) - 1) / 2 * np.log(h / l))
+        h, l = h * e, l / e
+    return ts, o, h, l, c, v
+
+
+def binance_symbols(base, quote):
+    """Binance spot symbols that may price base/quote, either way up."""
+    return [base + quote, quote + base]
+
+
+def binance_5m(symbol, start_ts, pages=2):
+    """Binance five-minute klines of `symbol` from `start_ts`, as raw rows
+    (ts, open, high, low, close, quote volume). [] on any failure: an error
+    answer, a rate limit, a timeout, junk."""
+    rows, start = [], int(start_ts) * 1000
+    for _ in range(pages):
+        try:
+            d = engine.curl(f'{BINANCE_KLINES}?symbol={symbol}&interval=5m&limit=1000&startTime={start}',
+                            retries=0, max_time=SURROGATE_TIMEOUT_S)
+        except Exception:
+            break
+        if not isinstance(d, list) or not d:
+            break
+        for k in d:
+            try:
+                rows.append((int(k[0]) // 1000, k[1], k[2], k[3], k[4], k[7]))
+            except (TypeError, ValueError, IndexError):
+                continue
+        if len(d) < 1000:
+            break
+        try:
+            start = int(d[-1][0]) + 1
+        except (TypeError, ValueError, IndexError):
+            break
+    return rows
+
+
+# name, symbols for (base, quote), raw fetch, high-low range scale. First that
+# prices the pool wins. A new source goes here after the 30-day comparison.
+SURROGATES = (
+    ('Binance', binance_symbols, binance_5m, 1.15),
+)
+
+
+def surrogate_5m(pair, start_ts, live_price, ref=None, sources=None):
+    """(name, bars) from the first surrogate that prices `pair` at
+    `live_price` from `start_ts`, or (None, None). Never raises."""
+    toks = pair_tokens(pair)
+    if toks is None:
+        return None, None
+    now = time.time()
+    for name, symbols, fetch, scale in (SURROGATES if sources is None else sources):
+        try:
+            for sym in symbols(*toks):
+                fit = fit_surrogate(clean_bars(fetch(sym, start_ts), now), live_price, ref, scale)
+                if fit is not None:
+                    return name, fit
+        except Exception:
+            continue
+    return None, None
+
+
+def missing_slots(ts, now, lookback_s, grace_s=GECKO_GRACE_S):
+    """The five-minute slots of the last `lookback_s` with no bar in `ts`,
+    oldest first. A slot counts once its bar closed `grace_s` ago. Pure."""
+    last = int((now - BAR_SECONDS - grace_s) // BAR_SECONDS) * BAR_SECONDS
+    first = last - int(lookback_s) // BAR_SECONDS * BAR_SECONDS
+    have = set(int(t) for t in (ts if ts is not None else []))
+    return [s for s in range(first, last + 1, BAR_SECONDS) if s not in have]
+
+
+def tape_fresh(ts, now, bars=FRESH_BARS, max_age_s=FRESH_MAX_AGE_S):
+    """Whether the tape describes the market now: its last `bars` bars are
+    consecutive (no gap) and the newest is at most `max_age_s` old. A lone
+    bar after a gap is not fresh. Pure."""
+    if ts is None or len(ts) < bars:
+        return False
+    tail = np.asarray(ts[-bars:], dtype=float)
+    return bool(now - tail[-1] <= max_age_s and np.all(np.abs(np.diff(tail) - BAR_SECONDS) < 1))
 
 
 def ewma_sigma(close, half_life=HALF_LIFE_BARS):

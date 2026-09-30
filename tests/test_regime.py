@@ -113,10 +113,10 @@ class Loop(unittest.TestCase):
         b = tape()
         old = tuple(list(b[:1]) and [b[0] - 3600]) + b[1:]
         with mock.patch.object(rebalancer.config, 'REGIME_ENABLED', True), \
-                mock.patch.object(rebalancer, 'tape5', lambda pool, price: old):
+                mock.patch.object(rebalancer, 'tape5', lambda pool, price, pair=None: old):
             self.assertIsNone(rebalancer.regime_choice_now('P', float(b[4][-1])))
         with mock.patch.object(rebalancer.config, 'REGIME_ENABLED', True), \
-                mock.patch.object(rebalancer, 'tape5', lambda pool, price: b):
+                mock.patch.object(rebalancer, 'tape5', lambda pool, price, pair=None: b):
             self.assertIn(rebalancer.regime_choice_now('P', float(b[4][-1])), W)
 
     def test_view_records_mode_changes_and_the_guard(self):
@@ -124,7 +124,7 @@ class Loop(unittest.TestCase):
         state = {'calm_times': [time.time() - 10] * 3}
         with mock.patch.object(rebalancer.config, 'REGIME_ENABLED', True), \
                 mock.patch.object(rebalancer.config, 'CALM_MAX_MOVES', 48), \
-                mock.patch.object(rebalancer, 'tape5', lambda pool, price: b), \
+                mock.patch.object(rebalancer, 'tape5', lambda pool, price, pair=None: b), \
                 mock.patch.object(rebalancer, 'save', lambda s: None), \
                 mock.patch.object(rebalancer.db, 'event', lambda *a: events.append(a)):
             v = rebalancer.regime_view(state, {'price': p, 'lowerPrice': p / 1.01, 'upperPrice': p * 1.01})

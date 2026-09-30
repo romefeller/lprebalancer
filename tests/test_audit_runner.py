@@ -27,6 +27,7 @@ class Base(unittest.TestCase):
         self.sigs = []
         self.txs = {}
         self.prices = {}
+        self.facts = {}
         self.harvested = {}
         self.rpc_calls = []
         self.equity(0.0592 * 120 + 0.5 + 240.0 + 0.1)
@@ -56,8 +57,9 @@ class Base(unittest.TestCase):
         return types.SimpleNamespace(
             wallet=lambda pool: dict(self.bal), read_status=lambda *a: (dict(self.status) if self.status else None, None),
             deployable_usd=rebalancer.deployable_usd, pool_tokens=lambda: ((SOL, 'SOL'), (USDC, 'USDC')),
-            position_usd=rebalancer.position_usd, FEED=self.feed.name,
-            dexes=types.SimpleNamespace(jupiter_prices=lambda mints: {m: self.prices.get(m, 0.0) for m in mints}),
+            position_usd=rebalancer.position_usd, plan_sweep=rebalancer.plan_sweep, FEED=self.feed.name,
+            dexes=types.SimpleNamespace(jupiter_prices=lambda mints: {m: self.prices.get(m, 0.0) for m in mints},
+                                        jupiter_token=lambda m: self.facts.get(m)),
             load=lambda: {'reward_mints_seen': []})
 
     def run_audit(self):
@@ -130,6 +132,20 @@ class Inputs(Base):
         res = self.run_audit()
         self.assertNotIn('getTokenAccountsByOwner', [m for m, _ in self.rpc_calls])
         self.assertEqual(res['empty'], 'ok')
+
+
+class ForeignIdle(Base):
+    def test_a_verified_foreign_token_counts_as_idle(self):
+        self.acct('JITO', 200_000_000, 9)                                     # 0.2 JitoSOL at $150: $30
+        self.prices = {'JITO': 150.0}; self.facts = {'JITO': {'verified': True, 'symbol': 'JitoSOL'}}
+        self.assertEqual(self.run_audit()['idle'], 'fail')                   # $30 of ~$248: over 10%
+        self.assertAlmostEqual(self.detail('idle')['foreign_usd'], 30.0)
+
+    def test_spam_and_dust_do_not(self):
+        self.acct('SPAM', 10**12, 6); self.acct('CAKE', 3_272_695, 9)
+        self.prices = {'SPAM': 5.0, 'CAKE': 2.6}; self.facts = {'SPAM': {'verified': False}, 'CAKE': {'verified': True}}
+        self.assertEqual(self.run_audit()['idle'], 'ok')
+        self.assertEqual(self.detail('idle')['foreign_usd'], 0.0)
 
 
 class Equity(Base):
@@ -236,6 +252,18 @@ class Ledger(Base):
         self.harvested = {'H3': None, 'H4': (9.0, 9.0)}
         self.assertEqual(self.run_audit()['harvests'], 'fail')                # warn and fail: fail
 
+    def test_a_row_booked_under_a_close_signature_is_not_checked(self):
+        # 2026-09-30 audit, row 63: fees the close collected, booked under the
+        # close's real signature, were compared with principal plus fees
+        self.position('NFT2', closed=True)
+        with db.cursor(commit=True) as cur:
+            cur.execute("update positions set close_sig = 'CLOSESIG' where mint = 'NFT2'")
+        db.record_harvest('NFT2', 0.001, 0.1, 0.22, 'CLOSESIG')
+        db.record_harvest('NFT2', 0.001, 0.1, 0.22, 'H9')
+        self.harvested = {'H9': (0.001, 0.1), 'CLOSESIG': (1.0467, 94.10)}
+        self.assertEqual(self.run_audit()['harvests'], 'ok')
+        self.assertEqual(self.detail('harvests')['checked'], 1)
+
     def test_payouts_check_only_paid_rows_with_signatures(self):
         with db.cursor(commit=True) as cur:
             cur.execute("insert into payouts (ts, config_name, position, token_mint, symbol, amount, usd, kind, signature) values "
@@ -294,3 +322,19 @@ class Ledger(Base):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class ToleranceExcused(Base):
+    def test_the_bands_tolerance_leftover_is_not_idle(self):
+        self.bal.update(balanceB=10.0, walletUsd=0.0592 * 120 + 10.0)        # $10 left beside the band
+        b = self.bot()
+        b.load = lambda: {'idle_baseline': {'mint': 'NFT1', 'usd': 10.0}}
+        cfg = __import__('types').SimpleNamespace(RPC='http://rpc.test', POOL=POOL, GAS_RESERVE_SOL=0.05, PROFIT_WALLET=PROFIT)
+        fx = __import__('types').SimpleNamespace(fetch=lambda *a, **k: None, harvested=lambda *a: None)
+        with mock.patch.object(audit, 'rpc', self.fake_rpc), mock.patch.object(audit.time, 'sleep', lambda s: None):
+            res = audit.run(b, db, cfg, fx, lambda ev, **kw: None)
+        self.assertEqual(res['idle'], 'ok'); self.assertEqual(self.detail('idle')['tolerance_leftover_usd'], 10.0)
+        b.load = lambda: {'idle_baseline': {'mint': 'OTHER', 'usd': 10.0}}          # another band's reading: not excused
+        with mock.patch.object(audit, 'rpc', self.fake_rpc), mock.patch.object(audit.time, 'sleep', lambda s: None):
+            res = audit.run(b, db, cfg, fx, lambda ev, **kw: None)
+        self.assertEqual(res['idle'], 'warn')

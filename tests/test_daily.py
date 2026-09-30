@@ -71,6 +71,21 @@ class Line(unittest.TestCase):
         self.assertAlmostEqual(l['fees_per_recentre_usd'], 0.4)
         self.assertAlmostEqual(l['paid_out_usd'], 0.4)            # paid and uncertain; owed and reinvested stay in the book
 
+    def test_earned_is_the_accrual_basis_of_the_book_s_today(self):
+        l = self.line
+        start = dt.datetime.combine(DAY, dt.time(0), tzinfo=dt.timezone.utc)
+        self.assertAlmostEqual(l['fees_earned_usd'], round(float(db.fees_between(start, start + dt.timedelta(days=1))['usd']), 4))
+        self.assertEqual(l['idle_redeploys'], 0)
+
+    def test_idle_redeploys_are_counted_apart(self):
+        reset()
+        snap(T(1), 100.0, 100.0)
+        with db.cursor(commit=True) as cur:
+            cur.execute("insert into positions (mint, pool, opened_at, open_reason) values ('I1', 'P', %s, 'deploy $81.54 idle'), "
+                        "('R1', 'P', %s, 'regime HOT: +/-4.0%% -> +/-2.5%%')", (T(2), T(3)))
+        l = db.daily_line(DAY)
+        self.assertEqual((l['recentres'], l['idle_redeploys']), (2, 1))
+
     def test_open_and_close_are_the_first_and_last_snapshot(self):
         l = self.line
         self.assertEqual((l['equity_open'], l['price_open'], l['equity_close'], l['price_close']), (240.0, 120.0, 238.0, 108.0))

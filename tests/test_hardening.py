@@ -128,7 +128,7 @@ class FeesKeptWhenTheHarvestFails(unittest.TestCase):
                 mock.patch.object(rebalancer.db, 'event', lambda *a: None):
             rebalancer.rebalance(state, {'positionMint': 'M', 'price': 100, 'feesAccruedA': 0.001,
                                          'feesAccruedB': 0.2, 'feesAccrued_USD': 0.3}, 'price went below')
-        self.assertEqual(len(recorded), 1); self.assertEqual(recorded[0][4], 'c')
+        self.assertEqual(len(recorded), 1); self.assertEqual(recorded[0][4], 'close:c')      # close-collected fees: marked (audit 2026-09-30)
         self.assertEqual(split, [(0.001, 0.2)])
 
 

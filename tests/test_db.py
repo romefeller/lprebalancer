@@ -135,6 +135,20 @@ class Ledger(unittest.TestCase):
         self.assertAlmostEqual(s['equity_usd'], 241.6)
         self.assertAlmostEqual(s['pnl_usd'], 1.6)
 
+    def test_pnl_is_the_capital_baseline_profit_when_there_is_one(self):
+        self.assertEqual(db._pnl(241.6, 240.0, 0.5, None), {'pnl_usd': 2.1, 'pnl_basis': 'first snapshot'})
+        self.assertEqual(db._pnl(None, 240.0, 0.5, None), {'pnl_usd': None, 'pnl_basis': None})
+        self.assertEqual(db._pnl(241.6, None, 0.5, None), {'pnl_usd': None, 'pnl_basis': None})
+        self.assertEqual(db._pnl(241.6, 240.0, 0.5, {'profit_usd': -2.9092}), {'pnl_usd': -2.91, 'pnl_basis': 'capital baseline'})
+        self.assertEqual(db._pnl(241.6, 240.0, 0.5, {'profit_usd': None})['pnl_basis'], 'first snapshot')
+        db.open_position('m1', LIVE_POOL, 'SOL/USDC', 95, 105, 5, 's', 190, 't')
+        self.snap('m1', 0, 0, 0, wallet=80.0, pos=160.0)
+        with db.cursor(commit=True) as cur:
+            cur.execute("insert into capital_flows (ts, kind, sol, usdc, usd, price) values (now() - interval '1 day', 'baseline', 2, 0, 248.0, 124.0)")
+        s = db.stats()
+        self.assertEqual(s['pnl_usd'], round(s['since_start']['profit_usd'], 2)); self.assertEqual(s['pnl_basis'], 'capital baseline')
+        self.assertAlmostEqual(s['pnl_usd'], 240.0 - 248.0, places=2)
+
     def test_harvest_moves_fees_without_creating_equity(self):
         db.open_position('m1', LIVE_POOL, 'SOL/USDC', 95, 105, 5, 's', 190, 't')
         self.snap('m1', 0.001, 0.1, 0.2, wallet=80, pos=160)

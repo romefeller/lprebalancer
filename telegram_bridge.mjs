@@ -7,7 +7,7 @@
 // Needs TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID in the environment.
 import fs from 'fs';
 import path from 'path';
-import { equityLine, lpLine, sinceStartLine } from './book_format.mjs';
+import { equityLine, lpLine, sinceStartLine, splitMessage, emojiFor, healthLine } from './book_format.mjs';
 
 const token = process.env.TELEGRAM_BOT_TOKEN;
 const chatId = process.env.TELEGRAM_CHAT_ID;
@@ -17,16 +17,22 @@ const DIR = path.dirname(new URL(import.meta.url).pathname);
 const FEED = path.join(DIR, 'events.jsonl');
 const STATE_F = path.join(DIR, 'telegram_bridge_state.json');
 
+let EMOJI = {};
+try { EMOJI = JSON.parse(fs.readFileSync(new URL('./event_emoji.json', import.meta.url), 'utf8')); } catch {}
 let state = { pos: 0 };
 try { state = { ...state, ...JSON.parse(fs.readFileSync(STATE_F, 'utf8')) }; } catch {}
 const save = () => fs.writeFileSync(STATE_F, JSON.stringify(state));
 
 async function send(text) {
-  const r = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
-    method: 'POST', headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ chat_id: chatId, text }) });
-  const j = await r.json();
-  if (!j.ok) throw new Error(`telegram: ${JSON.stringify(j)}`);
+  // Telegram refuses a message over 4,096 characters (2026-09-28: a
+  // DEPLOY_IDLE book was lost that way). Long messages go out in parts.
+  for (const part of splitMessage(text)) {
+    const r = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ chat_id: chatId, text: part }) });
+    const j = await r.json();
+    if (!j.ok) throw new Error(`telegram: ${JSON.stringify(j)}`);
+  }
 }
 
 function render(row) {
@@ -43,7 +49,7 @@ function render(row) {
   const book = (r) => {
     const A = r.token_a ?? 'A', B = r.token_b ?? 'B';
     return [
-      `━━ FEES ━━`,
+      `━━ 💰 FEES ━━`,
       `today       ${tok(r.fees_today_a)} ${A}   ${tok(r.fees_today_b, 4)} ${B}   $${n(r.fees_today_usd, 4)}`,
       `realised    ${tok(r.fees_realised_a)} ${A}   ${tok(r.fees_realised_b, 4)} ${B}   $${n(r.fees_realised_usd, 4)}`,
       `unrealised  ${tok(r.fees_unrealised_a)} ${A}   ${tok(r.fees_unrealised_b, 4)} ${B}   $${n(r.fees_unrealised_usd, 4)}`,
@@ -52,7 +58,7 @@ function render(row) {
         `profit      $${n(r.split.paid_usd, 4)} paid to the profit wallet · $${n(r.split.paid_today_usd, 4)} today`,
         `reinvested  $${n(r.split.reinvested_usd, 4)} back in the LP · gas $${n(r.split.gas_usd, 4)}`] : []),
       ...(Array.isArray(r.by_pool) && r.by_pool.length > 1 ? [
-        `━━ POOLS ━━`,
+        `━━ 🏊 POOLS ━━`,
         ...r.by_pool.slice(0, 5).map(p =>
           `${p.open_now ? '▸' : '·'} ${p.dex} ${p.pair_label} ${n(p.days, 2)}d fees $${n(p.fees_usd, 4)}`
           + `${p.apr_pct != null ? ` APR ${n(p.apr_pct, 0)}%` : ''}`
@@ -60,9 +66,9 @@ function render(row) {
           + `${p.in_range_pct != null ? ` ${n(p.in_range_pct, 0)}% in` : ''}`),
         `all pools   fees $${n(r.fees_total_usd, 4)}   P&L ${r.pnl_all_pools_usd != null ? sign(r.pnl_all_pools_usd) : '—'}`,
       ] : []),
-      `━━ BOOK ━━`,
+      `━━ 📒 BOOK ━━`,
       equityLine(r),
-      ...[lpLine(r), sinceStartLine(r)].filter(Boolean),
+      ...[lpLine(r), sinceStartLine(r), healthLine(r.health)].filter(Boolean),
       `rate        ${r.fees_per_day_usd != null ? '$' + n(r.fees_per_day_usd, 4) + '/day' : '— (needs an hour)'}`
         + `${r.apr_pct != null ? `   APR ${n(r.apr_pct, 1)}%` : ''} since start`,
       ...(r.fees_per_day_6h_usd != null ? [
@@ -94,8 +100,9 @@ function render(row) {
     const pct = (x) => (x == null ? '—' : `${Math.round(Number(x) * 100)}%`);
     const probs = (Array.isArray(g.probs) ? g.probs : Object.entries(g.probs ?? {}))
       .map(([w, p]) => `${w}% ${pct(p)}`).join(' · ');
-    return [`━━ REGIME ━━`,
-      `mode        ${g.mode}${g.stale ? ' (tape stale: widest width, no narrowing)' : ''} · holding ±${n(g.held_pct, 2)}% · market says ±${n(g.choice_pct, 2)}%`,
+    return [`━━ 📈 REGIME ━━`,
+      `mode        ${g.mode}${g.stale ? (g.unstale_in_s ? ` (tape back: widest width for ${Math.ceil(g.unstale_in_s / 60)} more min)` : ' (tape stale: widest width, no narrowing)') : ''} · holding ±${n(g.held_pct, 2)}% · market says ±${n(g.choice_pct, 2)}%`,
+      `data        ${dataSource(g.data)}`,
       `vol 5m      σ ${n(g.sigma_5m_pct, 4)}% · velocity ${sign(g.velocity)}/h · instability ${n(g.instability, 3)}`,
       `P(touch ≤${g.horizon_minutes}m)  ${probs}`,
       `held band   P(touch) ${pct(g.p_held)} · rule: narrowest width ≤ ${pct(g.threshold)}, move at 2 steps, exits re-centre`,
@@ -114,10 +121,19 @@ function render(row) {
       `guard       ${g.moves_24h ?? '—'}/${g.guard ?? '—'} moves in 24h`];
   }
 
+  // Where the five-minute bars came from: GeckoTerminal, a surrogate
+  // (Binance klines) in the slots GeckoTerminal lacks, or none (stale).
+  function dataSource(d) {
+    if (!d || !d.source) return 'Gecko';
+    if (d.source === 'none') return 'none · GeckoTerminal and the surrogate both lack recent bars';
+    if (d.source === 'Gecko') return 'Gecko' + (d.filled_24h ? ` · ${d.surrogate} still fills ${d.filled_24h} older bars of 24h` : '');
+    return `${d.source} · ${d.surrogate} fills ${d.filled_1h}/${d.bars_1h} bars of the last hour (Gecko lacks them)`;
+  }
+
   function calmBlock(c) {
     if (!c) return [];
     const pct = (x) => (x == null ? '—' : `${Math.round(Number(x) * 100)}%`);
-    return [`━━ CALM ━━`,
+    return [`━━ ❄️ CALM ━━`,
       `sigma 5m    ${n(c.sigma_5m_pct, 4)}% · cut ${n(c.cut_pct, 4)}% (${n(c.ratio, 2)}x) · leave above ${n(c.exit_cut_pct, 4)}%`,
       `state       ${c.calm ? 'CALM' : 'normal'} · ${c.tight_held ? `holding ±${n(c.band_pct, 1)}%` : 'normal band'}`
         + ` · calm ${pct(c.calm_share_24h)} of last 24h`,
@@ -130,7 +146,7 @@ function render(row) {
     const f = r.forecast;
     const pct = (x) => (x == null ? '—' : `${Math.round(Number(x) * 100)}%`);
     if (f) {
-      const lines = [`━━ BAND ━━`];
+      const lines = [`━━ 🧭 BAND ━━`];
       if (f.inside) {
         lines.push(`price       ${n(f.to_lower_pct, 1)}% above the floor · ${n(f.to_upper_pct, 1)}% below the ceiling`
           + `${f.hours_alive != null ? ` · alive ${n(f.hours_alive, 0)}h` : ''}`);
@@ -153,7 +169,7 @@ function render(row) {
     }
     const b = r.band;
     if (!b || b.p_exit_24h == null) return [];
-    return [`━━ BAND ━━`,
+    return [`━━ 🧭 BAND ━━`,
       `${b.in_range ? 'in range' : 'OUT'}    position ${sign(b.position)} · alive ${n(b.hours_alive, 0)}h`
       + ` · P(exit) 6h ${pct(b.p_exit_6h)}  24h ${pct(b.p_exit_24h)}  72h ${pct(b.p_exit_72h)}`];
   }
@@ -181,6 +197,14 @@ function render(row) {
         + `price ${n(row.price, 4)} · band ${n(row.lower, 4)} — ${n(row.upper, 4)}\n${row.action}\n` + book(row);
     case 'recentre_deferred':
       return `re-centre deferred · P(exit within ${row.horizon_hours}h) ${Math.round(row.p_exit * 100)}%\n${row.reason}`;
+    case 'FAILOVER':
+      return `FAILOVER · ${row.venue} failed ${row.fails}x (${row.last_error ?? '—'}) → ${row.to} ${n(row.total_pct_day, 2)}%/d on chain\n${row.pool ?? ''}`;
+    case 'failover_none':
+      return `no failover · ${row.venue} failed ${row.fails ?? '—'}x · ${row.reason}`;
+    case 'failover_failed':
+      return `failover failed · ${row.reason}`;
+    case 'TAPE_SOURCE':
+      return `DATA SOURCE · ${row.detail}`;
     case 'REGIME_WIDEN':
       return `HEATING · widening ±${n(row.regime?.held_pct, 2)}% → ±${n(row.regime?.choice_pct, 2)}% (${row.regime?.mode})\n`
         + `σ ${n(row.regime?.sigma_5m_pct, 4)}% · velocity ${sign(row.regime?.velocity)}/h\n` + book(row);
@@ -232,6 +256,25 @@ function render(row) {
       return `REBALANCE REQUESTED by operator · price ${n(row.price, 4)}\n${row.action}`;
     case 'rebalance_deferred':
       return `rebalance deferred · ${row.seconds_remaining}s until the minimum gap`;
+    case 'deploy_idle_deferred':
+      return `idle $${n(row.idle_usd)} waits · ${row.reason}`;
+    case 'DEPLOY_IDLE':
+      return `DEPLOYING IDLE $${n(row.idle_usd)} · re-centre at ${n(row.price, 4)} to put it in the LP\n` + book(row);
+    case 'SWEEP':
+      return `SWEPT $${n(row.total_usd)} of other tokens into the pool · `
+        + (row.swept || []).map(x => `${x.symbol ?? String(x.mint).slice(0, 6)} $${n(x.usd)}`).join(' · ');
+    case 'sweep_failed':
+      return `sweep failed · ${row.reason}${row.usd != null ? ` ($${n(row.usd)})` : ''}`;
+    case 'JANITOR':
+      return `JANITOR · closed ${(row.accounts || []).length} empty token accounts, ${n(row.reclaim_sol, 6)} SOL rent back to the wallet`;
+    case 'AUDIT':
+      return `AUDIT ${row.check} · ${String(row.status).toUpperCase()}${row.was ? ` (was ${row.was})` : ''}\n`
+        + JSON.stringify(row.detail ?? {}).slice(0, 600);
+    case 'DAILY':
+      return `DAILY ${row.day} · ${row.recentres} re-centres${row.idle_redeploys ? ` (${row.idle_redeploys} idle redeploys)` : ''}`
+        + ` · fees earned $${n(row.fees_earned_usd ?? row.fees_usd)}${row.fees_earned_usd != null ? ` (harvested $${n(row.fees_usd)})` : ''}`
+        + ` · vs 50/50 hold ${sign(row.vs_hold_usd)}`
+        + ` · SOL ${n(row.price_open)} → ${n(row.price_close)}`;
     case 'HARVEST':
       return `HARVESTED $${n(row.collected_usd, 4)}\n${row.signature ?? ''}`;
     case 'harvest_skipped':
@@ -306,7 +349,7 @@ async function tail() {
     if (!line.trim()) continue;
     let row;
     try { row = JSON.parse(line); } catch { continue; }
-    try { await send(render(row)); } catch (e) { console.error('send:', e.message); }
+    try { await send(`${emojiFor(row.event, EMOJI)} ${render(row)}`); } catch (e) { console.error('send:', e.message); }
   }
 }
 

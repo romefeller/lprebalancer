@@ -624,6 +624,36 @@ def payout_totals(config_name=None):
             'payouts': int(rows['paid']['n']) if 'paid' in rows else 0}
 
 
+# --- circuit breakers (health.py) ---------------------------------------------
+
+_HEALTH_COLS = ('key', 'fails', 'trips', 'last_fail', 'last_ok', 'retry_at', 'last_error')
+
+
+def health_get(key):
+    """The breaker record of `key`, or None."""
+    with cursor() as cur:
+        cur.execute('select key, fails, trips, last_fail, last_ok, retry_at, last_error from health where key = %s', (key,))
+        r = cur.fetchone()
+    return dict(r) if r else None
+
+
+def health_put(rec):
+    """Upsert one breaker record."""
+    vals = [rec.get(c) for c in _HEALTH_COLS]
+    with cursor(commit=True) as cur:
+        cur.execute("""insert into health (key, fails, trips, last_fail, last_ok, retry_at, last_error, updated)
+                       values (%s,%s,%s,%s,%s,%s,%s, now())
+                       on conflict (key) do update set fails = excluded.fails, trips = excluded.trips,
+                           last_fail = excluded.last_fail, last_ok = excluded.last_ok,
+                           retry_at = excluded.retry_at, last_error = excluded.last_error, updated = now()""", vals)
+
+
+def health_all():
+    with cursor() as cur:
+        cur.execute('select key, fails, trips, last_fail, last_ok, retry_at, last_error from health order by key')
+        return [dict(r) for r in cur.fetchall()]
+
+
 def event(kind, detail=''):
     with cursor(commit=True) as cur:
         cur.execute('insert into events (ts, kind, detail) values (%s,%s,%s)',
@@ -791,18 +821,25 @@ def daily_line(day):
         a = cur.fetchone()                    # an aggregate: always one row
         if a['e0'] is None:
             return None
-        cur.execute('select count(*) n from positions where opened_at >= %(s)s and opened_at < %(e)s', w)
-        n = cur.fetchone()['n']
+        cur.execute("""select count(*) n, count(*) filter (where open_reason ilike 'deploy%%idle%%') idle
+                       from positions where opened_at >= %(s)s and opened_at < %(e)s""", w)
+        r = cur.fetchone()
+        n, idle = r['n'], r['idle']
         cur.execute('select coalesce(sum(fee_usd), 0) f from harvests where ts >= %(s)s and ts < %(e)s', w)
         f = float(cur.fetchone()['f'])
         cur.execute("select coalesce(sum(usd), 0) u from payouts where kind in ('paid', 'uncertain') "
                     "and ts >= %(s)s and ts < %(e)s", w)
         paid = float(cur.fetchone()['u'])
     e0, p0, e1, p1 = float(a['e0']), float(a['p0']), float(a['e1']), float(a['p1'])
+    # Earned is accrual, the same basis as the book's "today" (fees_between);
+    # fees_usd is what was harvested in the day (audit 2026-09-30: $0.61 of
+    # the 09-30 figure was earned before midnight and harvested after).
+    earned = float(fees_between(start, min(end, now()))['usd'])
     value = e1 + paid
     hold = e0 * (0.5 + 0.5 * p1 / p0) if p0 > 0 else None
     return {'day': day.isoformat(), 'complete': now() >= end,
-            'recentres': int(n), 'fees_usd': round(f, 4),
+            'recentres': int(n), 'idle_redeploys': int(idle), 'fees_usd': round(f, 4),
+            'fees_earned_usd': round(earned, 4),
             'fees_per_recentre_usd': round(f / n, 4) if n else None,
             'price_open': round(p0, 4), 'price_close': round(p1, 4),
             'equity_open': round(e0, 4), 'equity_close': round(e1, 4), 'paid_out_usd': round(paid, 4),
@@ -860,6 +897,16 @@ def since_start(extra_usd=0.0):
             'hold_50_50_usd': round(hold_50, 4), 'vs_hold_50_50_usd': round(value - hold_50, 4)}
 
 
+def _pnl(equity, started, paid, sst):
+    """{'pnl_usd', 'pnl_basis'}: the capital-baseline profit when there is a
+    baseline, else equity - first snapshot + payouts. Pure."""
+    if sst and sst.get('profit_usd') is not None:
+        return {'pnl_usd': round(float(sst['profit_usd']), 2), 'pnl_basis': 'capital baseline'}
+    if equity is None or started is None:
+        return {'pnl_usd': None, 'pnl_basis': None}
+    return {'pnl_usd': round(_f(equity) - _f(started) + paid, 2), 'pnl_basis': 'first snapshot'}
+
+
 def _since_start_or_none():
     try:
         return since_start(float(audit_value('uncounted_usd') or 0.0))
@@ -908,18 +955,47 @@ def _daily_or_none():
         return None             # the book never fails over its daily line
 
 
+DEPLOYMENT_TOLERANCE_USD = 1.0     # LP + wallet + fees may differ from equity by this much
+
+
+def _pct(part, whole):
+    """part / whole in percent, clamped to [0, 100], or None without a whole."""
+    if not whole or whole <= 0:
+        return None
+    return round(min(max(part / whole * 100, 0.0), 100.0), 1)
+
+
 def _deployment(latest, equity):
     """What is in the LP position and what is in the wallet, from the latest
     snapshot. The position mark is zero when the latest snapshot's position is
-    closed (the money is back in the wallet)."""
+    closed (the money is back in the wallet). The share is None (shown as no
+    share) when the parts do not add up to the equity: a book that cannot be
+    checked says nothing, not a wrong figure."""
     if not latest:
         return {'lp_usd': None, 'wallet_usd': None, 'deployed_pct': None}
     lp = _f(latest.get('position_usd')) if latest.get('open') else 0.0
     wallet = latest.get('wallet_usd')
     eq = _f(equity) if equity is not None else None
+    pct = _pct(lp, eq)
+    if pct is not None and wallet is not None and latest.get('open'):
+        if abs(lp + _f(wallet) + _f(latest.get('accrued_usd')) - eq) > DEPLOYMENT_TOLERANCE_USD:
+            pct = None
     return {'lp_usd': round(lp, 2),
             'wallet_usd': round(_f(wallet), 2) if wallet is not None else None,
-            'deployed_pct': round(lp / eq * 100, 1) if eq else None}
+            'deployed_pct': pct}
+
+
+def deployment_now(book, lp_usd):
+    """The book's LP line at an OPEN or a CLOSE, from the position's mark the
+    loop just read (lp_usd; 0 at a close) and the equity on record. The latest
+    snapshot still describes the position before the move, so without this an
+    OPEN book said "in LP $0.00 (0.0%)" (2026-09-30). No wallet read: one
+    seconds after a move can still show the tokens that just left it. Pure."""
+    eq = book.get('equity_usd')
+    if lp_usd is None or eq is None or eq <= 0:
+        return {}
+    lp = min(max(float(lp_usd), 0.0), float(eq))
+    return {'lp_usd': round(lp, 2), 'wallet_usd': round(float(eq) - lp, 2), 'deployed_pct': _pct(lp, eq)}
 
 
 def stats(token_a=None, token_b=None):
@@ -1007,6 +1083,7 @@ def stats(token_a=None, token_b=None):
             last_priced = cur.fetchone()
         equity = last_priced and last_priced['equity_usd']
     started = first_eq and first_eq['equity_usd']
+    sst = _since_start_or_none()
 
     today = fees_between(now().replace(hour=0, minute=0, second=0, microsecond=0))
 
@@ -1077,16 +1154,18 @@ def stats(token_a=None, token_b=None):
         # what is in the LP position (its mark, rent included) and what is not
         **_deployment(latest, equity),
         'equity_start_usd': round(_f(started), 2) if started is not None else None,
+        # P&L is since_start's profit (the capital baseline and every flow):
+        # the first snapshot is not the start (audit 2026-09-30: $7.69 apart).
+        # Without a baseline, the first-snapshot figure, labelled as such.
         # Payouts leave the LP wallet by design; they are income, not a loss
         # (review, 2026-09-26: the book counted every payout against P&L).
-        'pnl_usd': (round(_f(equity) - _f(started) + _paid_usd(cfg.get('name')), 2)
-                    if (equity is not None and started is not None) else None),
+        **_pnl(equity, started, _paid_usd(cfg.get('name')), sst),
         'in_range_pct': (round(_f(span['ir']) * 100, 1)
                          if span and span['ir'] is not None else None),
         'tracked_days': round(days, 3) if days else None,
         'split': payout_totals(cfg.get('name')) if cfg.get('payout_enabled') else None,
         'daily': _daily_or_none(),
-        'since_start': _since_start_or_none(),
+        'since_start': sst,
         'last_price': _f(latest and latest['price']) or None,
         'last_seen': latest['ts'].isoformat() if latest else None,
         # the survival figures recorded at the last poll of the open position

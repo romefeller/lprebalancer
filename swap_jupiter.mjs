@@ -37,15 +37,16 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { createRequire } from 'node:module';
 
+import { endpoints, overEndpoints, JupiterError, AfterSignError } from './rpc_policy.mjs';
 const require = createRequire(import.meta.url);
 const { Connection, Keypair, PublicKey, VersionedTransaction } = require('@solana/web3.js');
 const spl = require('@solana/spl-token');
 
 const DIR = path.dirname(new URL(import.meta.url).pathname);
 const HALT = path.join(DIR, 'HALT');
-const RPC = process.env.SOLANA_RPC_URL ?? process.env.LPBOT_RPC ?? 'https://api.mainnet-beta.solana.com';
-const ENDPOINTS = [RPC, 'https://api.mainnet-beta.solana.com', 'https://solana-rpc.publicnode.com']
-  .filter((v, i, a) => v && a.indexOf(v) === i);
+// The swap reads token balances (getTokenAccountsByOwner): indexed-capable
+// endpoints only (rpc_policy.mjs; 2026-09-30 publicnode 403).
+const ENDPOINTS = endpoints(process.env, { indexed: true });
 
 const SLIPPAGE_BPS = Number(process.env.LPBOT_SLIPPAGE_BPS ?? 100);
 const GAS_RESERVE_SOL = Number(process.env.LPBOT_GAS_RESERVE_SOL ?? 0.05);
@@ -81,23 +82,11 @@ async function connect(url) {
 // transaction left this process: never retried, whatever the cause.
 class SentError extends Error {}
 
+// The endpoint loop is rpc_policy.overEndpoints: an RPC rate limit, a 403 or
+// a transport failure before signing moves on; a Jupiter error, a SentError
+// or anything after signing is thrown at once.
 async function withRpc(fn) {
-  let lastErr = null;
-  for (const url of ENDPOINTS) {
-    for (let attempt = 0; attempt < 2; attempt++) {
-      try {
-        return await fn(await connect(url));
-      } catch (e) {
-        if (e instanceof SentError) throw e;
-        // Only a rate limit moves to the next endpoint; any other error is
-        // the caller's answer (a refusal, a bad quote) and is passed through.
-        if (!/429|Too Many Requests|rate/i.test(String(e?.message ?? e))) throw e;
-        lastErr = e;
-        await new Promise(r => setTimeout(r, 2500 * (attempt + 1)));
-      }
-    }
-  }
-  throw new Error(`all RPC endpoints failed: ${String(lastErr?.message ?? lastErr).slice(0, 160)}`);
+  return overEndpoints(ENDPOINTS, async url => fn(await connect(url)));
 }
 
 // --- Jupiter HTTP -----------------------------------------------------------------
@@ -114,7 +103,7 @@ async function jfetch(url, init) {
       await new Promise(res => setTimeout(res, JUP_RETRY_MS[attempt]));
       continue;
     }
-    if (!r.ok) throw new Error(`Jupiter ${r.status} on ${new URL(url).pathname}: ${(j?.error ?? text).toString().slice(0, 200)}`);
+    if (!r.ok) throw new JupiterError(`Jupiter ${r.status} on ${new URL(url).pathname}: ${(j?.error ?? text).toString().slice(0, 200)}`);
     return j;
   }
 }
@@ -435,7 +424,8 @@ async function performSwap({ connection, payer }, inInfo, outInfo, amountHuman, 
     }, 'confirmed');
     if (conf.value?.err) throw new Error(`transaction ${signature} failed on chain: ${JSON.stringify(conf.value.err)}`);
   } catch (e) {
-    if (!signature) throw e;                     // nothing left this process; a plain error
+    // No signature: the send may still have reached a node. Never retried.
+    if (!signature) throw new AfterSignError(`send failed after signing (not retried): ${e.message ?? e}`);
     console.log(JSON.stringify({ ...report, signature, sent: true, partial: true, error: String(e.message ?? e) }, null, 1));
     throw new SentError(`sent ${signature} but could not confirm it: ${e.message}`);
   }

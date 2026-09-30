@@ -58,6 +58,7 @@ while you are looking and the next poll runs harvest -> close -> reopen at the
 best band, subject to the same gap and daily limits as an automatic one.
 """
 import json
+import math
 import os
 import pathlib
 import re
@@ -70,6 +71,7 @@ import datetime as dt
 import numpy as np
 
 import calm
+import health
 import config
 import db
 import dexes
@@ -109,6 +111,11 @@ def stamp():
     return datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
 
 
+NOISE = re.compile(r'^\s*bigint: Failed to load bindings|^\s*\(node:\d+\) \[?\w*\]? ?(Experimental|Deprecation)Warning'
+                   r'|^\s*\(Use `node --trace-')
+LAST_CHAIN_ERROR = {}             # {'args', 'text'}: the last signer failure in full, for the events table
+
+
 def tidy(err, limit=140):
     """Turn a wall of RPC error text into one readable line.
 
@@ -118,13 +125,32 @@ def tidy(err, limit=140):
     """
     if not err:
         return None
-    s = ' '.join(str(err).split())
+    # Known noise lines first: the bigint warning took 76 of 140 characters
+    # and cut the 2026-09-30 403 off before its cause.
+    s = ' '.join(ln for ln in str(err).splitlines() if not NOISE.search(ln))
+    s = ' '.join(s.split())
+    if not s:
+        return None
     # A program rejection is authoritative even if earlier RPC retries logged 429.
     if re.search(r'PriceSlippageCheck|price slippage check|0x1781\b|Custom["\s:]+6017\b', s, re.I):
         return 'PriceSlippageCheck (6017): price moved beyond the slippage limit'
+    # The specific part of a program failure first: an Anchor "Error Message",
+    # the custom error code, a JSON-RPC message. A simulation failure's log
+    # dump buried them (2026-09-28 18:56: only "Program data: 7XCU..." kept).
+    anchor = re.search(r'Error Code: (\w+)\. Error Number: (\d+)\. Error Message: ([^."\]]+)', s)
+    if anchor:
+        return f'program error {anchor.group(1)} ({anchor.group(2)}): {anchor.group(3).strip()}'[:limit]
+    code = re.search(r'custom program error: 0x[0-9a-fA-F]+', s)
+    if code and re.search(r'simulation failed|failed on chain|InstructionError', s, re.I):
+        head = re.search(r'Error processing Instruction \d+', s)
+        return (f'{head.group(0)}: ' if head else '') + code.group(0)
     program = re.search(r'(?:InstructionError|custom program error|failed on chain|simulation failed).*', s, re.I)
     if program:
         return program.group(0)[:limit]
+    if re.search(r'Indexed requests|personal token', s, re.I):
+        return 'RPC endpoint refuses indexed reads (403: needs a personal token)'
+    if re.search(r'^Jupiter \d+|\bJupiter 429\b', s):
+        return ('Jupiter rate limited: ' if re.search(r'\bJupiter 429\b', s) else '') + s[:limit]
     for needle, plain in (
             ('Too Many Requests', 'RPC rate limited'),
             ('timeout', 'RPC timeout'),
@@ -134,14 +160,41 @@ def tidy(err, limit=140):
             return plain
     if re.search(r'\b429\b', s):
         return 'RPC rate limited'
+    rpc_msg = re.search(r'"message"\s*:\s*"([^"]{3,})"', s)
+    if rpc_msg:
+        return rpc_msg.group(1)[:limit]
     return s[:limit]
+
+
+def _load_emoji():
+    try:
+        m = json.loads((ROOT / 'event_emoji.json').read_text())
+        return {k: v for k, v in m.items() if not k.startswith('_') and isinstance(v, str)}
+    except Exception:
+        return {}
+
+
+EVENT_EMOJI = _load_emoji()
+
+
+def emoji_for(event):
+    """The event's emoji (event_emoji.json, shared with the Telegram bridge),
+    or by rule: a failure ❌, a deferral ⏳, anything else ▫️. Pure."""
+    e = str(event)
+    if e in EVENT_EMOJI:
+        return EVENT_EMOJI[e]
+    if re.search(r'fail|unreadable|refused|rejected|error', e, re.I):
+        return '❌'
+    if re.search(r'defer|skip|wait|held', e, re.I):
+        return '⏳'
+    return '▫️'
 
 
 def notify(event, **payload):
     row = {'t': stamp(), 'event': event, **payload}
     with open(FEED, 'a') as fh:
         fh.write(json.dumps(row, default=str) + '\n')
-    print(f'[{row["t"]}] {event}: {json.dumps(payload, default=str, sort_keys=True)}',
+    print(f'[{row["t"]}] {emoji_for(event)} {event}: {json.dumps(payload, default=str, sort_keys=True)}',
           flush=True)
 
 
@@ -156,6 +209,27 @@ def nearest(runs, pct, tolerance=2):
         return None
     k = min(runs, key=lambda x: abs(x - pct))
     return runs[k] if abs(k - pct) <= tolerance else None
+
+
+def regime_at_move(view, lower, upper, moves_24h=None):
+    """The regime view as it is right after a move. Pure. With a new band
+    (lower, upper): held, held_pct, inside and p_held describe it, p_held
+    from the view's own probability for that width. Without one (a close):
+    nothing is held. moves_24h, when given, replaces the poll's count."""
+    v = dict(view)
+    if moves_24h is not None:
+        v['moves_24h'] = moves_24h
+    if lower and upper and upper > lower > 0:
+        half = math.sqrt(upper / lower)
+        widths = [k for k in config.REGIME_WIDTHS]
+        held = min(widths, key=lambda k: abs(k - half))
+        v['held'], v['held_pct'], v['inside'] = held, round((half - 1) * 100, 2), True
+        pct = round((held - 1) * 100, 2)
+        v['p_held'] = next((p for w, p in (v.get('probs') or []) if abs(float(w) - pct) < 1e-6), None)
+    else:
+        v['held'] = v['held_pct'] = v['p_held'] = None
+        v['inside'] = False
+    return v
 
 
 def notify_book(event, **payload):
@@ -174,12 +248,63 @@ def notify_book(event, **payload):
         payload = dict(payload, regime=LAST_REGIME['view'])
     if payload.get('venues') is None and LAST_VENUES.get('view'):
         payload = dict(payload, venues=LAST_VENUES['view'][:4])
-    return notify(event, **{**payload, **db.stats()})
+    # At an OPEN or a CLOSE the caller knows the position's mark before any
+    # snapshot of it exists: the LP line is built from that (db.deployment_now),
+    # and the regime block describes the band the move left behind it, not
+    # the one the last poll saw (audit, 2026-09-30: 15 of 19 OPEN books).
+    lp_now = payload.pop('lp_now_usd', None)
+    moves_now = payload.pop('moves_24h_now', None)
+    if lp_now is not None and isinstance(payload.get('regime'), dict):
+        opened = event == 'OPEN'
+        payload = dict(payload, regime=regime_at_move(payload['regime'], payload.get('lower') if opened else None,
+                                                      payload.get('upper') if opened else None, moves_now))
+    if payload.get('health') is None:
+        payload = dict(payload, health=health.summary())
+    book = db.stats()
+    if lp_now is not None:
+        book = {**book, **db.deployment_now(book, lp_now)}
+    return notify(event, **{**payload, **book})
+
+
+WRITE_COMMANDS = {'open', 'close', 'harvest'}      # a venue's own transactions
+
+
+def health_key(args, dex):
+    """The breaker a signer call answers to, or None for calls that do not
+    feed one (reads have their own counter, read_failures). Pure."""
+    cmd = str(args[0]) if args else ''
+    if dex == 'jupiter':
+        return 'swap' if cmd == 'rebalance' else None
+    return f'venue:{dex}' if cmd in WRITE_COMMANDS else None
+
+
+def counts_as_failure(err):
+    """Whether an error is the dependency's fault. Our own refusals, HALT and
+    a missing signer are not: they say nothing about the venue. Pure."""
+    e = str(err or '')
+    return bool(e) and not re.search(r'^refused:|HALT present|^no signer for', e)
 
 
 def chain(*args, dex=None, timeout=420, extra_env=None):
     """Call the signer for `dex` (the active pool's by default).
-    Returns (parsed_json, tidy_error)."""
+    Returns (parsed_json, tidy_error). Every write feeds its breaker
+    (health.py): the venue's for open/close/harvest, 'swap' for the swap."""
+    d = dex or config.DEX
+    out, err = _chain(*args, dex=d, timeout=timeout, extra_env=extra_env)
+    key = health_key(args, d)
+    if key:
+        failed = (err or not out) and not (out or {}).get('signature') and not (out or {}).get('noop')
+        if failed and counts_as_failure(err or 'no result'):
+            rec = health.record_failure(key, err or 'no result')
+            state, _ok, wait = health.verdict(rec, time.time())
+            print(f"{health.EMOJI[state]} health {key}: {state} after {rec['fails']} failure(s); "
+                  f"retry in {wait / 60:.0f} min: {err}", flush=True)
+        elif not failed:
+            health.record_success(key)
+    return out, err
+
+
+def _chain(*args, dex=None, timeout=420, extra_env=None):
     script = SIGNERS.get(dex or config.DEX)
     if not script or not pathlib.Path(script).exists():
         return None, f'no signer for {dex or config.DEX}'
@@ -216,8 +341,10 @@ def chain(*args, dex=None, timeout=420, extra_env=None):
             continue
         err = out.get('error') or ('partial transaction execution' if out.get('partial') else None)
         if r.returncode or err:
+            LAST_CHAIN_ERROR.update(args=' '.join(map(str, args[:1])), text=str(err or r.stderr or text)[:2000])
             return out, tidy(err or r.stderr or text) or f'signer exited {r.returncode}'
         return out, None
+    LAST_CHAIN_ERROR.update(args=' '.join(map(str, args[:1])), text=text[:2000])
     return None, tidy(text) or (f'signer exited {r.returncode}' if r.returncode else 'no signer result')
 
 
@@ -745,7 +872,7 @@ def _merge(bars_list):
     return tuple(np.array(c, dtype=float) for c in cols)
 
 
-def tape5(pool, price):
+def tape5(pool, price, pair=None):
     """The pool's five-minute tape, `regime_tape_days` deep, from the
     database. Each refresh fetches the newest 1000 bars, pages back while the
     window is short, stores the new bars and deletes those older than the
@@ -754,7 +881,7 @@ def tape5(pool, price):
     noisy and churned 6 to 7 moves a day in the replay."""
     t, b = _TAPE5.get(pool, (0, None))
     if b is not None and time.time() - t <= TAPE5_REFRESH:
-        return b
+        return with_surrogate(pool, b, price, pair)
     window_s = tape_bars() * calm.BAR_SECONDS
     if b is None:
         try:
@@ -787,7 +914,7 @@ def tape5(pool, price):
         if len(merged[0]) == n0:
             break
     if merged is None:
-        return b
+        return with_surrogate(pool, b, price, pair)
     if fresh is not None:
         try:
             db.tape_store(pool, merged, merged[0][-1] - window_s)
@@ -798,17 +925,290 @@ def tape5(pool, price):
         for other in [p for p in _TAPE5 if p != pool][:-1]:
             _TAPE5.pop(other, None)
         _TAPE5[pool] = (time.time(), merged)
-    return merged
+    return with_surrogate(pool, merged, price, pair)
+
+
+_SURR = {}                      # pool -> (asked_at, name, surrogate bars); one pool
+LAST_SURROGATE = {}             # pool -> tape_source(): where the last hour's bars came from
+SURROGATE_LOOKBACK_S = 86400    # a slot GeckoTerminal lacks in the last day is filled
+SURROGATE_REFRESH = TAPE5_REFRESH
+
+
+def tape_source(ts, filled_ts, now, name, fresh):
+    """Where the last hour's bars came from, for the book: 'Gecko', 'Binance'
+    (every bar of the hour), 'Gecko+Binance', or 'none' when the tape is
+    stale. Pure."""
+    hour = [t for t in (ts if ts is not None else []) if t >= now - 3600 - calm.BAR_SECONDS]
+    filled = set(int(t) for t in filled_ts)
+    n_s = sum(1 for t in hour if int(t) in filled)
+    label = ('none' if not fresh else 'Gecko' if n_s == 0 else name if n_s == len(hour) else f'Gecko+{name}')
+    return {'source': label, 'surrogate': name if filled else None,
+            'filled_1h': n_s, 'bars_1h': len(hour), 'filled_24h': len(filled)}
+
+
+def with_surrogate(pool, bars, price, pair=None):
+    """The GeckoTerminal tape with the slots it lacks in the last day filled
+    from a surrogate (calm.surrogate_5m). GeckoTerminal wins wherever it has a
+    bar; surrogate bars are never stored, so a late GeckoTerminal bar replaces
+    them and the tape is GeckoTerminal's again as soon as it is complete. The
+    surrogate is asked only while a slot is missing and not already filled,
+    at most once per SURROGATE_REFRESH; a failed ask keeps the bars an earlier
+    ask gave. Any failure returns the GeckoTerminal tape as it is."""
+    if bars is None:
+        return None
+    now = time.time()
+    try:
+        pair = pair or (config.PAIR_LABEL if pool == config.POOL else None)
+        gaps = calm.missing_slots(bars[0], now, SURROGATE_LOOKBACK_S)
+        if not gaps:
+            _SURR.pop(pool, None)
+            LAST_SURROGATE[pool] = tape_source(bars[0], [], now, None, calm.tape_fresh(bars[0], now))
+            return bars
+        t, name, s = _SURR.get(pool, (0, None, None))
+        have = set(int(x) for x in s[0]) if s is not None else set()
+        if any(g not in have for g in gaps) and now - t > SURROGATE_REFRESH:
+            got_name, got = calm.surrogate_5m(pair, gaps[0], price, ref=bars)
+            if got is not None:
+                name, s = got_name, _merge([s, got])
+                s = tuple(c[s[0] >= now - SURROGATE_LOOKBACK_S - 3600] for c in s)   # the last day only
+            for other in [p for p in _SURR if p != pool]:
+                _SURR.pop(other, None)
+            _SURR[pool] = (now, name, s)
+        fill = None
+        if s is not None:
+            want = set(gaps)
+            keep = np.array([int(x) in want for x in s[0]], dtype=bool)
+            fill = tuple(c[keep] for c in s) if keep.any() else None
+        out = _merge([fill, bars]) if fill is not None else bars    # the later array wins: GeckoTerminal
+        LAST_SURROGATE[pool] = tape_source(out[0], fill[0] if fill is not None else [], now, name,
+                                           calm.tape_fresh(out[0], now))
+        return out
+    except Exception as e:
+        print(f'surrogate tape failed: {type(e).__name__}: {e}', flush=True)
+        return bars
+
+
+IDLE_MIN_AGE_S = 600              # an open this recent may still be settling
+IDLE_DEPLOYS_PER_DAY = 3          # re-centres to deploy idle money, at most, in 24 h
+
+
+def idle_deploys_left(times, now):
+    """Idle-deploy re-centres still allowed in the 24 h before `now`. Pure."""
+    return max(0, IDLE_DEPLOYS_PER_DAY - sum(1 for t in (times or []) if now - t < 86400))
+
+
+def idle_to_deploy(deployable_usd, equity_usd, seconds_since_open):
+    """Whether money idle beside an open position is worth a re-centre that
+    deploys it: more than max($2, 2% of equity), the audit's idle limit, and
+    the band at least IDLE_MIN_AGE_S old. A cycle costs about $0.012
+    (lp-cost-structure); $22 idle forgoes about $0.20 a day of fees."""
+    if seconds_since_open is None or seconds_since_open < IDLE_MIN_AGE_S:
+        return False
+    return deployable_usd > max(audit.IDLE_ABS_USD, audit.IDLE_SHARE * (equity_usd or 0.0))
+
+
+def deploy_idle(state, status, wbal, rv, price):
+    """Deploy-all: money idle beside the band (a swap that failed before an
+    open, a leftover) goes in at the next allowed move, a re-centre at the
+    regime's width, which swaps the wallet to 50/50 first. True when it moved."""
+    if 'balanceA' not in wbal or wbal.get('walletUsd') is None:
+        return False
+    opened = db.position_opened(status['positionMint'])
+    age = (datetime.now(timezone.utc) - opened).total_seconds() if opened else None
+    idle = deployable_usd(wbal)
+    equity = float(wbal['walletUsd']) + (position_usd(status) or 0.0)
+    # What a balanced open leaves out is its price tolerance, by design: in a
+    # narrow band the deposit ratio moves ~80x faster than the price, so a
+    # 7.5 bp tolerance leaves ~6% of one side (2026-09-28: $13 of $234). The
+    # first reading of a band after such an open is that leftover; only new
+    # money beyond it (a deposit, a sweep) is deployed. After an open that
+    # skipped its swap, nothing is excused.
+    base = state.get('idle_baseline') or {}
+    if base.get('mint') != status['positionMint']:
+        excused = 0.0 if state.get('open_unbalanced') else idle
+        state['idle_baseline'] = {'mint': status['positionMint'], 'usd': round(excused, 4)}; save(state)
+        base = state['idle_baseline']
+    idle_new = idle - float(base['usd'])                 # always written as a number above
+    if not (idle_to_deploy(idle_new, equity, age) and calm_budget_left(state) > 0 and voluntary_move_allowed(state)):
+        return False
+    # The re-centre deploys idle money only through its swap: while swaps
+    # fail (the 'swap' breaker, exponential backoff, health.py), it would
+    # close and reopen lopsided again, and spend the move budget the regime
+    # needs (2026-09-30: every ~11 minutes). At most a few a day.
+    now = time.time()
+    ok, _st, wait, rec = health.allowed('swap', now)
+    left = idle_deploys_left(state.get('idle_deploys'), now)
+    if not ok or left <= 0:
+        told = state.get('idle_deferred_told')
+        key = f"{rec.get('last_fail')}:{left}"
+        if told != key:
+            state['idle_deferred_told'] = key; save(state)
+            why = (f"the swap failed {rec.get('fails')}x in a row: next try in {wait / 60:.0f} min"
+                   if not ok else f'{IDLE_DEPLOYS_PER_DAY} idle deploys in 24 h already')
+            notify('deploy_idle_deferred', idle_usd=round(idle, 2), reason=why)
+            db.event('deploy_idle_deferred', f'${idle:.2f} idle: {why}')
+        return False
+    state['idle_deploys'] = [t for t in (state.get('idle_deploys') or []) if now - t < 86400] + [now]; save(state)
+    k = rv['choice'] if rv else math.sqrt(status['upperPrice'] / status['lowerPrice'])
+    notify_book('DEPLOY_IDLE', idle_usd=round(idle, 2), price=price, lower=status['lowerPrice'],
+                upper=status['upperPrice'])
+    db.event('DEPLOY_IDLE', f'${idle:.2f} idle beside the band: re-centre to deploy it')
+    rebalance(state, status, f'deploy ${idle:.2f} idle', band=k, calm_move=True)
+    return True
+
+
+SWEEP_EVERY_S = 600               # a token-account read at most every ten minutes
+SWEEP_MIN_USD = 1.0               # smaller balances are dust: a swap would cost more than it moves
+
+
+def plan_sweep(accounts, pool_mints, reward_mints, prices, facts):
+    """Which foreign tokens in the LP wallet to convert into the pool's
+    tokens, so they can be deployed (owner, 2026-09-28: "every idle capital
+    should be put on the LP"). Pure. `accounts` are audit.token_accounts rows;
+    `prices` USD per mint; `facts` Jupiter's token facts per mint. Never: the
+    pool's own tokens, reward tokens (paid out by distribute_rewards), wrapped
+    SOL, position NFTs, unverified tokens (airdropped spam), or balances under
+    SWEEP_MIN_USD."""
+    plan = []
+    for a in accounts:
+        m = a['mint']
+        if a['amount'] <= 0 or m in pool_mints or m in reward_mints or m == fees.NATIVE_MINT:
+            continue
+        if a['decimals'] == 0 and a['amount'] == 1:
+            continue                                   # a position NFT
+        human = a['amount'] / 10 ** a['decimals']
+        usd = human * float(prices.get(m) or 0.0)
+        if usd < SWEEP_MIN_USD or not (facts.get(m) or {}).get('verified'):
+            continue
+        plan.append({'mint': m, 'amount': human, 'usd': round(usd, 4),
+                     'symbol': (facts.get(m) or {}).get('symbol')})
+    return plan
+
+
+def sweep_foreign(state, bal):
+    """Convert foreign tokens in the LP wallet into the pool's quote token
+    (plan_sweep); deploy_idle then puts them in the band. Never blocks the
+    loop. Returns the swaps made."""
+    if time.time() - state.get('last_sweep', 0) < SWEEP_EVERY_S:
+        return []
+    state['last_sweep'] = time.time(); save(state)
+    try:
+        owner = bal.get('owner')
+        if not owner:
+            return []
+        (mint_a, _), (mint_b, _) = pool_tokens()
+        accounts = audit.token_accounts(config.RPC, owner)
+        rewards = set(state.get('reward_mints_seen') or [])
+        others = [a['mint'] for a in accounts if a['amount'] > 0 and a['mint'] not in (mint_a, mint_b)]
+        if not others:
+            return []
+        prices = dexes.jupiter_prices(others)
+        facts = {m: dexes.jupiter_token(m) for m in others}
+        plan = plan_sweep(accounts, {mint_a, mint_b}, rewards, prices, facts)
+        target = mint_b if mint_b != fees.NATIVE_MINT else mint_a
+        done = []
+        for p in plan:
+            sw, err = chain('swap', p['mint'], target, f"{p['amount']:.9f}", '--execute', dex='jupiter')
+            if err or not (sw or {}).get('signature'):
+                notify('sweep_failed', reason=err or 'no signature', mint=p['mint'], usd=p['usd'])
+                continue
+            db.event('SWEEP', f"{p['amount']} {p['symbol'] or p['mint']} (${p['usd']:.2f}) swapped to the pool, "
+                              f"{sw['signature']}")
+            done.append({**p, 'signature': sw['signature']})
+        if done:
+            notify('SWEEP', swept=done, total_usd=round(sum(d['usd'] for d in done), 2))
+        return done
+    except Exception as e:
+        notify('sweep_failed', reason=f'{type(e).__name__}: {tidy(e)}')
+        return []
 
 
 def voluntary_move_allowed(state):
-    """Whether a calm or regime move would pass rebalance()'s gap now. The
-    loop asks first, so a move held back by the gap is not announced on
-    every poll (review, 2026-09-26: up to five duplicate messages a move)."""
+    """Whether a calm or regime move would pass rebalance()'s gap now, and
+    the held venue's breaker allows its transactions (a venue in backoff gets
+    no voluntary move; exits and failover still run). The loop asks first,
+    so a move held back is not announced on every poll (review, 2026-09-26:
+    up to five duplicate messages a move)."""
     now = time.time()
     recent = [t for t in state.get('calm_times', []) if now - t < 86400]
     last_any = max([state.get('last_rebalance', 0)] + recent)
-    return now - last_any >= config.CALM_MIN_GAP
+    return now - last_any >= config.CALM_MIN_GAP and health.allowed(f'venue:{config.DEX}', now)[0]
+
+
+FAILOVER_MIN_RATIO = 0.8          # a failover target earns at least this share of the held venue
+
+
+def failover_pick(held_dex, venues, allowed, *, execute_dexes, signers, min_hours, min_ratio=FAILOVER_MIN_RATIO):
+    """The venue to fail over to when `held_dex` is tripped, or None. Pure.
+    `venues` is venue_view(); `allowed(dex)` says whether that venue's
+    breaker allows it. A target has on-chain evidence (min_hours), an armed
+    signer, a breaker that allows it, and at least `min_ratio` of the held
+    venue's on-chain income ("similar fee goodness"); the best such wins.
+    Without evidence on the held venue, any eligible venue qualifies."""
+    held = next((v for v in venues if v.get('held')), None)
+    floor = (held.get('total_pct_day') or 0.0) * min_ratio if held and (held.get('hours') or 0) >= min_hours else None
+    ok = [v for v in venues
+          if not v.get('held') and v.get('dex') != held_dex and v.get('row')
+          and (v.get('hours') or 0) >= min_hours and v.get('dex') in execute_dexes and v.get('dex') in signers
+          and allowed(v['dex']) and (floor is None or (v.get('total_pct_day') or 0.0) >= floor)]
+    return max(ok, key=lambda v: v.get('total_pct_day') or 0.0) if ok else None
+
+
+def venue_failover(state, status, price=None):
+    """Fail over when the held venue's breaker is tripped (TRIP_FAILS
+    failures of its own transactions in a row): move to the best venue with
+    similar on-chain income. With a position, a rebalance to the target
+    (its close is one more probe of the tripped venue); without one, repoint
+    and reopen there. The old venue cools down; the normal pool review can
+    bring the bot back once it earns more again. True when a move started."""
+    key = f'venue:{config.DEX}'
+    _ok, st, wait, rec = health.allowed(key)
+    if st != health.TRIPPED:
+        return False
+    told = state.get('failover_told')
+    tell = told != rec.get('last_fail')
+    if config.POOL_PINNED:
+        if tell:
+            state['failover_told'] = rec.get('last_fail'); save(state)
+            notify('failover_none', venue=config.DEX, reason='pool pinned: no failover', fails=rec.get('fails'))
+        return False
+    p = price if price is not None else (status or {}).get('price')
+    if not p:
+        return False
+    try:
+        venues = venue_view(p, (status or {}).get('quoteUsd') or 1.0)
+    except Exception as e:
+        venues = []
+        notify('venue_sample_failed', reason=tidy(e))
+    target = failover_pick(config.DEX, venues, lambda d: health.allowed(f'venue:{d}')[0],
+                           execute_dexes=config.EXECUTE_DEXES, signers=SIGNERS, min_hours=config.VENUE_MIN_HOURS)
+    if not target:
+        if tell:
+            state['failover_told'] = rec.get('last_fail'); save(state)
+            notify('failover_none', venue=config.DEX, fails=rec.get('fails'), retry_in_min=round(wait / 60),
+                   reason=f'no venue with {FAILOVER_MIN_RATIO:.0%} of the income, evidence and a healthy breaker; '
+                          f'backing off on {config.DEX}')
+            db.event('failover_none', f"{config.DEX} tripped ({rec.get('fails')}x: {rec.get('last_error')}); no target")
+        return False
+    row = target['row']
+    state['failover_told'] = rec.get('last_fail'); save(state)
+    what = (f"{config.DEX} tripped after {rec.get('fails')} failures ({rec.get('last_error')}) -> "
+            f"{target['dex']} {target['total_pct_day']:.2f}%/d on chain")
+    notify('FAILOVER', venue=config.DEX, to=target['dex'], pool=row['address'], fails=rec.get('fails'),
+           last_error=rec.get('last_error'), total_pct_day=target['total_pct_day'])
+    db.event('FAILOVER', what)
+    k = (regime_choice_now(row['address'], p, row.get('pair')) or config.REGIME_WIDTHS[-1]) \
+        if config.REGIME_ENABLED else None
+    if status and status.get('positionMint'):
+        rebalance(state, status, f'failover: {what}', target=row, band=k, calm_move=True)
+        return True
+    repoint(row)
+    pending = state.get('pending_reopen')
+    if pending:
+        # The intent's funds move with the venue: the failover is the reason.
+        pending.update(pool=config.POOL, dex=config.DEX); save(state)
+    reopen(state, f'failover: {what}', band=k)
+    return True
 
 
 def calm_budget_left(state):
@@ -840,7 +1240,27 @@ def calm_view(state, status):
 
 
 LAST_REGIME = {}                # {'view': the latest calm.regime_view}, for every book
-REGIME_STALE_S = 900            # a newest bar older than this: the tape is stale
+REGIME_UNSTALE_S = 900          # a tape back from STALE must stay fresh this long
+
+
+def track_tape_source(state, src):
+    """An event and a Telegram line when the tape's source changes between
+    GeckoTerminal only, GeckoTerminal with a surrogate, and none (stale).
+    'Binance' and 'Gecko+Binance' are one state here, so bars that come and
+    go one at a time do not repeat the message."""
+    kind = 'none' if src['source'] == 'none' else 'surrogate' if src['filled_1h'] else 'gecko'
+    was = state.get('tape_source_kind')
+    if was == kind:
+        return
+    state['tape_source_kind'] = kind; save(state)
+    if was is None and kind == 'gecko':
+        return                                        # first poll, all normal: nothing to say
+    detail = (f"{src['source']}: {src['surrogate']} fills {src['filled_1h']} of {src['bars_1h']} bars "
+              f"in the last hour (GeckoTerminal lacks them)" if kind == 'surrogate'
+              else 'none: GeckoTerminal and every surrogate lack recent bars (STALE)' if kind == 'none'
+              else 'Gecko: GeckoTerminal complete again, surrogate off')
+    db.event('TAPE_SOURCE', detail)
+    notify('TAPE_SOURCE', source=src['source'], was=was, kind=kind, detail=detail)
 
 
 def regime_view(state, status):
@@ -850,24 +1270,49 @@ def regime_view(state, status):
         return None
     pool = status.get('whirlpool') or config.POOL
     bars = tape5(pool, status['price'])
+    if bars is None:
+        return None
     lq = liquidity_view(pool, config.DEX, bars)
     theta = min(max(config.REGIME_THRESHOLD * lq['factor'], 0.05), 0.40)
     v = calm.regime_view(bars, status['price'], status['lowerPrice'], status['upperPrice'],
                          widths=config.REGIME_WIDTHS, horizon_minutes=config.REGIME_HORIZON,
                          threshold=theta)
-    if v and (v.get('bar_age_s') or 0) > REGIME_STALE_S:
-        # The newest bar is old (a data outage): the tape no longer describes
-        # the market. Choose the widest width, so an exit never reopens tight
-        # into a market nobody is measuring, and narrowing cannot happen
-        # (review, 2026-09-26: a 6-hour-old calm tape chose +/-1%).
+    raw_fresh = fresh = calm.tape_fresh(bars[0], time.time())
+    hold_left = 0
+    if fresh:
+        # A tape that just came back must stay complete REGIME_UNSTALE_S
+        # before the bot leaves STALE: sources that flicker cannot flip the
+        # band between the widest width and a tight one.
+        if state.get('regime_mode') == 'STALE':
+            since = state.get('tape_fresh_since')
+            if since is None:
+                state['tape_fresh_since'] = since = time.time(); save(state)
+            hold_left = max(0, int(REGIME_UNSTALE_S - (time.time() - since)))
+            fresh = hold_left == 0
+    elif state.get('tape_fresh_since') is not None:
+        state['tape_fresh_since'] = None; save(state)
+    if v and not fresh:
+        # The newest bar is old, or the last half hour has a gap (a data
+        # outage of GeckoTerminal and Binance both): the tape no longer
+        # describes the market. Choose the widest width, so an exit never
+        # reopens tight into a market nobody is measuring, and narrowing
+        # cannot happen (review, 2026-09-26: a 6-hour-old calm tape chose
+        # +/-1%; 2026-09-29: a lone bar after a 25-minute gap passed the
+        # age check and the bot narrowed, then widened again).
         v = dict(v, choice=config.REGIME_WIDTHS[-1],
-                 choice_pct=round((config.REGIME_WIDTHS[-1] - 1) * 100, 2), mode='STALE', stale=True)
+                 choice_pct=round((config.REGIME_WIDTHS[-1] - 1) * 100, 2), mode='STALE', stale=True,
+                 unstale_in_s=hold_left if raw_fresh else None)
     if v:
         v['threshold_base'] = config.REGIME_THRESHOLD
         v['liquidity'] = lq
         LAST_REGIME['risk'] = calm.risk_metrics(bars)
         v['moves_24h'] = config.CALM_MAX_MOVES - calm_budget_left(state)
         v['guard'] = config.CALM_MAX_MOVES
+        src = dict(LAST_SURROGATE.get(pool) or tape_source(bars[0], [], time.time(), None, raw_fresh))
+        if not raw_fresh:
+            src['source'] = 'none'
+        v['data'] = src
+        track_tape_source(state, src)
         if state.get('regime_mode') != v['mode']:
             db.event('REGIME', f"{state.get('regime_mode')} -> {v['mode']}: choice +/-{v['choice_pct']}% "
                                f"sigma {v['sigma_5m_pct']}% velocity {v['velocity']}")
@@ -1029,12 +1474,25 @@ def janitor(state):
         if err or not plan:
             notify('janitor_failed', reason=err or 'no answer')
             return None
+        # A mint closed before that has an account again was recreated by an
+        # operation that needs it (2026-09-28: Raydium recreates RAY, the
+        # pool's reward mint, at every close): keep it from now on.
+        closed_before = set(state.get('janitor_closed') or [])
+        back = sorted({a['mint'] for a in plan.get('closable') or []} & closed_before)
+        if back:
+            state['janitor_keep'] = sorted(set(state.get('janitor_keep') or []) | set(back)); save(state)
+            keep = sorted(set(keep) | set(back))
+            plan, err = chain('close-empty', *keep, dex='janitor')
+            if err or not plan:
+                notify('janitor_failed', reason=err or 'no answer')
+                return None
         if not plan.get('closable'):
             return plan
         out, err = chain('close-empty', *keep, '--execute', dex='janitor')
         if err or not (out or {}).get('signature'):
             notify('janitor_failed', reason=err or 'no signature')
             return None
+        state['janitor_closed'] = sorted(closed_before | {a['mint'] for a in out['closable']})
         state['last_audit'] = 0; save(state)          # re-audit next poll, on fresh reads
         db.event('JANITOR', f"closed {len(out['closable'])} empty token accounts, "
                             f"{out['reclaimSol']:.6f} SOL of rent back to the wallet")
@@ -1046,11 +1504,13 @@ def janitor(state):
         return None
 
 
-def regime_choice_now(pool, price):
+def regime_choice_now(pool, price, pair=None):
     """The regime's width for a fresh band at `price` on `pool`, or None."""
     if not config.REGIME_ENABLED:
         return None
-    bars = tape5(pool, price)
+    bars = tape5(pool, price, pair)
+    if bars is None:
+        return None
     try:
         dex = config.DEX if pool == config.POOL else None
         f = liquidity_view(pool, dex, bars)['factor'] if dex else 1.0
@@ -1059,7 +1519,7 @@ def regime_choice_now(pool, price):
     theta = min(max(config.REGIME_THRESHOLD * f, 0.05), 0.40)
     v = calm.regime_view(bars, price, price / 1.01, price * 1.01, widths=config.REGIME_WIDTHS,
                          horizon_minutes=config.REGIME_HORIZON, threshold=theta)
-    if not v or (v.get('bar_age_s') or 0) > REGIME_STALE_S:
+    if not v or not calm.tape_fresh(bars[0], time.time()):
         return None
     return v['choice']
 
@@ -1110,6 +1570,9 @@ def resume_reopen(state):
     return True
 
 
+SWAP_RETRY_PAUSES = (15, 30)      # three attempts in all
+
+
 def balance_wallet(state, bal, rec):
     """Swap the wallet to about 50/50 through Jupiter before an open, when
     either side holds less than half the capital, which is what a centred
@@ -1124,6 +1587,7 @@ def balance_wallet(state, bal, rec):
     Without this an open after an exit is limited by the scarcer token: a
     band that left above holds only the quote token, and the reopen deposits
     a sliver of the capital. See SWAP_HOOK.md for the contract."""
+    state['open_unbalanced'] = False
     if not config.REBALANCE_SWAP or not rec:
         return bal
     q = bal.get('quoteUsd') or 1.0
@@ -1165,17 +1629,21 @@ def balance_wallet(state, bal, rec):
         hints = {}
     env = {'LPBOT_TOKEN_HINTS': json.dumps(hints)} if hints else None
     out, err = chain('rebalance', mint_a, mint_b, target_a, target_b, '--execute', dex='jupiter', extra_env=env)
-    if (err or not out) and not (out or {}).get('signature') and not (out or {}).get('partial') \
-            and re.search(r'rate limit|429|timeout|timed out|ECONNRESET|blockhash', str(err), re.I):
-        # Nothing left this process: a transport failure is safe to repeat
-        # once. Two rate-limited swaps in a row on 2026-09-26 left the bot one
-        # failure from a halt with its capital idle in the wallet.
-        time.sleep(15)
+    for pause in SWAP_RETRY_PAUSES:
+        # Nothing left this process: a transport failure is safe to repeat.
+        # One retry was not enough: two rate limits in a row on 2026-09-28
+        # 18:16Z opened a lopsided band and left $22 of SOL idle.
+        if not ((err or not out) and not (out or {}).get('signature') and not (out or {}).get('partial')
+                and re.search(r'rate limit|429|timeout|timed out|ECONNRESET|blockhash', str(err), re.I)):
+            break
+        time.sleep(pause)
         out, err = chain('rebalance', mint_a, mint_b, target_a, target_b, '--execute', dex='jupiter', extra_env=env)
     if (err or not out) and not (out or {}).get('signature') and not (out or {}).get('partial'):
         # Nothing was sent. Open with what the wallet holds: a smaller
         # position earning fees beats capital idle until the next poll.
         notify('swap_skipped', reason=f'swap failed without sending ({err or "no result"}); opening with the wallet as it is')
+        db.event('swap_skipped', f"{err or 'no result'} | full: {LAST_CHAIN_ERROR.get('text', '')}")
+        state['open_unbalanced'] = True; save(state)   # its leftover is not tolerance: deploy_idle deploys it
         return bal
     if out and out.get('noop'):
         notify('swap_skipped', reason='already at target', usd_a=round(usd_a, 2), usd_b=round(usd_b, 2))
@@ -1452,7 +1920,7 @@ def calm_board_check(state, status):
            pool=best['address'], dex=best['dex'], calm=True)
     db.event('MIGRATE', f'on-chain: {config.DEX} {config.POOL} -> {best["dex"]} {best["address"]} '
                         f'({held_txt} -> {best_txt})')
-    k = (regime_choice_now(best['address'], status['price']) or config.REGIME_WIDTHS[0]) \
+    k = (regime_choice_now(best['address'], status['price'], best.get('pair')) or config.REGIME_WIDTHS[0]) \
         if config.REGIME_ENABLED else config.CALM_BAND
     rebalance(state, status, 'moved to the pool that earns more on chain', target=best, band=k, calm_move=True)
     return True
@@ -1619,7 +2087,8 @@ def reopen(state, reason, band=None, recovering=False):
                      deposit_usd, reason, config_name=config.PROFILE, dex=config.DEX)
     state.pop('pending_reopen', None)
     save(state)
-    notify_book('OPEN', pair=config.PAIR_LABEL, pool=pool, dex=config.DEX,
+    notify_book('OPEN', pair=config.PAIR_LABEL, pool=pool, dex=config.DEX, lp_now_usd=deposit_usd,
+           moves_24h_now=config.CALM_MAX_MOVES - calm_budget_left(state),
            opened_band=band_label(k), calm_band=bool(band),
            lower=round(lower, 4), upper=round(upper, 4),
            deposit_usd=round(deposit_usd, 2),
@@ -1741,15 +2210,18 @@ def rebalance(state, status, reason, target=None, band=None, calm_move=False, ex
         # realised and split them, or they vanish from the ledger and from the
         # payout (review, 2026-09-26).
         db.record_harvest(mint, accrued_a, accrued_b, accrued_usd,
-                          (out or {}).get('signature') or f'close:{mint}')
+                          # 'close:' marks fees the close collected: its tx moves
+                          # principal too, so the harvest audit cannot measure them
+                          # from the vault outflow (audit 2026-09-30, row 63)
+                          f"close:{(out or {}).get('signature') or mint}")
         try:
             distribute(state, mint, accrued_a, accrued_b)
         except Exception as e:
             notify('payout_failed', reason=f'{type(e).__name__}: {tidy(e)}')
     band_profile(mint, 'rebalance', reason)
-    notify_book('CLOSE', positionMint=mint,
-                signature=(out or {}).get('signature'), reason=reason)
-
+    # The move counts from the moment the close landed: record it before the
+    # CLOSE book, so the book's moves_24h includes it (audit, 2026-09-30: the
+    # CLOSE and OPEN books were one short).
     if calm_move:
         state['calm_times'] = calm_recent + [now]
         if state.get('pending_reopen'):
@@ -1758,6 +2230,8 @@ def rebalance(state, status, reason, target=None, band=None, calm_move=False, ex
         state['last_rebalance'] = now
         state['rebalance_times'] = recent + [now]
     save(state)
+    notify_book('CLOSE', positionMint=mint, lp_now_usd=0.0, moves_24h_now=config.CALM_MAX_MOVES - calm_budget_left(state),
+                signature=(out or {}).get('signature'), reason=reason)
     if target:
         repoint(target)
         notify('REPOINTED', dex=config.DEX, pool=config.POOL, pair=config.PAIR_LABEL)
@@ -1794,6 +2268,14 @@ def main():
 
         if not status.get('positionMint'):
             notify('no_position', detail='chain reports no open position')
+            try:
+                fo = venue_failover(state, None, price=(wallet(config.POOL) or {}).get('price'))
+            except Exception as e:
+                fo = False
+                notify('failover_failed', reason=f'{type(e).__name__}: {tidy(e)}')
+            if fo:
+                time.sleep(config.CALM_POLL_SECONDS)
+                continue
             if resume_reopen(state):
                 time.sleep(config.CALM_POLL_SECONDS)
                 continue
@@ -1821,7 +2303,8 @@ def main():
             continue
 
         price = status['price']
-        wusd = wallet(status['whirlpool']).get('walletUsd')
+        wbal = wallet(status['whirlpool'])
+        wusd = wbal.get('walletUsd')
         fc = forecast_for(status)
         sample_fee_growth(state, status)
         cv = calm_view(state, status) if not config.REGIME_ENABLED else None
@@ -1850,8 +2333,16 @@ def main():
                         wusd, position_usd(status), forecast=fc)
         record_risk(status, rv, fc)
         daily_report(state)
-        run_audits(state)               # before the janitor: an RPC read just after a close is stale
-        janitor(state)
+        run_audits(state)
+
+        try:
+            fo = venue_failover(state, status)
+        except Exception as e:
+            fo = False
+            notify('failover_failed', reason=f'{type(e).__name__}: {tidy(e)}')
+        if fo:
+            time.sleep(config.CALM_POLL_SECONDS)
+            continue
 
         if not status.get('inRange'):
             side = 'above' if price > status['upperPrice'] else 'below'
@@ -1869,6 +2360,11 @@ def main():
 
         # Calm mode: narrow when the market goes cold, re-centre the tight
         # band before it is touched, widen when the calm ends.
+        sweep_foreign(state, wbal)
+        if deploy_idle(state, status, wbal, rv, price):
+            time.sleep(config.CALM_POLL_SECONDS)
+            continue
+
         ract = calm.regime_decide(rv, widths=config.REGIME_WIDTHS, steps=config.REGIME_STEPS) if rv else None
         if ract == 'narrow' and rv.get('stale'):
             ract = None                                   # never narrow on a stale tape
@@ -1944,7 +2440,7 @@ def main():
                 # While calm holds the tight band, the move keeps it: reopen
                 # tight on the new pool (if still calm) instead of at the
                 # ladder band, which would cost a second move to narrow again.
-                k = (regime_choice_now(target['address'], price) or rv['choice'] if rv
+                k = (regime_choice_now(target['address'], price, target.get('pair')) or rv['choice'] if rv
                      else calm_reopen_band(cv, state)) if tight else None
                 rebalance(state, status, 'operator requested move', target=target,
                           band=k, calm_move=bool(k))
@@ -2029,6 +2525,11 @@ def main():
             notify_book('in_band', price=price, lower=status['lowerPrice'],
                         upper=status['upperPrice'],
                         liquidity=status.get('liquidity'), forecast=fc, calm=cv, regime=rv)
+        # Last, and only in a poll that made no move: a transaction built
+        # seconds after a close reads stale accounts. On 2026-09-28 18:56Z the
+        # janitor closed the RAY account and the re-centre that followed
+        # failed in simulation.
+        janitor(state)
         time.sleep(config.CALM_POLL_SECONDS if tight else config.POLL_SECONDS)
 
 

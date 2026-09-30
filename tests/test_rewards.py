@@ -85,7 +85,7 @@ class CalmReview(unittest.TestCase):
                 mock.patch.object(rebalancer, 'notify', lambda ev, **kw: sent.append((ev, kw))), \
                 mock.patch.object(rebalancer.db, 'event', lambda *a: None), \
                 mock.patch.object(rebalancer, 'rebalance', lambda *a, **k: moved.append(k)), \
-                mock.patch.object(rebalancer, 'regime_choice_now', lambda pool, price: 1.0125), \
+                mock.patch.object(rebalancer, 'regime_choice_now', lambda pool, price, pair=None: 1.0125), \
                 mock.patch.object(rebalancer.config, 'POOL', 'HELD'), \
                 mock.patch.object(rebalancer.config, 'POOL_PINNED', False), \
                 mock.patch.object(rebalancer.config, 'MIGRATE_MIN_GAIN', 0.25), \

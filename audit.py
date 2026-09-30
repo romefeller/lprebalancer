@@ -42,6 +42,17 @@ BOT_PROGRAMS = {
     'HpNfyc2Saw7RKkQd8nEL4khUcuPhQ7WwY1B2qjx8jxFq': 'pancake',
 }
 DUST_LAMPORTS = 10_000          # a spam transfer moves a few lamports, never more
+DUST_USDC = 0.01                # an unsigned USDC transfer in of at most this is spam, not capital
+
+
+def lookalike(addr, known):
+    """Whether `addr` imitates one of `known`: the same first four and last
+    three characters (58^-7: no chance collision), not the same address. Address poisoning (2026-09-30:
+    8funvFQK...D1h imitating the profit wallet 8funmDkP...D1h) sends dust
+    after each payout, hoping the owner copies the address from the history.
+    Pure."""
+    a = str(addr or '')
+    return any(a != k and len(a) > 8 and a[:4] == k[:4] and a[-3:] == k[-3:] for k in known if k)
 IDLE_ABS_USD = 2.0              # idle above max($2, 2% of equity) is a warning,
 IDLE_SHARE = 0.02
 IDLE_FAIL_SHARE = 0.10          # above 10% a failure
@@ -80,9 +91,12 @@ def check_equity(chain_total_usd, snapshot_equity_usd, uncounted_usd):
     return ('warn', d) if abs(diff) > EQUITY_TOLERANCE_USD else ('ok', d)
 
 
-def classify_tx(tx, owner, known):
-    """What one wallet transaction was: ('known'|'failed'|'dust'|'bot'|
-    'deposit'|'withdrawal'|'other', detail). `tx` is jsonParsed."""
+def classify_tx(tx, owner, known, watch=()):
+    """What one wallet transaction was: ('known'|'failed'|'poison'|'dust'|
+    'bot'|'deposit'|'withdrawal'|'other', detail). `tx` is jsonParsed.
+    `watch` are addresses an attacker may imitate (the owner, the profit
+    wallet): an unsigned transaction paid by a lookalike is 'poison'. Neither
+    poison nor dust is capital."""
     sig = tx['transaction']['signatures'][0]
     if sig in known:
         return 'known', {}
@@ -108,7 +122,11 @@ def classify_tx(tx, owner, known):
     usdc = moves.pop(USDC, 0) / 1e6
     progs = sorted({BOT_PROGRAMS[k] for k in keys if k in BOT_PROGRAMS})
     d = {'sol': round(sol, 9), 'usdc': round(usdc, 6), 'programs': progs, 'other_tokens': moves, 'signer': signer}
-    if not signer and abs(lam) <= DUST_LAMPORTS and not moves and usdc == 0:
+    if not signer and lookalike(keys[0] if keys else None, [owner, *watch]):
+        d['lookalike_of'] = next(k for k in [owner, *watch] if lookalike(keys[0], [k]))
+        d['sender'] = keys[0]
+        return 'poison', d
+    if not signer and abs(lam) <= DUST_LAMPORTS and not moves and 0 <= usdc <= DUST_USDC:
         return 'dust', d
     if signer and progs:
         return 'bot', d
@@ -130,8 +148,14 @@ def check_flows(classified):
     for kind, _ in classified:
         counts[kind] = counts.get(kind, 0) + 1
     flagged = [(k, d) for k, d in classified if k in ('deposit', 'withdrawal', 'bot', 'other')]
-    status = 'warn' if flagged else 'ok'
-    return status, {'counts': counts, 'flagged': flagged[:10]}
+    # Address poisoning is not capital, but the owner must hear of it: never
+    # copy an address from the wallet history.
+    poison = sorted({(d.get('sender'), d.get('lookalike_of')) for k, d in classified if k == 'poison'})
+    status = 'warn' if flagged or poison else 'ok'
+    out = {'counts': counts, 'flagged': flagged[:10]}
+    if poison:
+        out['poison'] = [{'sender': a, 'imitates': b} for a, b in poison]
+    return status, out
 
 
 def check_harvest(row_a, row_b, measured):
@@ -157,12 +181,22 @@ def payout_received(tx, profit_wallet, mint, amount):
     return abs(got - amount) <= PAYOUT_TOLERANCE
 
 
-def check_positions(db_open_mints, chain_nft_mints, db_open_dexes=None):
-    """Open positions in the ledger against the position NFTs the wallet
-    holds. Meteora positions are accounts, not NFTs: they are not compared."""
+DLMM_PROGRAM = 'LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo'
+
+
+def check_positions(db_open_mints, chain_nft_mints, db_open_dexes=None, dlmm_live=None):
+    """Open positions in the ledger against the chain: the position NFTs the
+    wallet holds, and for Meteora (positions are accounts, not NFTs) the
+    position accounts that exist and belong to the DLMM program (`dlmm_live`;
+    None = not read, then Meteora rows are not compared). A DLMM position the
+    ledger does not know cannot be found without an indexed read: orphans are
+    NFT-only."""
     nft = set(chain_nft_mints)
-    open_ = [m for m, dx in zip(db_open_mints, db_open_dexes or [None] * len(db_open_mints)) if dx != 'meteora-dlmm']
+    dexes_ = db_open_dexes or [None] * len(db_open_mints)
+    open_ = [m for m, dx in zip(db_open_mints, dexes_) if dx != 'meteora-dlmm']
     missing = [m for m in open_ if m not in nft]
+    if dlmm_live is not None:
+        missing += [m for m, dx in zip(db_open_mints, dexes_) if dx == 'meteora-dlmm' and m not in set(dlmm_live)]
     orphans = [m for m in nft if m not in set(db_open_mints)]
     d = {'db_open': list(db_open_mints), 'nfts': sorted(nft), 'missing_on_chain': missing, 'orphans': orphans}
     if missing or orphans or len(db_open_mints) > 1:
@@ -269,12 +303,26 @@ def run(bot, db, config, txfees, notify, now=None):
     snap_equity = float(r['equity_usd']) if r else None
     owner = bal.get('owner')
 
-    guarded('idle', lambda: check_idle(bot.deployable_usd(bal), snap_equity or 0.0, open_))
-    guarded('gas', lambda: check_gas(float(bal.get('sol') or 0.0), config.GAS_RESERVE_SOL))
-
     accts = token_accounts(url, owner) if owner else []
     (mint_a, _), (mint_b, _) = bot.pool_tokens()
     keep = keep_mints(bot, mint_a, mint_b)
+
+    def idle():
+        # the pool's tokens beyond the gas reserve, plus every foreign token
+        # the sweep would convert: all of it belongs in the LP
+        others = [a['mint'] for a in accts if a['amount'] > 0 and a['mint'] not in (mint_a, mint_b)]
+        sweep = bot.plan_sweep(accts, {mint_a, mint_b}, keep - {mint_a, mint_b, NATIVE, USDC},
+                               bot.dexes.jupiter_prices(others) if others else {},
+                               {m: bot.dexes.jupiter_token(m) for m in others}) if others else []
+        # the open's tolerance leftover is by design (rebalancer.deploy_idle)
+        base = (bot.load().get('idle_baseline') or {})
+        excused = float(base.get('usd') or 0.0) if open_ and base.get('mint') == (status or {}).get('positionMint') else 0.0
+        st, d = check_idle(max(bot.deployable_usd(bal) - excused, 0.0) + sum(p['usd'] for p in sweep), snap_equity or 0.0, open_)
+        d['tolerance_leftover_usd'] = round(excused, 4)
+        d['foreign_usd'] = round(sum(p['usd'] for p in sweep), 4)
+        return st, d
+    guarded('idle', idle)
+    guarded('gas', lambda: check_gas(float(bal.get('sol') or 0.0), config.GAS_RESERVE_SOL))
     empty = [a for a in accts if a['amount'] == 0 and a['mint'] not in keep]
 
     def equity():
@@ -322,7 +370,7 @@ def run(bot, db, config, txfees, notify, now=None):
             if tx is None:
                 classified.append(('other', {'sig': s['signature'], 'note': 'unreadable'}))
                 continue
-            kind, d = classify_tx(tx, owner, known)
+            kind, d = classify_tx(tx, owner, known, watch=(config.PROFIT_WALLET,))
             d['sig'] = s['signature']
             if kind in ('deposit', 'withdrawal'):
                 px = bal['price'] * (bal.get('quoteUsd') or 1.0)
@@ -340,7 +388,9 @@ def run(bot, db, config, txfees, notify, now=None):
         last = int(db.audit_value('harvest_cursor') or 0)
         with db.cursor() as c:
             c.execute("""select h.id, h.fee_a, h.fee_b, h.signature, p.pool from harvests h join positions p using (mint)
-                         where h.id > %s and h.signature not like 'close:%%' order by h.id limit 30""", (last,))
+                         where h.id > %s and h.signature not like 'close:%%'
+                           and h.signature not in (select close_sig from positions where close_sig is not null)
+                         order by h.id limit 30""", (last,))
             rows = c.fetchall()
         worst, details = 'ok', []
         for r in rows:
@@ -373,7 +423,16 @@ def run(bot, db, config, txfees, notify, now=None):
             c.execute('select mint, dex from positions where closed_at is null order by opened_at')
             rows = c.fetchall()
         nfts = [a['mint'] for a in accts if a['decimals'] == 0 and a['amount'] == 1]
-        return check_positions([r['mint'] for r in rows], nfts, [r['dex'] for r in rows])
+        live = []
+        for r in rows:
+            if r['dex'] == 'meteora-dlmm':
+                info = rpc(url, 'getAccountInfo', [r['mint'], {'encoding': 'base64'}])
+                if info is None:
+                    return 'warn', {'note': 'DLMM position account unreadable', 'mint': r['mint']}
+                v = info.get('value')
+                if v and v.get('owner') == DLMM_PROGRAM and (v.get('lamports') or 0) > 0:
+                    live.append(r['mint'])
+        return check_positions([r['mint'] for r in rows], nfts, [r['dex'] for r in rows], dlmm_live=live)
     guarded('positions', positions)
 
     def band_profiles():
@@ -410,7 +469,15 @@ def keep_mints(bot, mint_a, mint_b):
     tokens, the payout token, native SOL, and every reward mint seen."""
     keep = {NATIVE, USDC, mint_a, mint_b}
     try:
-        keep |= set(bot.load().get('reward_mints_seen') or [])
+        st = bot.load()
+        keep |= set(st.get('reward_mints_seen') or []) | set(st.get('janitor_keep') or [])
+    except Exception:
+        pass
+    # every reward mint the held pool names, ended programs included: the
+    # protocol uses these accounts at every harvest and close (2026-09-28:
+    # closing the empty RAY account broke a Raydium close)
+    try:
+        keep |= {m for m in (bot.pool_record().get('reward_mints') or []) if m}
     except Exception:
         pass
     return keep

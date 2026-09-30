@@ -1,0 +1,15 @@
+{
+  "_comment": "One emoji per event, shared by the loop's log lines (rebalancer.notify) and Telegram (telegram_bridge.mjs). grep the emoji to find the event. Events not listed get the rule in emoji_for(): failures ❌, deferrals ⏳, else ▫️.",
+  "startup": "🚀", "halted": "🛑", "BREAKER": "🛑",
+  "in_band": "📗", "OUT_OF_BAND": "📕", "no_position": "⚪",
+  "OPEN": "🟩", "CLOSE": "🟥", "HARVEST": "🌾", "DIVIDEND": "🌾",
+  "PAYOUT": "💸", "REWARD_PAYOUT": "🎁", "SWAP": "🔁", "SWEEP": "🧹", "JANITOR": "🧽",
+  "DEPLOY_IDLE": "📥", "deploy_idle_deferred": "⏳",
+  "REGIME_WIDEN": "🔥", "REGIME_NARROW": "❄️", "PROACTIVE": "🎯", "REBAND": "🎯",
+  "CALM_NARROW": "❄️", "CALM_RECENTRE": "🎯", "CALM_WIDEN": "🔥",
+  "MIGRATE": "🧳", "MIGRATE_RECOMMENDED": "🧳", "REPOINTED": "🧳", "FAILOVER": "🚑", "failover_none": "🚧", "failover_failed": "❌",
+  "TAPE_SOURCE": "📡", "AUDIT": "🔍", "DAILY": "📅", "SCAN": "🔭", "board_checked": "🔭", "reopt_checked": "🔭",
+  "swap_skipped": "⚠️", "swap_failed": "❌", "open_failed": "❌", "close_failed": "❌", "payout_failed": "❌",
+  "status_unreadable": "📵", "idle": "💤", "move_deferred": "⏳", "rebalance_deferred": "⏳", "recentre_deferred": "⏳",
+  "open_recovered": "🩹", "close_recovered": "🩹"
+}

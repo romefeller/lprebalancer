@@ -61,7 +61,7 @@ _GECKO_LAST = [0.0]
 GECKO_SPACING = 2.1
 
 
-def curl(url, accept='application/json', retries=2):
+def curl(url, accept='application/json', retries=2, max_time=40):
     if 'geckoterminal.com' in url:
         with _GECKO_LOCK:
             wait = _GECKO_LAST[0] + GECKO_SPACING - time.time()
@@ -69,7 +69,7 @@ def curl(url, accept='application/json', retries=2):
                 time.sleep(wait)
             _GECKO_LAST[0] = time.time()
     for attempt in range(retries + 1):
-        r = subprocess.run(['curl', '-s', '--max-time', '40',
+        r = subprocess.run(['curl', '-s', '--max-time', str(int(max_time)),
                             '-H', f'accept: {accept}', '-H', f'user-agent: {UA}', url],
                            capture_output=True, text=True)
         try:

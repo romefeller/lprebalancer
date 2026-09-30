@@ -180,3 +180,80 @@ class Deployment(unittest.TestCase):
                         "values (now(), 'LPM', 120, true, '1', 18.73, 221.24, 240.0)")
         s = db.stats()
         self.assertEqual((s['lp_usd'], s['wallet_usd'], s['deployed_pct']), (221.24, 18.73, 92.2))
+
+
+class KeepRewardAccounts(unittest.TestCase):
+    def test_the_pools_reward_mints_are_kept_even_ended(self):
+        import audit, types
+        bot = types.SimpleNamespace(load=lambda: {}, pool_record=lambda: {'reward_mints': ['RAYMINT', None]})
+        self.assertIn('RAYMINT', audit.keep_mints(bot, 'A', 'B'))
+        self.assertNotIn(None, audit.keep_mints(bot, 'A', 'B'))
+        broken = types.SimpleNamespace(load=lambda: {}, pool_record=lambda: (_ for _ in ()).throw(RuntimeError('api')))
+        self.assertEqual(audit.keep_mints(broken, 'A', 'B'), {audit.NATIVE, audit.USDC, 'A', 'B'})
+        empty = types.SimpleNamespace(load=lambda: {}, pool_record=lambda: {'reward_mints': None})
+        self.assertEqual(audit.keep_mints(empty, 'A', 'B'), {audit.NATIVE, audit.USDC, 'A', 'B'})
+
+
+class JanitorKeepsWhatComesBack(unittest.TestCase):
+    def test_a_recreated_mint_is_kept_from_then_on(self):
+        calls, seen = [], []
+        answers = iter([({'closable': [{'mint': 'RAY', 'lamports': 1488440}, {'mint': 'MSOL', 'lamports': 2039280}], 'reclaimSol': 0.0035}, None),
+                        ({'closable': [{'mint': 'MSOL', 'lamports': 2039280}], 'reclaimSol': 0.00204}, None),
+                        ({'closable': [{'mint': 'MSOL', 'lamports': 2039280}], 'reclaimSol': 0.00204, 'signature': 'J'}, None)])
+        state = {'janitor_closed': ['RAY']}
+        with mock.patch.object(rebalancer, 'chain', lambda *a, **k: (calls.append(a) or next(answers))), \
+                mock.patch.object(rebalancer, 'pool_tokens', lambda: ((SOL, 'SOL'), (USDC, 'USDC'))), \
+                mock.patch.object(rebalancer, 'save', lambda s: None), \
+                mock.patch.object(rebalancer, 'load', lambda: state), \
+                mock.patch.object(rebalancer.db, 'event', lambda *a: None), \
+                mock.patch.object(rebalancer, 'notify', lambda ev, **kw: seen.append(ev)):
+            out = rebalancer.janitor(state)
+        self.assertEqual(state['janitor_keep'], ['RAY'])
+        self.assertIn('RAY', calls[1]); self.assertIn('RAY', calls[2])        # kept in the re-plan and the close
+        self.assertEqual(out['signature'], 'J')
+        self.assertEqual(state['janitor_closed'], ['MSOL', 'RAY'])
+        import audit, types
+        self.assertIn('RAY', audit.keep_mints(types.SimpleNamespace(load=lambda: state, pool_record=lambda: {}), 'A', 'B'))
+
+
+class JanitorReplan(unittest.TestCase):
+    def go(self, answers, state):
+        calls, seen = [], []
+        it = iter(answers)
+        with mock.patch.object(rebalancer, 'chain', lambda *a, **k: (calls.append(a) or next(it))), \
+                mock.patch.object(rebalancer, 'pool_tokens', lambda: ((SOL, 'SOL'), (USDC, 'USDC'))), \
+                mock.patch.object(rebalancer, 'save', lambda s: None), \
+                mock.patch.object(rebalancer, 'load', lambda: state), \
+                mock.patch.object(rebalancer.db, 'event', lambda *a: None), \
+                mock.patch.object(rebalancer, 'notify', lambda ev, **kw: seen.append(ev)):
+            out = rebalancer.janitor(state)
+        return out, calls, seen
+
+    FIRST = ({'closable': [{'mint': 'RAY', 'lamports': 1}], 'reclaimSol': 1e-9}, None)
+
+    def test_a_failed_replan_closes_nothing(self):
+        for bad in ((None, 'rpc'), ({'closable': []}, 'partial'), (None, None)):
+            out, calls, seen = self.go([self.FIRST, bad], {'janitor_closed': ['RAY']})
+            self.assertIsNone(out); self.assertEqual(len(calls), 2, bad); self.assertEqual(seen, ['janitor_failed'])
+
+    def test_a_replan_with_nothing_left_sends_nothing(self):
+        out, calls, seen = self.go([self.FIRST, ({'closable': [], 'reclaimSol': 0}, None)], {'janitor_closed': ['RAY']})
+        self.assertEqual(out, {'closable': [], 'reclaimSol': 0}); self.assertEqual(len(calls), 2); self.assertEqual(seen, [])
+
+    def test_a_plan_without_a_list_is_nothing_to_close(self):
+        out, calls, seen = self.go([({'closable': None}, None)], {'janitor_closed': ['RAY']})
+        self.assertEqual(out, {'closable': None}); self.assertEqual(seen, []); self.assertEqual(len(calls), 1)
+
+    def test_the_keep_list_grows_and_is_never_replaced(self):
+        state = {'janitor_closed': ['RAY'], 'janitor_keep': ['OLD']}
+        self.go([self.FIRST, ({'closable': []}, None)], state)
+        self.assertEqual(state['janitor_keep'], ['OLD', 'RAY'])
+
+
+class JanitorUnsignedClose(JanitorReplan):
+    def test_an_unsigned_close_records_nothing_as_closed(self):
+        state = {}
+        out, calls, seen = self.go([({'closable': [{'mint': 'MSOL', 'lamports': 1}], 'reclaimSol': 1e-9}, None),
+                                    ({'closable': [{'mint': 'MSOL', 'lamports': 1}], 'reclaimSol': 1e-9}, None)], state)
+        self.assertIsNone(out); self.assertEqual(seen, ['janitor_failed'])
+        self.assertNotIn('janitor_closed', state)
