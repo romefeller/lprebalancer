@@ -12,6 +12,6 @@ export SOLANA_RPC_URL="${SOLANA_RPC_URL:-https://api.mainnet-beta.solana.com}"
 if [ $# -gt 0 ]; then
   python3 -m unittest -v "$@"
 else
-  python3 -m unittest -v test_engine test_rebalancer test_db test_calm test_payout test_rewards test_regime test_tape_surrogate test_move_books test_health test_edges_0930 test_observability test_hardening test_venues test_touches test_fee_integrity test_money_paths test_rate_limit test_band_profile test_daily test_deploy_all test_deploy_idle test_sweep test_audit test_audit_more test_audit_runner test_signer_live
+  python3 -m unittest -v test_engine test_rebalancer test_db test_calm test_payout test_rewards test_regime test_tape_surrogate test_move_books test_health test_edges_0930 test_observability test_hardening test_venues test_touches test_fee_integrity test_money_paths test_rate_limit test_band_profile test_daily test_deploy_all test_deploy_idle test_sweep test_audit test_audit_more test_audit_runner test_audit_edges test_rpc_key test_no_dead_code test_signer_live
 fi
-node --test test_signer_helpers.mjs test_security.mjs test_payout_pin.mjs test_slippage.mjs test_fee_snapshot.mjs test_orca_fees.mjs test_priority_fee.mjs test_janitor.mjs test_book_format.mjs test_rpc_policy.mjs
+node --test test_signer_helpers.mjs test_security.mjs test_payout_pin.mjs test_slippage.mjs test_fee_snapshot.mjs test_orca_fees.mjs test_priority_fee.mjs test_janitor.mjs test_book_format.mjs test_rpc_policy.mjs test_signer_rpc.mjs

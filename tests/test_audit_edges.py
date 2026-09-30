@@ -9,7 +9,7 @@ import types
 import unittest
 from unittest import mock
 
-from hypothesis import given, settings, strategies as st
+from hypothesis import HealthCheck, given, settings, strategies as st
 
 import _fixtures  # noqa: F401  (first: it puts lp_bot on the path)
 import audit
@@ -18,6 +18,9 @@ from test_audit import tx, tb, OWNER, PROFIT, POOL, SOL, USDC, RAYDIUM
 from test_audit_runner import Base
 
 EXAMPLES = int(os.environ.get('HYP_EXAMPLES', '200'))
+# test_audit_runner loads this module too (mutate.py runs that one): the same
+# test may run twice in a process, which is not a flaky executor
+QUIET = [HealthCheck.differing_executors]
 POISONER = '8funvFQKPaEtb3zGppWiZ9obkPnkfKzLiMGTyhWU3D1h'        # imitates PROFIT
 ALICE = 'ALiCE1111111111111111111111111111111111111'
 
@@ -40,7 +43,7 @@ class Lookalike(unittest.TestCase):
         # the same first four, a different fifth: still a lookalike
         self.assertTrue(audit.lookalike('8funZkPNBtjqfNkBEoBF16eBfyQ4vMAFrs4Nyys5D1h', [PROFIT]))
 
-    @settings(max_examples=EXAMPLES, deadline=None)
+    @settings(max_examples=EXAMPLES, deadline=None, suppress_health_check=QUIET)
     @given(mid=st.text('123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz', min_size=2, max_size=40))
     def test_oracle(self, mid):
         a = PROFIT[:4] + mid + PROFIT[-3:]
@@ -59,7 +62,7 @@ class Thresholds(unittest.TestCase):
         self.assertEqual(d, {'deployable_usd': 3.0, 'limit_usd': 6.0})
         self.assertEqual(audit.check_idle(3.0, 50.0, False), ('ok', {'note': 'no position open', 'deployable_usd': 3.0}))
 
-    @settings(max_examples=EXAMPLES, deadline=None)
+    @settings(max_examples=EXAMPLES, deadline=None, suppress_health_check=QUIET)
     @given(dep=st.floats(0, 1000), eq=st.floats(0, 5000), open_=st.booleans())
     def test_idle_oracle(self, dep, eq, open_):
         want = 'ok' if not open_ else ('fail' if eq > 0 and dep > 0.10 * eq else
@@ -112,24 +115,24 @@ class Payout(unittest.TestCase):
         t = tx(keys=(OWNER, PROFIT),
                pre_tok=[tb(1, OWNER, USDC, 5_000_000), tb(2, PROFIT, USDC, 1_000_000), tb(3, PROFIT, 'CAKE', 0, 9)],
                post_tok=[tb(1, OWNER, USDC, 4_700_000), tb(2, PROFIT, USDC, 1_300_000), tb(3, PROFIT, 'CAKE', 7 * 10**9, 9)])
-        self.assertTrue(audit.payout_received(t, PROFIT, USDC, 0.3))
+        self.assertIs(True, audit.payout_received(t, PROFIT, USDC, 0.3))
         self.assertTrue(audit.payout_received(t, PROFIT, 'CAKE', 7.0))
-        self.assertFalse(audit.payout_received(t, PROFIT, USDC, 0.0))
-        self.assertFalse(audit.payout_received(t, OWNER, USDC, 0.3))
+        self.assertIs(False, audit.payout_received(t, PROFIT, USDC, 0.0))
+        self.assertIs(False, audit.payout_received(t, OWNER, USDC, 0.3))
 
     def test_exactly_at_the_tolerance(self):
         t = tx(keys=(OWNER, PROFIT), pre_tok=[tb(2, PROFIT, USDC, 0)], post_tok=[tb(2, PROFIT, USDC, 1)])
         self.assertTrue(audit.payout_received(t, PROFIT, USDC, 0.0))                    # 1e-6 off: within
         self.assertTrue(audit.payout_received(t, PROFIT, USDC, 2e-6))
-        self.assertFalse(audit.payout_received(t, PROFIT, USDC, 3e-6))
+        self.assertIs(False, audit.payout_received(t, PROFIT, USDC, 3e-6))
 
     def test_decimals_are_read_per_balance(self):
         t = tx(keys=(OWNER, PROFIT), pre_tok=[tb(2, PROFIT, 'M', 0, 2)], post_tok=[tb(2, PROFIT, 'M', 150, 2)])
         self.assertTrue(audit.payout_received(t, PROFIT, 'M', 1.5))
 
     def test_unreadable_shapes_are_not_received(self):
-        self.assertFalse(audit.payout_received({'meta': None}, PROFIT, USDC, 0.0))
-        self.assertFalse(audit.payout_received({}, PROFIT, USDC, 0.0))
+        self.assertIs(False, audit.payout_received({'meta': None}, PROFIT, USDC, 0.0))
+        self.assertIs(False, audit.payout_received({}, PROFIT, USDC, 0.0))
         t = tx(keys=(OWNER, PROFIT))
         t['meta']['preTokenBalances'] = None; t['meta']['postTokenBalances'] = None
         self.assertTrue(audit.payout_received(t, PROFIT, USDC, 0.0))                    # null lists: nothing moved
@@ -187,7 +190,7 @@ amounts = st.one_of(st.sampled_from([0, 1, -1, 10_000, -10_000, 10_001, -10_001,
 
 
 class ClassifyOracle(unittest.TestCase):
-    @settings(max_examples=EXAMPLES * 3, deadline=None)
+    @settings(max_examples=EXAMPLES * 3, deadline=None, suppress_health_check=QUIET)
     @given(signer=st.booleans(), sender=st.sampled_from([ALICE, POISONER, 'SPAM']), lam=amounts, fee=st.sampled_from([0, 5000]),
            usdc=amounts, wsol=st.sampled_from([0, 0, 1, -1, 5 * 10**8, -5 * 10**8]), cake=st.sampled_from([0, 0, 1, -1, 5]),
            prog=st.booleans(), noise=st.booleans())
@@ -245,6 +248,20 @@ class ClassifyOracle(unittest.TestCase):
         t = build(False, ALICE, 10**9, 5000, 0, 0, 0, False, noise=False, null_tokens=True)
         self.assertEqual(audit.classify_tx(t, OWNER)[:1], ('deposit',))
 
+    def test_an_account_opened_or_closed_in_the_transaction(self):
+        # the LP wallet's USDC account closed: a pre balance, no post balance
+        t = tx(keys=(OWNER, 'BOB'), pre_tok=[tb(1, OWNER, USDC, 7_000_000)], post_tok=[tb(2, 'BOB', USDC, 7_000_000)])
+        self.assertEqual(audit.classify_tx(t, OWNER)[1]['usdc'], -7.0)
+        # a new USDC account: no pre balance
+        t = tx(keys=(ALICE, OWNER), pre_tok=[tb(2, ALICE, USDC, 7_000_000)], post_tok=[tb(1, OWNER, USDC, 7_000_000)])
+        self.assertEqual(audit.classify_tx(t, OWNER)[:1] + (audit.classify_tx(t, OWNER)[1]['usdc'],), ('deposit', 7.0))
+
+    def test_one_null_token_list(self):
+        t = tx(keys=(ALICE, OWNER), post_tok=[tb(1, OWNER, USDC, 7_000_000)]); t['meta']['preTokenBalances'] = None
+        self.assertEqual(audit.classify_tx(t, OWNER)[1]['usdc'], 7.0)
+        t = tx(keys=(OWNER, 'BOB'), pre_tok=[tb(1, OWNER, USDC, 7_000_000)]); t['meta']['postTokenBalances'] = None
+        self.assertEqual(audit.classify_tx(t, OWNER)[1]['usdc'], -7.0)
+
     def test_plain_string_account_keys(self):
         t = build(False, ALICE, 10**9, 5000, 0, 0, 0, False, noise=False)
         t['transaction']['message']['accountKeys'] = [k['pubkey'] for k in t['transaction']['message']['accountKeys']]
@@ -270,7 +287,7 @@ class Positions(unittest.TestCase):
         st_, d = audit.check_positions(['M'], [], ['orca'], dlmm_live=['M'])          # an NFT venue needs its NFT
         self.assertEqual((st_, d['missing_on_chain']), ('fail', ['M']))
 
-    @settings(max_examples=EXAMPLES, deadline=None)
+    @settings(max_examples=EXAMPLES, deadline=None, suppress_health_check=QUIET)
     @given(rows=st.lists(st.tuples(st.sampled_from('ABCDE'), st.sampled_from(['orca', 'meteora-dlmm'])), max_size=3, unique_by=lambda r: r[0]),
            nfts=st.sets(st.sampled_from('ABCDEF')), live=st.sets(st.sampled_from('ABCDEF')))
     def test_oracle(self, rows, nfts, live):
@@ -309,10 +326,25 @@ class KnownSignatures(unittest.TestCase):
                   {'signatures': None, 'sent': None}):
             self.feed.write(json.dumps(r) + '\n')
         self.feed.write('{"signature": broken\n')
+        self.feed.write('["signature"]\n"signature"\n[1, 2]\n42\nnull\n')
         self.feed.write(json.dumps({'event': 'X', 'sig': 'NOPE'}) + '\n')
         self.feed.close()
         self.assertEqual(audit.known_signatures(db, self.feed.name),
                          {'OPEN1', 'CLOSE1', 'FLOW1', 'HARV1', 'PAY1', 'ONE', 'TWO', 'THREE'})
+
+
+class KeepMints(unittest.TestCase):
+    def keep(self, state, record):
+        bot = types.SimpleNamespace(load=lambda: state, pool_record=lambda: record)
+        return audit.keep_mints(bot, 'A', 'B')
+
+    def test_every_source(self):
+        base = {SOL, USDC, 'A', 'B'}
+        self.assertEqual(self.keep({'reward_mints_seen': ['R'], 'janitor_keep': ['J']}, {'reward_mints': ['P', None, '']}),
+                         base | {'R', 'J', 'P'})
+        self.assertEqual(self.keep({'reward_mints_seen': None, 'janitor_keep': ['J']}, {}), base | {'J'})
+        self.assertEqual(self.keep({'janitor_keep': None, 'reward_mints_seen': ['R']}, {'reward_mints': None}), base | {'R'})
+        self.assertEqual(self.keep({}, {'reward_mints': ['P']}), base | {'P'})
 
 
 # --- audit.run, edge by edge -------------------------------------------------------
@@ -334,6 +366,9 @@ class Run(Base):
         if method == 'getAccountInfo':
             self.rpc_calls.append((method, params))
             return self.infos.get(params[0])
+        if method == 'getSignaturesForAddress' and not params[1].get('until'):
+            self.rpc_calls.append((method, params))
+            return list(self.sigs)                               # a signature may lack its blockTime
         return super().fake_rpc(url, method, params, tries)
 
     def bot(self):
@@ -343,6 +378,14 @@ class Run(Base):
             jupiter_token=lambda m: (self.faced.append(m) or self.facts.get(m)))
         b.load = lambda: self.load
         return b
+
+    def run_audit(self):
+        self.tries = []
+        cfg = types.SimpleNamespace(RPC='http://rpc.test', POOL=POOL, GAS_RESERVE_SOL=0.05, PROFIT_WALLET=PROFIT)
+        fx = types.SimpleNamespace(fetch=lambda url, sig, tries=None: (self.tries.append((sig, tries)), self.txs.get(sig))[1],
+                                   harvested=lambda url, sigs, pool, a, b: self.harvested.get(sigs[0]))
+        with mock.patch.object(audit, 'rpc', self.fake_rpc), mock.patch.object(audit.time, 'sleep', lambda s: None):
+            return audit.run(self.bot(), db, cfg, fx, lambda ev, **kw: self.notes.append((ev, kw)))
 
     def position(self, mint, dex):
         with db.cursor(commit=True) as cur:
@@ -359,6 +402,14 @@ class RunRecord(Run):
         self.notes.clear(); self.run_audit()
         self.assertIn(('gas', 'ok', 'warn'), [(kw['check'], kw['status'], kw['was']) for ev, kw in self.notes])
         self.assertEqual(db.audit_value('status:gas'), 'ok')
+
+    def test_one_run_id_of_twelve_hex_characters(self):
+        self.run_audit()
+        with db.cursor() as cur:
+            cur.execute('select distinct run_id from audits')
+            ids = [r['run_id'] for r in cur.fetchall()]
+        self.assertEqual(len(ids), 1)
+        self.assertRegex(ids[0], r'^[0-9a-f]{12}$')
 
     def test_a_crash_is_recorded_with_its_type(self):
         with mock.patch.object(audit, 'check_gas', side_effect=KeyError('x' * 400)):
@@ -395,12 +446,13 @@ class RunIdle(Run):
 
     def test_foreign_idle_adds_to_the_wallet_and_asks_only_for_foreign_held_tokens(self):
         self.acct('JITO', 200_000_000, 9); self.acct('EMPTY', 0, 9); self.acct(USDC, 500_000, 6); self.acct(SOL, 5, 9)
+        self.acct('ONE', 1, 6)                                             # one raw unit is held too
         self.prices = {'JITO': 150.0}; self.facts = {'JITO': {'verified': True, 'symbol': 'JitoSOL'}}
         self.run_audit()
         d = self.detail('idle')
         self.assertAlmostEqual(d['deployable_usd'], 30.0 + 0.5 + (0.0592 - 0.059) * 120.0, places=4)
-        self.assertEqual(self.priced[0], ['JITO'])
-        self.assertEqual(self.faced, ['JITO'])
+        self.assertEqual(self.priced[0], ['JITO', 'ONE'])
+        self.assertEqual(self.faced, ['JITO', 'ONE'])
 
     def test_a_reward_token_is_not_swept(self):
         self.acct('RAY', 10 * 10**6, 6)
@@ -439,11 +491,12 @@ class RunEquity(Run):
         self.acct('NFT1', 1, 0, prog=1)
         self.acct('CAKE', 0, 9); self.acct(SOL, 0, 9); self.acct(SOL, 3 * 10**9, 9, lamports=0)
         self.acct('CAKE2', 10**9, 9)
-        self.prices = {'NFT1': 99.0, 'CAKE': 5.0, 'CAKE2': 1.0}
+        self.acct('ONE', 1, 6); self.acct('ZERO', 5, 0)                   # one raw unit; five of a 0-decimal token
+        self.prices = {'NFT1': 99.0, 'CAKE': 5.0, 'CAKE2': 1.0, 'ONE': 20_000.0, 'ZERO': 0.5}
         self.run_audit()
         d = self.detail('equity')
-        self.assertAlmostEqual(d['uncounted_usd'], 3 * 120.0 + 1.0 + 2039280 / 1e9 * 120.0, places=4)
-        self.assertEqual(self.priced[-1], ['NOPRICE', 'CAKE2'])                   # the equity read: no NFT, nothing empty
+        self.assertAlmostEqual(d['uncounted_usd'], 3 * 120.0 + 1.0 + 0.02 + 2.5 + 2039280 / 1e9 * 120.0, places=4)
+        self.assertEqual(self.priced[-1], ['NOPRICE', 'CAKE2', 'ONE', 'ZERO'])                   # the equity read: no NFT, nothing empty
 
     def test_no_foreign_token_asks_no_price(self):
         self.acct(USDC, 500_000, 6)
@@ -498,6 +551,23 @@ class RunFlows(Run):
             r = dict(cur.fetchone())
         self.assertEqual(float(r['price']), 120.0); self.assertAlmostEqual(float(r['usd']), 120.0)
         self.assertLess(abs(r['ts'].timestamp() - before), 60)
+
+    def test_oldest_first_a_missing_block_time_first_and_three_tries(self):
+        gift = lambda sig: tx(sig, keys=('ALICE', OWNER), pre=[5 * 10**9, 10**9], post=[4 * 10**9, 2 * 10**9])
+        self.sigs = [{'signature': 'N'}, {'signature': 'C', 'blockTime': 30}, {'signature': 'A', 'blockTime': 10},
+                     {'signature': 'B', 'blockTime': 20}]                     # newest first, as the RPC answers
+        self.txs = {k: gift(k) for k in 'NABC'}
+        self.assertEqual(self.run_audit()['flows'], 'warn')
+        self.assertEqual([d['sig'] for _, d in self.detail('flows')['flagged']], ['N', 'A', 'B', 'C'])
+        self.assertEqual(db.audit_value('flows_cursor'), 'C')
+        self.assertEqual(self.tries, [('N', 3), ('A', 3), ('B', 3), ('C', 3)])
+
+    def test_payouts_are_fetched_with_three_tries(self):
+        with db.cursor(commit=True) as cur:
+            cur.execute("insert into payouts (ts, config_name, position, token_mint, symbol, amount, usd, kind, signature) values "
+                        "(now(), 's', 'M', %s, 'USDC', 0.3, 0.3, 'paid', 'P1')", (USDC,))
+        self.run_audit()
+        self.assertEqual(self.tries, [('P1', 3)])
 
     def test_poison_through_the_runner_is_warned_and_not_recorded(self):
         self.sigs = [{'signature': 'PZ', 'blockTime': 1}]

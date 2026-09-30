@@ -69,7 +69,12 @@ TARGETS = {
     'books': ('rebalancer.py', ['regime_at_move', 'notify_book', 'emoji_for', 'tidy'],
               PY_TESTS('test_move_books', 'test_observability', 'test_rebalancer', 'test_edges_0930')),
     'deployment': ('db.py', ['_pct', '_deployment', 'deployment_now', '_pnl'], PY_TESTS('test_move_books', 'test_audit_more', 'test_edges_0930', 'test_db')),
-    'rpc_policy': ('rpc_policy.mjs', ['endpoints', 'errorKind', 'overEndpoints'], NODE_TESTS('test_rpc_policy.mjs')),
+    'rpc_policy': ('rpc_policy.mjs', ['endpoints', 'errorKind', 'overEndpoints', 'isEntry'], NODE_TESTS('test_rpc_policy.mjs', 'test_signer_rpc.mjs')),
+    'rpc_raydium': ('signer_raydium.mjs', ['withRpc', 'sendAll'], NODE_TESTS('test_signer_rpc.mjs')),
+    'rpc_dlmm': ('signer_dlmm.mjs', ['withRpc', 'sendAll'], NODE_TESTS('test_signer_rpc.mjs')),
+    'rpc_pancake': ('signer_pancake.mjs', ['withRpc', 'sendOne'], NODE_TESTS('test_signer_rpc.mjs')),
+    'rpc_byreal': ('signer_byreal.mjs', ['withRpc', 'sendAll', 'confirm'], NODE_TESTS('test_signer_rpc.mjs')),
+    'rpc_orca': ('signer2.mjs', ['withRpc', 'sendOnce'], NODE_TESTS('test_signer_rpc.mjs')),
     'book_lines': ('book_format.mjs', ['shareAgrees', 'lpLine', 'emojiFor', 'healthLine'], NODE_TESTS('test_book_format.mjs')),
     'surrogate': ('calm.py', ['pair_tokens', 'clean_bars', 'fit_surrogate', 'binance_5m', 'surrogate_5m',
                               'missing_slots', 'tape_fresh'], PY_TESTS('test_tape_surrogate')),
@@ -107,6 +112,13 @@ SQL_TARGETS = {'band_profile', 'daily', 'capital_db'}
 # The report prints each survivor's key: copy it here with a reason. The line
 # number is not in the key, so an edit above a mutant keeps its entry valid.
 EQUIVALENT = {
+    ('audit_checks', 'lookalike', 'drop operand 1', "a = str(addr or '')", 0): "str(None) is 'None', 4 characters, never over 8: False either way",
+    ('audit_checks', 'known_signatures', 'skip if body', 'if \'"signature\' not in line:', 0): 'a cheap prefilter: an object line without the word has no signature key, and non-objects are skipped below',
+    ('audit_checks', 'keep_mints', 'drop operand 1', "keep |= {m for m in (bot.pool_record().get('reward_mints') or []) if m}", 0): 'a None reward list raises inside the try, which keeps the set built so far either way',
+    ('audit_run', 'run', 'drop operand 1', "sigs = rpc(url, 'getSignaturesForAddress', [owner, params]) or []", 0): "None and [] both take the 'not sigs' return: ok, new 0",
+    ('audit_run', 'run', 'const 0->1', "for s in sorted(sigs, key=lambda x: x.get('blockTime') or 0):", 0): 'a missing blockTime sorts first either way: real block times are ~1.8e9, never 0 or 1',
+    ('audit_run', 'run', 'drop operand 1', "ts = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(tx.get('blockTime') or time.time()))", 0): 'time.gmtime(None) is the current time: the same ts',
+    ('audit_run', 'run', 'const 0->1', "db.set_audit_value('flows_cursor', max(sigs, key=lambda x: x.get('blockTime') or 0)['signature'])", 0): 'a missing blockTime never wins the max against a real block time (~1.8e9)',
     ('health', 'summary', 'const 2->3', 'order = {TRIPPED: 0, BACKOFF: 1, CLOSED: 2}', 0):
         'the closed rank only has to sort after 0 and 1',
     ('health', 'summary', 'const 2->4', 'order = {TRIPPED: 0, BACKOFF: 1, CLOSED: 2}', 0):
@@ -251,6 +263,23 @@ EQUIVALENT = {
         'a float-noise tolerance: 2x on its scale changes nothing',
     ('risk', 'risk_metrics', 'const 1e-06->5e-07', 'if sd > 1e-6 * rms24:', 0):
         'a float-noise tolerance: 2x on its scale changes nothing',
+    # Signer send paths: `e?.message ?? e` only builds the text of an error.
+    ('rpc_raydium', 'sendAll', '\\?\\? -> ||', 'signatures: sigs, error: String(e?.message ?? e).slice(0, 300) }, null, 1));', 0):
+        'error-message text only: ?? and || differ only for an error with an empty message',
+    ('rpc_raydium', 'sendAll', '\\?\\? -> ||', 'throw Object.assign(new Error(`partial send: ${sigs.length}/${builts.length} sent; ${e?.message ?? e}`), { sent: true });', 0):
+        'error-message text only: ?? and || differ only for an error with an empty message',
+    ('rpc_dlmm', 'sendAll', '\\?\\? -> ||', 'if (!sigs.length) throw new AfterSignError(`send failed after signing (not retried): ${e?.message ?? e}`);', 0):
+        'error-message text only: ?? and || differ only for an error with an empty message',
+    ('rpc_dlmm', 'sendAll', '\\?\\? -> ||', 'return { sigs, error: String(e?.message ?? e).slice(0, 300) };', 0):
+        'error-message text only: ?? and || differ only for an error with an empty message',
+    ('rpc_pancake', 'sendOne', '\\?\\? -> ||', 'throw new AfterSignError(`send failed after signing (not retried): ${e?.message ?? e}`);', 0):
+        'error-message text only: ?? and || differ only for an error with an empty message',
+    ('rpc_byreal', 'sendAll', '\\?\\? -> ||', 'return { sigs, error: String(e?.message ?? e).slice(0, 300) };', 0):
+        'error-message text only: ?? and || differ only for an error with an empty message',
+    ('rpc_byreal', 'confirm', '\\?\\? -> ||', 'if (!s || !s.confirmationStatus) throw new Error(`${sig} not confirmed: ${String(e?.message ?? e).slice(0, 120)}`);', 0):
+        'error-message text only: ?? and || differ only for an error with an empty message',
+    ('rpc_orca', 'sendOnce', '\\?\\? -> ||', 'throw new AfterSignError(`send failed after signing (not retried): ${e?.message ?? e}`);', 0):
+        'error-message text only: ?? and || differ only for an error with an empty message',
 }
 
 # Old-style entries (target, function, 'description @L<line>'). They did not
@@ -350,11 +379,7 @@ EQUIVALENT_OLD = {
     ('daily', 'daily_line', 'swap GtE->Gt @L804'):
         'only the exact instant of midnight differs; now() is never that instant in a test or a poll',
     # no older copy has this line. Candidates now: 'if \'"signature\' not in line:' / "if r.get('signature'):"
-    ('audit_checks', 'known_signatures', 'skip if body @L218'):
-        'a cheap prefilter: a line without the word is skipped either way by the lookups below',
     # no older copy has this line. Candidates now: "keep |= set(st.get('reward_mints_seen') or []) | set(st.get(" / "keep |= set(st.get('reward_mints_seen') or []) | set(st.get(" #1 / "keep |= {m for m in (bot.pool_record().get('reward_mints') o"
-    ('audit_checks', 'keep_mints', 'drop operand 1 @L402'):
-        'a None reward list raises inside the try, which keeps the base set either way',
     # in an older copy, 2+ mutants shared this key on the line. Candidates now: 7 lines
     ('loop_hooks', 'janitor', 'drop operand 1 @L1159'):
         'a None close answer raises inside the try, which reports janitor_failed exactly as the guard does (the unsigned-answer mutant on this line is killed)',

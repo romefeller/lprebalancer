@@ -91,15 +91,13 @@ def check_equity(chain_total_usd, snapshot_equity_usd, uncounted_usd):
     return ('warn', d) if abs(diff) > EQUITY_TOLERANCE_USD else ('ok', d)
 
 
-def classify_tx(tx, owner, known, watch=()):
-    """What one wallet transaction was: ('known'|'failed'|'poison'|'dust'|
-    'bot'|'deposit'|'withdrawal'|'other', detail). `tx` is jsonParsed.
+def classify_tx(tx, owner, watch=()):
+    """What one wallet transaction was: ('failed'|'poison'|'dust'|'bot'|
+    'deposit'|'withdrawal'|'other', detail). `tx` is jsonParsed; the runner
+    counts known signatures before it fetches, so none reaches here.
     `watch` are addresses an attacker may imitate (the owner, the profit
     wallet): an unsigned transaction paid by a lookalike is 'poison'. Neither
     poison nor dust is capital."""
-    sig = tx['transaction']['signatures'][0]
-    if sig in known:
-        return 'known', {}
     m = tx['meta']
     keys = [k['pubkey'] if isinstance(k, dict) else k for k in tx['transaction']['message']['accountKeys']]
     if m.get('err') is not None:
@@ -118,7 +116,8 @@ def classify_tx(tx, owner, known, watch=()):
     mints = {b.get('mint') for b in (m.get('preTokenBalances') or []) + (m.get('postTokenBalances') or [])
              if b.get('owner') == owner}
     moves = {mt: tok(mt) for mt in mints if tok(mt) != 0}
-    sol = lam / 1e9 + moves.pop(NATIVE, 0) / 1e9
+    wsol = moves.pop(NATIVE, 0)
+    sol = lam / 1e9 + wsol / 1e9
     usdc = moves.pop(USDC, 0) / 1e6
     progs = sorted({BOT_PROGRAMS[k] for k in keys if k in BOT_PROGRAMS})
     d = {'sol': round(sol, 9), 'usdc': round(usdc, 6), 'programs': progs, 'other_tokens': moves, 'signer': signer}
@@ -126,7 +125,8 @@ def classify_tx(tx, owner, known, watch=()):
         d['lookalike_of'] = next(k for k in [owner, *watch] if lookalike(keys[0], [k]))
         d['sender'] = keys[0]
         return 'poison', d
-    if not signer and abs(lam) <= DUST_LAMPORTS and not moves and 0 <= usdc <= DUST_USDC:
+    # wrapped SOL is SOL: 0.5 wSOL sent in is a deposit, not dust
+    if not signer and abs(lam + wsol) <= DUST_LAMPORTS and not moves and 0 <= usdc <= DUST_USDC:
         return 'dust', d
     if signer and progs:
         return 'bot', d
@@ -184,19 +184,16 @@ def payout_received(tx, profit_wallet, mint, amount):
 DLMM_PROGRAM = 'LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo'
 
 
-def check_positions(db_open_mints, chain_nft_mints, db_open_dexes=None, dlmm_live=None):
+def check_positions(db_open_mints, chain_nft_mints, db_open_dexes, dlmm_live):
     """Open positions in the ledger against the chain: the position NFTs the
     wallet holds, and for Meteora (positions are accounts, not NFTs) the
-    position accounts that exist and belong to the DLMM program (`dlmm_live`;
-    None = not read, then Meteora rows are not compared). A DLMM position the
-    ledger does not know cannot be found without an indexed read: orphans are
-    NFT-only."""
+    position accounts that exist and belong to the DLMM program (`dlmm_live`).
+    A DLMM position the ledger does not know cannot be found without an
+    indexed read: orphans are NFT-only."""
     nft = set(chain_nft_mints)
-    dexes_ = db_open_dexes or [None] * len(db_open_mints)
-    open_ = [m for m, dx in zip(db_open_mints, dexes_) if dx != 'meteora-dlmm']
-    missing = [m for m in open_ if m not in nft]
-    if dlmm_live is not None:
-        missing += [m for m, dx in zip(db_open_mints, dexes_) if dx == 'meteora-dlmm' and m not in set(dlmm_live)]
+    rows = list(zip(db_open_mints, db_open_dexes))
+    missing = [m for m, dx in rows if dx != 'meteora-dlmm' and m not in nft] + \
+              [m for m, dx in rows if dx == 'meteora-dlmm' and m not in set(dlmm_live)]
     orphans = [m for m in nft if m not in set(db_open_mints)]
     d = {'db_open': list(db_open_mints), 'nfts': sorted(nft), 'missing_on_chain': missing, 'orphans': orphans}
     if missing or orphans or len(db_open_mints) > 1:
@@ -263,6 +260,8 @@ def known_signatures(db, feed_path):
                     r = json.loads(line)
                 except ValueError:
                     continue
+                if not isinstance(r, dict):
+                    continue                    # a JSON line that is no event: `["signature"]` crashed the check
                 if r.get('signature'):
                     known.add(r['signature'])
                 known |= {s for s in r.get('signatures') or [] if isinstance(s, str)}
@@ -316,7 +315,7 @@ def run(bot, db, config, txfees, notify, now=None):
                                {m: bot.dexes.jupiter_token(m) for m in others}) if others else []
         # the open's tolerance leftover is by design (rebalancer.deploy_idle)
         base = (bot.load().get('idle_baseline') or {})
-        excused = float(base.get('usd') or 0.0) if open_ and base.get('mint') == (status or {}).get('positionMint') else 0.0
+        excused = float(base.get('usd') or 0.0) if open_ and base.get('mint') == status.get('positionMint') else 0.0
         st, d = check_idle(max(bot.deployable_usd(bal) - excused, 0.0) + sum(p['usd'] for p in sweep), snap_equity or 0.0, open_)
         d['tolerance_leftover_usd'] = round(excused, 4)
         d['foreign_usd'] = round(sum(p['usd'] for p in sweep), 4)
@@ -370,7 +369,7 @@ def run(bot, db, config, txfees, notify, now=None):
             if tx is None:
                 classified.append(('other', {'sig': s['signature'], 'note': 'unreadable'}))
                 continue
-            kind, d = classify_tx(tx, owner, known, watch=(config.PROFIT_WALLET,))
+            kind, d = classify_tx(tx, owner, watch=(config.PROFIT_WALLET,))
             d['sig'] = s['signature']
             if kind in ('deposit', 'withdrawal'):
                 px = bal['price'] * (bal.get('quoteUsd') or 1.0)

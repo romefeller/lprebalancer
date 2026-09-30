@@ -47,15 +47,15 @@ def tb(i, owner, mint, amount, dec=6):
 
 
 class Classify(unittest.TestCase):
-    def test_known_and_failed(self):
-        self.assertEqual(audit.classify_tx(tx('K'), OWNER, {'K'})[0], 'known')
-        self.assertEqual(audit.classify_tx(tx(err={'x': 1}), OWNER, set())[0], 'failed')
+    def test_failed(self):
+        # known signatures never reach classify_tx: run() counts them first
+        self.assertEqual(audit.classify_tx(tx(err={'x': 1}), OWNER), ('failed', {}))
 
     def test_dust_spam(self):
         t = tx(keys=('SPAMMER', OWNER), pre=[10**9, 10**9], post=[10**9 - 5001, 10**9 + 1], fee=5000)
-        self.assertEqual(audit.classify_tx(t, OWNER, set())[0], 'dust')
+        self.assertEqual(audit.classify_tx(t, OWNER)[0], 'dust')
         big = tx(keys=('SPAMMER', OWNER), pre=[10**9, 10**9], post=[10**9 - 20_001, 10**9 + 20_001])
-        self.assertEqual(audit.classify_tx(big, OWNER, set())[0], 'deposit')    # more than dust: a deposit
+        self.assertEqual(audit.classify_tx(big, OWNER)[0], 'deposit')    # more than dust: a deposit
 
     PROFIT = '8funmDkPNBtjqfNkBEoBF16eBfyQ4vMAFrs4Nyys5D1h'
     POISONER = '8funvFQKPaEtb3zGppWiZ9obkPnkfKzLiMGTyhWU3D1h'
@@ -73,18 +73,18 @@ class Classify(unittest.TestCase):
     def test_replay_2026_09_30_poisoning_is_never_capital(self):
         # 4NQE6UnD: the poisoner pays, 0.0001 USDC lands in the LP wallet
         t = tx(keys=(self.POISONER, OWNER), pre_tok=[tb(0, OWNER, USDC, 1_000_000)], post_tok=[tb(0, OWNER, USDC, 1_000_100)])
-        kind, d = audit.classify_tx(t, OWNER, set(), watch=(self.PROFIT,))
+        kind, d = audit.classify_tx(t, OWNER, watch=(self.PROFIT,))
         self.assertEqual((kind, d['sender'], d['lookalike_of']), ('poison', self.POISONER, self.PROFIT))
         big = tx(keys=(self.POISONER, OWNER), pre_tok=[tb(0, OWNER, USDC, 0)], post_tok=[tb(0, OWNER, USDC, 50_000_000)])
-        self.assertEqual(audit.classify_tx(big, OWNER, set(), watch=(self.PROFIT,))[0], 'poison')   # any amount from a lookalike
+        self.assertEqual(audit.classify_tx(big, OWNER, watch=(self.PROFIT,))[0], 'poison')   # any amount from a lookalike
         lam = tx(keys=(self.POISONER, OWNER), pre=[10**9, 10**9], post=[10**9 - 6000, 10**9 + 1000])
-        self.assertEqual(audit.classify_tx(lam, OWNER, set(), watch=(self.PROFIT,))[0], 'poison')
-        self.assertEqual(audit.classify_tx(t, OWNER, set())[0], 'dust')                              # without the watch list: still not capital
+        self.assertEqual(audit.classify_tx(lam, OWNER, watch=(self.PROFIT,))[0], 'poison')
+        self.assertEqual(audit.classify_tx(t, OWNER)[0], 'dust')                              # without the watch list: still not capital
 
     def test_small_usdc_from_anyone_is_dust_and_more_is_a_deposit(self):
         for raw, kind in ((100, 'dust'), (10_000, 'dust'), (10_001, 'deposit'), (50_000_000, 'deposit')):
             u = tx(keys=('ALICE', OWNER), pre_tok=[tb(0, OWNER, USDC, 0)], post_tok=[tb(0, OWNER, USDC, raw)])
-            self.assertEqual(audit.classify_tx(u, OWNER, set())[0], kind, raw)
+            self.assertEqual(audit.classify_tx(u, OWNER)[0], kind, raw)
 
     def test_poisoning_warns_and_names_the_sender(self):
         st_, d = audit.check_flows([('poison', {'sender': self.POISONER, 'lookalike_of': self.PROFIT}),
@@ -94,38 +94,38 @@ class Classify(unittest.TestCase):
 
     def test_a_bot_operation_the_ledger_missed(self):
         t = tx(keys=(OWNER, RAYDIUM), pre=[10**9, 1], post=[10**9 - 5000 + 7_600_000, 1])
-        kind, d = audit.classify_tx(t, OWNER, set())
+        kind, d = audit.classify_tx(t, OWNER)
         self.assertEqual(kind, 'bot'); self.assertEqual(d['programs'], ['raydium'])
         self.assertAlmostEqual(d['sol'], 0.0076)                                  # the fee is added back for the signer
 
     def test_deposits_of_sol_and_usdc(self):
         t = tx(keys=('ALICE', OWNER), pre=[5 * 10**9, 10**9], post=[4 * 10**9, 2 * 10**9])
-        kind, d = audit.classify_tx(t, OWNER, set())
+        kind, d = audit.classify_tx(t, OWNER)
         self.assertEqual(kind, 'deposit'); self.assertAlmostEqual(d['sol'], 1.0)
         u = tx(keys=('ALICE', OWNER), pre_tok=[tb(0, OWNER, USDC, 0)], post_tok=[tb(0, OWNER, USDC, 50_000_000)])
-        kind, d = audit.classify_tx(u, OWNER, set())
+        kind, d = audit.classify_tx(u, OWNER)
         self.assertEqual(kind, 'deposit'); self.assertEqual(d['usdc'], 50.0)
 
     def test_a_withdrawal(self):
         t = tx(keys=(OWNER, 'BOB'), pre=[2 * 10**9, 0], post=[10**9 - 5000, 10**9])
-        kind, d = audit.classify_tx(t, OWNER, set())
+        kind, d = audit.classify_tx(t, OWNER)
         self.assertEqual(kind, 'withdrawal'); self.assertAlmostEqual(d['sol'], -1.0)
 
     def test_wrapped_sol_counts_as_sol_and_other_tokens_are_named(self):
         t = tx(keys=('ALICE', OWNER), pre_tok=[tb(0, OWNER, SOL, 0, 9), tb(1, OWNER, 'CAKE', 0, 9)],
                post_tok=[tb(0, OWNER, SOL, 2 * 10**9, 9), tb(1, OWNER, 'CAKE', 5, 9)])
-        kind, d = audit.classify_tx(t, OWNER, set())
+        kind, d = audit.classify_tx(t, OWNER)
         self.assertEqual(kind, 'deposit'); self.assertAlmostEqual(d['sol'], 2.0); self.assertEqual(d['other_tokens'], {'CAKE': 5})
 
     def test_anything_else_is_other(self):
         t = tx(keys=('ALICE', OWNER), pre_tok=[tb(0, OWNER, 'CAKE', 0, 9)], post_tok=[tb(0, OWNER, 'CAKE', 5, 9)])
-        self.assertEqual(audit.classify_tx(t, OWNER, set())[0], 'other')         # an airdrop of some token
+        self.assertEqual(audit.classify_tx(t, OWNER)[0], 'other')         # an airdrop of some token
         noop = tx(keys=(OWNER,), pre=[10**9], post=[10**9 - 5000])
-        self.assertEqual(audit.classify_tx(noop, OWNER, set())[0], 'other')      # our own tx that moved nothing
+        self.assertEqual(audit.classify_tx(noop, OWNER)[0], 'other')      # our own tx that moved nothing
 
     def test_a_tx_without_the_owner_is_not_a_flow(self):
         t = tx(keys=('ALICE', 'BOB'), pre=[10**9, 0], post=[0, 10**9])
-        self.assertEqual(audit.classify_tx(t, OWNER, set())[0], 'dust')
+        self.assertEqual(audit.classify_tx(t, OWNER)[0], 'dust')
 
     def test_check_flows_counts_and_flags(self):
         st_, d = audit.check_flows([('known', {}), ('dust', {}), ('dust', {})])
@@ -180,21 +180,20 @@ class Checks(unittest.TestCase):
         self.assertTrue(audit.payout_received(new_ata, PROFIT, USDC, 0.5))
 
     def test_positions(self):
-        self.assertEqual(audit.check_positions(['M'], ['M'], ['raydium-clmm'])[0], 'ok')
-        self.assertEqual(audit.check_positions([], [])[0], 'ok')
-        st_, d = audit.check_positions(['M'], [], ['raydium-clmm'])
+        self.assertEqual(audit.check_positions(['M'], ['M'], ['raydium-clmm'], [])[0], 'ok')
+        self.assertEqual(audit.check_positions([], [], [], [])[0], 'ok')
+        st_, d = audit.check_positions(['M'], [], ['raydium-clmm'], [])
         self.assertEqual((st_, d['missing_on_chain']), ('fail', ['M']))
-        st_, d = audit.check_positions([], ['X'])
+        st_, d = audit.check_positions([], ['X'], [], [])
         self.assertEqual((st_, d['orphans']), ('fail', ['X']))
-        self.assertEqual(audit.check_positions(['D'], [], ['meteora-dlmm'])[0], 'ok')   # a DLMM position is no NFT
-        # 2026-09-30 audit: the DLMM row is checked against its position account when read
+        # 2026-09-30 audit: a DLMM row is no NFT; it is checked against its position account
         self.assertEqual(audit.check_positions(['D'], [], ['meteora-dlmm'], dlmm_live=['D'])[0], 'ok')
         st_, d = audit.check_positions(['D'], [], ['meteora-dlmm'], dlmm_live=[])
         self.assertEqual((st_, d['missing_on_chain']), ('fail', ['D']))
         st_, d = audit.check_positions(['D', 'M'], ['M'], ['meteora-dlmm', 'raydium-clmm'], dlmm_live=['D'])
         self.assertEqual((st_, d['missing_on_chain']), ('fail', []))                 # two open rows: still a fail
         self.assertEqual(audit.check_positions(['M'], ['M'], ['raydium-clmm'], dlmm_live=[])[0], 'ok')
-        self.assertEqual(audit.check_positions(['A', 'B'], ['A', 'B'], ['orca', 'orca'])[0], 'fail')
+        self.assertEqual(audit.check_positions(['A', 'B'], ['A', 'B'], ['orca', 'orca'], [])[0], 'fail')
 
     def test_small_checks(self):
         self.assertEqual(audit.check_owed([])[0], 'ok'); self.assertEqual(audit.check_owed([{'id': 1}])[0], 'warn')

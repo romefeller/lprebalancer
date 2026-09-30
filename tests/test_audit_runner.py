@@ -320,10 +320,6 @@ class Ledger(Base):
         self.assertEqual(self.detail('fee_reads'), {'rejected_24h': 1})
 
 
-if __name__ == '__main__':
-    unittest.main()
-
-
 class ToleranceExcused(Base):
     def test_the_bands_tolerance_leftover_is_not_idle(self):
         self.bal.update(balanceB=10.0, walletUsd=0.0592 * 120 + 10.0)        # $10 left beside the band
@@ -338,3 +334,14 @@ class ToleranceExcused(Base):
         with mock.patch.object(audit, 'rpc', self.fake_rpc), mock.patch.object(audit.time, 'sleep', lambda s: None):
             res = audit.run(b, db, cfg, fx, lambda ev, **kw: None)
         self.assertEqual(res['idle'], 'warn')
+
+
+def load_tests(loader, tests, pattern):
+    # mutate.py runs this module for the audit targets: the edge cases ride along
+    import test_audit_edges
+    tests.addTests(loader.loadTestsFromModule(test_audit_edges))
+    return tests
+
+
+if __name__ == '__main__':
+    unittest.main()
