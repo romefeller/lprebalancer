@@ -33,6 +33,7 @@ import fs from 'node:fs';
 import { positionRent } from './position_rent.mjs';
 import { consistentFees, BYREAL_LAYOUT } from './fee_snapshot.mjs';
 import { SLIPPAGE_REFUSAL } from './slippage.mjs';
+import { endpoints, overEndpoints, isEntry } from './rpc_policy.mjs';
 import path from 'node:path';
 import { createRequire } from 'node:module';
 
@@ -51,9 +52,9 @@ console.info = (...a) => console.error(...a);
 
 const DIR = path.dirname(new URL(import.meta.url).pathname);
 const HALT = path.join(DIR, 'HALT');
-const RPC = process.env.SOLANA_RPC_URL ?? process.env.LPBOT_RPC ?? 'https://api.mainnet-beta.solana.com';
-const ENDPOINTS = [RPC, 'https://api.mainnet-beta.solana.com', 'https://solana-rpc.publicnode.com']
-  .filter((v, i, a) => v && a.indexOf(v) === i);
+// A keyed endpoint from the environment first. Indexed reads
+// (getParsedTokenAccountsByOwner) never go to an endpoint that refuses them.
+export const ENDPOINTS = endpoints(process.env, { indexed: true });
 
 const DEX = 'byreal';
 const MAX_USD = Number(process.env.LPBOT_MAX_USD ?? 260);
@@ -181,27 +182,14 @@ async function connect(url) {
   return { connection, payer, chain };
 }
 
-// Retry the whole operation across endpoints on a rate limit or a transport
-// failure, as signer2 does. A logic error ("position not found", "exceeds
-// cap") is the same on every endpoint, so it is thrown as it is, at once.
-const TRANSIENT = /429|Too Many Requests|rate|403|blocked|Indexed requests|fetch failed|ECONN|ETIMEDOUT|timed? ?out|socket hang up|502|503|504/i;
-
-async function withRpc(fn) {
-  let lastErr = null;
-  for (const url of ENDPOINTS) {
-    for (let attempt = 0; attempt < 2; attempt++) {
-      try {
-        return await fn(await connect(url));
-      } catch (e) {
-        const msg = String(e?.message ?? e);
-        if (!TRANSIENT.test(msg)) throw e;
-        lastErr = e;
-        if (!/429|Too Many Requests|rate/i.test(msg)) break;   // blocked here: next endpoint
-        await new Promise(r => setTimeout(r, 2500 * (attempt + 1)));
-      }
-    }
-  }
-  throw new Error(`all RPC endpoints failed: ${String(lastErr?.message ?? lastErr).slice(0, 160)}`);
+// Run the whole operation over the endpoints (rpc_policy.mjs). A rate limit,
+// a refusal or a transport failure moves on, BEFORE anything is sent. An
+// error after a send (`sent`), a program failure or an answer from the chain
+// is thrown at once, as itself. `deps` replaces the endpoints, connect and
+// sleep in tests.
+export async function withRpc(fn, opts, deps = {}) {
+  const { urls = ENDPOINTS, connectFn = connect, sleep } = deps;
+  return overEndpoints(urls, async url => fn(await connectFn(url, opts)), { tries: 2, pauseMs: 2500, sleep });
 }
 
 // Native SOL counts as its token: the SDK funds a fresh WSOL account from
@@ -408,7 +396,7 @@ async function simulate(connection, tx) {
 // and withRpc never retries a send on another endpoint. A preflight failure
 // is the same everywhere, and a transport timeout on the send may or may not
 // have delivered the transaction; either way the loop re-reads the chain.
-async function sendAll(connection, txs, payer) {
+export async function sendAll(connection, txs, payer) {
   const sigs = [];
   for (const tx of Array.isArray(txs) ? txs : [txs]) {
     try {
@@ -679,4 +667,5 @@ async function main() {
     + '| close <position> [--execute]   (pool via --pool or LPBOT_POOL)');
 }
 
-main().catch(e => { console.error('ERROR:', e.message); process.exitCode = 1; });
+// The CLI runs only when node starts this file; a test import runs nothing.
+if (isEntry(import.meta.url)) main().catch(e => { console.error('ERROR:', e.message); process.exitCode = 1; });

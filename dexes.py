@@ -52,11 +52,6 @@ METEORA_DLMM = 'https://dlmm.datapi.meteora.ag'
 GECKO = 'https://api.geckoterminal.com/api/v2/networks/solana'
 JUPITER = 'https://lite-api.jup.ag'
 
-RAYDIUM_CLMM_PROGRAM = 'CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK'
-BYREAL_CLMM_PROGRAM = 'REALQqNEomY6cQGZJUGwywTBD2UmDT32rZcNnfxQ5N2'
-PANCAKE_CLMM_PROGRAM = 'HpNfyc2Saw7RKkQd8nEL4khUcuPhQ7WwY1B2qjx8jxFq'
-METEORA_DLMM_PROGRAM = 'LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo'
-
 # Every DEX this module knows, with the adapter that lists it. The config's
 # `dexes` column names entries of this table.
 KNOWN = ('orca', 'raydium-clmm', 'byreal', 'pancakeswap-v3-solana', 'meteora-dlmm')

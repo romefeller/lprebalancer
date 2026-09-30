@@ -280,12 +280,6 @@ class Board(unittest.TestCase):
         self.assertIsNotNone(run); self.assertEqual(rows, [])
         self.assertEqual(db.latest_scan(), (db.latest_scan()[0], db.latest_scan()[1]))
 
-    def test_scan_history_per_pool(self):
-        db.record_scan('sol-usdc', ('orca',), self.rows(), {}, 1.0, listed=3)
-        db.record_scan('sol-usdc', ('orca',), self.rows(), {}, 1.0, listed=3)
-        self.assertEqual(len(db.scan_history('O1')), 2)
-        self.assertEqual(db.scan_history('nope'), [])
-
     def test_repoint_moves_the_profile(self):
         row = db.repoint('sol-usdc', 'meteora-dlmm', 'M1', 'SOL/USDC', 'SOL', 'USDC')
         self.assertEqual((row['dex'], row['pool']), ('meteora-dlmm', 'M1'))

@@ -29,6 +29,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { createRequire } from 'node:module';
+import { endpoints, overEndpoints, isEntry, AfterSignError } from './rpc_policy.mjs';
 
 // The package's ESM build imports a directory and fails to load under Node 24;
 // the CommonJS build resolves cleanly.
@@ -41,9 +42,9 @@ const { BN } = require('@coral-xyz/anchor');
 
 const DIR = path.dirname(new URL(import.meta.url).pathname);
 const HALT = path.join(DIR, 'HALT');
-const RPC = process.env.SOLANA_RPC_URL ?? process.env.LPBOT_RPC ?? 'https://api.mainnet-beta.solana.com';
-const ENDPOINTS = [RPC, 'https://api.mainnet-beta.solana.com', 'https://solana-rpc.publicnode.com']
-  .filter((v, i, a) => v && a.indexOf(v) === i);
+// A keyed endpoint from the environment first. Indexed reads
+// (getParsedTokenAccountsByOwner) never go to an endpoint that refuses them.
+export const ENDPOINTS = endpoints(process.env, { indexed: true });
 
 const MAX_USD = Number(process.env.LPBOT_MAX_USD ?? 260);
 const SLIPPAGE_BPS = Number(process.env.LPBOT_SLIPPAGE_BPS ?? 100);
@@ -139,21 +140,14 @@ async function connect(url) {
   return { connection, payer };
 }
 
-// Retry the whole operation across endpoints on a rate limit, as signer2 does.
-async function withRpc(fn) {
-  let lastErr = null;
-  for (const url of ENDPOINTS) {
-    for (let attempt = 0; attempt < 2; attempt++) {
-      try {
-        return await fn(await connect(url));
-      } catch (e) {
-        lastErr = e;
-        if (!/429|Too Many Requests|rate/i.test(String(e?.message ?? e))) break;
-        await new Promise(r => setTimeout(r, 2500 * (attempt + 1)));
-      }
-    }
-  }
-  throw new Error(`all RPC endpoints failed: ${String(lastErr?.message ?? lastErr).slice(0, 160)}`);
+// Run the whole operation over the endpoints (rpc_policy.mjs). A rate limit,
+// a refusal or a transport failure moves on, BEFORE anything is sent. An
+// error after a send (`sent`), a program failure or an answer from the chain
+// is thrown at once, as itself. `deps` replaces the endpoints, connect and
+// sleep in tests.
+export async function withRpc(fn, opts, deps = {}) {
+  const { urls = ENDPOINTS, connectFn = connect, sleep } = deps;
+  return overEndpoints(urls, async url => fn(await connectFn(url, opts)), { tries: 2, pauseMs: 2500, sleep });
 }
 
 async function splBalance(connection, owner, mint, decimals, lamports) {
@@ -288,13 +282,15 @@ async function positions() {
 // Sends in order. Throws only if NOTHING was sent; after the first send a
 // failure comes back as {sigs, error} so the caller reports a partial result
 // instead of letting withRpc retry the whole operation.
-async function sendAll(connection, txs, signers) {
+export async function sendAll(connection, txs, signers) {
   const sigs = [];
   for (const tx of Array.isArray(txs) ? txs : [txs]) {
     try {
       sigs.push(await sendAndConfirmTransaction(connection, tx, signers, { commitment: 'confirmed' }));
     } catch (e) {
-      if (!sigs.length) throw e;
+      // Nothing confirmed, but the send may still reach a node: never
+      // rotated, never retried (AfterSignError).
+      if (!sigs.length) throw new AfterSignError(`send failed after signing (not retried): ${e?.message ?? e}`);
       return { sigs, error: String(e?.message ?? e).slice(0, 300) };
     }
   }
@@ -466,4 +462,5 @@ async function main() {
     + '| close <position> [--execute]   (pool via --pool or LPBOT_POOL)');
 }
 
-main().catch(e => { console.error('ERROR:', e.message); process.exitCode = 1; });
+// The CLI runs only when node starts this file; a test import runs nothing.
+if (isEntry(import.meta.url)) main().catch(e => { console.error('ERROR:', e.message); process.exitCode = 1; });

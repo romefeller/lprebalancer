@@ -53,6 +53,7 @@ import fs from 'node:fs';
 import { positionRent } from './position_rent.mjs';
 import { SLIPPAGE_REFUSAL } from './slippage.mjs';
 import { consistentFees } from './fee_snapshot.mjs';
+import { endpoints, overEndpoints, isEntry, AfterSignError } from './rpc_policy.mjs';
 import path from 'node:path';
 import { createRequire } from 'node:module';
 
@@ -78,9 +79,9 @@ const Decimal = require('decimal.js');
 
 const DIR = path.dirname(new URL(import.meta.url).pathname);
 const HALT = path.join(DIR, 'HALT');
-const RPC = process.env.SOLANA_RPC_URL ?? process.env.LPBOT_RPC ?? 'https://api.mainnet-beta.solana.com';
-const ENDPOINTS = [RPC, 'https://api.mainnet-beta.solana.com', 'https://solana-rpc.publicnode.com']
-  .filter((v, i, a) => v && a.indexOf(v) === i);
+// A keyed endpoint from the environment first. Indexed reads
+// (getParsedTokenAccountsByOwner) never go to an endpoint that refuses them.
+export const ENDPOINTS = endpoints(process.env, { indexed: true });
 
 const MAX_USD = Number(process.env.LPBOT_MAX_USD ?? 260);
 const SLIPPAGE_BPS = Number(process.env.LPBOT_SLIPPAGE_BPS ?? 100);
@@ -120,7 +121,7 @@ function poolArg(explicit) {
 }
 
 // An error thrown after a transaction was sent. withRpc must not retry it.
-class SentError extends Error {
+export class SentError extends Error {
   constructor(message, signatures) { super(message); this.sent = true; this.signatures = signatures; }
 }
 
@@ -254,29 +255,14 @@ async function connect(url, withKey = true) {
   return { connection, payer };
 }
 
-// Retry the whole operation across endpoints on a rate limit or an endpoint
-// fault, as the other signers do. Never after a send. `pool` reads without the
-// key.
-const RETRYABLE = /429|Too Many Requests|rate limit|fetch failed|ECONN|ETIMEDOUT|EAI_AGAIN|socket|timed? ?out|50[0-4]\b|Service Unavailable|Gateway|Forbidden|Indexed requests|Blockhash not found|failed to get/i;
-async function withRpc(fn, withKey = true) {
-  const errs = [];
-  for (const url of ENDPOINTS) {
-    for (let attempt = 0; attempt < 3; attempt++) {
-      try {
-        return await fn(await connect(url, withKey));
-      } catch (e) {
-        if (e?.sent) throw e;
-        // A deterministic error (bad position, price outside the band, a
-        // simulation failure) is the answer; only endpoint trouble moves on.
-        if (!RETRYABLE.test(String(e?.message ?? e))) throw e;
-        errs.push(String(e?.message ?? e).replace(/\s+/g, ' ').slice(0, 140));
-        if (!/429|Too Many Requests|rate/i.test(String(e?.message ?? e))) break;
-        await new Promise(r => setTimeout(r, 3000 * (attempt + 1)));
-      }
-    }
-  }
-  const uniq = errs.filter((v, i, a) => a.indexOf(v) === i);
-  throw new Error(`all RPC endpoints failed: ${uniq.join(' || ')}`);
+// Run the whole operation over the endpoints (rpc_policy.mjs). A rate limit,
+// a refusal or a transport failure moves on, BEFORE anything is sent. An
+// error after a send (`sent`), a program failure or an answer from the chain
+// is thrown at once, as itself. `deps` replaces the endpoints, connect and
+// sleep in tests.
+export async function withRpc(fn, withKey = true, deps = {}) {
+  const { urls = ENDPOINTS, connectFn = connect, sleep } = deps;
+  return overEndpoints(urls, async url => fn(await connectFn(url, withKey)), { tries: 3, pauseMs: 3000, sleep });
 }
 
 async function splBalance(connection, owner, mint, decimals, lamports) {
@@ -518,11 +504,18 @@ async function simulate(connection, tx) {
 
 // Send one signed transaction and confirm it. Any error after the send is a
 // SentError carrying the signature, so the caller reports partial state.
-async function sendOne(connection, tx, signers, sigsSoFar) {
+export async function sendOne(connection, tx, signers, sigsSoFar) {
   const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('confirmed');
   tx.message.recentBlockhash = blockhash;
   tx.sign(signers);
-  const sig = await connection.sendRawTransaction(tx.serialize(), { skipPreflight: false, maxRetries: 3 });
+  // A send that fails without a signature may still reach a node: never
+  // rotated, never retried (AfterSignError).
+  let sig;
+  try {
+    sig = await connection.sendRawTransaction(tx.serialize(), { skipPreflight: false, maxRetries: 3 });
+  } catch (e) {
+    throw new AfterSignError(`send failed after signing (not retried): ${e?.message ?? e}`);
+  }
   sigsSoFar.push(sig);
   try {
     const c = await connection.confirmTransaction({ signature: sig, blockhash, lastValidBlockHeight }, 'confirmed');
@@ -790,4 +783,5 @@ async function main() {
     + '| close <position> [--execute]   (pool via --pool or LPBOT_POOL)');
 }
 
-main().catch(e => { console.error('ERROR:', e.message); process.exitCode = 1; });
+// The CLI runs only when node starts this file; a test import runs nothing.
+if (isEntry(import.meta.url)) main().catch(e => { console.error('ERROR:', e.message); process.exitCode = 1; });

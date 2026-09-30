@@ -28,12 +28,15 @@ import subprocess
 import sys
 import tempfile
 import time
+from typing import NamedTuple
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 SCRATCH = pathlib.Path(os.environ.get('MUT_DIR') or tempfile.gettempdir()) / 'lp_bot_mutants'
 WORKERS = int(os.environ.get('MUT_WORKERS', 6))
 TIMEOUT = int(os.environ.get('MUT_TIMEOUT', 180))
 PY = sys.executable
+# Test databases are <MUT_DB_PREFIX><worker>_test: give a second concurrent run its own prefix.
+DB_PREFIX = os.environ.get('MUT_DB_PREFIX', 'rebalancer_mut')
 
 PY_TESTS = lambda *mods: [PY, '-m', 'unittest', '-q', '-f', *mods]
 NODE_TESTS = lambda *files: ['node', '--test', *files]
@@ -98,119 +101,268 @@ TARGETS = {
 
 SQL_TARGETS = {'band_profile', 'daily', 'capital_db'}
 
-# Mutants that cannot change behaviour, with the reason. Keyed by
-# (target, function, description) as the report prints them.
+# Mutants that cannot change behaviour, with the reason. Keyed by the mutant's
+# identity (see "identity" below):
+#     (target, function, description, stripped source line, occurrence)
+# The report prints each survivor's key: copy it here with a reason. The line
+# number is not in the key, so an edit above a mutant keeps its entry valid.
 EQUIVALENT = {
-    ('health', 'summary', 'const 2->3 @L148'): 'the closed rank only has to sort after 0 and 1',
-    ('health', 'summary', 'const 2->4 @L148'): 'the closed rank only has to sort after 0 and 1',
-    ('resilience', 'deploy_idle', 'swap Lt->LtE @L1038'): 'only a deploy exactly 86400.0 s old differs: a float clock never lands there',
-    ('resilience', 'voluntary_move_allowed', 'const 86400->86401 @L1120'): 'a move older than a day passes the gap anyway: keeping it in the window changes nothing',
-    ('resilience', 'voluntary_move_allowed', 'const 86400->172800 @L1120'): 'a move older than a day passes the gap anyway: keeping it in the window changes nothing',
-    ('resilience', 'voluntary_move_allowed', 'const 0->1 @L1121'): 'a last rebalance at epoch 0 or 1 is decades past the gap',
-    ('resilience', 'voluntary_move_allowed', 'swap GtE->Gt @L1122'): 'only a gap of exactly CALM_MIN_GAP seconds differs: a float clock never lands there',
-    ('resilience', 'failover_pick', 'drop operand 0 @L1138'): 'the held venue is the held dex (config.POOL is on config.DEX): `dex != held_dex` excludes it too',
-    ('resilience', 'chain', 'flip bool @L288'): 'print flush only',
-    ('resilience', 'voluntary_move_allowed', 'swap Lt->LtE @L1120'): 'only a move exactly 86400.0 s old differs: a float clock never lands there',
-    ('books', 'regime_at_move', 'swap Gt->GtE @L209'): 'lower = 0 is caught by `lower and` first; upper = lower gives half 1.0, refused by `upper > lower`',
-    ('book_lines', 'shareAgrees', '<= -> < @L25'): 'only a difference of exactly 0.2 points differs: a float share never lands there',
-    ('book_lines', 'healthLine', '\\?\\? -> || @L76'): 'health.summary always sets emoji to a non-empty string: ?? and || agree',
-    ('health', 'cooldown', 'const 30->31 @L43'): 'the exponent cap only guards overflow: 2^30 x 600 s is far past MAX_S either way',
-    ('health', 'cooldown', 'const 30->60 @L43'): 'the exponent cap only guards overflow: 2^30 x 600 s is far past MAX_S either way',
-    ('health', 'verdict', 'const 0.0->1.0 @L80'): 'retry_at None with failures on record: 0.0 or 1.0 are both decades past, allowed either way',
-    ('resilience', 'chain', 'const 420->421 @L275'): 'one second more on a 420 s signer timeout',
-    ('books', 'regime_at_move', 'swap Lt->LtE @L215'): 'widths and probs are both rounded to 2 decimals: a difference is 0 or >= 0.01',
-    ('books', 'regime_at_move', 'const 1e-06->1.5e-06 @L215'): 'widths and probs are both rounded to 2 decimals: a difference is 0 or >= 0.01',
-    ('books', 'regime_at_move', 'const 1e-06->5e-07 @L215'): 'widths and probs are both rounded to 2 decimals: a difference is 0 or >= 0.01',
-    ('deployment', '_pct', 'swap LtE->Lt @L946'): 'a whole of exactly 0 is caught by `not whole` first',
-    ('surrogate', 'pair_tokens', 'drop operand 1 @L101'): "str(None) is 'None', one part: refused either way",
-    ('surrogate', 'clean_bars', 'swap GtE->Gt @L123'): 'a volume of exactly 0 becomes 0.0 either way',
-    ('surrogate', 'fit_surrogate', 'const 1.0->0.5 @L130'): 'the scale is clamped at 1.0: a default below 1 is the identity',
-    ('surrogate', 'fit_surrogate', 'const 1.0->0.0 @L130'): 'the scale is clamped at 1.0: a default below 1 is the identity',
-    ('surrogate', 'fit_surrogate', 'const 1.0->1.5 @L147'): 'scale 1.0 through the formula is the identity: skipping it or not gives the same bars',
-    ('surrogate', 'fit_surrogate', 'const 1.0->0.5 @L147'): 'scale 1.0 through the formula is the identity: skipping it or not gives the same bars',
-    ('surrogate', 'fit_surrogate', 'const 1.0->0.0 @L147'): 'scale 1.0 through the formula is the identity: skipping it or not gives the same bars',
-    ('surrogate', 'fit_surrogate', 'drop operand 4 @L135'): 'a negative live price fails both level checks: None either way',
-    ('surrogate', 'fit_surrogate', 'swap LtE->Lt @L135'): 'a zero live price is caught by `not live_price` first',
-    ('surrogate', 'fit_surrogate', 'const 0->1 @L135'): 'bars[0] and bars[1] have the same length (the <= 0 -> <= 1 twin is killed by the sub-1 price test)',
-    ('surrogate', 'fit_surrogate', 'swap Gt->GtE @L138'): 'only a close exactly 0.5% off differs: a float never lands there',
-    ('surrogate', 'fit_surrogate', 'swap Gt->GtE @L139'): 'only a close exactly 0.5% off differs: a float never lands there',
-    ('surrogate', 'fit_surrogate', 'swap Gt->GtE @L145'): 'only a median exactly 0.2% differs: a float never lands there',
-    ('surrogate', 'fit_surrogate', 'drop operand 1 @L142'): 'an empty reference gives no overlap: the join check is skipped either way',
-    ('surrogate', 'fit_surrogate', 'const 0->1 @L142'): 'ref[0] and ref[1] have the same length',
-    ('surrogate', 'binance_5m', 'and<->or @L169'): 'a dict, a string or [] yields no row and stops at the short-page check: [] either way',
-    ('surrogate', 'binance_5m', 'drop operand 0 @L169'): 'a dict or a string yields no row and stops at the short-page check: [] either way',
-    ('surrogate', 'binance_5m', 'drop operand 1 @L169'): '[] yields no row and stops at the short-page check',
-    ('surrogate', 'surrogate_5m', 'skip if body @L196'): 'symbols(*None) raises inside the try, which skips every source: (None, None), no fetch',
-    ('surrogate', 'missing_slots', 'const 1->2 @L216'): 'the range end is exclusive on a 300 s step: last + 1 and last + 2 give the same slots',
-    ('surrogate_overlay', 'with_surrogate', 'skip if body @L831'): 'None[0] raises inside the try, which returns bars (None) either way',
-    ('surrogate_overlay', 'with_surrogate', 'const 0->1 @L841'): 'an empty cache asked at t = 0 or t = 1: both are decades past the refresh',
-    ('surrogate_overlay', 'with_surrogate', 'swap Gt->GtE @L843'): 'only an ask exactly SURROGATE_REFRESH later differs: a float clock never lands there',
-    ('surrogate_overlay', 'with_surrogate', 'swap GtE->Gt @L847'): 'the trim is an hour beyond the fill window: a bar at its edge is never used',
-    ('surrogate_overlay', 'with_surrogate', 'const 3600->3601 @L847'): 'the trim is an hour beyond the fill window: a bar at its edge is never used',
-    ('surrogate_overlay', 'with_surrogate', 'flip bool @L861'): 'print flush only',
-    ('surrogate_overlay', 'regime_view', 'const 0->1 @L1053'): 'hold_left is read only in STALE mode on a fresh tape, where it is assigned first',
-    ('surrogate_overlay', 'regime_view', 'drop operand 0 @L1066'): 'calm.regime_view returns None only for no bars, which returned before',
-    ('guards', 'fee_read_problem', 'drop operand 1 @L141'):
+    ('health', 'summary', 'const 2->3', 'order = {TRIPPED: 0, BACKOFF: 1, CLOSED: 2}', 0):
+        'the closed rank only has to sort after 0 and 1',
+    ('health', 'summary', 'const 2->4', 'order = {TRIPPED: 0, BACKOFF: 1, CLOSED: 2}', 0):
+        'the closed rank only has to sort after 0 and 1',
+    ('book_lines', 'shareAgrees', '<= -> <', 'return Number.isFinite(lp) && Math.abs(lp / eq * 100 - p) <= 0.2;', 0):
+        'only a difference of exactly 0.2 points differs: a float share never lands there',
+    ('book_lines', 'healthLine', '\\?\\? -> ||', "return `🩺 health   ` + bad.map(x => `${x.emoji ?? (x.state === 'tripped' ? '🔴' : '🟡')} ${x.key} ${x.fails}x`", 0):
+        'health.summary always sets emoji to a non-empty string: ?? and || agree',
+    ('health', 'cooldown', 'const 30->31', 'return float(min(base_s * 2 ** min(fails - 1, 30), max_s))', 0):
+        'the exponent cap only guards overflow: 2^30 x 600 s is far past MAX_S either way',
+    ('health', 'cooldown', 'const 30->60', 'return float(min(base_s * 2 ** min(fails - 1, 30), max_s))', 0):
+        'the exponent cap only guards overflow: 2^30 x 600 s is far past MAX_S either way',
+    ('surrogate', 'pair_tokens', 'drop operand 1', "parts = [p.strip().upper() for p in str(pair or '').replace('-', '/').split('/')]", 0):
+        "str(None) is 'None', one part: refused either way",
+    ('surrogate', 'clean_bars', 'swap GtE->Gt', 'out[int(t)] = (t, o, h, l, c, v if math.isfinite(v) and v >= 0 else 0.0)', 0):
+        'a volume of exactly 0 becomes 0.0 either way',
+    ('surrogate', 'fit_surrogate', 'const 1.0->0.5', 'def fit_surrogate(bars, live_price, ref=None, range_scale=1.0):', 0):
+        'the scale is clamped at 1.0: a default below 1 is the identity',
+    ('surrogate', 'fit_surrogate', 'const 1.0->0.0', 'def fit_surrogate(bars, live_price, ref=None, range_scale=1.0):', 0):
+        'the scale is clamped at 1.0: a default below 1 is the identity',
+    ('surrogate', 'fit_surrogate', 'const 1.0->1.5', 'if range_scale != 1.0:', 0):
+        'scale 1.0 through the formula is the identity: skipping it or not gives the same bars',
+    ('surrogate', 'fit_surrogate', 'const 1.0->0.5', 'if range_scale != 1.0:', 0):
+        'scale 1.0 through the formula is the identity: skipping it or not gives the same bars',
+    ('surrogate', 'fit_surrogate', 'const 1.0->0.0', 'if range_scale != 1.0:', 0):
+        'scale 1.0 through the formula is the identity: skipping it or not gives the same bars',
+    ('surrogate', 'fit_surrogate', 'drop operand 4', 'if bars is None or not len(bars[0]) or not live_price or not math.isfinite(live_price) or live_price <= 0:', 0):
+        'a negative live price fails both level checks: None either way',
+    ('surrogate', 'fit_surrogate', 'swap LtE->Lt', 'if bars is None or not len(bars[0]) or not live_price or not math.isfinite(live_price) or live_price <= 0:', 0):
+        'a zero live price is caught by `not live_price` first',
+    ('surrogate', 'fit_surrogate', 'swap Gt->GtE', 'if abs(c[-1] / live_price - 1) > SURROGATE_MATCH:', 0):
+        'only a close exactly 0.5% off differs: a float never lands there',
+    ('surrogate', 'fit_surrogate', 'swap Gt->GtE', 'if abs((1 / c[-1]) / live_price - 1) > SURROGATE_MATCH:', 0):
+        'only a close exactly 0.5% off differs: a float never lands there',
+    ('surrogate', 'fit_surrogate', 'swap Gt->GtE', 'if len(d) >= SURROGATE_JOIN_MIN and float(np.median(d)) > SURROGATE_BASIS_MAX:', 0):
+        'only a median exactly 0.2% differs: a float never lands there',
+    ('surrogate', 'fit_surrogate', 'drop operand 1', 'if ref is not None and len(ref[0]):', 0):
+        'an empty reference gives no overlap: the join check is skipped either way',
+    ('surrogate', 'fit_surrogate', 'const 0->1', 'if ref is not None and len(ref[0]):', 0):
+        'ref[0] and ref[1] have the same length',
+    ('surrogate', 'binance_5m', 'and<->or', 'if not isinstance(d, list) or not d:', 0):
+        'a dict, a string or [] yields no row and stops at the short-page check: [] either way',
+    ('surrogate', 'binance_5m', 'drop operand 0', 'if not isinstance(d, list) or not d:', 0):
+        'a dict or a string yields no row and stops at the short-page check: [] either way',
+    ('surrogate', 'binance_5m', 'drop operand 1', 'if not isinstance(d, list) or not d:', 0):
+        '[] yields no row and stops at the short-page check',
+    ('surrogate', 'surrogate_5m', 'skip if body', 'if toks is None:', 0):
+        'symbols(*None) raises inside the try, which skips every source: (None, None), no fetch',
+    ('surrogate', 'missing_slots', 'const 1->2', 'return [s for s in range(first, last + 1, BAR_SECONDS) if s not in have]', 0):
+        'the range end is exclusive on a 300 s step: last + 1 and last + 2 give the same slots',
+    ('guards', 'fee_read_problem', 'drop operand 1', 'if not isinstance(pos, (int, float)) or not math.isfinite(pos) or pos <= 0 or usd is None:', 0):
         'not isfinite(pos): a NaN or infinite position fails every later comparison, so the verdict is None either way',
-    ('txfees', 'fetch', 'const 1->0 @L56'): 'the JSON-RPC request id is arbitrary',
-    ('txfees', 'fetch', 'const 1->2 @L56'): 'the JSON-RPC request id is arbitrary',
+    ('txfees', 'fetch', 'const 1->0', "body = json.dumps({'jsonrpc': '2.0', 'id': 1, 'method': 'getTransaction',", 0):
+        'the JSON-RPC request id is arbitrary',
+    ('txfees', 'fetch', 'const 1->2', "body = json.dumps({'jsonrpc': '2.0', 'id': 1, 'method': 'getTransaction',", 0):
+        'the JSON-RPC request id is arbitrary',
+    ('distribute', 'distribute', 'swap Gt->GtE', 'if rest > 1e-9:', 0):
+        'a remainder of exactly 1e-9 is not reachable in float and is below any token resolution',
+    ('read_status', 'read_status', 'drop operand 1', "if not (out and out.get('positionMint')):", 0):
+        'an answer without a position carries no fee figures, so the check finds nothing either way',
+    ('risk', 'chi2_sf_even', 'const 0->1', 'if k <= 0 or k % 2:', 0):
+        'k = 1 is odd and refused by the next test either way',
+    ('risk', 'chi2_sf_even', 'swap LtE->Lt', 'if x <= 0:', 0):
+        'at x = 0 the series gives exp(0) * 1 = 1.0, the same value',
+    ('risk', 'chi2_sf_even', 'const 1.0->1.5', 'return min(1.0, math.exp(-h) * total)', 0):
+        'exp(-h) times a partial sum of e^h is below 1 for h > 0: the clamp never binds',
+    ('fees', 'split', 'swap Lt->LtE', 'if amt < 0:', 0):
+        'a zero fee skipped or split adds no row and takes no gas: add() drops zero',
+    ('orca_fees', 'feesFromOrcaSnapshot', '\\?\\? -> ||', 'return arr.ticks[getTickIndexInArray(tick, start, s)] ?? null;', 0):
+        'a tick is an object or undefined: ?? and || agree',
+    ('orca_fees', 'feesFromOrcaSnapshot', '\\?\\? -> ||', 'return { ok: false, reason: `the SDK quote failed: ${e?.message ?? e}`, ...fallback };', 0):
+        'an error message is never empty: ?? and || agree',
+    ('fee_snapshot', 'decodeSnapshot', '\\?(?=\\s) -> && false ?', 'if (a && a.owner.equals(programId)) arrays.set(starts[i], { data: a.data, key: arrayKeys ? arrayKeys[i] : null });', 0):
+        'the array key is only echoed back inside the parsed container; no fee depends on it',
+    ('capital_db', 'record_flow', "sql 'on conflict (signature) do nothing' -> 'on conflict do nothing'", "'values (%s,%s,%s,%s,%s,%s,%s,%s) on conflict (signature) do nothing',", 0):
+        'the only other unique constraint is on the baseline, which record_flow cannot write',
+    ('janitor_js', 'planClose', '\\?\\? -> ||', "!(a.info.extensions || []).some(e => e.extension === 'transferFeeAmount' && Number(e.state?.withheldAmount ?? 0) > 0));", 0):
+        'a withheld amount is a number or absent: ?? and || agree',
+    ('idle_capital', 'idle_to_deploy', 'const 0.0->1.0', 'return deployable_usd > max(audit.IDLE_ABS_USD, audit.IDLE_SHARE * (equity_usd or 0.0))', 0):
+        'the $2 floor is above 2% of $1: a missing equity gives the floor either way',
+    ('idle_capital', 'plan_sweep', 'drop operand 0', "if a['amount'] <= 0 or m in pool_mints or m in reward_mints or m == fees.NATIVE_MINT:", 0):
+        'an empty account is worth $0, under the $1 dust gate either way',
+    ('idle_capital', 'plan_sweep', 'swap LtE->Lt', "if a['amount'] <= 0 or m in pool_mints or m in reward_mints or m == fees.NATIVE_MINT:", 0):
+        'an empty account is worth $0, under the $1 dust gate either way',
+    ('idle_capital', 'plan_sweep', 'const 0->1', "if a['amount'] <= 0 or m in pool_mints or m in reward_mints or m == fees.NATIVE_MINT:", 0):
+        'one raw unit of a token worth over $1 per raw unit does not exist among verified tokens; the dust gate decides',
+    ('idle_capital', 'plan_sweep', 'drop operand 1', "'symbol': (facts.get(m) or {}).get('symbol')})", 0):
+        'the symbol is read only after facts were required to exist',
+    ('idle_capital', 'sweep_foreign', 'skip if body', 'if not others:', 0):
+        'an empty list plans nothing either way; the early return only saves the price calls',
+    ('idle_capital', 'sweep_foreign', 'and<->or', "others = [a['mint'] for a in accounts if a['amount'] > 0 and a['mint'] not in (mint_a, mint_b)]", 0):
+        'the list only chooses what to price; plan_sweep applies the rules again',
+    ('idle_capital', 'sweep_foreign', 'drop operand 0', "others = [a['mint'] for a in accounts if a['amount'] > 0 and a['mint'] not in (mint_a, mint_b)]", 0):
+        'the list only chooses what to price; plan_sweep applies the rules again',
+    ('idle_capital', 'sweep_foreign', 'drop operand 1', "others = [a['mint'] for a in accounts if a['amount'] > 0 and a['mint'] not in (mint_a, mint_b)]", 0):
+        'the list only chooses what to price; plan_sweep applies the rules again',
+    ('idle_capital', 'sweep_foreign', 'swap Gt->GtE', "others = [a['mint'] for a in accounts if a['amount'] > 0 and a['mint'] not in (mint_a, mint_b)]", 0):
+        'the list only chooses what to price; plan_sweep applies the rules again',
+    ('idle_capital', 'sweep_foreign', 'const 0->1', "others = [a['mint'] for a in accounts if a['amount'] > 0 and a['mint'] not in (mint_a, mint_b)]", 0):
+        'the list only chooses what to price; plan_sweep applies the rules again',
+    ('loop_hooks', 'run_audits', 'const 0->1', "if time.time() - state.get('last_audit', 0) < AUDIT_EVERY_S:", 0):
+        'a first audit is due either way: time.time() is far past 3,601 s',
+    ('loop_hooks', 'janitor', 'drop operand 1', 'if err or not plan:', 0):
+        'a None plan raises inside the try, which reports janitor_failed exactly as the guard does',
+    ('loop_hooks', 'janitor', 'drop operand 1', 'if err or not plan:', 1):
+        'a None re-plan raises inside the try, which reports janitor_failed exactly as the guard does',
+    # measured_fees: the disagreement check only decides whether a disagreement is
+    # notified; the figures booked do not depend on it.
+    ('measured', 'measured_fees', 'swap Gt->GtE', 'if abs(musd - (usd or 0.0)) > max(0.01, 0.05 * musd):', 0):
+        'report-only: decides whether a disagreement is notified',
+    ('measured', 'measured_fees', 'const 0.01->0.015', 'if abs(musd - (usd or 0.0)) > max(0.01, 0.05 * musd):', 0):
+        'report-only: decides whether a disagreement is notified',
+    ('measured', 'measured_fees', 'const 0.01->0.005', 'if abs(musd - (usd or 0.0)) > max(0.01, 0.05 * musd):', 0):
+        'report-only: decides whether a disagreement is notified',
+    ('measured', 'measured_fees', 'const 0.01->0.0', 'if abs(musd - (usd or 0.0)) > max(0.01, 0.05 * musd):', 0):
+        'report-only: decides whether a disagreement is notified',
+    ('measured', 'measured_fees', 'const 0.05->0.025', 'if abs(musd - (usd or 0.0)) > max(0.01, 0.05 * musd):', 0):
+        'report-only: decides whether a disagreement is notified',
+    ('measured', 'measured_fees', 'const 0.0->1.0', 'if abs(musd - (usd or 0.0)) > max(0.01, 0.05 * musd):', 0):
+        'report-only: decides whether a disagreement is notified',
+    ('measured', 'measured_fees', 'const 0.05->0.07500000000000001', 'if abs(musd - (usd or 0.0)) > max(0.01, 0.05 * musd):', 0):
+        'report-only: decides whether a disagreement is notified',
+    ('measured', 'measured_fees', 'const 0.01->1.0', 'if abs(musd - (usd or 0.0)) > max(0.01, 0.05 * musd):', 0):
+        'report-only: decides whether a disagreement is notified',
+    ('measured', 'measured_fees', 'const 0.05->1.0', 'if abs(musd - (usd or 0.0)) > max(0.01, 0.05 * musd):', 0):
+        'report-only: decides whether a disagreement is notified',
+    ('measured', 'measured_fees', 'const 0.05->0.0', 'if abs(musd - (usd or 0.0)) > max(0.01, 0.05 * musd):', 0):
+        'report-only: decides whether a disagreement is notified',
+    # Float-noise tolerances: the scale of the threshold is a choice between
+    # "exactly no variance" and any real variance, many decades apart. A mutant
+    # that moves it by 2x cannot change a result; moving it to 0 or 1 can, and
+    # those mutants are killed by tests.
+    ('risk', 'arch_lm', 'const 1e-12->1.5e-12', 'if ss_tot <= 1e-12 * float((y * y).sum()):        # no variance, up to float noise', 0):
+        'a float-noise tolerance: 2x on its scale changes nothing',
+    ('risk', 'arch_lm', 'const 1e-12->5e-13', 'if ss_tot <= 1e-12 * float((y * y).sum()):        # no variance, up to float noise', 0):
+        'a float-noise tolerance: 2x on its scale changes nothing',
+    ('risk', 'risk_metrics', 'const 1e-06->1.5e-06', 'tiny = 1e-6 * float(np.mean(e))                  # float noise, not variance', 0):
+        'a float-noise tolerance: 2x on its scale changes nothing',
+    ('risk', 'risk_metrics', 'const 1e-06->5e-07', 'tiny = 1e-6 * float(np.mean(e))                  # float noise, not variance', 0):
+        'a float-noise tolerance: 2x on its scale changes nothing',
+    ('risk', 'risk_metrics', 'const 1e-06->1.5e-06', 'if sd > 1e-6 * rms24:', 0):
+        'a float-noise tolerance: 2x on its scale changes nothing',
+    ('risk', 'risk_metrics', 'const 1e-06->5e-07', 'if sd > 1e-6 * rms24:', 0):
+        'a float-noise tolerance: 2x on its scale changes nothing',
+}
+
+# Old-style entries (target, function, 'description @L<line>'). They did not
+# resolve to exactly one mutant when the keys were migrated on 2026-09-30:
+# the line moved, or two mutants shared the key. They still match during the
+# transition, with a warning; each one needs review. For each, find the one
+# mutant the reason describes in a report and replace the entry with its key.
+EQUIVALENT_OLD = {
+    # no older copy has this line. Candidates now: "state['idle_deploys'] = [t for t in (state.get('idle_deploys"
+    ('resilience', 'deploy_idle', 'swap Lt->LtE @L1038'):
+        'only a deploy exactly 86400.0 s old differs: a float clock never lands there',
+    # no older copy has this line. Candidates now: "recent = [t for t in state.get('calm_times', []) if now - t "
+    ('resilience', 'voluntary_move_allowed', 'const 86400->86401 @L1120'):
+        'a move older than a day passes the gap anyway: keeping it in the window changes nothing',
+    # no older copy has this line. Candidates now: "recent = [t for t in state.get('calm_times', []) if now - t "
+    ('resilience', 'voluntary_move_allowed', 'const 86400->172800 @L1120'):
+        'a move older than a day passes the gap anyway: keeping it in the window changes nothing',
+    # no older copy has this line. Candidates now: 'return now - last_any >= config.CALM_MIN_GAP and health.allo' / "last_any = max([state.get('last_rebalance', 0)] + recent)"
+    ('resilience', 'voluntary_move_allowed', 'const 0->1 @L1121'):
+        'a last rebalance at epoch 0 or 1 is decades past the gap',
+    # no older copy has this line. Candidates now: 'return now - last_any >= config.CALM_MIN_GAP and health.allo'
+    ('resilience', 'voluntary_move_allowed', 'swap GtE->Gt @L1122'):
+        'only a gap of exactly CALM_MIN_GAP seconds differs: a float clock never lands there',
+    # no older copy has this line. Candidates now: 8 lines
+    ('resilience', 'failover_pick', 'drop operand 0 @L1138'):
+        'the held venue is the held dex (config.POOL is on config.DEX): `dex != held_dex` excludes it too',
+    # no older copy has this line. Candidates now: 'f"retry in {wait / 60:.0f} min: {err}", flush=True)'
+    ('resilience', 'chain', 'flip bool @L288'):
+        'print flush only',
+    # no older copy has this line. Candidates now: "recent = [t for t in state.get('calm_times', []) if now - t "
+    ('resilience', 'voluntary_move_allowed', 'swap Lt->LtE @L1120'):
+        'only a move exactly 86400.0 s old differs: a float clock never lands there',
+    # no older copy has this line. Candidates now: 'if lower and upper and upper > lower > 0:' / 'if lower and upper and upper > lower > 0:' #1
+    ('books', 'regime_at_move', 'swap Gt->GtE @L209'):
+        'lower = 0 is caught by `lower and` first; upper = lower gives half 1.0, refused by `upper > lower`',
+    # 2 mutants on this line share the old key; it hides all of them. Candidates now: 'return CLOSED, True, 0.0' / "wait = min(max(0.0, float(rec.get('retry_at') or 0.0) - now)" / "wait = min(max(0.0, float(rec.get('retry_at') or 0.0) - now)" #1
+    ('health', 'verdict', 'const 0.0->1.0 @L80'):
+        'retry_at None with failures on record: 0.0 or 1.0 are both decades past, allowed either way',
+    # no older copy has this line. Candidates now: 'def chain(*args, dex=None, timeout=420, extra_env=None):'
+    ('resilience', 'chain', 'const 420->421 @L275'):
+        'one second more on a 420 s signer timeout',
+    # no older copy has this line. Candidates now: "v['p_held'] = next((p for w, p in (v.get('probs') or []) if "
+    ('books', 'regime_at_move', 'swap Lt->LtE @L215'):
+        'widths and probs are both rounded to 2 decimals: a difference is 0 or >= 0.01',
+    # no older copy has this line. Candidates now: "v['p_held'] = next((p for w, p in (v.get('probs') or []) if "
+    ('books', 'regime_at_move', 'const 1e-06->1.5e-06 @L215'):
+        'widths and probs are both rounded to 2 decimals: a difference is 0 or >= 0.01',
+    # no older copy has this line. Candidates now: "v['p_held'] = next((p for w, p in (v.get('probs') or []) if "
+    ('books', 'regime_at_move', 'const 1e-06->5e-07 @L215'):
+        'widths and probs are both rounded to 2 decimals: a difference is 0 or >= 0.01',
+    # no older copy has this line. Candidates now: 'if not whole or whole <= 0:'
+    ('deployment', '_pct', 'swap LtE->Lt @L946'):
+        'a whole of exactly 0 is caught by `not whole` first',
+    # 2 mutants on this line share the old key; it hides all of them. Candidates now: 5 lines
+    ('surrogate', 'fit_surrogate', 'const 0->1 @L135'):
+        'bars[0] and bars[1] have the same length (the <= 0 -> <= 1 twin is killed by the sub-1 price test)',
+    # no older copy has this line. Candidates now: 5 lines
+    ('surrogate_overlay', 'with_surrogate', 'skip if body @L831'):
+        'None[0] raises inside the try, which returns bars (None) either way',
+    # no older copy has this line. Candidates now: 11 lines
+    ('surrogate_overlay', 'with_surrogate', 'const 0->1 @L841'):
+        'an empty cache asked at t = 0 or t = 1: both are decades past the refresh',
+    # no older copy has this line. Candidates now: 'if any(g not in have for g in gaps) and now - t > SURROGATE_'
+    ('surrogate_overlay', 'with_surrogate', 'swap Gt->GtE @L843'):
+        'only an ask exactly SURROGATE_REFRESH later differs: a float clock never lands there',
+    # no older copy has this line. Candidates now: 's = tuple(c[s[0] >= now - SURROGATE_LOOKBACK_S - 3600] for c'
+    ('surrogate_overlay', 'with_surrogate', 'swap GtE->Gt @L847'):
+        'the trim is an hour beyond the fill window: a bar at its edge is never used',
+    # no older copy has this line. Candidates now: 's = tuple(c[s[0] >= now - SURROGATE_LOOKBACK_S - 3600] for c'
+    ('surrogate_overlay', 'with_surrogate', 'const 3600->3601 @L847'):
+        'the trim is an hour beyond the fill window: a bar at its edge is never used',
+    # no older copy has this line. Candidates now: "print(f'surrogate tape failed: {type(e).__name__}: {e}', flu"
+    ('surrogate_overlay', 'with_surrogate', 'flip bool @L861'):
+        'print flush only',
+    # no older copy has this line. Candidates now: 5 lines
+    ('surrogate_overlay', 'regime_view', 'const 0->1 @L1053'):
+        'hold_left is read only in STALE mode on a fresh tape, where it is assigned first',
+    # no older copy has this line. Candidates now: "pool = status.get('whirlpool') or config.POOL" / 'if v and not fresh:' / 'src = dict(LAST_SURROGATE.get(pool) or tape_source(bars[0], '
+    ('surrogate_overlay', 'regime_view', 'drop operand 0 @L1066'):
+        'calm.regime_view returns None only for no bars, which returned before',
+    # older copies give different lines. Candidates now: 19 lines
     ('distribute', 'distribute', 'drop operand 1 @L578'):
         'split never yields a part of amount 0, so the zero-amount guard of the price cannot bind',
-    ('distribute', 'distribute', 'swap Gt->GtE @L594'):
-        'a remainder of exactly 1e-9 is not reachable in float and is below any token resolution',
-    ('read_status', 'read_status', 'drop operand 1 @L234'):
-        'an answer without a position carries no fee figures, so the check finds nothing either way',
-    ('risk', 'chi2_sf_even', 'const 0->1 @L326'): 'k = 1 is odd and refused by the next test either way',
-    ('risk', 'chi2_sf_even', 'swap LtE->Lt @L328'): 'at x = 0 the series gives exp(0) * 1 = 1.0, the same value',
-    ('risk', 'chi2_sf_even', 'const 1.0->1.5 @L334'): 'exp(-h) times a partial sum of e^h is below 1 for h > 0: the clamp never binds',
-    ('risk', 'arch_lm', 'const 1.0->1.5 @L353'): 'an OLS R^2 with an intercept lies in [0, 1]: the clamp never binds',
-    ('risk', 'arch_lm', 'const 1.0->0.5 @L353'): 'an OLS R^2 with an intercept lies in [0, 1]: the clamp never binds',
-    ('fees', 'split', 'swap Lt->LtE @L39'): 'a zero fee skipped or split adds no row and takes no gas: add() drops zero',
+    # in an older copy, 2+ mutants shared this key on the line. Candidates now: 'r2 = min(max(1.0 - ss_res / ss_tot, 0.0), 1.0)' / 'r2 = min(max(1.0 - ss_res / ss_tot, 0.0), 1.0)' #1
+    ('risk', 'arch_lm', 'const 1.0->1.5 @L353'):
+        'an OLS R^2 with an intercept lies in [0, 1]: the clamp never binds',
+    # in an older copy, 2+ mutants shared this key on the line. Candidates now: 'r2 = min(max(1.0 - ss_res / ss_tot, 0.0), 1.0)' / 'r2 = min(max(1.0 - ss_res / ss_tot, 0.0), 1.0)' #1
+    ('risk', 'arch_lm', 'const 1.0->0.5 @L353'):
+        'an OLS R^2 with an intercept lies in [0, 1]: the clamp never binds',
+    # in an older copy, 2+ mutants shared this key on the line. Candidates now: 6 lines
     ('measured', 'measured_fees', 'drop operand 1 @L635'):
         'out None: the mutant raises inside the try, which falls back exactly as the original does',
+    # in an older copy, 2+ mutants shared this key on the line. Candidates now: 4 lines
     ('risk', 'risk_metrics', 'swap Gt->GtE @L392'):
         'exact float equality with the tolerance; on a flat tape the other operand still refuses',
-    ('orca_fees', 'feesFromOrcaSnapshot', '\\?\\? -> || @L93'): 'a tick is an object or undefined: ?? and || agree',
-    ('orca_fees', 'feesFromOrcaSnapshot', '\\?\\? -> || @L111'): 'an error message is never empty: ?? and || agree',
-    ('fee_snapshot', 'decodeSnapshot', '\\?(?=\\s) -> && false ? @L141'):
-        'the array key is only echoed back inside the parsed container; no fee depends on it',
-    ('daily', 'daily_line', 'swap GtE->Gt @L804'): 'only the exact instant of midnight differs; now() is never that instant in a test or a poll',
-    ('audit_checks', 'known_signatures', "skip if body @L218"): "a cheap prefilter: a line without the word is skipped either way by the lookups below",
-    ('audit_checks', 'keep_mints', 'drop operand 1 @L402'): "a None reward list raises inside the try, which keeps the base set either way",
-    ('capital_db', 'record_flow', "sql 'on conflict (signature) do nothing' -> 'on conflict do nothing' @466"):
-        "the only other unique constraint is on the baseline, which record_flow cannot write",
-    ('janitor_js', 'planClose', '\\?\\? -> || @L45'): "a withheld amount is a number or absent: ?? and || agree",
-    ('idle_capital', 'idle_to_deploy', 'const 0.0->1.0 @L815'): 'the $2 floor is above 2% of $1: a missing equity gives the floor either way',
-    ('idle_capital', 'plan_sweep', 'drop operand 0 @L865'): 'an empty account is worth $0, under the $1 dust gate either way',
-    ('idle_capital', 'plan_sweep', 'swap LtE->Lt @L865'): 'an empty account is worth $0, under the $1 dust gate either way',
-    ('idle_capital', 'plan_sweep', 'const 0->1 @L865'): 'one raw unit of a token worth over $1 per raw unit does not exist among verified tokens; the dust gate decides',
-    ('idle_capital', 'plan_sweep', 'drop operand 1 @L874'): 'the symbol is read only after facts were required to exist',
-    ('idle_capital', 'sweep_foreign', 'skip if body @L893'): 'an empty list plans nothing either way; the early return only saves the price calls',
-    ('idle_capital', 'sweep_foreign', 'and<->or @L892'): 'the list only chooses what to price; plan_sweep applies the rules again',
-    ('idle_capital', 'sweep_foreign', 'drop operand 0 @L892'): 'the list only chooses what to price; plan_sweep applies the rules again',
-    ('idle_capital', 'sweep_foreign', 'drop operand 1 @L892'): 'the list only chooses what to price; plan_sweep applies the rules again',
-    ('idle_capital', 'sweep_foreign', 'swap Gt->GtE @L892'): 'the list only chooses what to price; plan_sweep applies the rules again',
-    ('idle_capital', 'sweep_foreign', 'const 0->1 @L892'): 'the list only chooses what to price; plan_sweep applies the rules again',
-    ('loop_hooks', 'run_audits', 'const 0->1 @L1118'): 'a first audit is due either way: time.time() is far past 3,601 s',
-    ('loop_hooks', 'janitor', 'drop operand 1 @L1141'): 'a None plan raises inside the try, which reports janitor_failed exactly as the guard does',
-    ('loop_hooks', 'janitor', 'drop operand 1 @L1153'): 'a None re-plan raises inside the try, which reports janitor_failed exactly as the guard does',
-    ('loop_hooks', 'janitor', 'drop operand 1 @L1159'): 'a None close answer raises inside the try, which reports janitor_failed exactly as the guard does (the unsigned-answer mutant on this line is killed)',
+    # no older copy has this line. Candidates now: "return {'day': day.isoformat(), 'complete': now() >= end,"
+    ('daily', 'daily_line', 'swap GtE->Gt @L804'):
+        'only the exact instant of midnight differs; now() is never that instant in a test or a poll',
+    # no older copy has this line. Candidates now: 'if \'"signature\' not in line:' / "if r.get('signature'):"
+    ('audit_checks', 'known_signatures', 'skip if body @L218'):
+        'a cheap prefilter: a line without the word is skipped either way by the lookups below',
+    # no older copy has this line. Candidates now: "keep |= set(st.get('reward_mints_seen') or []) | set(st.get(" / "keep |= set(st.get('reward_mints_seen') or []) | set(st.get(" #1 / "keep |= {m for m in (bot.pool_record().get('reward_mints') o"
+    ('audit_checks', 'keep_mints', 'drop operand 1 @L402'):
+        'a None reward list raises inside the try, which keeps the base set either way',
+    # in an older copy, 2+ mutants shared this key on the line. Candidates now: 7 lines
+    ('loop_hooks', 'janitor', 'drop operand 1 @L1159'):
+        'a None close answer raises inside the try, which reports janitor_failed exactly as the guard does (the unsigned-answer mutant on this line is killed)',
+    # older copies give different lines. Candidates now: 6 lines
+    ('measured', 'measured_fees', 'drop operand 1 @L651'):
+        'report-only: decides whether a disagreement is notified',
 }
-# measured_fees line 651 only decides whether a disagreement is notified; the
-# figures booked do not depend on it.
-for d in ('swap Gt->GtE', 'const 0.01->0.015', 'const 0.01->0.005', 'const 0.01->0.0', 'drop operand 1',
-          'const 0.05->0.025', 'const 0.0->1.0', 'const 0.05->0.07500000000000001', 'const 0.01->1.0',
-          'const 0.05->1.0', 'const 0.05->0.0'):
-    EQUIVALENT[('measured', 'measured_fees', f'{d} @L651')] = 'report-only: decides whether a disagreement is notified'
-# Float-noise tolerances: the scale of the threshold is a choice between
-# "exactly no variance" and any real variance, many decades apart. A mutant
-# that moves it by 2x cannot change a result; moving it to 0 or 1 can, and
-# those mutants are killed by tests.
-for fn, line in (('arch_lm', 349), ('risk_metrics', 391), ('risk_metrics', 398)):
-    base = {349: '1e-12', 391: '1e-06', 398: '1e-06'}[line]
-    for new in ({'1e-12': ('1.5e-12', '5e-13'), '1e-06': ('1.5e-06', '5e-07')}[base]):
-        EQUIVALENT[('risk', fn, f'const {base}->{new} @L{line}')] = 'a float-noise tolerance: 2x on its scale changes nothing'
-
+EQUIVALENT.update(EQUIVALENT_OLD)
 
 
 # --- Python mutants ---------------------------------------------------------------
@@ -225,9 +377,9 @@ NAME_SWAP = {'min': 'max', 'max': 'min', 'any': 'all', 'all': 'any'}
 
 
 def py_mutants(src, functions):
-    """(function, description, mutated source) for every mutant of
-    `functions`. Only the function is re-generated; the rest of the file is
-    spliced back byte for byte."""
+    """(function, description, line, legacy description, mutated source) for
+    every mutant of `functions`. Only the function is re-generated; the rest of
+    the file is spliced back byte for byte."""
     tree = ast.parse(src)
     lines = src.splitlines(keepends=True)
     fns = [n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name in functions]
@@ -251,7 +403,8 @@ def py_mutants(src, functions):
                 except Exception:
                     continue
                 body = ''.join(indent + l if l.strip() else l for l in body.splitlines(keepends=True))
-                out.append((fn.name, f'{desc} @L{getattr(node, "lineno", "?")}', head + body + '\n' + tail))
+                line = getattr(node, 'lineno', None)
+                out.append((fn.name, desc, line, f'{desc} @L{line or "?"}', head + body + '\n' + tail))
     return out
 
 
@@ -395,7 +548,7 @@ def js_mutants(src, functions):
                     continue
                 new = body[:m.start()] + rep + body[m.end():]
                 lineno = src[:a + m.start()].count('\n') + 1
-                out.append((name, f'{pat} -> {rep} @L{lineno}', src[:a] + new + src[b:]))
+                out.append((name, f'{pat} -> {rep}', lineno, f'{pat} -> {rep} @L{lineno}', src[:a] + new + src[b:]))
     return out
 
 
@@ -435,9 +588,129 @@ def sql_mutants(src, functions):
             start = 0
             while (i := body.find(old, start)) >= 0:
                 mutated = body[:i] + new + body[i + len(old):]
-                out.append((fn.name, f'sql {old!r} -> {new!r} @{i}', src[:a] + mutated + src[b:]))
+                desc = f'sql {old!r} -> {new!r}'
+                out.append((fn.name, desc, src[:a + i].count('\n') + 1, f'{desc} @{i}', src[:a] + mutated + src[b:]))
                 start = i + len(old)
     return out
+
+
+# --- identity -----------------------------------------------------------------------
+#
+# A mutant's identity is its key:
+#     (target, function, description, text, occurrence)
+# `text` is the stripped source line the change starts on. `occurrence` counts
+# the mutants of the same function that have the same description and text,
+# in generation order (0 for the first). The line number is not in the key, so
+# an edit above a mutant does not change its key. Two mutants with the same
+# description on one line get different occurrences, so each has its own key.
+# The report prints the line number and the occurrence for humans.
+
+class Mutant(NamedTuple):
+    target: str
+    function: str
+    desc: str          # the change, without a line number
+    text: str          # stripped source line of the change
+    occ: int           # index among mutants of `function` with this desc and text
+    line: int          # for the report only: not in the key
+    legacy: str        # the old description ('... @L<line>', or '... @<offset>' for SQL)
+    code: str
+
+    @property
+    def key(self):
+        return (self.target, self.function, self.desc, self.text, self.occ)
+
+    @property
+    def old_key(self):
+        return (self.target, self.function, self.legacy)
+
+    def label(self):
+        return f'{self.target} {self.function} {self.desc} @L{self.line}' + (f' #{self.occ}' if self.occ else '')
+
+
+def identify(target, src, raw):
+    """Mutants with keys from (function, desc, line, legacy, code) tuples."""
+    lines = src.splitlines()
+    seen = {}
+    out = []
+    for fn, desc, line, legacy, code in raw:
+        text = lines[line - 1].strip() if line and 0 < line <= len(lines) else ''
+        occ = seen.get((fn, desc, text), 0)
+        seen[(fn, desc, text)] = occ + 1
+        out.append(Mutant(target, fn, desc, text, occ, line, legacy, code))
+    return out
+
+
+def target_mutants(name, root=ROOT):
+    f, fns, _ = TARGETS[name]
+    src = (root / f).read_text()
+    raw = js_mutants(src, fns) if f.endswith('.mjs') else py_mutants(src, fns)
+    if name in SQL_TARGETS:
+        raw += sql_mutants(src, fns)
+    return identify(name, src, raw)
+
+
+def match_equivalent(mutants, table, targets=None):
+    """({mutant key: reason}, [warning]) for `mutants` against `table`.
+
+    A 5-tuple entry matches only the mutant with that key. A 3-tuple entry is
+    an old-style key (target, function, 'desc @L<line>'): it still matches,
+    with a warning, during the transition. An entry of a target in `targets`
+    that matches no mutant gets a warning: it is stale."""
+    targets = set(targets if targets is not None else {m.target for m in mutants})
+    by_old = {}
+    for m in mutants:
+        by_old.setdefault(m.old_key, []).append(m)
+    keys = {m.key for m in mutants}
+    reasons, warnings = {}, []
+    for entry, reason in table.items():
+        if len(entry) == 5:
+            if entry in keys:
+                reasons[entry] = reason
+            elif entry[0] in targets:
+                warnings.append(f'stale EQUIVALENT entry, matches no mutant: {entry!r}')
+        elif len(entry) == 3:
+            hits = by_old.get(entry, [])
+            if not hits:
+                if entry[0] in targets:
+                    warnings.append(f'stale old-style EQUIVALENT entry, matches no mutant: {entry!r}')
+                continue
+            if len(hits) > 1:
+                warnings.append(f'old-style EQUIVALENT entry {entry!r} matches {len(hits)} mutants '
+                                f'({", ".join(m.label() for m in hits)}): give each its own key')
+            for m in hits:
+                warnings.append(f'old-style EQUIVALENT key {entry!r}: migrate to {m.key!r}')
+                reasons.setdefault(m.key, reason)
+        else:
+            raise SystemExit(f'EQUIVALENT key must have 5 (or old-style 3) parts: {entry!r}')
+    return reasons, warnings
+
+
+def migrate(table, root=ROOT):
+    """(resolved {new key: reason}, unresolved [(old key, why)]) for every
+    old-style entry of `table`. An entry resolves only when exactly one mutant
+    of its function has its description on its line in the current source.
+    Nothing is guessed."""
+    cache, resolved, unresolved = {}, {}, []
+    for entry, reason in table.items():
+        if len(entry) != 3:
+            continue
+        target, fn, old = entry
+        if target not in TARGETS:
+            unresolved.append((entry, 'unknown target'))
+            continue
+        if target not in cache:
+            cache[target] = target_mutants(target, root)
+        hits = [m for m in cache[target] if m.function == fn and m.legacy == old]
+        if len(hits) == 1:
+            resolved[hits[0].key] = reason
+        elif not hits:
+            near = sorted({m.line for m in cache[target] if m.function == fn and old.startswith(m.desc + ' @')})
+            unresolved.append((entry, f'no mutant {old!r} in {fn} now' +
+                               (f' (same description on lines {near})' if near else ' (description not in function)')))
+        else:
+            unresolved.append((entry, f'{len(hits)} mutants share {old!r}: '
+                               + '; '.join(repr(m.key) for m in hits)))
+    return resolved, unresolved
 
 
 # --- running -------------------------------------------------------------------------
@@ -449,7 +722,7 @@ def worker_setup(i):
     base.mkdir(parents=True)
     shutil.copytree(ROOT, base / 'lp_bot', ignore=shutil.ignore_patterns('__pycache__', 'research', '*.jsonl'))
     (base / 'node_modules').symlink_to(ROOT.parent / 'node_modules')
-    dbname = f'rebalancer_mut{i}_test'
+    dbname = f'{DB_PREFIX}{i}_test'
     subprocess.run(['dropdb', '--if-exists', dbname], capture_output=True)
     r = subprocess.run(['createdb', '-T', 'rebalancer_test', dbname], capture_output=True, text=True)
     if r.returncode:
@@ -468,18 +741,17 @@ def run_tests(copy_root, dbname, cmd):
 
 
 def main(names):
-    todo = []
-    for name in names or TARGETS:
-        f, fns, cmd = TARGETS[name]
-        src = (ROOT / f).read_text()
-        muts = js_mutants(src, fns) if f.endswith('.mjs') else py_mutants(src, fns)
-        if name in SQL_TARGETS:
-            muts += sql_mutants(src, fns)
-        todo += [(name, f, cmd, fn, desc, code) for fn, desc, code in muts]
-    print(f'{len(todo)} mutants over {len(names or TARGETS)} targets, {WORKERS} workers', flush=True)
+    if names and names[0] == '--migrate':
+        return print_migration(EQUIVALENT)
+    names = names or list(TARGETS)
+    todo = [m for name in names for m in target_mutants(name)]
+    reasons, warnings = match_equivalent(todo, EQUIVALENT, names)
+    for w in warnings:
+        print('  WARNING', w, flush=True)
+    print(f'{len(todo)} mutants over {len(names)} targets, {WORKERS} workers', flush=True)
     setups = [worker_setup(i) for i in range(WORKERS)]
     # baseline: the unmutated copy must pass every command
-    for name in names or TARGETS:
+    for name in names:
         rc = run_tests(*setups[0], TARGETS[name][2])
         if rc != 0:
             raise SystemExit(f'baseline fails for {name} ({rc}): fix the tests first')
@@ -488,12 +760,12 @@ def main(names):
     free = list(range(WORKERS))
     t0 = time.time()
 
-    def one(slot, k, item):
-        name, f, cmd, fn, desc, code = item
+    def one(slot, k, m):
+        f, _, cmd = TARGETS[m.target]
         copy_root, dbname = setups[slot]
         path = copy_root / f
         original = (ROOT / f).read_text()
-        path.write_text(code)
+        path.write_text(m.code)
         try:
             rc = run_tests(copy_root, dbname, cmd)
         finally:
@@ -515,26 +787,38 @@ def main(names):
                 if n % 25 == 0:
                     print(f'  {n}/{len(todo)} in {time.time() - t0:.0f}s', flush=True)
     survivors, equivalent = [], []
-    for (name, f, cmd, fn, desc, code), rc in zip(todo, results):
+    for m, rc in zip(todo, results):
         if rc == 0:
-            key = (name, fn, desc)
-            (equivalent if key in EQUIVALENT else survivors).append(key)
+            (equivalent if m.key in reasons else survivors).append(m)
     killed = len(todo) - len(survivors) - len(equivalent)
     print(f'\n{killed}/{len(todo)} killed, {len(equivalent)} equivalent, {len(survivors)} SURVIVED '
           f'({time.time() - t0:.0f}s)')
     by = {}
-    for (name, f, *_), rc in zip(todo, results):
-        s = by.setdefault(name, [0, 0]); s[0] += 1; s[1] += rc != 0
+    for m, rc in zip(todo, results):
+        s = by.setdefault(m.target, [0, 0]); s[0] += 1; s[1] += rc != 0
     for name, (n, k) in by.items():
         print(f'  {name:14s} {k:4d}/{n:<4d} killed')
-    for key in survivors:
-        print('  SURVIVED', *key)
-    for key in equivalent:
-        print('  equivalent', *key, '--', EQUIVALENT[key])
+    for m in survivors:
+        print('  SURVIVED', m.label(), '|', m.text)
+        print('      key:', repr(m.key))
+    for m in equivalent:
+        print('  equivalent', m.label(), '--', reasons[m.key])
     for i in range(WORKERS):
-        subprocess.run(['dropdb', '--if-exists', f'rebalancer_mut{i}_test'], capture_output=True)
+        subprocess.run(['dropdb', '--if-exists', f'{DB_PREFIX}{i}_test'], capture_output=True)
     shutil.rmtree(SCRATCH, ignore_errors=True)
     return 1 if survivors else 0
+
+
+def print_migration(table):
+    """Print new-style entries for the old-style entries of `table`, and every
+    entry that does not resolve. Exit status 1 when one does not resolve."""
+    resolved, unresolved = migrate(table)
+    for key, reason in resolved.items():
+        print(f'    {key!r}: {reason!r},')
+    for entry, why in unresolved:
+        print('UNRESOLVED', repr(entry), '--', why)
+    print(f'# {len(resolved)} resolved, {len(unresolved)} unresolved')
+    return 1 if unresolved else 0
 
 
 if __name__ == '__main__':

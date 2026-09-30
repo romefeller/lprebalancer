@@ -104,15 +104,16 @@ class Simulate(unittest.TestCase):
             r = engine.simulate(k, self.hours(n), px, vol, self.ctx(), 0.0004, 1000.0)
             self.assertLess(r['vs_hold'], 0, msg=f'k={k}')
 
-    def test_best_band_prefers_narrow_when_calm_and_wide_when_wild(self):
+    def test_simulated_best_band_is_narrow_when_calm_and_wide_when_wild_when_calm_and_wide_when_wild(self):
         n = 24 * 20 + 1
         rng = np.random.default_rng(7)
         vol = np.full(n, 2e6)
         calm = 100 * np.exp(np.cumsum(rng.normal(0, 0.001, n)))
         wild = 100 * np.exp(np.cumsum(rng.normal(0, 0.02, n)))
         bands = (1.03, 1.05, 1.08, 1.12, 1.18, 1.25, 1.40)
-        bc, _ = engine.best_band(self.hours(n), calm, vol, self.ctx(), 0.0004, 1000.0, bands)
-        bw, _ = engine.best_band(self.hours(n), wild, vol, self.ctx(), 0.0004, 1000.0, bands)
+        best = lambda px: max((engine.simulate(k, self.hours(n), px, vol, self.ctx(), 0.0004, 1000.0)
+                               for k in bands), key=lambda r: r['net_day_pct'])
+        bc, bw = best(calm), best(wild)
         self.assertLess(bc['band'], bw['band'])
 
 

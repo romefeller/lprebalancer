@@ -190,12 +190,48 @@ def emoji_for(event):
     return '▫️'
 
 
+SECRET_IN_URL = re.compile(r'(api[-_]?key=)[^&\s"\'<>]+', re.I)
+
+
+def redact(text):
+    """Text with every api-key in a URL replaced by ***. The keyed RPC URL
+    carries the Helius key; no feed row, log line or event may show it."""
+    return SECRET_IN_URL.sub(r'\1***', str(text))
+
+
 def notify(event, **payload):
     row = {'t': stamp(), 'event': event, **payload}
+    line = redact(json.dumps(row, default=str))
     with open(FEED, 'a') as fh:
-        fh.write(json.dumps(row, default=str) + '\n')
-    print(f'[{row["t"]}] {emoji_for(event)} {event}: {json.dumps(payload, default=str, sort_keys=True)}',
+        fh.write(line + '\n')
+    print(redact(f'[{row["t"]}] {emoji_for(event)} {event}: {json.dumps(payload, default=str, sort_keys=True)}'),
           flush=True)
+
+
+def probe_rpc(url=None, fallback=None, timeout=10):
+    """Whether the configured RPC answers getSlot. At startup: a keyed
+    endpoint that does not answer (a bad or expired key) is replaced by the
+    public one, and the book says so, host only. Returns the URL in use."""
+    import urllib.request
+    url, fallback = url or config.RPC, fallback or config.PUBLIC_RPC
+    if url == fallback:
+        return url
+    try:
+        req = urllib.request.Request(url, data=json.dumps({'jsonrpc': '2.0', 'id': 1, 'method': 'getSlot'}).encode(),
+                                     headers={'Content-Type': 'application/json'})
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            ok = isinstance(json.load(r).get('result'), int)
+    except Exception as e:
+        ok, why = False, f'{type(e).__name__}: {redact(e)}'
+    else:
+        why = 'no slot in the answer'
+    host = re.sub(r'^https?://([^/?]+).*$', r'\1', url)
+    if ok:
+        print(f'🔑 RPC {host} answers', flush=True)
+        return url
+    config.RPC = fallback
+    notify('rpc_fallback', host=host, reason=why[:200], using=re.sub(r'^https?://([^/?]+).*$', r'\1', fallback))
+    return fallback
 
 
 def nearest(runs, pct, tolerance=2):
@@ -847,9 +883,6 @@ def dividend(state, status):
 _TAPE5 = {}                     # pool -> (fetched_at, bars)
 LAST_CALM = {}                  # {'view': the latest calm.view}, for every book
 TAPE5_REFRESH = 240             # one GeckoTerminal call per five-minute bar, at most
-
-
-TAPE5_BARS = 8640               # default 30 days; config.REGIME_TAPE_DAYS sets it (lp_research/regime.md)
 
 
 def tape_bars():
@@ -2243,6 +2276,7 @@ def main():
         print(f'HALT present: {HALT.read_text().strip()}')
         return 2
     config.require_wallet()
+    probe_rpc()
     state = load()
     notify_book('startup', mode='ARMED — signs its own rebalances',
                 **config.summary())

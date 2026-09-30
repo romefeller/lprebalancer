@@ -16,6 +16,10 @@
 //   4. Every endpoint is tagged with what it serves; indexed reads go only to
 //      endpoints that serve them.
 
+import fs from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { isProgramFailure } from './signer_errors.mjs';
+
 export const MAINNET = 'https://api.mainnet-beta.solana.com';
 export const PUBLICNODE = 'https://solana-rpc.publicnode.com';
 
@@ -41,14 +45,18 @@ export class AfterSignError extends Error {}
 // What an error means for the endpoint loop:
 //   'fatal'    stop, pass it to the caller (after signing, Jupiter, an answer)
 //   'rotate'   try the next endpoint (rate limit, refusal, transport)
+// A signer marks an error after a send with `sent`. A program failure and a
+// HALT are the same on every endpoint. All three are fatal, whatever the text.
 export function errorKind(e) {
   if (e instanceof AfterSignError || e?.name === 'SentError' || e?.constructor?.name === 'SentError') return 'fatal';
+  if (e?.sent === true) return 'fatal';
   if (e instanceof JupiterError) return 'fatal';
   const m = String(e?.message ?? e ?? '');
   if (/^Jupiter\b/.test(m)) return 'fatal';
+  if (/HALT present/.test(m) || isProgramFailure(e)) return 'fatal';
   if (/\b429\b|Too Many Requests|rate.?limit/i.test(m)) return 'rotate';
-  if (/\b403\b|Forbidden|Indexed requests|personal token/i.test(m)) return 'rotate';
-  if (/fetch failed|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|socket hang up|\b50[234]\b|Service Unavailable|Bad Gateway/i.test(m)) return 'rotate';
+  if (/\b403\b|Forbidden|Indexed requests|personal token|Request blocked/i.test(m)) return 'rotate';
+  if (/fetch failed|ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|socket hang up|timed? ?out|\b50[0-4]\b|Internal Server Error|Service Unavailable|Bad Gateway/i.test(m)) return 'rotate';
   return 'fatal';
 }
 
@@ -69,4 +77,15 @@ export async function overEndpoints(urls, fn, { tries = 2, pauseMs = 2500, sleep
     }
   }
   throw new Error(`all RPC endpoints failed: ${seen.join(' | ')}`);
+}
+
+// True when the module at metaUrl is the script node was started with. A
+// signer runs its CLI only then, so a test can import it without effects.
+export function isEntry(metaUrl, argv = process.argv) {
+  if (!argv[1]) return false;
+  try {
+    return fs.realpathSync(argv[1]) === fs.realpathSync(fileURLToPath(metaUrl));
+  } catch {
+    return false;
+  }
 }

@@ -24,6 +24,7 @@ is nothing, and it means a dropped connection cannot wedge the loop.
 """
 import json
 import os
+import re
 from contextlib import contextmanager
 from datetime import datetime, timezone
 import datetime as dt
@@ -492,15 +493,6 @@ def season_outlook(profile, hour=None, ahead=6):
             'trough_hour_utc': int(min(range(24), key=lambda i: profile[i]))}
 
 
-def scan_history(address, limit=30):
-    """How one pool has scored over time."""
-    with cursor() as cur:
-        cur.execute('select s.ts, p.rank, p.band, p.net_day_pct, p.rebal_per_day, p.tvl_usd, '
-                    'p.volume_24h_usd, p.c_pool from scan_pools p join scan_runs s on s.id = p.run_id '
-                    'where p.address = %s order by s.id desc limit %s', (address, limit))
-        return [dict(r) for r in cur.fetchall()]
-
-
 # --- accounting: writes ------------------------------------------------------
 
 def open_position(mint, pool, pair, lower, upper, band_pct, sig,
@@ -654,10 +646,14 @@ def health_all():
         return [dict(r) for r in cur.fetchall()]
 
 
+_SECRET_IN_URL = re.compile(r'(api[-_]?key=)[^&\s"\'<>]+', re.I)
+
+
 def event(kind, detail=''):
+    detail = _SECRET_IN_URL.sub(r'\1***', str(detail))      # the keyed RPC URL never reaches the table
     with cursor(commit=True) as cur:
         cur.execute('insert into events (ts, kind, detail) values (%s,%s,%s)',
-                    (now(), kind, str(detail)[:2000]))
+                    (now(), kind, detail[:2000]))
 
 
 # --- accounting: reads -------------------------------------------------------
@@ -1274,7 +1270,6 @@ def history(limit=30):
 
 # --- command line ------------------------------------------------------------
 
-ORCA = 'https://api.orca.so/v2/solana'
 SEED_POOL = 'Czfq3xZZDmsdGdUyrNLtRhGc47cXcZtLG4crryfu44zE'   # SOL/USDC 0.04%
 
 

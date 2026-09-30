@@ -37,6 +37,7 @@ import { positionRent } from './position_rent.mjs';
 import { PRICE_SLIPPAGE_BPS, SLIPPAGE_REFUSAL, openToleranceBps, safeBase } from './slippage.mjs';
 import { executeBuilt, isProgramFailure, signerError } from './signer_errors.mjs';
 import { consistentFees } from './fee_snapshot.mjs';
+import { endpoints, overEndpoints, isEntry } from './rpc_policy.mjs';
 import path from 'node:path';
 import { createRequire } from 'node:module';
 
@@ -52,9 +53,9 @@ const Decimal = require('decimal.js');
 
 const DIR = path.dirname(new URL(import.meta.url).pathname);
 const HALT = path.join(DIR, 'HALT');
-const RPC = process.env.SOLANA_RPC_URL ?? process.env.LPBOT_RPC ?? 'https://api.mainnet-beta.solana.com';
-const ENDPOINTS = [RPC, 'https://api.mainnet-beta.solana.com', 'https://solana-rpc.publicnode.com']
-  .filter((v, i, a) => v && a.indexOf(v) === i);
+// A keyed endpoint from the environment first. Indexed reads
+// (getParsedTokenAccountsByOwner) never go to an endpoint that refuses them.
+export const ENDPOINTS = endpoints(process.env, { indexed: true });
 
 const MAX_USD = Number(process.env.LPBOT_MAX_USD ?? 260);
 const SLIPPAGE_BPS = Number(process.env.LPBOT_SLIPPAGE_BPS ?? 100);
@@ -185,32 +186,14 @@ async function connect(url, { withKey = true } = {}) {
   return { connection, payer, raydium };
 }
 
-// Retry the whole operation across endpoints on a rate limit, as the other
-// signers do. Only a transport failure moves to the next endpoint: an answer
-// the chain gave ("position not found", "price moved") is final and is
-// reported as itself, not masked by whatever the last fallback says. An error
-// that carries `sent` happened after a transaction went out; it is never
-// retried, whatever its text says.
-const RATE_LIMITED = /429|Too Many Requests|rate limit/i;
-const TRANSPORT = /429|Too Many Requests|rate limit|403|Request blocked|fetch failed|ECONN|ETIMEDOUT|ENOTFOUND|socket|timed? ?out|50\d\b|Service Unavailable|Bad Gateway/i;
-
-async function withRpc(fn, opts) {
-  let lastErr = null;
-  for (const url of ENDPOINTS) {
-    for (let attempt = 0; attempt < 2; attempt++) {
-      try {
-        return await fn(await connect(url, opts));
-      } catch (e) {
-        if (e?.sent || isProgramFailure(e)) throw e;
-        const msg = String(e?.message ?? e);
-        if (!TRANSPORT.test(msg)) throw e;                    // the chain answered; that is the answer
-        lastErr = e;
-        if (!RATE_LIMITED.test(msg)) break;                   // endpoint down or blocked: next one
-        await new Promise(r => setTimeout(r, 2500 * (attempt + 1)));
-      }
-    }
-  }
-  throw new Error(`all RPC endpoints failed: ${String(lastErr?.message ?? lastErr).slice(0, 160)}`);
+// Run the whole operation over the endpoints (rpc_policy.mjs). A rate limit,
+// a refusal or a transport failure moves on, BEFORE anything is sent. An
+// error after a send (`sent`), a program failure or an answer from the chain
+// is thrown at once, as itself. `deps` replaces the endpoints, connect and
+// sleep in tests.
+export async function withRpc(fn, opts, deps = {}) {
+  const { urls = ENDPOINTS, connectFn = connect, sleep } = deps;
+  return overEndpoints(urls, async url => fn(await connectFn(url, opts)), { tries: 2, pauseMs: 2500, sleep });
 }
 
 async function splBalance(connection, owner, mint, decimals, lamports) {
@@ -447,7 +430,7 @@ async function sendBuilt(built) {
 
 // Send several built transactions in order. After the first one lands, a
 // failure is reported as a partial send and never retried.
-async function sendAll(builts, report) {
+export async function sendAll(builts, report) {
   const sigs = [];
   for (const b of builts) {
     try {
@@ -696,7 +679,8 @@ async function main() {
 }
 
 // Braces in an error text would look like JSON to the loop; flatten them.
-main().catch(e => {
+// The CLI runs only when node starts this file; a test import runs nothing.
+if (isEntry(import.meta.url)) main().catch(e => {
   console.error('ERROR:', signerError(e).replace(/[{}]/g, ' '));
   process.exitCode = 1;
 });

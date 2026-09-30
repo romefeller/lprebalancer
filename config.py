@@ -24,6 +24,7 @@ Any column may still be overridden for one run by the matching LPBOT_ variable
 environment is the escape hatch.
 """
 import os
+import re
 
 import db
 
@@ -43,8 +44,6 @@ PROFILE = _CFG['name']
 DEX = _env('LPBOT_DEX', str, _CFG.get('dex') or 'orca')
 POOL = _env('LPBOT_POOL', str, _CFG['pool'])
 PAIR_LABEL = _env('LPBOT_PAIR', str, _CFG['pair_label'])
-TOKEN_A = _env('LPBOT_TOKEN_A', str, _CFG['token_a'])
-TOKEN_B = _env('LPBOT_TOKEN_B', str, _CFG['token_b'])
 
 # --- size --------------------------------------------------------------------
 CAPITAL_USD = _env('LPBOT_CAPITAL_USD', float, float(_CFG['capital_usd']))
@@ -87,7 +86,6 @@ SLIPPAGE_BPS = _env('LPBOT_SLIPPAGE_BPS', int, _CFG['slippage_bps'])
 # --- pool screening (scanner only) ------------------------------------------
 # Consulted only when the scanner picks the pool. Token quality is a rule on
 # Jupiter's token facts (engine.screen_token), not a parameter here.
-MIN_NET_DAY_PCT = _env('LPBOT_MIN_NET_DAY', float, float(_CFG['min_net_day_pct']))
 MIN_TVL_USD = _env('LPBOT_MIN_TVL', float, float(_CFG['min_tvl_usd']))
 
 # --- the board: scanning other pools and other DEXes --------------------------
@@ -195,8 +193,20 @@ def policy():
 
 
 # --- plumbing ----------------------------------------------------------------
-RPC = _env('LPBOT_RPC', str,
-           os.environ.get('SOLANA_RPC_URL') or 'https://api.mainnet-beta.solana.com')
+PUBLIC_RPC = os.environ.get('SOLANA_RPC_URL') or 'https://api.mainnet-beta.solana.com'
+
+
+def keyed_rpc(env=os.environ):
+    """The Helius endpoint when the service environment holds its key
+    (KAMINO_RPC_KEY, from ~/.kamino-keys/env; owner, 2026-09-30), or None.
+    A value that does not look like a key is ignored. The URL carries the
+    key: it is never logged (rebalancer.redact)."""
+    k = (env.get('KAMINO_RPC_KEY') or '').strip()
+    return f'https://mainnet.helius-rpc.com/?api-key={k}' if re.fullmatch(r'[A-Za-z0-9-]{16,128}', k) else None
+
+
+# LPBOT_RPC wins; then the keyed Helius endpoint; then the public one.
+RPC = _env('LPBOT_RPC', str, keyed_rpc() or PUBLIC_RPC)
 WALLET = _env('LPBOT_WALLET', str, os.environ.get('WALLET_SECRET_PATH', ''))
 
 

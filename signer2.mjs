@@ -31,6 +31,7 @@ import {
 } from '@orca-so/whirlpools';
 import { createSolanaRpc, address } from '@solana/kit';
 import { consistentOrcaFees } from './orca_fees.mjs';
+import { endpoints, overEndpoints, isEntry, AfterSignError } from './rpc_policy.mjs';
 
 const DIR = path.dirname(new URL(import.meta.url).pathname);
 const HALT = path.join(DIR, 'HALT');
@@ -168,9 +169,9 @@ function depositQuote(p, pa, pb, capA, capB) {
 // Try each endpoint in turn. A single rate-limited RPC made the bot read
 // "no position" and try to open a second one; the read must be hard to fail,
 // and when it does fail it must fail loudly rather than return an empty answer.
-const ENDPOINTS = [RPC, 'https://api.mainnet-beta.solana.com',
-                   'https://solana-rpc.publicnode.com']
-  .filter((v, i, a) => v && a.indexOf(v) === i);
+// RPC first (a keyed endpoint when there is one). Indexed reads
+// (fetchPositionsForOwner) never go to an endpoint that refuses them.
+export const ENDPOINTS = endpoints({ SOLANA_RPC_URL: RPC }, { indexed: true });
 
 async function connectTo(url) {
   guard();
@@ -184,21 +185,22 @@ async function connectTo(url) {
 // Validating the connection alone is not enough: the rate limit lands on the
 // account fetch that comes afterwards, which is what made the first armed run
 // report an unreadable position on every poll.
-async function withRpc(fn) {
-  let lastErr = null;
-  for (const url of ENDPOINTS) {
-    for (let attempt = 0; attempt < 2; attempt++) {
-      try {
-        return await fn(await connectTo(url));
-      } catch (e) {
-        lastErr = e;
-        const msg = String(e?.message ?? e);
-        if (!/429|Too Many Requests|rate/i.test(msg)) break;   // not transient
-        await new Promise(r => setTimeout(r, 2500 * (attempt + 1)));
-      }
-    }
+// A rate limit, a refusal or a transport failure moves on (rpc_policy.mjs);
+// an answer from the chain or an error after a send is thrown at once.
+// `deps` replaces the endpoints, connect and sleep in tests.
+export async function withRpc(fn, deps = {}) {
+  const { urls = ENDPOINTS, connectFn = connectTo, sleep } = deps;
+  return overEndpoints(urls, async url => fn(await connectFn(url)), { tries: 2, pauseMs: 2500, sleep });
+}
+
+// The SDK callback signs, sends and confirms. A failure in it may follow a
+// send that reached a node: it is never rotated or retried (AfterSignError).
+export async function sendOnce(result) {
+  try {
+    return await result.callback();
+  } catch (e) {
+    throw new AfterSignError(`send failed after signing (not retried): ${e?.message ?? e}`);
   }
-  throw new Error(`all RPC endpoints failed: ${String(lastErr?.message ?? lastErr).slice(0, 160)}`);
 }
 
 async function connect() {
@@ -307,7 +309,7 @@ async function open(pool, lower, upper, maxA, maxB, execute) {
       console.log('DRY RUN — instructions built. Pass --execute to sign and send.');
       return;
     }
-    const sig = await result.callback();
+    const sig = await sendOnce(result);
     console.log(JSON.stringify({ ...report, sent: true, signature: sig }, null, 1));
   });
 }
@@ -407,13 +409,14 @@ async function harvest(mint, execute) {
   if (!execute) { console.log('DRY RUN — pass --execute to collect fees.'); return; }
   // Writes retry across endpoints too. A 429 here lands while the SDK is
   // FETCHING accounts to build the instruction, before anything is signed or
-  // sent, so rotating endpoints is safe. The caller still re-reads chain state
-  // after any failure rather than trusting the error alone.
+  // sent, so rotating endpoints is safe. The send itself is never retried
+  // (sendOnce). The caller still re-reads chain state after any failure
+  // rather than trusting the error alone.
   return withRpc(async ({ signer }) => {
     // authority, not funder: harvest and close act on a position you own, and
     // both return an ActionResult that still needs its callback invoked.
     const result = await harvestPosition(address(mint), { authority: signer });
-    const sig = await result.callback();
+    const sig = await sendOnce(result);
     console.log(JSON.stringify({ harvested: mint, signature: sig }, null, 1));
   });
 }
@@ -442,7 +445,7 @@ async function close(mint, execute) {
     }
     const result = await closePosition(address(mint),
       { slippageToleranceBps: SLIPPAGE_BPS, authority: signer });
-    const sig = await result.callback();
+    const sig = await sendOnce(result);
     console.log(JSON.stringify({ closed: mint, signature: sig }, null, 1));
   });
 }
@@ -463,4 +466,5 @@ async function main() {
     + '| close <mint> [--execute]');
 }
 
-main().catch(e => { console.error('ERROR:', e.message); process.exitCode = 1; });
+// The CLI runs only when node starts this file; a test import runs nothing.
+if (isEntry(import.meta.url)) main().catch(e => { console.error('ERROR:', e.message); process.exitCode = 1; });

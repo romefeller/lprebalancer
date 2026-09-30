@@ -34,13 +34,12 @@ Meteora or Byreal. Candles come from GeckoTerminal, which indexes all of them by
 address. The fee-share model needs one number per pool, its implied
 concentration, and each DEX kind has its own route to it (see `concentration`).
 """
-import json, math, os, pathlib, subprocess, threading, time, urllib.error, urllib.request
+import json, math, pathlib, subprocess, threading, time
 import numpy as np
 
 ROOT = pathlib.Path(__file__).resolve().parent
 UA = ('Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 '
       '(KHTML, like Gecko) Chrome/126.0 Safari/537.36')
-ORCA = 'https://api.orca.so/v2/solana'
 GECKO = 'https://api.geckoterminal.com/api/v2/networks/solana'
 
 # Defaults for a bare scan from the command line. The bot passes its own values
@@ -142,16 +141,6 @@ def screening_verdict(rec, facts, majors=MAJORS):
             return False, why
         reasons.append(why)
     return True, '; '.join(reasons) or 'both tokens are majors'
-
-
-def active_liquidity(pool):
-    """Pool active L in human units, from Orca's raw CLMM liquidity field."""
-    try:
-        da = int(pool['tokenA'].get('decimals', 9))
-        db = int(pool['tokenB'].get('decimals', 6))
-        return float(pool['liquidity']) / math.sqrt(10 ** da * 10 ** db)
-    except Exception:
-        return None
 
 
 STABLES = {'USDC', 'USDT', 'PYUSD', 'USDS', 'DAI', 'FDUSD', 'USDE'}      # display only
@@ -411,18 +400,6 @@ def simulate(k, ts, px, vol, pool_L, fee, capital, swap_cost=SWAP_COST,
             'proactive': proactive, 'proactive_per_day': proactive / days,
             'in_range_pct': in_range / (len(px) - 1) * 100,
             'vs_hold': (final + fees) - hold}
-
-
-def best_band(ts, px, vol, pool_L, fee, capital, bands=None, swap_cost=SWAP_COST, **policy):
-    """Score every candidate band on this pool's own history, keep the best.
-
-    The ladder is a parameter, not a constant: `bands` defaults to the module's
-    own list only so that a bare scan still works. The bot passes the ladder
-    from its active profile.
-    """
-    runs = [simulate(k, ts, px, vol, pool_L, fee, capital, swap_cost, **policy)
-            for k in (bands or BANDS)]
-    return max(runs, key=lambda r: r['net_day_pct']), runs
 
 
 # --- robustness: many origins, not one path ----------------------------------
