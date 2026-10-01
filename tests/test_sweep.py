@@ -178,3 +178,41 @@ class SweepGoesOn(Sweep):
             out, calls, seen, _, _ = self.go([acc(JITO, 200_000_000, 9), acc(MSOL, 100_000_000, 9)],
                                              answers=(bad, ({'signature': 'S2'}, None)))
             self.assertEqual(len(calls), 2, bad); self.assertEqual([d['mint'] for d in out], [MSOL], bad)
+
+
+class SweepAsksLittle(unittest.TestCase):
+    """What sweep_foreign asks Jupiter about: prices for foreign tokens held,
+    facts only for those worth a sweep (mutation gaps, 2026-10-01)."""
+    BAL = Sweep.BAL
+
+    def ask(self, accounts, prices):
+        priced, facts = [], []
+        with mock.patch.object(rebalancer.audit, 'token_accounts', lambda url, owner: accounts), \
+                mock.patch.object(rebalancer.dexes, 'jupiter_prices',
+                                  lambda ms: priced.append(list(ms)) or {m: prices[m] for m in ms if m in prices}), \
+                mock.patch.object(rebalancer.dexes, 'jupiter_token', lambda m: facts.append(m) or {'verified': True}), \
+                mock.patch.object(rebalancer, 'pool_tokens', lambda: ((SOL, 'SOL'), (USDC, 'USDC'))), \
+                mock.patch.object(rebalancer, 'chain', lambda *a, **k: ({'signature': 'SW'}, None)), \
+                mock.patch.object(rebalancer, 'save', lambda s: None), \
+                mock.patch.object(rebalancer.db, 'event', lambda *a: None), \
+                mock.patch.object(rebalancer, 'notify', lambda ev, **kw: None):
+            out = rebalancer.sweep_foreign({}, dict(self.BAL))
+        return priced, facts, [d['mint'] for d in out]
+
+    def test_pool_tokens_and_empty_accounts_are_not_priced(self):
+        priced, facts, out = self.ask([acc(SOL, 10 ** 9, 9), acc(USDC, 10 ** 6, 6), acc(JITO, 0, 9)], PRICES)
+        self.assertEqual((priced, facts, out), ([], [], []))                   # no Jupiter call at all
+
+    def test_one_raw_unit_is_priced(self):
+        priced, *_ = self.ask([acc(SOL, 10 ** 9, 9), acc(MSOL, 1, 9)], PRICES)
+        self.assertEqual(priced, [[MSOL]])
+
+    def test_facts_from_exactly_sweep_min_usd(self):
+        self.assertEqual(rebalancer.SWEEP_MIN_USD, 1.0)
+        _, facts, _ = self.ask([acc('USDT', 1_000_000, 6), acc('TINY', 100, 6)], {'USDT': 1.0, 'TINY': 1.0})
+        self.assertEqual(facts, ['USDT'])                                      # $1.00 exactly; $0.0001 is dust
+
+    def test_a_token_without_a_price_is_dust_and_the_rest_go_on(self):
+        _, facts, out = self.ask([acc('NOPRICE', 5_000_000, 6), acc(JITO, 200_000_000, 9)],
+                                 {'NOPRICE': None, JITO: 150.0})
+        self.assertEqual((facts, out), ([JITO], [JITO]))

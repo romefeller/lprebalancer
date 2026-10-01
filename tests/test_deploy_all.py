@@ -291,3 +291,75 @@ class BalanceWallet(Patched):
         self.assertEqual(sw['signature'], 'SIG'); self.assertEqual(sw['before_usd_b'], 200.0)
         out, *_ = self.go(self.LOP, answers=(ans,), after={'error': 'unreadable'})
         self.assertIsNone(out)
+
+
+class BalanceWalletEdges(BalanceWallet):
+    """Exact edges of the swap decision and of the outcome (mutation gaps, 2026-10-01)."""
+
+    def no_swap(self, b):
+        out, calls, seen, *_ = self.go(b)
+        self.assertEqual((calls, seen), ([], []), b)
+        self.assertEqual(out, b)                                               # the wallet as it is, not None
+
+    def swaps(self, b):
+        self.assertEqual(len(self.go(b)[1]), 1, b)
+
+    def test_without_a_record_nothing_is_asked_or_said(self):
+        out, calls, seen, *_ = self.go(self.LOP, rec={})
+        self.assertEqual((out, calls, seen), (self.LOP, [], []))
+        with mock.patch.object(rebalancer, 'notify', lambda *a, **k: self.fail('notified')):
+            self.assertEqual(rebalancer.balance_wallet({'failures': 0}, dict(self.LOP), None), self.LOP)
+
+    def test_a_record_without_token_a_skips(self):
+        out, calls, seen, *_ = self.go(self.LOP, rec={'token_b': {'address': USDC}})
+        self.assertEqual((out, calls), (self.LOP, [])); self.assertIn('swap_skipped', seen)
+
+    def test_a_short_side_of_exactly_need_does_not_swap(self):
+        # The capital is capped, so a side can reach `need` while the wallet is lopsided.
+        C = config.MAX_USD / (2 * config.SIDE_CAP_FRACTION)
+        need = C * rebalancer.side_target_fraction() * 0.97
+        b = bal(400.0, need, price=1.0, native=None)
+        self.assertAlmostEqual(rebalancer.capital(b), C)
+        self.no_swap(b)
+        self.swaps(bal(400.0, need * 0.999, price=1.0, native=None))
+
+    def test_a_gap_of_exactly_4_percent_is_balanced(self):
+        self.assertEqual(abs(52.0 - 48.0), 0.04 * (52.0 + 48.0))
+        self.assertLess(48.0, rebalancer.capital(bal(52.0, 48.0, price=1.0, native=None)) * 0.5 * 0.97)   # under need
+        self.no_swap(bal(52.0, 48.0, price=1.0, native=None))
+        self.no_swap(bal(48.0, 52.0, price=1.0, native=None))                   # nothing reserved off A either
+        self.swaps(bal(52.5, 47.5, price=1.0, native=None))
+
+    def test_the_quote_price_scales_both_sides(self):
+        self.no_swap(bal(50.0, 50.0, price=1.0, q=2.0, native=None))
+
+    def test_a_side_under_one_unit_counts_as_it_is(self):
+        self.swaps(bal(1.0, 0.5, price=1.0, native=None))
+        self.swaps(bal(0.03, 100.0, price=120.0, native='A'))                   # under the reserve: nothing of A
+
+    def test_the_reserve_comes_off_a_native_b_side(self):
+        self.swaps(bal(0.05, RES() + 0.03, price=1.0, q=1000.0, native='B'))  # $50 of A, $30 of B
+
+    def test_the_quote_price_reaches_the_targets_and_the_hints(self):
+        b = bal(0.2, 200.0, price=120.0, q=2.0)
+        _, calls, *_ = self.go(b)
+        C = rebalancer.capital(b)
+        a = calls[0][0]
+        self.assertAlmostEqual(float(a[3]), C / 2 + rebalancer.OPEN_RENT_HEADROOM_SOL * 120.0 * 2.0, places=2)
+        self.assertAlmostEqual(float(a[4]), C / 2, places=2)
+        h = json.loads(calls[0][1]['extra_env']['LPBOT_TOKEN_HINTS'])
+        self.assertEqual((h[SOL]['usd'], h[USDC]['usd']), (240.0, 2.0))
+
+    def test_an_answer_with_a_transport_error_is_retried(self):
+        ok = ({'sent': True, 'signature': 's'}, None)
+        _, calls, *_ = self.go(self.LOP, answers=(({'quoted': True}, 'timeout'), ok))
+        self.assertEqual(len(calls), 2)
+
+    def test_an_answer_with_an_error_and_nothing_sent_opens_as_it_is(self):
+        out, _, seen, _, state, *_ = self.go(self.LOP, answers=(({'quoted': True}, 'custom program error'),))
+        self.assertEqual(out, self.LOP); self.assertIn('swap_skipped', seen); self.assertEqual(state['failures'], 0)
+
+    def test_a_partial_is_a_failure_with_or_without_a_signature_or_an_error(self):
+        for ans in (({'partial': True}, 'boom'), ({'partial': True, 'signature': 'p', 'sent': True}, None)):
+            out, _, seen, _, state, *_ = self.go(self.LOP, answers=(ans,))
+            self.assertIsNone(out, ans); self.assertEqual(state['failures'], 1, ans); self.assertIn('swap_failed', seen)

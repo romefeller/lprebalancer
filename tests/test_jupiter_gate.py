@@ -7,6 +7,7 @@ at a time across all of them, Python and Node alike."""
 import json
 import os
 import pathlib
+import stat
 import subprocess
 import sys
 import tempfile
@@ -116,6 +117,101 @@ class Gate(unittest.TestCase):
             dexes._get('https://api.geckoterminal.com/x')
             dexes._get('https://api.jup.ag/swap/v1/quote')
         self.assertEqual(len(seen), 2)
+
+    # --- exact edges of the lock and the slot (mutation gaps, 2026-10-01) ---
+
+    def script(self, *times):
+        """A now() that answers `times` in order and fails the test past the end."""
+        it = iter(times)
+        def now():
+            try:
+                return next(it)
+            except StopIteration:
+                raise AssertionError('now() called more often than scripted') from None
+        return now
+
+    def held(self, mtime=1000.0):
+        lock = self.gate + '.lock'
+        pathlib.Path(lock).write_text('')
+        os.utime(lock, (mtime, mtime))
+        return lock
+
+    def test_the_lock_is_private_to_the_owner(self):
+        lock = self.gate + '.lock'
+        self.assertIs(jupgate._take(lock, time.time, lambda s: None), True)
+        self.assertEqual(stat.S_IMODE(os.stat(lock).st_mode), 0o600)
+
+    def test_a_wait_of_exactly_wait_s_tries_once_more(self):
+        lock = self.held(mtime=2000.0)                                  # a live holder: never stale here
+        slept = []
+        t0 = 1000.0
+        now = self.script(t0, t0, t0 + jupgate.WAIT_S, t0, t0 + jupgate.WAIT_S + 0.01)
+        self.assertIs(jupgate._take(lock, now, slept.append), False)
+        self.assertEqual(slept, [0.02])                                # one more try at exactly WAIT_S
+        self.assertTrue(os.path.exists(lock))                          # the holder's lock is left alone
+
+    def test_a_lock_exactly_stale_s_old_is_still_held(self):
+        lock = self.held(mtime=1000.0)
+        t = 1000.0 + jupgate.STALE_S
+        now = self.script(t, t, t + jupgate.WAIT_S + 1)
+        self.assertIs(jupgate._take(lock, now, lambda s: None), False)
+        self.assertTrue(os.path.exists(lock))
+
+    def test_a_lock_just_past_stale_s_is_removed_and_taken(self):
+        lock = self.held(mtime=1000.0)
+        t = 1000.0 + jupgate.STALE_S + 0.001
+        self.assertIs(jupgate._take(lock, self.script(t, t), lambda s: None), True)
+        self.assertGreater(os.path.getmtime(lock), 1000.0)             # a new lock, ours
+
+    def test_no_writable_directory_is_false_not_none(self):
+        self.assertIs(jupgate._take('/nonexistent-dir/x.lock', time.time, lambda s: None), False)
+
+    def test_a_lock_not_taken_leaves_the_gate_and_the_lock_alone(self):
+        pathlib.Path(self.gate).write_text('1000.500000')
+        lock = self.held()
+        c = Clock(1000.0)
+        with mock.patch.object(jupgate, '_take', lambda *a: False):
+            self.assertEqual(jupgate.reserve(self.gate, 1.1, c.now, c.sleep), 1000.0)
+        self.assertEqual(pathlib.Path(self.gate).read_text(), '1000.500000')
+        self.assertTrue(os.path.exists(lock))                          # another holder's lock: never removed
+
+    def test_a_slot_exactly_an_hour_ahead_is_kept(self):
+        c = Clock(1000.0)
+        pathlib.Path(self.gate).write_text(f'{1000.0 + 3600:.6f}')
+        self.assertAlmostEqual(jupgate.reserve(self.gate, 1.1, c.now, c.sleep), 4601.1, places=6)
+        pathlib.Path(self.gate).write_text(f'{1000.0 + 3600.5:.6f}')
+        self.assertEqual(jupgate.reserve(self.gate, 1.1, c.now, c.sleep), 1000.0)   # past the hour: garbage
+
+    def test_a_missing_or_empty_gate_file_is_slot_zero(self):
+        for content in (None, ''):
+            if content is None:
+                if os.path.exists(self.gate):
+                    os.unlink(self.gate)
+            else:
+                pathlib.Path(self.gate).write_text(content)
+            c = Clock(0.0)
+            self.assertAlmostEqual(jupgate.reserve(self.gate, 1.1, c.now, c.sleep), 1.1, places=9, msg=repr(content))
+
+    def test_a_delay_under_a_second_is_slept_and_zero_is_not(self):
+        c = Clock(1000.0)
+        pathlib.Path(self.gate).write_text('999.500000')
+        jupgate.wait_turn(self.gate, 1.0, c.now, c.sleep)
+        self.assertEqual(len(c.slept), 1); self.assertAlmostEqual(c.slept[0], 0.5, places=6)
+        c = Clock(1000.0)
+        pathlib.Path(self.gate).write_text('999.000000')
+        jupgate.wait_turn(self.gate, 1.0, c.now, c.sleep)
+        self.assertEqual(c.slept, [])                                  # a delay of exactly 0
+
+    def test_get_parses_curl_with_a_40_s_limit(self):
+        import dexes
+        seen = []
+        def run(argv, **k):
+            seen.append((argv, k)); return mock.Mock(stdout='{"a": 1}')
+        with mock.patch.object(dexes.subprocess, 'run', run):
+            self.assertEqual(dexes._get('https://api.geckoterminal.com/x'), {'a': 1})
+        argv, k = seen[0]
+        self.assertEqual(argv[argv.index('--max-time') + 1], '40')
+        self.assertEqual(k, {'capture_output': True, 'text': True})
 
     def test_every_jupiter_call_site_takes_a_slot(self):
         for f in ('signer_pancake.mjs', 'signer_dlmm.mjs', 'signer_byreal.mjs', 'signer_raydium.mjs'):
@@ -260,6 +356,24 @@ class OrcaFallback(OneOutcomePerSwap):
             calls, _ = self.go([self.J429] * 3)
         self.assertEqual(self.dexes(calls), ['jupiter'] * 3)
 
+    def test_a_fallback_that_is_no_signer_is_never_called(self):
+        with mock.patch.object(rebalancer, 'SWAP_FALLBACK', 'no-such-signer'):
+            calls, _ = self.go([self.J429] * 3)
+        self.assertEqual(self.dexes(calls), ['jupiter'] * 3)
+
+    def test_no_answer_and_no_error_falls_back(self):
+        calls, _ = self.go([(None, None), self.OK])
+        self.assertEqual(self.dexes(calls), ['jupiter', 'orca-swap'])
+        self.assertEqual(db.health_get('swap')['fails'], 0)
+
+    def test_an_answer_with_an_error_and_nothing_sent_falls_back(self):
+        calls, _ = self.go([({'quoted': True}, 'route not found'), self.OK])
+        self.assertEqual(self.dexes(calls), ['jupiter', 'orca-swap'])
+
+    def test_never_after_a_partial_without_a_signature(self):
+        calls, _ = self.go([({'partial': True}, 'partial transaction execution')])
+        self.assertEqual(self.dexes(calls), ['jupiter'])                       # part of it may have landed
+
     def test_the_fallback_script_is_a_registered_signer(self):
         self.assertTrue(rebalancer.SIGNERS['orca-swap'].endswith('swap_orca.mjs'))
         self.assertNotIn('orca-swap', rebalancer.config.EXECUTE_DEXES)                # never a venue
@@ -341,6 +455,56 @@ class RecordHealth(unittest.TestCase):
             rebalancer.chain('open', 'M', dex='orca', record=False)
         self.assertEqual(db.health_get('venue:orca')['fails'], 1)
 
+
+    def test_an_empty_key_feeds_no_breaker(self):
+        seen = []
+        with mock.patch.object(rebalancer.health, 'record_failure', lambda *a, **k: seen.append('f')), \
+                mock.patch.object(rebalancer.health, 'record_success', lambda *a, **k: seen.append('s')):
+            for key in (None, ''):
+                rebalancer.record_health(key, None, 'boom')
+                rebalancer.record_health(key, {'signature': 'S'}, None)
+        self.assertEqual(seen, [])
+
+    def earlier(self, key='k'):
+        health.record_failure(key, 'earlier', now=time.time() - 3600)
+
+    def outcome(self, out, err, key='k'):
+        with mock.patch('builtins.print'):
+            rebalancer.record_health(key, out, err)
+        return db.health_get(key) or {}
+
+    def test_no_answer_and_no_error_is_a_failure_with_no_result(self):
+        rec = self.outcome(None, None)
+        self.assertEqual((rec['fails'], rec['last_error']), (1, 'no result'))
+
+    def test_an_answer_without_an_error_is_a_success(self):
+        self.earlier()
+        self.assertEqual(self.outcome({'answer': 1}, None)['fails'], 0)
+
+    def test_an_answer_with_an_error_and_no_signature_is_a_failure(self):
+        rec = self.outcome({'answer': 1}, 'route not found')
+        self.assertEqual((rec['fails'], rec['last_error']), (1, 'route not found'))
+
+    def test_a_signature_or_a_noop_beside_an_error_is_a_success(self):
+        for out in ({'signature': 'S'}, {'noop': True}):
+            self.earlier()
+            self.assertEqual(self.outcome(out, 'could not confirm')['fails'], 0, out)
+
+    def test_our_own_refusal_feeds_nothing(self):
+        self.earlier()
+        rec = self.outcome(None, 'refused: bad mint')
+        self.assertEqual((rec['fails'], rec['last_error']), (1, 'earlier'))   # neither a failure nor a success
+
+    def test_chain_defaults_the_timeout_and_the_dex(self):
+        seen = []
+        def fake(*a, **k):
+            seen.append(k); return {'signature': 'S'}, None
+        with mock.patch.object(rebalancer, '_chain', fake), mock.patch.object(config, 'DEX', 'raydium-clmm'):
+            rebalancer.chain('open', 'M')
+            rebalancer.chain('open', 'M', dex='orca', timeout=7)
+        self.assertEqual((seen[0]['dex'], seen[0]['timeout']), ('raydium-clmm', 420))
+        self.assertEqual((seen[1]['dex'], seen[1]['timeout']), ('orca', 7))
+        self.assertIsNotNone(db.health_get('venue:raydium-clmm'))
 
 
 class LessJupiterTraffic(unittest.TestCase):

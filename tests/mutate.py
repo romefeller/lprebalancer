@@ -298,6 +298,34 @@ EQUIVALENT = {
         'for every falsy non-nullish value v, v.length is 0 or undefined: falsy, like [].length',
     ('swap_orca', 'verifyTxShape', '\\?\\? -> ||', "if (pid === undefined || !ALLOWED_PROGRAMS.has(pid)) throw new Refused(`transaction calls ${pid ?? 'a program from a lookup table'}; refusing`);", 0):
         'error text only, and pid is undefined or a base58 key from toBase58, never the empty string',
+    # jupgate.py
+    ('jupgate', 'reserve', 'drop operand 1', 'last = float(fh.read().strip() or 0.0)', 0):
+        "float('') raises ValueError, which the except turns into last = 0.0: the same slot",
+    # record_health, balance_wallet (one outcome per operation, 2026-10-01)
+    ('one_outcome', 'record_health', 'flip bool', 'f"retry in {wait / 60:.0f} min: {err}", flush=True)', 0):
+        'print flush only',
+    ('one_outcome', 'balance_wallet', 'drop operand 0', "if (SWAP_FALLBACK and SWAP_FALLBACK in SIGNERS and counts_as_failure(err or 'no result')", 0):
+        "an empty fallback name is never a SIGNERS key: '' in SIGNERS is False, as `SWAP_FALLBACK and` is",
+    ('one_outcome', 'balance_wallet', 'drop operand 0', "if out and out.get('noop'):", 0):
+        'out is truthy here: a falsy out took the nothing-sent return above',
+    ('one_outcome', 'balance_wallet', 'drop operand 1', "if err or not out or out.get('partial') or not out.get('sent'):", 0):
+        'out is truthy here: a falsy out took the nothing-sent return above',
+    ('one_outcome', 'balance_wallet', 'const 0.0->1.0', "(OPEN_RENT_HEADROOM_SOL * q if bal.get('nativeSide') == 'B' else 0.0)", 0):
+        'with no native side neither target adds head_usd: its value is never read',
+    ('one_outcome', 'balance_wallet', 'drop operand 1', "ra, rb = rec.get('token_a') or {}, rec.get('token_b') or {}", 0):
+        'token_a is a dict here: the mint guard above returned unless it holds a valid address',
+    ('one_outcome', 'balance_wallet', 'drop operand 1', "ra, rb = rec.get('token_a') or {}, rec.get('token_b') or {}", 1):
+        'token_b is a dict here: the mint guard above returned unless it holds a valid address',
+    ('one_outcome', 'balance_wallet', 'and<->or', "if ra.get('decimals') is not None and rb.get('decimals') is not None:", 0):
+        'a missing or None decimal makes int(...) raise KeyError or TypeError, which the except turns into hints = {}',
+    ('one_outcome', 'balance_wallet', 'drop operand 0', "if ra.get('decimals') is not None and rb.get('decimals') is not None:", 0):
+        'a missing or None decimal makes int(...) raise KeyError or TypeError, which the except turns into hints = {}',
+    ('one_outcome', 'balance_wallet', 'drop operand 1', "if ra.get('decimals') is not None and rb.get('decimals') is not None:", 0):
+        'a missing or None decimal makes int(...) raise KeyError or TypeError, which the except turns into hints = {}',
+    ('one_outcome', 'balance_wallet', 'drop operand 0', "if not ((err or not out) and not (out or {}).get('signature') and not (out or {}).get('partial')", 0):
+        "(err or not out) is false only for a falsy err, and str() of a falsy err ('None', '') never matches the transport regex",
+    ('one_outcome', 'balance_wallet', 'drop operand 1', "if not ((err or not out) and not (out or {}).get('signature') and not (out or {}).get('partial')", 1):
+        "err alone differs only for a falsy err, and str() of a falsy err ('None', '') never matches the transport regex",
 }
 
 # Old-style entries (target, function, 'description @L<line>'). They did not
