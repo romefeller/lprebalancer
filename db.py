@@ -16,7 +16,8 @@ with psql while the bot is mid-rebalance.
     python3 db.py add <name> <pool> [k=v ...]   describe a pool; symbols come from Orca
     python3 db.py activate <name>               make it the one the bot runs
     python3 db.py set <name> k=v [k=v ...]      retune
-    python3 db.py [stats|daily|history|json]    the book
+    python3 db.py [stats|daily|history|json]    the book (this process's or every enabled profile's)
+    python3 db.py stats --pool P --wallet W     one profile's book, or one wallet's (stats.py: all, summed)
     python3 db.py forecasts                     the survival model against the tape
 
 Connections are opened per operation. At one write every few minutes the cost
@@ -54,6 +55,166 @@ def cursor(commit=False):
 
 def now():
     return datetime.now(timezone.utc)
+
+
+# --- who is writing ----------------------------------------------------------
+# One process runs one profile (config.py sets this at import). Rows the
+# process writes carry the profile and its wallet; per-process state that
+# lives in shared tables (breakers, audit cursors) is keyed by them, so two
+# profiles never read each other's breaker or cursor. Empty until set: a
+# tool that imports db without config writes unscoped rows, as before 020.
+CONTEXT = {'profile': None, 'wallet_id': None}
+
+
+def set_context(profile, wallet_id):
+    """Scope this process's writes to `profile` on `wallet_id`."""
+    if not (isinstance(profile, str) and re.fullmatch(r'[a-z0-9][a-z0-9-]{0,62}', profile)):
+        raise ValueError(f'bad profile name {profile!r}')
+    if wallet_id is not None and not (isinstance(wallet_id, str)
+                                      and re.fullmatch(r'[a-z0-9][a-z0-9-]{1,40}', wallet_id)):
+        raise ValueError(f'bad wallet id {wallet_id!r}')
+    CONTEXT.update(profile=profile, wallet_id=wallet_id)
+
+
+def scoped(key, by='profile'):
+    """`key` prefixed with this process's profile (or wallet), when one is set:
+    the shared key-value tables hold one row per process, not one in all."""
+    owner = CONTEXT.get(by)
+    return f'{owner}|{key}' if owner else key
+
+
+def unscoped(key, by='profile'):
+    """`key` without this process's prefix, or None when it is another's. Pure."""
+    owner = CONTEXT.get(by)
+    if not owner:
+        return None if '|' in key else key
+    pre = f'{owner}|'
+    return key[len(pre):] if key.startswith(pre) else None
+
+
+# --- wallets and profiles ----------------------------------------------------
+
+def wallet_row(wallet_id):
+    """The wallets row `wallet_id`, or None. Holds no secret."""
+    with cursor() as cur:
+        cur.execute('select id, chain, address, secret_env, label from wallets where id = %s', (wallet_id,))
+        r = cur.fetchone()
+    return dict(r) if r else None
+
+
+def wallets():
+    with cursor() as cur:
+        cur.execute('select id, chain, address, secret_env, label from wallets order by id')
+        return [dict(r) for r in cur.fetchall()]
+
+
+def profiles(wallet_id=None, enabled_only=True):
+    """Profiles (config rows), optionally of one wallet, enabled ones by default."""
+    with cursor() as cur:
+        cur.execute('select * from config where (%s::text is null or wallet_id = %s) '
+                    'and (not %s or enabled) order by name', (wallet_id, wallet_id, enabled_only))
+        return [dict(r) for r in cur.fetchall()]
+
+
+def add_wallet(wallet_id, chain, address, secret_env, label=None):
+    """Register a wallet. The table checks the address shape per chain."""
+    with cursor(commit=True) as cur:
+        cur.execute('insert into wallets (id, chain, address, secret_env, label) values (%s,%s,%s,%s,%s) '
+                    'on conflict (id) do nothing returning id', (wallet_id, chain, address, secret_env, label))
+        if cur.fetchone() is None:
+            cur.execute('select chain, address from wallets where id = %s', (wallet_id,))
+            r = cur.fetchone()
+            if (r['chain'], r['address']) != (chain, address):
+                raise ValueError(f'wallet {wallet_id} exists with a different chain or address')
+
+
+# --- whose book: the scope of a report ------------------------------------------
+# Every report reads the rows of a set of profiles. Money rows find their
+# profile through the position they belong to (positions.config_name); payouts
+# carry config_name; flows and events carry profile. Rows from before 020 carry
+# no profile (and one position carries no config_name): they are the book of
+# the one profile that existed then, LEGACY_PROFILE on LEGACY_WALLET. That
+# attribution is done here, in every query, so the book is right whether or not
+# the deploy backfilled those NULLs.
+LEGACY_PROFILE = 'sol-usdc'
+LEGACY_WALLET = 'sol-lp'
+
+POS_IN = 'coalesce(p.config_name, %(legacy)s) = any(%(names)s::text[])'
+PAYOUT_IN = 'coalesce(config_name, %(legacy)s) = any(%(names)s::text[])'
+PROFILE_IN = 'coalesce(profile, %(legacy)s) = any(%(names)s::text[])'
+
+
+def mint_in(col):
+    """SQL: the row whose position mint is `col` belongs to the scope. A mint
+    with no positions row is the legacy book's."""
+    return (f'coalesce((select x.config_name from positions x where x.mint = {col}), %(legacy)s) '
+            '= any(%(names)s::text[])')
+
+
+def _scope_args(names, **kw):
+    return {'names': list(names), 'legacy': LEGACY_PROFILE, **kw}
+
+
+def book_profiles(wallet_id=None, include_disabled=False):
+    """Config rows with two derived keys: `wallet` (the wallet id; the legacy
+    wallet when the row names none) and `on` (whether the profile runs:
+    `enabled`, or, while no row is enabled yet (before the 020 deploy), the
+    one `active` row). Enabled ones only, unless include_disabled."""
+    with cursor() as cur:
+        cur.execute('select * from config order by name')
+        rows = [dict(r) for r in cur.fetchall()]
+    any_enabled = any(r.get('enabled') for r in rows)
+    out = []
+    for r in rows:
+        r['wallet'] = r.get('wallet_id') or LEGACY_WALLET
+        r['on'] = bool(r.get('enabled')) if any_enabled else bool(r.get('active'))
+        if (wallet_id is None or r['wallet'] == wallet_id) and (include_disabled or r['on']):
+            out.append(r)
+    return out
+
+
+def book_scope(profile=None, wallet_id=None):
+    """The profile names a report covers. With neither filter: this
+    process's own profile (CONTEXT) when it has one, so a process's books show
+    only its pool; else every enabled profile. A profile with a wallet it does
+    not belong to covers nothing. With no profile running at all (a pre-020
+    database with no active row), the legacy book."""
+    if profile is None and wallet_id is None:
+        profile = CONTEXT.get('profile')
+    if profile is not None:
+        if wallet_id is not None:
+            rows = [r for r in book_profiles(include_disabled=True) if r['name'] == profile]
+            mine = rows[0]['wallet'] if rows else LEGACY_WALLET
+            if mine != wallet_id:
+                return []
+        return [profile]
+    names = [r['name'] for r in book_profiles(wallet_id)]
+    if not names and wallet_id is None:
+        return [LEGACY_PROFILE]
+    return names
+
+
+def open_by_profile():
+    """{profile: positions open now}, legacy rows attributed as everywhere."""
+    with cursor() as cur:
+        cur.execute('select coalesce(config_name, %s) name, count(*) n from positions '
+                    'where closed_at is null group by 1', (LEGACY_PROFILE,))
+        return {r['name']: int(r['n']) for r in cur.fetchall()}
+
+
+def flow_totals(profile=None, wallet_id=None):
+    """Deposits and withdrawals the flows audit recorded for the scope, in
+    dollars at the time of each flow, with their counts."""
+    with cursor() as cur:
+        cur.execute(f"""select coalesce(sum(usd) filter (where kind = 'deposit'), 0) dep,
+                               count(*) filter (where kind = 'deposit') ndep,
+                               coalesce(sum(usd) filter (where kind = 'withdrawal'), 0) wd,
+                               count(*) filter (where kind = 'withdrawal') nwd
+                        from capital_flows where kind in ('deposit', 'withdrawal') and {PROFILE_IN}""",
+                    _scope_args(book_scope(profile, wallet_id)))
+        r = cur.fetchone()
+    return {'deposits_usd': round(_f(r['dep']), 4), 'deposits': int(r['ndep']),
+            'withdrawals_usd': round(_f(r['wd']), 4), 'withdrawals': int(r['nwd'])}
 
 
 # --- configuration -----------------------------------------------------------
@@ -593,22 +754,22 @@ def record_payout(config_name, position, token_mint, symbol, amount, usd, kind,
                      to_address, signature, detail))
 
 
-def reinvested_usd(config_name):
+def reinvested_usd(profile=None, wallet_id=None):
     """Dollars of fees reinvested so far: they raise the sizing base."""
     with cursor() as cur:
         cur.execute("select coalesce(sum(usd), 0) usd from payouts "
-                    "where config_name = %s and kind = 'reinvested'", (config_name,))
+                    f"where {PAYOUT_IN} and kind = 'reinvested'", _scope_args(book_scope(profile, wallet_id)))
         return float(cur.fetchone()['usd'])
 
 
-def payout_totals(config_name=None):
+def payout_totals(profile=None, wallet_id=None):
     """Fee split so far, in dollars, by kind; and today's payout."""
     with cursor() as cur:
-        cur.execute("""
+        cur.execute(f"""
             select kind, coalesce(sum(usd), 0) usd, count(*) n,
                    coalesce(sum(usd) filter (where ts >= date_trunc('day', now() at time zone 'utc')), 0) today
-            from payouts where (%s::text is null or config_name = %s) group by kind
-        """, (config_name, config_name))
+            from payouts where {PAYOUT_IN} group by kind
+        """, _scope_args(book_scope(profile, wallet_id)))
         rows = {r['kind']: r for r in cur.fetchall()}
     g = lambda k, f='usd': round(float(rows[k][f]), 4) if k in rows else 0.0
     return {'paid_usd': g('paid'), 'paid_today_usd': g('paid', 'today'),
@@ -624,14 +785,15 @@ _HEALTH_COLS = ('key', 'fails', 'trips', 'last_fail', 'last_ok', 'retry_at', 'la
 def health_get(key):
     """The breaker record of `key`, or None."""
     with cursor() as cur:
-        cur.execute('select key, fails, trips, last_fail, last_ok, retry_at, last_error from health where key = %s', (key,))
+        cur.execute('select key, fails, trips, last_fail, last_ok, retry_at, last_error from health where key = %s',
+                    (scoped(key),))
         r = cur.fetchone()
-    return dict(r) if r else None
+    return dict(r, key=key) if r else None
 
 
 def health_put(rec):
     """Upsert one breaker record."""
-    vals = [rec.get(c) for c in _HEALTH_COLS]
+    vals = [scoped(rec.get('key')) if c == 'key' else rec.get(c) for c in _HEALTH_COLS]
     with cursor(commit=True) as cur:
         cur.execute("""insert into health (key, fails, trips, last_fail, last_ok, retry_at, last_error, updated)
                        values (%s,%s,%s,%s,%s,%s,%s, now())
@@ -643,7 +805,13 @@ def health_put(rec):
 def health_all():
     with cursor() as cur:
         cur.execute('select key, fails, trips, last_fail, last_ok, retry_at, last_error from health order by key')
-        return [dict(r) for r in cur.fetchall()]
+        rows = [dict(r) for r in cur.fetchall()]
+    out = []
+    for r in rows:
+        k = unscoped(r['key'])
+        if k is not None:
+            out.append(dict(r, key=k))
+    return out
 
 
 _SECRET_IN_URL = re.compile(r'(api[-_]?key=)[^&\s"\'<>]+', re.I)
@@ -652,8 +820,8 @@ _SECRET_IN_URL = re.compile(r'(api[-_]?key=)[^&\s"\'<>]+', re.I)
 def event(kind, detail=''):
     detail = _SECRET_IN_URL.sub(r'\1***', str(detail))      # the keyed RPC URL never reaches the table
     with cursor(commit=True) as cur:
-        cur.execute('insert into events (ts, kind, detail) values (%s,%s,%s)',
-                    (now(), kind, detail[:2000]))
+        cur.execute('insert into events (ts, kind, detail, profile) values (%s,%s,%s,%s)',
+                    (now(), kind, detail[:2000], CONTEXT.get('profile')))
 
 
 # --- accounting: reads -------------------------------------------------------
@@ -662,14 +830,14 @@ def _f(x):
     return float(x) if x is not None else 0.0
 
 
-def fees_between(start, end=None):
+def fees_between(start, end=None, profile=None, wallet_id=None):
     """Accrual earned between two UTC boundaries, including closed positions.
 
     The latest observation before the start is the baseline, so collecting
     yesterday's fees today cannot count them as today's earnings.
     """
     with cursor() as cur:
-        cur.execute("""
+        cur.execute(f"""
             with per_mint as (
                 select mint,
                     (array_agg(a order by ts desc, kind desc, id desc))[1]
@@ -681,40 +849,43 @@ def fees_between(start, end=None):
                     (array_agg(usd order by ts desc, kind desc, id desc))[1]
                       - coalesce((array_agg(usd order by ts desc, kind desc, id desc)
                                   filter (where ts <= %(start)s))[1], 0) usd
-                from fee_points where ts <= %(end)s group by mint
+                from fee_points where ts <= %(end)s and {mint_in('fee_points.mint')} group by mint
             )
             select coalesce(sum(a), 0) a, coalesce(sum(b), 0) b,
                    coalesce(sum(usd), 0) usd from per_mint
-        """, {'start': start, 'end': end or now()})
+        """, _scope_args(book_scope(profile, wallet_id), start=start, end=end or now()))
         return dict(cur.fetchone())
 
 
-def trailing_rate(hours):
+def trailing_rate(hours, profile=None, wallet_id=None):
     """Fees earned per day over the last `hours`, from the ledger's own
     series: for every position, fees to date are its unharvested accrual plus
     what was harvested from it, so the window's earning is the rise of that
     sum, per position, summed. Realised does not move it, a rebalance does not
     reset it. None when the window has fewer than two points."""
     with cursor() as cur:
-        cur.execute("""
+        cur.execute(f"""
             with pts as (
                 select s.ts, s.mint,
                        s.accrued_usd + coalesce((select sum(h.fee_usd) from harvests h
                                                  where h.mint = s.mint and h.ts <= s.ts), 0) usd
                 from snapshots s
-                where s.ts >= now() - make_interval(hours => %s) - interval '10 minutes'
+                where s.ts >= now() - make_interval(hours => %(hours)s) - interval '10 minutes'
+                  and {mint_in('s.mint')}
                 union all
                 select h.ts, h.mint,
                        (select sum(fee_usd) from harvests x where x.mint = h.mint and x.ts <= h.ts)
-                from harvests h where h.ts >= now() - make_interval(hours => %s) - interval '10 minutes'
+                from harvests h where h.ts >= now() - make_interval(hours => %(hours)s) - interval '10 minutes'
+                  and {mint_in('h.mint')}
                 union all
                 select p.opened_at, p.mint, 0 from positions p
-                where p.opened_at >= now() - make_interval(hours => %s) - interval '10 minutes'
+                where p.opened_at >= now() - make_interval(hours => %(hours)s) - interval '10 minutes'
+                  and {POS_IN}
             ), per_mint as (
                 select mint, max(usd) - min(usd) usd, min(ts) t0, max(ts) t1 from pts group by mint
             )
             select coalesce(sum(usd), 0) usd, min(t0) t0, max(t1) t1, count(*) n from per_mint
-        """, (hours, hours, hours))
+        """, _scope_args(book_scope(profile, wallet_id), hours=hours))
         r = cur.fetchone()
     if not r or not r['n'] or r['t0'] is None or r['t1'] is None:
         return None
@@ -725,13 +896,13 @@ def trailing_rate(hours):
             'fees_per_day_usd': round(_f(r['usd']) / span_days, 4)}
 
 
-def by_pool():
+def by_pool(profile=None, wallet_id=None):
     """The book split by pool, and therefore by DEX: for every pool the bot
     has ever held, how long it was there, what it earned there realised and
     unrealised, and how often it was in range. The bot moves between DEXes
     now, so a single running total says nothing about which venue paid."""
     with cursor() as cur:
-        cur.execute("""
+        cur.execute(f"""
             with per_pos as (
                 select p.mint, p.dex, p.pool, p.pair_label, p.opened_at, p.closed_at,
                        coalesce((select sum(h.fee_usd) from harvests h where h.mint = p.mint), 0) realised_usd,
@@ -750,7 +921,7 @@ def by_pool():
                            (select s.position_usd from snapshots s where s.mint = p.mint
                             and s.position_usd is not null order by s.id desc limit 1)
                        else p.withdraw_usd end out_usd
-                from positions p
+                from positions p where {POS_IN}
             )
             select dex, pool, pair_label, count(*) positions,
                    count(*) filter (where closed_at is null) open_now,
@@ -766,7 +937,7 @@ def by_pool():
             from per_pos
             group by 1, 2, 3
             order by max(opened_at) desc
-        """)
+        """, _scope_args(book_scope(profile, wallet_id)))
         rows = []
         for r in cur.fetchall():
             d = dict(r)
@@ -792,45 +963,51 @@ def by_pool():
         return rows
 
 
-def _paid_usd(config_name):
+def _paid_usd(profile):
     try:
-        return float(payout_totals(config_name)['paid_usd'])
+        return float(payout_totals(profile)['paid_usd'])
     except Exception:
         return 0.0
 
 
-def daily_line(day):
+def daily_line(day, profile=None, wallet_id=None):
     """One UTC day of the book: re-centres (bands opened), fees harvested, and
     the value of the book (equity plus what was paid out) against a 50/50
     SOL/USDC hold of the day's opening equity. `day` is a date. None when the
     day has no snapshot with equity. Assumes no deposits or withdrawals other
-    than the payouts: the ledger does not record them."""
+    than the payouts: the ledger does not record them. Several profiles: one
+    line per profile, added up (combine_days)."""
+    names = book_scope(profile, wallet_id)
+    if len(names) != 1:
+        return combine_days([x for x in (daily_line(day, n) for n in names) if x])
     start = dt.datetime.combine(day, dt.time(0), tzinfo=dt.timezone.utc)
     end = start + dt.timedelta(days=1)
-    w = {'s': start, 'e': end}
+    w = _scope_args(names, s=start, e=end)
     with cursor() as cur:
-        cur.execute("""select (array_agg(equity_usd order by ts asc, id asc))[1] e0,
-                              (array_agg(price order by ts asc, id asc))[1] p0,
-                              (array_agg(equity_usd order by ts desc, id desc))[1] e1,
-                              (array_agg(price order by ts desc, id desc))[1] p1
-                       from snapshots where ts >= %(s)s and ts < %(e)s and equity_usd is not null""", w)
+        cur.execute(f"""select (array_agg(equity_usd order by ts asc, id asc))[1] e0,
+                               (array_agg(price order by ts asc, id asc))[1] p0,
+                               (array_agg(equity_usd order by ts desc, id desc))[1] e1,
+                               (array_agg(price order by ts desc, id desc))[1] p1
+                        from snapshots where ts >= %(s)s and ts < %(e)s and equity_usd is not null
+                          and {mint_in('snapshots.mint')}""", w)
         a = cur.fetchone()                    # an aggregate: always one row
         if a['e0'] is None:
             return None
-        cur.execute("""select count(*) n, count(*) filter (where open_reason ilike 'deploy%%idle%%') idle
-                       from positions where opened_at >= %(s)s and opened_at < %(e)s""", w)
+        cur.execute(f"""select count(*) n, count(*) filter (where open_reason ilike 'deploy%%idle%%') idle
+                        from positions p where opened_at >= %(s)s and opened_at < %(e)s and {POS_IN}""", w)
         r = cur.fetchone()
         n, idle = r['n'], r['idle']
-        cur.execute('select coalesce(sum(fee_usd), 0) f from harvests where ts >= %(s)s and ts < %(e)s', w)
+        cur.execute('select coalesce(sum(fee_usd), 0) f from harvests where ts >= %(s)s and ts < %(e)s '
+                    f"and {mint_in('harvests.mint')}", w)
         f = float(cur.fetchone()['f'])
         cur.execute("select coalesce(sum(usd), 0) u from payouts where kind in ('paid', 'uncertain') "
-                    "and ts >= %(s)s and ts < %(e)s", w)
+                    f"and ts >= %(s)s and ts < %(e)s and {PAYOUT_IN}", w)
         paid = float(cur.fetchone()['u'])
     e0, p0, e1, p1 = float(a['e0']), float(a['p0']), float(a['e1']), float(a['p1'])
     # Earned is accrual, the same basis as the book's "today" (fees_between);
     # fees_usd is what was harvested in the day (audit 2026-09-30: $0.61 of
     # the 09-30 figure was earned before midnight and harvested after).
-    earned = float(fees_between(start, min(end, now()))['usd'])
+    earned = float(fees_between(start, min(end, now()), names[0])['usd'])
     value = e1 + paid
     hold = e0 * (0.5 + 0.5 * p1 / p0) if p0 > 0 else None
     return {'day': day.isoformat(), 'complete': now() >= end,
@@ -844,38 +1021,53 @@ def daily_line(day):
             'vs_hold_usd': round(value - hold, 4) if hold is not None else None}
 
 
-def daily_lines(days=2):
+def daily_lines(days=2, profile=None, wallet_id=None):
     """The last `days` UTC days, newest first (today is the running one)."""
     today = now().date()
     out = []
     for k in range(days):
-        line = daily_line(today - dt.timedelta(days=k))
+        line = daily_line(today - dt.timedelta(days=k), profile, wallet_id)
         if line:
             out.append(line)
     return out
 
 
-def since_start(extra_usd=0.0):
+def since_start(extra_usd=0.0, profile=None, wallet_id=None):
     """Profit since the bot started, against the capital it started with and
     every deposit or withdrawal since (capital_flows), not against the first
     snapshot. `extra_usd` is value the snapshots do not count (rent in empty
     token accounts, reward dust), from the equity audit. Benchmarks: holding
-    what the baseline held (SOL-denominated) plus the flows, and a 50/50 hold
-    of the baseline. None without a baseline or a snapshot."""
+    what the baseline held (token A, the pool's base token, plus USDC) plus the
+    flows, and a 50/50 hold of the baseline. None without a baseline or a
+    snapshot. A flow's token A amount is amounts[<token A mint>] (config
+    mints[1], else deposit_mint) when the flow carries it, else the pre-020
+    `sol` column. Several profiles: each one's
+    own book with its own uncounted value (extra_usd is not used), added up
+    (combine_since)."""
+    names = book_scope(profile, wallet_id)
+    if len(names) != 1:
+        return combine_since([x for x in (since_start(_uncounted_usd(n), n) for n in names) if x])
     with cursor() as cur:
-        cur.execute("select ts, sol, usdc, usd, price from capital_flows where kind = 'baseline'")
+        cur.execute('select * from config where name = %s', (names[0],))
+        cfg = cur.fetchone() or {}
+        a = _scope_args(names, mint=(cfg.get('mints') or [None])[0] or cfg.get('deposit_mint'))
+        cur.execute("select ts, coalesce((amounts->>%(mint)s::text)::numeric, sol) sol, usdc, usd, price "
+                    f"from capital_flows where kind = 'baseline' and {PROFILE_IN} "
+                    "order by (profile is null), ts limit 1", a)
         base = cur.fetchone()
-        cur.execute("select equity_usd, price, ts from snapshots where equity_usd is not null order by ts desc, id desc limit 1")
+        cur.execute("select equity_usd, price, ts from snapshots where equity_usd is not null "
+                    f"and {mint_in('snapshots.mint')} order by ts desc, id desc limit 1", a)
         last = cur.fetchone()
         if not base or not last:
             return None
-        cur.execute("""select coalesce(sum(case when kind = 'deposit' then usd else -usd end), 0) net_usd,
-                              coalesce(sum(case when kind = 'deposit' then sol else -sol end), 0) net_sol,
-                              coalesce(sum(case when kind = 'deposit' then usdc else -usdc end), 0) net_usdc
-                       from capital_flows where kind in ('deposit', 'withdrawal')""")
+        cur.execute(f"""select coalesce(sum(case when kind = 'deposit' then usd else -usd end), 0) net_usd,
+                               coalesce(sum(case when kind = 'deposit' then coalesce((amounts->>%(mint)s::text)::numeric, sol)
+                                                 else -coalesce((amounts->>%(mint)s::text)::numeric, sol) end), 0) net_sol,
+                               coalesce(sum(case when kind = 'deposit' then usdc else -usdc end), 0) net_usdc
+                        from capital_flows where kind in ('deposit', 'withdrawal') and {PROFILE_IN}""", a)
         fl = cur.fetchone()
-        cur.execute("select coalesce(sum(usd), 0) u from payouts where kind in ('paid', 'uncertain') and ts >= %s",
-                    (base['ts'],))
+        cur.execute("select coalesce(sum(usd), 0) u from payouts where kind in ('paid', 'uncertain') "
+                    f"and ts >= %(since)s and {PAYOUT_IN}", dict(a, since=base['ts']))
         paid = float(cur.fetchone()['u'])
     p0, p1 = float(base['price']), float(last['price'])
     start = float(base['usd']) + float(fl['net_usd'])
@@ -903,17 +1095,39 @@ def _pnl(equity, started, paid, sst):
     return {'pnl_usd': round(_f(equity) - _f(started) + paid, 2), 'pnl_basis': 'first snapshot'}
 
 
-def _since_start_or_none():
+def _since_start_or_none(profile=None, wallet_id=None):
     try:
-        return since_start(float(audit_value('uncounted_usd') or 0.0))
+        names = book_scope(profile, wallet_id)
+        return since_start(_uncounted_usd(names[0]) if len(names) == 1 else 0.0, profile, wallet_id)
     except Exception:
         return None
+
+
+def _uncounted_usd(profile):
+    """Value the snapshots do not count (rent in empty token accounts, reward
+    dust) that the equity audit keeps per wallet (audit_state). It is the
+    wallet's, so only the wallet's residual owner carries it (a profile with
+    no wallet row is its own residual owner): a sum over profiles counts it
+    once. The legacy wallet's key may still be unprefixed (before the deploy
+    moved it)."""
+    with cursor() as cur:
+        cur.execute('select wallet_id, residual_owner from config where name = %s', (profile,))
+        cfg = cur.fetchone()
+        wid = cfg['wallet_id'] if cfg else None
+        if wid and not cfg['residual_owner']:
+            return 0.0
+        keys = [f'{wid}|uncounted_usd'] if wid else ['uncounted_usd']
+        if wid == LEGACY_WALLET:
+            keys.append('uncounted_usd')
+        cur.execute('select key, value from audit_state where key = any(%s)', (keys,))
+        vals = {r['key']: r['value'] for r in cur.fetchall()}
+    return next((float(vals[k] or 0.0) for k in keys if k in vals), 0.0)
 
 
 def audit_value(key):
     """A value the audits keep (audit_state), or None."""
     with cursor() as cur:
-        cur.execute('select value from audit_state where key = %s', (key,))
+        cur.execute('select value from audit_state where key = %s', (scoped(key, 'wallet_id'),))
         r = cur.fetchone()
     return r['value'] if r else None
 
@@ -921,32 +1135,42 @@ def audit_value(key):
 def set_audit_value(key, value):
     with cursor(commit=True) as cur:
         cur.execute('insert into audit_state (key, value, ts) values (%s, %s, now()) '
-                    'on conflict (key) do update set value = excluded.value, ts = excluded.ts', (key, str(value)))
+                    'on conflict (key) do update set value = excluded.value, ts = excluded.ts',
+                    (scoped(key, 'wallet_id'), str(value)))
 
 
 def record_audit(run_id, check_name, status, detail):
     if status not in ('ok', 'warn', 'fail'):
         raise ValueError(f'status must be ok, warn or fail, not {status!r}')
     with cursor(commit=True) as cur:
-        cur.execute('insert into audits (run_id, check_name, status, detail) values (%s,%s,%s,%s)',
-                    (run_id, check_name, status, json.dumps(detail, default=str)))
+        cur.execute('insert into audits (run_id, check_name, status, detail, profile, wallet_id) '
+                    'values (%s,%s,%s,%s,%s,%s)',
+                    (run_id, check_name, status, json.dumps(detail, default=str),
+                     CONTEXT.get('profile'), CONTEXT.get('wallet_id')))
         cur.execute("delete from audits where ts < now() - interval '30 days'")
 
 
-def record_flow(ts, kind, sol, usdc, usd, price, signature, detail):
-    """A deposit or withdrawal the flows audit found. One row per signature."""
+def record_flow(ts, kind, sol, usdc, usd, price, signature, detail, amounts=None, profile=None, wallet_id=None):
+    """A deposit or withdrawal the flows audit found. One row per signature.
+    `amounts` is {mint: human amount} for any token; sol/usdc stay for the
+    pre-020 readers. `profile` and `wallet_id` name the book the flow is
+    for (the audit runs in the residual owner and books a MU deposit to
+    mu-usdc); by default this process's own (CONTEXT)."""
     if kind not in ('deposit', 'withdrawal'):
         raise ValueError(f'kind must be deposit or withdrawal, not {kind!r}')
     with cursor(commit=True) as cur:
-        cur.execute('insert into capital_flows (ts, kind, sol, usdc, usd, price, signature, detail) '
-                    'values (%s,%s,%s,%s,%s,%s,%s,%s) on conflict (signature) do nothing',
-                    (ts, kind, sol, usdc, usd, price, signature, detail))
+        cur.execute('insert into capital_flows (ts, kind, sol, usdc, usd, price, signature, detail, '
+                    'amounts, wallet_id, profile) '
+                    'values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) on conflict (signature) do nothing',
+                    (ts, kind, sol, usdc, usd, price, signature, detail,
+                     json.dumps(amounts) if amounts is not None else None,
+                     wallet_id or CONTEXT.get('wallet_id'), profile or CONTEXT.get('profile')))
         return cur.rowcount == 1
 
 
-def _daily_or_none():
+def _daily_or_none(profile=None, wallet_id=None):
     try:
-        return daily_lines(2)
+        return daily_lines(2, profile, wallet_id)
     except Exception:
         return None             # the book never fails over its daily line
 
@@ -994,7 +1218,7 @@ def deployment_now(book, lp_usd):
     return {'lp_usd': round(lp, 2), 'wallet_usd': round(float(eq) - lp, 2), 'deployed_pct': _pct(lp, eq)}
 
 
-def stats(token_a=None, token_b=None):
+def stats(token_a=None, token_b=None, profile=None, wallet_id=None):
     """Everything cumulative, in both tokens and in dollars.
 
     Fees are earned in two currencies, not one. A position pays you token A and
@@ -1006,13 +1230,21 @@ def stats(token_a=None, token_b=None):
     Realised means harvested into the wallet: permanent. Unrealised means still
     sitting in the position and reset to zero the moment it closes. Their sum is
     what the ledger has seen you earn, and it only goes up.
+
+    The book of one profile: this process's own when no filter is given (see
+    book_scope). Several profiles: one book each, added up (combine_books).
     """
+    names = book_scope(profile, wallet_id)
+    if len(names) != 1:
+        return combine_books([stats(profile=n) for n in names])
+    name = names[0]
+    a = _scope_args(names)
     with cursor() as cur:
-        cur.execute('select * from config where active')
+        cur.execute('select * from config where name = %s', (name,))
         cfg = cur.fetchone() or {}
 
         cur.execute('select coalesce(sum(fee_a),0) a, coalesce(sum(fee_b),0) b, '
-                    'coalesce(sum(fee_usd),0) usd, count(*) n from harvests')
+                    f"coalesce(sum(fee_usd),0) usd, count(*) n from harvests where {mint_in('harvests.mint')}", a)
         r = cur.fetchone()
 
         # The latest snapshot, and whether the position it describes still
@@ -1026,44 +1258,44 @@ def stats(token_a=None, token_b=None):
                     's.p_exit_72h, s.band_position, s.position_usd, s.wallet_usd, p.opened_at, '
                     '(p.mint is not null and p.closed_at is null) as open '
                     'from snapshots s left join positions p on p.mint = s.mint '
-                    'order by s.id desc limit 1')
+                    f"where {mint_in('s.mint')} order by s.id desc limit 1", a)
         latest = cur.fetchone()
         if latest and not latest['open']:
             latest = dict(latest, accrued_a=0, accrued_b=0, accrued_usd=0)
 
         # The clock starts when the first position opened, not when the first
         # snapshot landed. A restart must not reset the denominator of the rate.
-        cur.execute('''
+        cur.execute(f'''
             select least(
-                     (select min(ts) from snapshots),
-                     (select min(opened_at) from positions)
+                     (select min(ts) from snapshots where {mint_in('snapshots.mint')}),
+                     (select min(opened_at) from positions p where {POS_IN})
                    ) t0,
                    (select avg(case when in_range then 1.0 else 0.0 end)
-                    from snapshots) ir
-        ''')
+                    from snapshots where {mint_in('snapshots.mint')}) ir
+        ''', a)
         span = cur.fetchone()
 
         cur.execute('select equity_usd from snapshots where equity_usd is not null '
-                    'order by id asc limit 1')
+                    f"and {mint_in('snapshots.mint')} order by id asc limit 1", a)
         first_eq = cur.fetchone()
 
-        cur.execute("""
+        cur.execute(f"""
             select count(*) filter (where closed_at is null) open_now,
-                   count(*) total from positions
-        """)
+                   count(*) total from positions p where {POS_IN}
+        """, a)
         pos = cur.fetchone()
 
         # Where the money is, from the ledger rather than the config: the two
         # agree except in the seconds between a repoint and the next open.
-        cur.execute('select dex, pool, pair_label from positions where closed_at is null '
-                    'order by opened_at desc limit 1')
+        cur.execute('select dex, pool, pair_label from positions p where closed_at is null '
+                    f'and {POS_IN} order by opened_at desc limit 1', a)
         cur_pos = cur.fetchone()
 
-        cur.execute("""
+        cur.execute(f"""
             select count(*) filter (where kind = 'REBAND') rebands,
-                   count(*) filter (where kind ilike '%fail%') failures
-            from events
-        """)
+                   count(*) filter (where kind ilike '%%fail%%') failures
+            from events where {PROFILE_IN}
+        """, a)
         ev = cur.fetchone()
 
     u_a = _f(latest and latest['accrued_a'])
@@ -1075,13 +1307,13 @@ def stats(token_a=None, token_b=None):
         # that could be priced stands in, and says how old it is.
         with cursor() as cur:
             cur.execute('select equity_usd, ts from snapshots where equity_usd is not null '
-                        'order by id desc limit 1')
+                        f"and {mint_in('snapshots.mint')} order by id desc limit 1", a)
             last_priced = cur.fetchone()
         equity = last_priced and last_priced['equity_usd']
     started = first_eq and first_eq['equity_usd']
-    sst = _since_start_or_none()
+    sst = _since_start_or_none(name)
 
-    today = fees_between(now().replace(hour=0, minute=0, second=0, microsecond=0))
+    today = fees_between(now().replace(hour=0, minute=0, second=0, microsecond=0), None, name)
 
     days = None
     if latest and span and span['t0']:
@@ -1092,8 +1324,8 @@ def stats(token_a=None, token_b=None):
     # Annualised on the capital actually at work, not on notional.
     apr = (rate / float(equity) * 365 * 100) if (rate and equity) else None
 
-    pools = by_pool()
-    t6, t24 = trailing_rate(6), trailing_rate(24)
+    pools = by_pool(name)
+    t6, t24 = trailing_rate(6, name), trailing_rate(24, name)
     outlook = season_outlook(season())
     eq_f = _f(equity) if equity else None
     apr_of = lambda t: (round(t['fees_per_day_usd'] / eq_f * 365 * 100, 2)
@@ -1155,12 +1387,12 @@ def stats(token_a=None, token_b=None):
         # Without a baseline, the first-snapshot figure, labelled as such.
         # Payouts leave the LP wallet by design; they are income, not a loss
         # (review, 2026-09-26: the book counted every payout against P&L).
-        **_pnl(equity, started, _paid_usd(cfg.get('name')), sst),
+        **_pnl(equity, started, _paid_usd(name), sst),
         'in_range_pct': (round(_f(span['ir']) * 100, 1)
                          if span and span['ir'] is not None else None),
         'tracked_days': round(days, 3) if days else None,
-        'split': payout_totals(cfg.get('name')) if cfg.get('payout_enabled') else None,
-        'daily': _daily_or_none(),
+        'split': payout_totals(name) if cfg.get('payout_enabled') else None,
+        'daily': _daily_or_none(name),
         'since_start': sst,
         'last_price': _f(latest and latest['price']) or None,
         'last_seen': latest['ts'].isoformat() if latest else None,
@@ -1176,7 +1408,115 @@ def stats(token_a=None, token_b=None):
     }
 
 
-def forecasts(horizons=(6, 24, 72)):
+# How books of several profiles add up (combine_*). Dollars add across pools;
+# token amounts only across books of the same token; counts add.
+BOOK_USD = ('fees_today_usd', 'fees_realised_usd', 'fees_unrealised_usd', 'fees_total_usd', 'fees_per_day_usd',
+            'fees_per_day_6h_usd', 'fees_per_day_24h_usd', 'expected_next_hours_fees_per_day_usd', 'equity_usd',
+            'lp_usd', 'wallet_usd', 'equity_start_usd', 'pnl_usd', 'pnl_all_pools_usd', 'position_pnl_all_pools_usd')
+BOOK_COUNTS = ('harvests', 'positions_opened', 'positions_open_now', 'rebands', 'failures')
+BOOK_TOKENS = {'token_a': ('fees_today_a', 'fees_realised_a', 'fees_unrealised_a', 'fees_total_a'),
+               'token_b': ('fees_today_b', 'fees_realised_b', 'fees_unrealised_b', 'fees_total_b')}
+BOOK_SAME = ('pair', 'dex', 'position_dex', 'position_pair', 'position_pool', 'pnl_basis')
+DAY_USD = ('fees_usd', 'fees_earned_usd', 'equity_open', 'equity_close', 'paid_out_usd', 'value_change_usd')
+SINCE_USD = ('start_usd', 'equity_usd', 'uncounted_usd', 'paid_out_usd', 'value_usd', 'profit_usd',
+             'hold_start_assets_usd', 'vs_hold_start_assets_usd', 'hold_50_50_usd', 'vs_hold_50_50_usd')
+
+
+def _sum_known(values, digits=4):
+    """The sum of the values that are known, or None when none is. Pure."""
+    known = [_f(v) for v in values if v is not None]
+    return round(sum(known), digits) if known else None
+
+
+def _same(values):
+    """The one value all share, or None when they differ. Pure."""
+    s = set(values)
+    return s.pop() if len(s) == 1 else None
+
+
+def combine_days(lines):
+    """One UTC day's lines (daily_line) of several profiles as one line.
+    Counts and dollars add; the prices are one pool's and are dropped; the
+    hold benchmark adds only when every line has one. One line is returned
+    as it is; no line is None. Pure."""
+    if len(lines) <= 1:
+        return lines[0] if lines else None
+    days = {x['day'] for x in lines}
+    if len(days) != 1:
+        raise ValueError(f'lines of different days: {sorted(days)}')
+    out = {'day': days.pop(), 'complete': all(x['complete'] for x in lines),
+           'recentres': sum(x['recentres'] for x in lines), 'idle_redeploys': sum(x['idle_redeploys'] for x in lines)}
+    for k in DAY_USD:
+        out[k] = round(sum(_f(x[k]) for x in lines), 4)
+    out['fees_per_recentre_usd'] = round(out['fees_usd'] / out['recentres'], 4) if out['recentres'] else None
+    out['price_open'] = out['price_close'] = None
+    for k in ('hold_50_50_usd', 'vs_hold_usd'):
+        out[k] = round(sum(_f(x[k]) for x in lines), 4) if all(x[k] is not None for x in lines) else None
+    return out
+
+
+def combine_since(books):
+    """since_start() of several profiles as one: dollars add, the start is the
+    earliest, the token amount and the prices (one pool's each) are None. One
+    book is returned as it is; none is None. Pure."""
+    if len(books) <= 1:
+        return books[0] if books else None
+    out = {k: round(sum(_f(s[k]) for s in books), 4) for k in SINCE_USD}
+    out.update(since=min(s['since'] for s in books), days=max(s['days'] for s in books),
+               start_sol=None, price_start=None, price_now=None,
+               profit_pct=(round((out['value_usd'] / out['start_usd'] - 1) * 100, 3) if out['start_usd'] else None))
+    return out
+
+
+def combine_books(books):
+    """Several profiles' books (stats()) as one. Dollars and counts add (the
+    snapshot's wallet_usd is each profile's own sleeve, so nothing is counted
+    twice). A token amount adds only across books that hold the same token on
+    that side, else it is None: SOL and MU do not add. What belongs to one
+    pool (its price, its band) is None. APRs are recomputed over the books that
+    have both the rate and an equity. One book is returned as it is. Pure."""
+    if len(books) == 1:
+        return books[0]
+    out = {k: _sum_known([b.get(k) for b in books]) for k in BOOK_USD}
+    out.update({k: sum(int(b.get(k) or 0) for b in books) for k in BOOK_COUNTS})
+    for side, keys in BOOK_TOKENS.items():
+        sym = _same(b.get(side) for b in books)
+        out[side] = sym
+        out.update({k: (_sum_known([b.get(k) for b in books], 6) if sym else None) for k in keys})
+    out.update({k: _same(b.get(k) for b in books) for k in BOOK_SAME})
+
+    def apr(rate_key):
+        known = [(_f(b[rate_key]), _f(b['equity_usd'])) for b in books
+                 if b.get(rate_key) is not None and b.get('equity_usd')]
+        eq = sum(e for _, e in known)
+        return round(sum(r for r, _ in known) / eq * 365 * 100, 2) if eq > 0 else None
+    ranged = [(_f(b['in_range_pct']), _f(b.get('tracked_days'))) for b in books if b.get('in_range_pct') is not None]
+    weight = sum(d for _, d in ranged)
+    days = {}
+    for b in books:
+        for line in b.get('daily') or []:
+            days.setdefault(line['day'], []).append(line)
+    splits = [b['split'] for b in books if b.get('split')]
+    out.update(
+        apr_pct=apr('fees_per_day_usd'), apr_6h_pct=apr('fees_per_day_6h_usd'), apr_24h_pct=apr('fees_per_day_24h_usd'),
+        in_range_pct=round(sum(p * d for p, d in ranged) / weight, 1) if weight > 0 else None,
+        tracked_days=max((b['tracked_days'] for b in books if b.get('tracked_days') is not None), default=None),
+        # a share only when every book's share could be checked
+        deployed_pct=(_pct(out['lp_usd'] or 0.0, out['equity_usd'])
+                      if all(b.get('deployed_pct') is not None for b in books) else None),
+        dexes_held=sorted({d for b in books for d in b.get('dexes_held') or []}),
+        by_pool=[p for b in books for p in b.get('by_pool') or []],
+        season=next((b['season'] for b in books if b.get('season')), None),
+        split=({k: (sum(int(s[k]) for s in splits) if k == 'payouts' else round(sum(_f(s[k]) for s in splits), 4))
+                for k in splits[0]} if splits else None),
+        daily=[combine_days(v) for _, v in sorted(days.items(), reverse=True)],
+        since_start=combine_since([b['since_start'] for b in books if b.get('since_start')]),
+        last_price=None, band=None,
+        last_seen=max((b['last_seen'] for b in books if b.get('last_seen')), default=None))
+    return out
+
+
+def forecasts(horizons=(6, 24, 72), profile=None, wallet_id=None):
     """The survival model against the tape it ran on. For every snapshot that
     carried a forecast, whether the SAME position was seen out of range within
     the horizon (a position that closed for another reason before the horizon
@@ -1184,17 +1524,18 @@ def forecasts(horizons=(6, 24, 72)):
     bucketed by decile so a bucket's mean forecast can be read next to its
     realised exit rate; Brier is the mean squared error of the probability."""
     out = {}
+    names = book_scope(profile, wallet_id)
     with cursor() as cur:
         for h in horizons:
             cur.execute(f"""
                 with f as (
                     select s.id, s.ts, s.mint, s.p_exit_{h}h p
                     from snapshots s
-                    where s.p_exit_{h}h is not null and s.in_range
+                    where s.p_exit_{h}h is not null and s.in_range and {mint_in('s.mint')}
                 ), o as (
                     select f.id, f.p,
                            exists (select 1 from snapshots x where x.mint = f.mint
-                                   and x.ts > f.ts and x.ts <= f.ts + make_interval(hours => %s)
+                                   and x.ts > f.ts and x.ts <= f.ts + make_interval(hours => %(h)s)
                                    and not x.in_range) exited,
                            (select max(x.ts) from snapshots x where x.mint = f.mint) last_seen
                     from f
@@ -1203,9 +1544,9 @@ def forecasts(horizons=(6, 24, 72)):
                        avg(case when exited then 1.0 else 0.0 end) exit_rate,
                        avg((p - case when exited then 1.0 else 0.0 end) ^ 2) brier
                 from o
-                where exited or last_seen >= (select ts from snapshots where id = o.id) + make_interval(hours => %s)
+                where exited or last_seen >= (select ts from snapshots where id = o.id) + make_interval(hours => %(h)s)
                 group by 1 order by 1
-            """, (h, h))
+            """, _scope_args(names, h=h))
             rows = [dict(r) for r in cur.fetchall()]
             n = sum(r['n'] for r in rows)
             brier = (sum(_f(r['brier']) * r['n'] for r in rows) / n) if n else None
@@ -1215,21 +1556,22 @@ def forecasts(horizons=(6, 24, 72)):
     return out
 
 
-def daily():
+def daily(profile=None, wallet_id=None):
     """Fees per UTC day. One row per day.
 
     A position's earnings to date are its unharvested accrual plus everything
     already harvested from it. That sum is what grows as fees come in and does
     not move when a harvest turns accrued into realised, so the day's earning
     is its rise over the day, per position, summed. Adding harvests to the
-    accrual delta instead counted a $0.26 harvest twice.
+    accrual delta instead counted a $0.26 harvest twice. The day's equity is
+    each profile's highest of the day, added up over the profiles.
     """
     with cursor() as cur:
-        cur.execute("""
+        cur.execute(f"""
             with last_per_day as (
                 select distinct on ((ts at time zone 'utc')::date, mint)
                        (ts at time zone 'utc')::date d, mint, a, b, usd
-                from fee_points
+                from fee_points where {mint_in('fee_points.mint')}
                 order by (ts at time zone 'utc')::date, mint, ts desc, kind desc, id desc
             ), per_mint as (
                 select d, mint,
@@ -1239,17 +1581,21 @@ def daily():
                 from last_per_day window w as (partition by mint order by d)
             ), f as (
                 select d, sum(a) a, sum(b) b, sum(usd) usd from per_mint group by d
+            ), snaps as (
+                select (ts at time zone 'utc')::date d, in_range, equity_usd,
+                       coalesce((select x.config_name from positions x where x.mint = s.mint), %(legacy)s) prof
+                from snapshots s where {mint_in('s.mint')}
+            ), eq as (
+                select d, sum(eq) eq from (select d, prof, max(equity_usd) eq from snaps group by 1, 2) t group by d
             ), s as (
-                select (ts at time zone 'utc')::date d,
-                       avg(case when in_range then 1.0 else 0.0 end) ir,
-                       max(equity_usd) eq
-                from snapshots group by 1
+                select snaps.d, avg(case when in_range then 1.0 else 0.0 end) ir, max(eq.eq) eq
+                from snaps join eq on eq.d = snaps.d group by 1
             )
             , where_ as (
                 -- the pools the money sat in that day, most-snapshotted first
                 select (s.ts at time zone 'utc')::date d,
                        string_agg(distinct p.dex || ' ' || p.pair_label, ', ') pools
-                from snapshots s join positions p on p.mint = s.mint group by 1
+                from snapshots s join positions p on p.mint = s.mint where {POS_IN} group by 1
             )
             select coalesce(f.d, s.d)::date as day,
                    coalesce(f.a, 0) fee_a, coalesce(f.b, 0) fee_b, coalesce(f.usd, 0) fee_usd,
@@ -1257,14 +1603,15 @@ def daily():
             from f full outer join s on f.d = s.d
             left join where_ w on w.d = coalesce(f.d, s.d)
             order by 1 desc limit 60
-        """)
+        """, _scope_args(book_scope(profile, wallet_id)))
         return [dict(r) for r in cur.fetchall()]
 
 
-def history(limit=30):
+def history(limit=30, profile=None, wallet_id=None):
     with cursor() as cur:
         cur.execute('select ts, price, in_range, accrued_usd, equity_usd '
-                    'from snapshots order by id desc limit %s', (limit,))
+                    f"from snapshots where {mint_in('snapshots.mint')} order by id desc limit %(limit)s",
+                    _scope_args(book_scope(profile, wallet_id), limit=limit))
         return [dict(r) for r in cur.fetchall()]
 
 
@@ -1378,11 +1725,13 @@ def migrate_sqlite(path='ledger.sqlite'):
     return moved
 
 
-def _print_stats():
-    s = stats()
-    a, b = s['token_a'], s['token_b']
+def _print_stats(profile=None, wallet_id=None):
+    s = stats(profile=profile, wallet_id=wallet_id)
+    # a combined book of different tokens has no token amount on that side
+    a, b = s['token_a'] or '-', s['token_b'] or '-'
+    tk = lambda x: f'{x:>12.6f}' if x is not None else f"{'-':>12}"
     w = lambda lbl, ka, kb, ku: print(
-        f"  {lbl:<11} {s[ka]:>12.6f} {a:<5} {s[kb]:>12.6f} {b:<5} ${s[ku]:.4f}")
+        f"  {lbl:<11} {tk(s[ka])} {a:<5} {tk(s[kb])} {b:<5} ${s[ku]:.4f}")
     print(f"{s.get('dex') or ''} {s['pair'] or '-'}   {s['positions_open_now']} open   "
           f"in range {s['in_range_pct']}%   over {s['tracked_days']}d")
     print('FEES')
@@ -1421,19 +1770,36 @@ def _print_stats():
           f"· {s['harvests']} harvests · {s['failures']} failures")
 
 
+def _scope_flags(argv):
+    """argv without `--pool P` / `--wallet W`, and the book filters they name.
+    Pure."""
+    rest, scope = [], {'profile': None, 'wallet_id': None}
+    it = iter(argv)
+    for x in it:
+        if x in ('--pool', '--wallet'):
+            v = next(it, None)
+            if not v:
+                raise SystemExit(f'{x} needs a value')
+            scope['profile' if x == '--pool' else 'wallet_id'] = v
+        else:
+            rest.append(x)
+    return rest, scope
+
+
 if __name__ == '__main__':
     import sys
-    cmd = sys.argv[1] if len(sys.argv) > 1 else 'stats'
-    arg = sys.argv[2] if len(sys.argv) > 2 else None
+    argv, SCOPE = _scope_flags(sys.argv)
+    cmd = argv[1] if len(argv) > 1 else 'stats'
+    arg = argv[2] if len(argv) > 2 else None
 
     if cmd == 'seed':
         print(json.dumps(seed(), indent=1, default=str))
     elif cmd == 'add':
         # db.py add <name> <pool> [key=value ...]
-        if len(sys.argv) < 4:
+        if len(argv) < 4:
             raise SystemExit('usage: db.py add <name> <pool> [capital_usd=... ...]')
-        kv = dict(p.partition('=')[::2] for p in sys.argv[4:])
-        print(json.dumps(add(arg, sys.argv[3], **kv), indent=1, default=str))
+        kv = dict(p.partition('=')[::2] for p in argv[4:])
+        print(json.dumps(add(arg, argv[3], **kv), indent=1, default=str))
     elif cmd == 'migrate':
         print(json.dumps(migrate_sqlite(arg or 'ledger.sqlite'), indent=1, default=str))
     elif cmd == 'config':
@@ -1442,17 +1808,17 @@ if __name__ == '__main__':
         print('active:', activate(arg))
     elif cmd == 'set':
         # db.py set <profile> key=value [key=value ...]
-        profile, pairs = arg, sys.argv[3:]
+        profile, pairs = arg, argv[3:]
         for p in pairs:
             k, _, v = p.partition('=')
             row = set_param(profile, k.strip(), v.strip())
             print(f'{k.strip()} = {row[k.strip()]}')
     elif cmd == 'repoint':
         # db.py repoint <profile> <dex> <pool>
-        if len(sys.argv) < 5:
+        if len(argv) < 5:
             raise SystemExit('usage: db.py repoint <profile> <dex> <pool>')
-        info = describe_pool(sys.argv[4], sys.argv[3])
-        row = repoint(arg, sys.argv[3], sys.argv[4], info['pair_label'],
+        info = describe_pool(argv[4], argv[3])
+        row = repoint(arg, argv[3], argv[4], info['pair_label'],
                       info['token_a'], info['token_b'])
         print(f"{row['name']} -> {row['dex']} {row['pair_label']} {row['pool']}  (restart the bot)")
     elif cmd == 'board':
@@ -1463,21 +1829,21 @@ if __name__ == '__main__':
         print(f"scan #{run['id']} at {run['ts']:%Y-%m-%d %H:%M} UTC  "
               f"{run['pools_scored']}/{run['pools_listed']} scored  "
               f"{float(run['duration_s'] or 0):.0f}s  errors {dict(run['errors'] or {})}")
-        engine.print_board(rows, top=int(sys.argv[3]) if len(sys.argv) > 3 else 40)
+        engine.print_board(rows, top=int(argv[3]) if len(argv) > 3 else 40)
     elif cmd == 'pools':
-        for r in by_pool():
+        for r in by_pool(**SCOPE):
             rate = f"${r['fees_per_day_usd']:.4f}/day" if r['fees_per_day_usd'] is not None else '-'
             print(f"{'>' if r['open_now'] else ' '} {r['dex']:<22} {r['pair_label']:<12} "
                   f"{r['positions']} pos  {r['days']:>6.2f}d  fees ${r['fees_usd']:.4f} "
                   f"(real ${r['realised_usd']:.4f} + unreal ${r['unrealised_usd']:.4f})  {rate:>14}  "
                   f"in range {r['in_range_pct'] if r['in_range_pct'] is not None else '-'}%  {r['pool']}")
     elif cmd == 'daily':
-        for d in reversed(daily()):
+        for d in reversed(daily(**SCOPE)):
             print(f"{d['day']}  {float(d['fee_a']):.6f} A  {float(d['fee_b']):.6f} B  "
                   f"${float(d['fee_usd']):.4f}  in range "
                   f"{(float(d['in_range'] or 0) * 100):.0f}%  {d.get('pools') or ''}")
     elif cmd == 'history':
-        for r in reversed(history()):
+        for r in reversed(history(**SCOPE)):
             print(f"{r['ts']:%Y-%m-%d %H:%M}  price {float(r['price'] or 0):>9.4f}  "
                   f"in_range {r['in_range']!s:<5}  accrued "
                   f"${float(r['accrued_usd'] or 0):.4f}  "
@@ -1492,11 +1858,11 @@ if __name__ == '__main__':
             if x['n']:
                 print(f"  +/-{w:<5}%      said {x['said']:.0%}  saw {x['saw']:.0%}  Brier {x['brier']}  n={x['n']}")
     elif cmd == 'forecasts':
-        for h, r in forecasts().items():
+        for h, r in forecasts(**SCOPE).items():
             print(f"P(exit within {h}h): {r['n']} forecasts resolved, Brier {r['brier']}")
             for b in r['buckets']:
                 print(f"    predicted {b['p_mean']:.0%}  realised {b['exit_rate']:.0%}  (n={b['n']})")
     elif cmd == 'json':
-        print(json.dumps(stats(), indent=1, default=str))
+        print(json.dumps(stats(**SCOPE), indent=1, default=str))
     else:
-        _print_stats()
+        _print_stats(**SCOPE)

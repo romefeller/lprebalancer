@@ -7,6 +7,7 @@ below turns that into one record the engine can score without knowing where the
 pool lives:
 
     dex             'orca' | 'raydium-clmm' | 'byreal' | 'pancakeswap-v3-solana' | 'meteora-dlmm'
+                    | 'aerodrome-slipstream' (Base; single-pool lookup only, never on the board)
     kind            'clmm' (ticks) | 'dlmm' (bins)
     address, pair
     token_a/token_b {address, symbol, name, decimals}
@@ -772,10 +773,193 @@ def _jupiter_token(mint):
     return None
 
 
+# --- Base: Aerodrome Slipstream (EVM) ------------------------------------------
+# One pool at a time, by address: `pool('aerodrome-slipstream', addr)`. Not on
+# the Solana board (KNOWN, ADAPTERS): the scanner never lists Base pools.
+# The pool's state comes from the chain (eth_call, one JSON-RPC batch); volume
+# and TVL from GeckoTerminal's 'base' network. The fee is what an UNSTAKED
+# position keeps: the pool's current fee() less the unstakedFee share the gauge
+# takes (5% on 2026-10-01). fee() is dynamic (base + tick-volatility term), and
+# the first swap of each block pays a cheaper initial fee (150 pips on this
+# pool), so the realised fee runs below fee().
+
+GECKO_BASE = 'https://api.geckoterminal.com/api/v2/networks/base'
+BASE_RPCS = ('https://mainnet.base.org', 'https://base-rpc.publicnode.com')
+SLIPSTREAM_FACTORY = '0x5e7bb104d84c7cb9b682aac2f3d509f5f406809a'
+_SEL = {'token0': '0x0dfe1681', 'token1': '0xd21220a7', 'tickSpacing': '0xd0c93a7c',
+        'fee': '0xddca3f43', 'unstakedFee': '0xb64cc67b', 'liquidity': '0x1a686502',
+        'stakedLiquidity': '0x3ab04b20', 'slot0': '0x3850c7bd', 'factory': '0xc45a0155',
+        'decimals': '0x313ce567', 'symbol': '0x95d89b41'}
+_RC = [0x0000000000000001, 0x0000000000008082, 0x800000000000808A, 0x8000000080008000,
+       0x000000000000808B, 0x0000000080000001, 0x8000000080008081, 0x8000000000008009,
+       0x000000000000008A, 0x0000000000000088, 0x0000000080008009, 0x000000008000000A,
+       0x000000008000808B, 0x800000000000008B, 0x8000000000008089, 0x8000000000008003,
+       0x8000000000008002, 0x8000000000000080, 0x000000000000800A, 0x800000008000000A,
+       0x8000000080008081, 0x8000000000008080, 0x0000000080000001, 0x8000000080008008]
+_ROT = [[0, 36, 3, 41, 18], [1, 44, 10, 45, 2], [62, 6, 43, 15, 61],
+        [28, 55, 25, 21, 56], [27, 20, 39, 8, 14]]
+_M64 = (1 << 64) - 1
+
+
+def keccak256(data):
+    """Keccak-256 as Ethereum uses it (NOT hashlib's sha3_256: different
+    padding). Only for EIP-55 checksums of a few addresses; pure Python."""
+    rate = 136
+    msg = bytearray(data) + b'\x01'
+    msg += b'\x00' * (-len(msg) % rate)
+    msg[-1] |= 0x80
+    a = [[0] * 5 for _ in range(5)]
+    for off in range(0, len(msg), rate):
+        for i in range(rate // 8):
+            a[i % 5][i // 5] ^= int.from_bytes(msg[off + 8 * i:off + 8 * i + 8], 'little')
+        for rc in _RC:
+            c = [a[x][0] ^ a[x][1] ^ a[x][2] ^ a[x][3] ^ a[x][4] for x in range(5)]
+            d = [c[(x - 1) % 5] ^ (((c[(x + 1) % 5] << 1) | (c[(x + 1) % 5] >> 63)) & _M64) for x in range(5)]
+            a = [[a[x][y] ^ d[x] for y in range(5)] for x in range(5)]
+            b = [[0] * 5 for _ in range(5)]
+            for x in range(5):
+                for y in range(5):
+                    r = _ROT[x][y]
+                    b[y][(2 * x + 3 * y) % 5] = ((a[x][y] << r) | (a[x][y] >> (64 - r))) & _M64 if r else a[x][y]
+            a = [[b[x][y] ^ ((~b[(x + 1) % 5][y]) & b[(x + 2) % 5][y]) for y in range(5)] for x in range(5)]
+            a[0][0] ^= rc
+    return b''.join(a[i % 5][i // 5].to_bytes(8, 'little') for i in range(4))
+
+
+def checksum_address(addr):
+    """EIP-55 mixed-case form of a 0x address, as the EVM signer prints it, so
+    the loop's string comparisons agree with the signer's output."""
+    h = addr.lower().removeprefix('0x')
+    if len(h) != 40 or any(ch not in '0123456789abcdef' for ch in h):
+        raise ValueError(f'not an address: {addr!r}')
+    digest = keccak256(h.encode()).hex()
+    return '0x' + ''.join(ch.upper() if int(digest[i], 16) >= 8 else ch for i, ch in enumerate(h))
+
+
+def _base_rpcs():
+    own = os.environ.get('LPBOT_BASE_RPC')
+    return ((own,) if own else ()) + BASE_RPCS
+
+
+def evm_calls(calls, urls=None, timeout=20):
+    """eth_call each (to, data) at 'latest' in ONE JSON-RPC batch. Returns the
+    hex results in order. Any error, missing id or failed call moves to the
+    next endpoint; all failing raises. In-process: the URL may carry a key."""
+    body = json.dumps([{'jsonrpc': '2.0', 'id': i, 'method': 'eth_call',
+                        'params': [{'to': to, 'data': data}, 'latest']}
+                       for i, (to, data) in enumerate(calls)]).encode()
+    errors = []
+    for url in urls or _base_rpcs():
+        try:
+            req = urllib.request.Request(url, data=body, headers={'content-type': 'application/json',
+                                                                  'user-agent': UA})
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                rows = json.loads(resp.read())
+            by_id = {r.get('id'): r for r in rows} if isinstance(rows, list) else {}
+            out = []
+            for i in range(len(calls)):
+                r = by_id.get(i) or {}
+                if 'result' not in r or r['result'] in (None, '0x'):
+                    raise RuntimeError(f"call {i}: {(r.get('error') or {}).get('message', 'no result')}")
+                out.append(r['result'])
+            return out
+        except Exception as e:         # next endpoint; the last error is reported
+            errors.append(f'{url.split("/")[2]}: {str(e)[:120]}')
+    raise RuntimeError('all Base RPC endpoints failed: ' + ' | '.join(errors))
+
+
+def _words(hexstr):
+    h = hexstr.removeprefix('0x')
+    return [int(h[i:i + 64], 16) for i in range(0, len(h), 64)]
+
+
+def _signed(word, bits):
+    word &= (1 << bits) - 1
+    return word - (1 << bits) if word >> (bits - 1) else word
+
+
+def _abi_string(hexstr):
+    """An ABI-encoded `string` return (dynamic), or a bytes32 one (old tokens)."""
+    w = _words(hexstr)
+    h = hexstr.removeprefix('0x')
+    if len(w) >= 3 and w[0] == 32:
+        return bytes.fromhex(h[128:128 + 2 * w[1]]).decode('utf-8', 'replace')
+    return bytes.fromhex(h[:64]).rstrip(b'\0').decode('utf-8', 'replace')
+
+
+def _evm_addr(word):
+    return checksum_address(f'0x{word & ((1 << 160) - 1):040x}')
+
+
+def slipstream_state(address, urls=None):
+    """The pool's own facts, from the chain. Refuses a pool of another factory."""
+    names = ['factory', 'token0', 'token1', 'tickSpacing', 'fee', 'unstakedFee',
+             'liquidity', 'stakedLiquidity', 'slot0']
+    res = evm_calls([(address, _SEL[n]) for n in names], urls)
+    st = {n: _words(r) for n, r in zip(names, res)}
+    if f"0x{st['factory'][0]:040x}" != SLIPSTREAM_FACTORY:
+        raise ValueError(f'{address} is not a pool of the Slipstream factory {SLIPSTREAM_FACTORY}')
+    t0, t1 = _evm_addr(st['token0'][0]), _evm_addr(st['token1'][0])
+    tok = evm_calls([(t0, _SEL['decimals']), (t1, _SEL['decimals']),
+                     (t0, _SEL['symbol']), (t1, _SEL['symbol'])], urls)
+    da, db_ = _words(tok[0])[0], _words(tok[1])[0]
+    sqrt_p = st['slot0'][0]
+    return {
+        'token0': t0, 'token1': t1, 'decimals0': da, 'decimals1': db_,
+        'symbol0': _abi_string(tok[2]), 'symbol1': _abi_string(tok[3]),
+        'tick_spacing': _signed(st['tickSpacing'][0], 24), 'tick': _signed(st['slot0'][1], 24),
+        'fee_pips': st['fee'][0], 'unstaked_fee_pips': st['unstakedFee'][0],
+        'liquidity_raw': st['liquidity'][0], 'staked_liquidity_raw': st['stakedLiquidity'][0],
+        'price': (sqrt_p / 2 ** 96) ** 2 * 10 ** (da - db_),
+    }
+
+
+def from_slipstream(address, st, gecko):
+    """The usual record from the chain state and GeckoTerminal's attributes."""
+    at = (gecko or {}).get('attributes') or {}
+    nominal = st['fee_pips'] / 1e6
+    lp_fee = nominal * (1 - st['unstaked_fee_pips'] / 1e6)
+    volume = _f((at.get('volume_usd') or {}).get('h24'))
+    da, db_ = st['decimals0'], st['decimals1']
+    return {
+        'dex': 'aerodrome-slipstream', 'kind': 'clmm', 'chain': 'base',
+        'address': checksum_address(address), 'pair': f"{st['symbol0']}/{st['symbol1']}",
+        'token_a': _token(st['token0'], st['symbol0'], st['symbol0'], da),
+        'token_b': _token(st['token1'], st['symbol1'], st['symbol1'], db_),
+        'price': st['price'], 'chain_price': st['price'],
+        'fee': lp_fee, 'fee_source': 'nominal', 'fee_nominal': nominal,
+        'unstaked_fee': st['unstaked_fee_pips'] / 1e6,
+        'tvl_usd': _f(at.get('reserve_in_usd')), 'volume_24h_usd': volume,
+        'fees_24h_usd': volume * nominal,
+        'liquidity': st['liquidity_raw'] / math.sqrt(10 ** da * 10 ** db_) or None,
+        # Unstaked positions share fees with the unstaked liquidity only; the
+        # gauge's stakers earn AERO instead of fees.
+        'staked_share': (st['staked_liquidity_raw'] / st['liquidity_raw']) if st['liquidity_raw'] else None,
+        'adaptive_fee': True, 'tick_spacing': st['tick_spacing'], 'tick': st['tick'],
+        'reward_usd_day': 0.0, 'reward_mints': [],
+    }
+
+
+def slipstream_pool(address):
+    """One Slipstream pool on Base. The chain is required; GeckoTerminal only
+    adds volume and TVL, and its absence leaves them at 0, not the record."""
+    try:
+        st = slipstream_state(address)
+    except Exception:
+        return None
+    try:
+        d = _get(f'{GECKO_BASE}/pools/{address.lower()}', accept='application/json;version=20230203')
+        gecko = d.get('data') if isinstance(d, dict) else None
+    except Exception:
+        gecko = None
+    return from_slipstream(address, st, gecko)
+
+
 ADAPTERS = {'orca': orca, 'raydium-clmm': raydium, 'byreal': byreal,
             'pancakeswap-v3-solana': pancakeswap, 'meteora-dlmm': meteora_dlmm}
 SINGLE = {'orca': orca_pool, 'raydium-clmm': raydium_pool, 'byreal': byreal_pool,
-          'pancakeswap-v3-solana': pancakeswap_pool, 'meteora-dlmm': meteora_dlmm_pool}
+          'pancakeswap-v3-solana': pancakeswap_pool, 'meteora-dlmm': meteora_dlmm_pool,
+          'aerodrome-slipstream': slipstream_pool}
 
 
 def fetch_all(dexes=KNOWN, limit=50, timeout=120):

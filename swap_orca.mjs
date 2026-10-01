@@ -21,7 +21,7 @@
 //
 // Order of work, all before any signature:
 //   HALT -> pool owner and mints -> decimals from chain -> balances (gas reserve
-//   kept) -> planRebalance (imported from swap_jupiter.mjs) -> SDK exact-in
+//   kept) -> planRebalance (rebalance_plan.mjs) -> SDK exact-in
 //   quote at LPBOT_SLIPPAGE_BPS -> quote check, value check at the hint prices,
 //   price impact -> instructions -> instruction allow-list and swap-data check
 //   -> priority fee cap -> simulation with balance deltas -> (dry run: report).
@@ -39,10 +39,12 @@
 // so every endpoint from rpc_policy.endpoints() can serve it.
 import fs from 'node:fs';
 import path from 'node:path';
+import { assertNotHalted } from './halt_guard.mjs';
 import { createRequire } from 'node:module';
 
 import { endpoints, overEndpoints, JupiterError, AfterSignError, isEntry } from './rpc_policy.mjs';
-import { planRebalance, priorityFeeLamports, verifyPriorityFee, PRIORITY_MAX_LAMPORTS } from './swap_jupiter.mjs';
+import { priorityFeeLamports, verifyPriorityFee, PRIORITY_MAX_LAMPORTS, parseSleeve, sleeveCap } from './swap_jupiter.mjs';
+import { planRebalance, TARGET_TOLERANCE } from './rebalance_plan.mjs';
 
 const require = createRequire(import.meta.url);
 const { Connection, Keypair, PublicKey, VersionedTransaction, TransactionMessage, TransactionInstruction,
@@ -61,7 +63,6 @@ const GAS_RESERVE_SOL = Number(process.env.LPBOT_GAS_RESERVE_SOL ?? 0.05);
 export const MAX_IMPACT = Number(process.env.LPBOT_MAX_IMPACT ?? 0.01);          // ratio: 0.01 = 1%
 export const MAX_VALUE_LOSS = Number(process.env.LPBOT_MAX_VALUE_LOSS ?? 0.02);  // 2% below fair value
 const QUOTE_MAX_AGE_MS = 20_000;
-const TARGET_TOLERANCE = 0.02;                                                  // as swap_jupiter.mjs
 const SOL_OVERHEAD_LAMPORTS = 10_000_000n;     // fees + temporary account rent, 0.01 SOL at most
 const CU_DRAFT_LIMIT = 1_400_000;
 const CU_PRICE_FLOOR = 20_000;                 // micro-lamports per unit
@@ -97,8 +98,9 @@ export class Refused extends JupiterError {}
 // A transaction left this process: never retried.
 export class SentError extends AfterSignError {}
 
-export function guard(haltPath = HALT) {
+export function guard(haltPath = HALT, env = process.env) {
   if (fs.existsSync(haltPath)) throw new Refused(`HALT present: ${fs.readFileSync(haltPath, 'utf8').trim()}`);
+  try { assertNotHalted(path.dirname(haltPath), env); } catch (e) { throw new Refused(e.message); }   // this profile's HALT
 }
 
 // --- pure helpers ---------------------------------------------------------------
@@ -365,8 +367,10 @@ function splAmount(data) {
 }
 
 // Raw balance the swap can spend: the ATA for an SPL token; lamports plus the
-// wSOL ATA for SOL. The gas reserve is kept back from native SOL.
-async function sellable(connection, owner, info) {
+// wSOL ATA for SOL. The gas reserve is kept back from native SOL. Capped at
+// LPBOT_SLEEVE, as in swap_jupiter.mjs: a wallet several profiles share must
+// not let this fallback sell another profile's tokens.
+export async function sellable(connection, owner, info) {
   let raw;
   if (info.mint === NATIVE_MINT) {
     const wsol = await connection.getAccountInfo(new PublicKey(ataOf(info, owner)));
@@ -375,7 +379,7 @@ async function sellable(connection, owner, info) {
     const a = await connection.getAccountInfo(new PublicKey(ataOf(info, owner)));
     raw = a ? splAmount(a.data) : 0n;
   }
-  const total = toHuman(raw, info.decimals);
+  const total = sleeveCap(toHuman(raw, info.decimals), info.mint, parseSleeve(process.env.LPBOT_SLEEVE));
   const avail = info.mint === NATIVE_MINT ? Math.max(0, total - GAS_RESERVE_SOL) : total;
   return { total, avail, usd: avail * info.usdPrice };
 }

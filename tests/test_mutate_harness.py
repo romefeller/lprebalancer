@@ -5,6 +5,7 @@ It must not depend on the line number, and two mutants on one line must never
 share a key. These tests run no mutant; they only generate them.
 """
 import pathlib
+import shutil
 import tempfile
 import unittest
 from unittest import mock
@@ -199,6 +200,59 @@ class Migration(unittest.TestCase):
     def test_an_unknown_target_is_listed(self):
         _, unresolved = M.migrate({('nope', 'f', 'x @L1'): 'why'}, self.root)
         self.assertEqual(unresolved[0][1], 'unknown target')
+
+
+GRANDCHILD = """
+import subprocess, sys, time
+g = subprocess.Popen([sys.executable, '-c', {code!r}], {redirect})
+open('pid', 'w').write(str(g.pid))
+{tail}
+"""
+
+
+def alive(pid):
+    """Whether `pid` runs (a zombie waiting for its reaper does not)."""
+    try:
+        state = pathlib.Path(f'/proc/{pid}/stat').read_text().rsplit(')', 1)[1].split()[0]
+    except (FileNotFoundError, ProcessLookupError):
+        return False
+    return state != 'Z'
+
+
+class Timeouts(unittest.TestCase):
+    """A mutant's test run that times out leaves no process behind."""
+
+    def run_cmd(self, code, redirect='', tail='time.sleep(300)', timeout=1):
+        root = pathlib.Path(tempfile.mkdtemp(prefix='mut_harness_'))
+        self.addCleanup(shutil.rmtree, root, True)
+        (root / 'tests').mkdir()
+        script = GRANDCHILD.format(code=code, redirect=redirect, tail=tail)
+        with mock.patch.object(M, 'KILL_GRACE_S', 1):
+            rc = M.run_tests(root, 'unused_test', [M.PY, '-c', script], timeout=timeout)
+        pid = int((root / 'tests' / 'pid').read_text())
+        deadline = M.time.monotonic() + 5
+        while alive(pid) and M.time.monotonic() < deadline:
+            M.time.sleep(0.05)
+        return rc, pid
+
+    def test_a_sleeping_grandchild_dies_with_the_timeout(self):
+        rc, pid = self.run_cmd('import time; time.sleep(300)')
+        self.assertEqual(rc, 'timeout')                     # counted as KILLED, as before
+        self.assertFalse(alive(pid))
+
+    def test_a_grandchild_that_ignores_sigterm_is_killed(self):
+        code = 'import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(300)'
+        rc, pid = self.run_cmd(code)
+        self.assertEqual(rc, 'timeout'); self.assertFalse(alive(pid))
+
+    def test_a_straggler_after_a_normal_exit_is_killed(self):
+        rc, pid = self.run_cmd('import time; time.sleep(300)', redirect='stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL',
+                               tail='sys.exit(3)', timeout=30)
+        self.assertEqual(rc, 3); self.assertFalse(alive(pid))
+
+    def test_a_timeout_counts_as_killed(self):
+        self.assertFalse(M.survived('timeout'))
+        self.assertFalse(M.survived(1)); self.assertTrue(M.survived(0))
 
 
 if __name__ == '__main__':

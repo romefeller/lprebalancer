@@ -24,8 +24,10 @@ Any column may still be overridden for one run by the matching LPBOT_ variable
 environment is the escape hatch.
 """
 import os
+import pathlib
 import re
 
+import chains
 import db
 
 
@@ -40,8 +42,60 @@ _CFG = db.load_config(os.environ.get('LPBOT_PROFILE'))
 
 PROFILE = _CFG['name']
 
+# --- whose money: the wallet ------------------------------------------------
+# A profile names its wallet; the wallet row names its chain, its address and
+# the environment variable that holds the PATH of its key. The key itself
+# never enters the database or this module. A profile with no wallet_id is a
+# pre-020 row: the Solana key from the service environment, as before.
+WALLET_ID = _CFG.get('wallet_id')
+_WALLET_ROW = db.wallet_row(WALLET_ID) if WALLET_ID else None
+if WALLET_ID and not _WALLET_ROW:
+    raise SystemExit(f'profile {PROFILE} names wallet {WALLET_ID}, which is not in rebalancer.wallets')
+CHAIN = (_WALLET_ROW or {}).get('chain') or 'solana'
+CAPS = chains.caps(CHAIN)
+WALLET_ADDRESS = (_WALLET_ROW or {}).get('address')
+WALLET_SECRET_ENV = (_WALLET_ROW or {}).get('secret_env') or 'WALLET_SECRET_PATH'
+ENABLED = bool(_CFG.get('enabled'))
+# The token whose arrival this profile deploys, and whether it holds the
+# residual of the tokens its wallet's profiles share (wallets.py).
+DEPOSIT_MINT = _CFG.get('deposit_mint')
+RESIDUAL_OWNER = bool(_CFG.get('residual_owner')) or not WALLET_ID
+MIN_DEPLOY_USD = float(_CFG.get('min_deploy_usd') or 5.0)
+db.set_context(PROFILE, WALLET_ID)
+
+# Per-profile runtime files: state, feed and the operator triggers. A HALT
+# in the code directory stops every profile; one in run/<profile> stops one.
+ROOT = pathlib.Path(__file__).resolve().parent
+RUN_DIR = ROOT / 'run' / PROFILE
+
 # --- what to trade -----------------------------------------------------------
 DEX = _env('LPBOT_DEX', str, _CFG.get('dex') or 'orca')
+# Environment the profile's own venue signer gets (sql/021): an opt-in a pool
+# needs, from an allowlist of keys and values. Anything else stops startup.
+SIGNER_ENV_ALLOWED = {'LPBOT_ORCA_ADAPTIVE': ('0', '1')}
+
+
+def signer_env(raw):
+    """The `signer_env` column as {key: value}, checked against
+    SIGNER_ENV_ALLOWED. Raises ValueError on anything else. Pure."""
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise ValueError(f'signer_env must be an object, got {type(raw).__name__}')
+    out = {}
+    for k, v in raw.items():
+        if k not in SIGNER_ENV_ALLOWED:
+            raise ValueError(f'signer_env key {k!r} is not allowed (allowed: {sorted(SIGNER_ENV_ALLOWED)})')
+        if not isinstance(v, str) or v not in SIGNER_ENV_ALLOWED[k]:
+            raise ValueError(f'signer_env {k}={v!r} is not allowed (allowed: {SIGNER_ENV_ALLOWED[k]})')
+        out[k] = v
+    return out
+
+
+try:
+    SIGNER_ENV = signer_env(_CFG.get('signer_env'))
+except ValueError as e:
+    raise SystemExit(f'profile {PROFILE}: {e}') from None
 POOL = _env('LPBOT_POOL', str, _CFG['pool'])
 PAIR_LABEL = _env('LPBOT_PAIR', str, _CFG['pair_label'])
 
@@ -71,7 +125,7 @@ MAX_REBALANCES_PER_DAY_MODELLED = _env(
 SWAP_COST = _env('LPBOT_SWAP_COST_BPS', int, _CFG['swap_cost_bps']) / 1e4
 
 # --- rebalancing -------------------------------------------------------------
-POLL_SECONDS = _env('LPBOT_POLL_SECONDS', int, _CFG['poll_seconds'])
+POLL_SECONDS = max(_env('LPBOT_POLL_SECONDS', int, _CFG['poll_seconds']), CAPS['min_poll_seconds'])
 MIN_REBALANCE_GAP = _env('LPBOT_MIN_GAP', int, _CFG['min_rebalance_gap_seconds'])
 MAX_REBALANCES_PER_DAY = _env('LPBOT_MAX_REBAL', int, _CFG['max_rebalances_per_day'])
 REOPT_INTERVAL = _env('LPBOT_REOPT_INTERVAL', int, _CFG['reopt_interval_seconds'])
@@ -141,7 +195,8 @@ CALM_HORIZON_MINUTES = _env('LPBOT_CALM_HORIZON', int, int(_CFG.get('calm_horizo
 CALM_THRESHOLD = _env('LPBOT_CALM_THRESHOLD', float, float(_CFG.get('calm_threshold') or 0.25))
 CALM_MIN_GAP = _env('LPBOT_CALM_MIN_GAP', int, int(_CFG.get('calm_min_gap_seconds') or 600))
 CALM_MAX_MOVES = _env('LPBOT_CALM_MAX_MOVES', int, int(_CFG.get('calm_max_moves_per_day') or 0))
-CALM_POLL_SECONDS = _env('LPBOT_CALM_POLL', int, int(_CFG.get('calm_poll_seconds') or 120))
+CALM_POLL_SECONDS = max(_env('LPBOT_CALM_POLL', int, int(_CFG.get('calm_poll_seconds') or 120)),
+                        CAPS['min_poll_seconds'])
 # Regime mode (calm.regime_view): the narrowest width in REGIME_WIDTHS whose
 # P(touch within REGIME_HORIZON) <= REGIME_THRESHOLD, chosen every poll. When
 # on, it holds every band; calm mode's two-width switch and the hourly rule
@@ -193,7 +248,8 @@ def policy():
 
 
 # --- plumbing ----------------------------------------------------------------
-PUBLIC_RPC = os.environ.get('SOLANA_RPC_URL') or 'https://api.mainnet-beta.solana.com'
+PUBLIC_RPC = (os.environ.get('SOLANA_RPC_URL') or 'https://api.mainnet-beta.solana.com') if CHAIN == 'solana' \
+    else (os.environ.get('LPBOT_BASE_RPC') or 'https://mainnet.base.org')
 
 
 def keyed_rpc(env=os.environ):
@@ -205,17 +261,19 @@ def keyed_rpc(env=os.environ):
     return f'https://mainnet.helius-rpc.com/?api-key={k}' if re.fullmatch(r'[A-Za-z0-9-]{16,128}', k) else None
 
 
-# LPBOT_RPC wins; then the keyed Helius endpoint; then the public one.
-RPC = _env('LPBOT_RPC', str, keyed_rpc() or PUBLIC_RPC)
-WALLET = _env('LPBOT_WALLET', str, os.environ.get('WALLET_SECRET_PATH', ''))
+# On Solana LPBOT_RPC wins; then the keyed Helius endpoint; then the public
+# one. On another chain only LPBOT_BASE_RPC (in PUBLIC_RPC) counts: the shared
+# service environment's LPBOT_RPC and SOLANA_RPC_URL name Solana endpoints.
+RPC = _env('LPBOT_RPC', str, keyed_rpc() or PUBLIC_RPC) if CHAIN == 'solana' else PUBLIC_RPC
+WALLET = _env('LPBOT_WALLET', str, os.environ.get(WALLET_SECRET_ENV, ''))
 
 
 def require_wallet():
     """Fail at startup rather than mysteriously at the first signature."""
     if not WALLET:
         raise SystemExit(
-            'No signing key configured. Set LPBOT_WALLET (or WALLET_SECRET_PATH) '
-            'to the path of your Solana keypair. Nothing was started.')
+            f'No signing key configured. Set LPBOT_WALLET (or {WALLET_SECRET_ENV}) '
+            f'to the path of the {CHAIN} key of profile {PROFILE}. Nothing was started.')
     return WALLET
 
 
@@ -229,6 +287,10 @@ def reload():
 def summary():
     return {
         'profile': PROFILE,
+        'wallet_id': WALLET_ID,
+        'chain': CHAIN,
+        'wallet': WALLET_ADDRESS,
+        'residual_owner': RESIDUAL_OWNER,
         'dex': DEX,
         'pool': POOL,
         'pair': PAIR_LABEL,
@@ -245,6 +307,7 @@ def summary():
         'scan_dexes': list(DEXES),
         'scan_every_hours': SCAN_INTERVAL / 3600,
         'execute_dexes': list(EXECUTE_DEXES),
+        'signer_env': SIGNER_ENV or None,
         'migrate_min_gain': MIGRATE_MIN_GAIN,
         'pool_pinned': POOL_PINNED,
         'allow_swap': ALLOW_SWAP,

@@ -9,6 +9,7 @@ from unittest import mock
 import numpy as np
 
 import _fixtures
+from test_rewards import OWNER, harvest_tx                       # noqa: E402  (a harvest that brought rewards)
 _fixtures.ensure_profile()
 
 import calm        # noqa: E402
@@ -204,13 +205,15 @@ class Security(unittest.TestCase):
                 mock.patch.object(rebalancer.config, 'REWARD_MAX_USD', 25.0), \
                 mock.patch.object(rebalancer.config, 'PAYOUT_MINT', USDC), \
                 mock.patch.object(rebalancer, 'pool_record', lambda: rec), \
-                mock.patch.object(rebalancer, 'wallet', lambda p: {'sol': 0.3}), \
+                mock.patch.object(rebalancer, 'wallet', lambda p: {'sol': 0.3, 'owner': OWNER}), \
+                mock.patch.object(rebalancer.txfees, 'fetch', lambda rpc, s, **k: harvest_tx(
+                    '4qQeZ5LwSz6HuupUu8jCtgXyW1mYQcNbFAW1sWZp89HL', 100.0)), \
                 mock.patch.object(rebalancer.dexes, 'jupiter_prices', lambda m: {'4qQeZ5LwSz6HuupUu8jCtgXyW1mYQcNbFAW1sWZp89HL': 2.76}), \
                 mock.patch.object(rebalancer, 'chain', chain), \
                 mock.patch.object(rebalancer, 'save', lambda s: None), \
                 mock.patch.object(rebalancer, 'notify', lambda ev, **kw: notes.append(ev)):
             state = {}
-            rebalancer.distribute_rewards(state, 'M')
+            rebalancer.distribute_rewards(state, 'M', ['H'])          # the harvest brought all 100
         self.assertNotIn('not a mint', state['reward_mints_seen'])
         self.assertNotIn('swap', calls)                                # $276 > $25 cap: held
         self.assertIn('reward_held', notes)

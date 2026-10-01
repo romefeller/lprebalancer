@@ -42,7 +42,7 @@ class Deployable(Patched):
     def test_a_wallet_under_the_reserve_deploys_nothing_of_it(self):
         self.assertEqual(rebalancer.deployable_usd(bal(0.03, 0.0)), 0.0)
         self.assertEqual(rebalancer.deployable_usd(bal(0.03, 5.0)), 5.0)
-        self.assertEqual(rebalancer.deployable_usd({'balanceA': None, 'balanceB': None, 'price': 120.0}), 0.0)
+        self.assertEqual(rebalancer.deployable_usd({'balanceA': None, 'balanceB': None, 'price': 120.0, 'quoteUsd': 1.0}), 0.0)
 
     def test_capital_is_the_wallet_under_the_ceiling(self):
         self.assertAlmostEqual(rebalancer.capital(bal(1.0, 100.0)), (1.0 - RES()) * 120.0 + 100.0)
@@ -190,13 +190,14 @@ class BalanceWallet(Patched):
         out, calls, *_ = self.go(self.LOP, rec={})
         self.assertEqual((out, calls), (self.LOP, []))
 
-    def test_a_missing_quote_price_counts_the_quote_as_a_dollar(self):
+    def test_a_missing_quote_price_sizes_no_swap(self):
+        # 2026-10-01 (multi-wallet contract): an unknown quote price is never
+        # a dollar. wallet() fills it for a stablecoin quote by mint; a read
+        # that still has none swaps nothing and leaves the wallet as it is.
         b = dict(self.LOP, quoteUsd=None)
-        _, calls, *_ = self.go(b)
-        a = calls[0][0]
-        C = rebalancer.deployable_usd(b)
-        self.assertAlmostEqual(float(a[4]), C / 2, places=2)
-        self.assertEqual(json.loads(calls[0][1]['extra_env']['LPBOT_TOKEN_HINTS'])[USDC]['usd'], 1.0)
+        out, calls, *_ = self.go(b)
+        self.assertEqual((out, calls), (b, []))
+        self.assertIsNone(rebalancer.deployable_usd(b))
 
     def test_the_thresholds(self):
         # Under deploy-all the 4% balance gate is the one that binds: a short side

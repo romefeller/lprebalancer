@@ -312,7 +312,7 @@ class Failover(unittest.TestCase):
                                                                       setattr(rebalancer.config, 'POOL', row['address']),
                                                                       setattr(rebalancer.config, 'DEX', row['dex']))), \
                 mock.patch.object(rebalancer, 'reopen', lambda s, r, band=None, recovering=False: calls['reopen'].append(r)):
-            out = rebalancer.venue_failover(state, status, price=119.6)
+            out = rebalancer.venue_failover(state, status, price=119.6, quote=1.0)
         return out, calls
 
     VENUES = [venue('raydium-clmm', 1.0, held=True), venue('byreal', 0.9)]
@@ -335,7 +335,7 @@ class Failover(unittest.TestCase):
 
     def test_tripped_with_a_position_moves_it(self):
         self.trip()
-        out, c = self.go({}, {'positionMint': 'M', 'price': 119.6}, self.VENUES)
+        out, c = self.go({}, {'positionMint': 'M', 'price': 119.6, 'quoteUsd': 1.0}, self.VENUES)
         self.assertTrue(out)
         self.assertEqual(c['rebalance'][0]['target']['dex'], 'byreal'); self.assertEqual(c['repoint'], [])
 

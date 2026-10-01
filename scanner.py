@@ -65,12 +65,15 @@ def run_once(notify=None, progress=None):
 
 
 class Scanner(threading.Thread):
-    """Scans every `config.SCAN_INTERVAL` seconds; never raises into the loop."""
+    """Scans every `config.SCAN_INTERVAL` seconds; never raises into the loop.
+    `active()` false (a dormant profile) skips the scan: no GeckoTerminal
+    work for a profile with nothing to deploy."""
 
-    def __init__(self, notify, first_delay=30):
+    def __init__(self, notify, first_delay=30, active=lambda: True):
         super().__init__(name='scanner', daemon=True)
         self.notify = notify
         self.first_delay = first_delay
+        self.active = active
         self.stop = threading.Event()
 
     def due(self):
@@ -89,7 +92,7 @@ class Scanner(threading.Thread):
         self.stop.wait(self.first_delay)
         while not self.stop.is_set():
             try:
-                if self.due():
+                if self.active() and self.due():
                     run_once(self.notify)
             except Exception as e:           # the board is advisory; the loop is not
                 self.notify('scan_failed', reason=f'{type(e).__name__}: {str(e)[:160]}',
@@ -99,6 +102,7 @@ class Scanner(threading.Thread):
 
 if __name__ == '__main__':
     import sys
+    engine.use_network(config.CAPS['gecko_network'])
     if len(sys.argv) > 1 and sys.argv[1] == 'board':
         run, rows = db.latest_scan()
         if not run:

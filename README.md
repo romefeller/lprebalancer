@@ -22,8 +22,8 @@ wallet holds of the pool's own two tokens.
 
 ```sh
 python3 db.py add wif-usdc <pool address> capital_usd=200   # describe a pool
-python3 db.py activate wif-usdc                              # run it
-sudo systemctl restart lp-bot
+python3 db.py set wif-usdc enabled=true                      # enable it
+sudo systemctl start lp-bot@wif-usdc                         # run it
 ```
 
 `add` asks Orca what the pool is, fills the pair from the answer, and refuses an
@@ -633,16 +633,23 @@ python3 db.py
 WALLET_SECRET_PATH=/path/to/key node signer2.mjs status
 WALLET_SECRET_PATH=/path/to/key node signer2.mjs balance <pool>
 
-# run it
-sudo systemctl start lp-bot          # the rebalancer
-sudo systemctl start lp-telegram     # the Telegram bridge
+# run it: one process per profile (systemd template ops/lp-bot@.service)
+sudo systemctl start lp-bot@sol-usdc  # one profile
+sudo systemctl start lp-telegram      # the Telegram bridge (every profile's feed)
 
-# stop it, from anywhere, immediately
+# stop EVERY profile, from anywhere, immediately
 touch HALT
+# stop ONE profile
+touch run/mu-usdc/HALT
 
-# run one full rebalance now, while you watch
-touch REBALANCE
+# run one full rebalance of one profile now, while you watch
+touch run/sol-usdc/REBALANCE
 ```
+
+Each profile keeps its state, its event feed and its triggers in
+`run/<profile>/` (`runtime.json`, `events.jsonl`, `HALT`, `REBALANCE`, `REOPT`,
+`MIGRATE`). `HALT` in the code directory stops every profile; one in
+`run/<profile>/` stops that profile only.
 
 `HALT` is absolute: the loop exits on its next cycle, the signer refuses to
 build a transaction, and neither restarts until the file is removed.
@@ -657,6 +664,31 @@ the same minimum-gap and per-day limits as an automatic one, and is deleted
 before it runs so a failure cannot loop on it. It exists because the rebalance
 path is the one that runs unattended, and a path that has only run at 3am has
 never been watched.
+
+### Many pools, many wallets
+
+A wallet (`rebalancer.wallets`: chain, address, and the NAME of the
+environment variable that holds the key file's path; never the key) may serve
+several profiles. Each profile owns its pool's base token (`deposit_mint`):
+SOL arriving in the wallet is deployed by the SOL/USDC profile, MU by MU/USDC,
+and so on. A profile with nothing to deploy is dormant: no opens, no tape, a
+light poll, one `dormant` event; a deposit wakes it (`deposit_seen`), the swap
+splits it about 50/50 against the quote token, and it opens.
+
+A token several profiles of one wallet use (USDC) is split by claims
+(`wallet_claims`): every transaction a profile sends runs under the wallet's
+advisory lock, and what it moved of a shared token is booked to its claim.
+The wallet's `residual_owner` profile holds the rest (a fresh USDC deposit,
+dust). Sweep, janitor, audits and the board run in the residual owner only.
+See MULTI_DESIGN.md.
+
+```sh
+python3 stats.py                    # every active pool, per wallet, and the total
+python3 stats.py --pool mu-usdc     # one pool
+python3 stats.py --wallet sol-lp    # one wallet
+python3 stats.py --all --json       # dormant and disabled profiles too, as JSON
+python3 db.py --pool sol-usdc       # the full book of one pool
+```
 
 ---
 
@@ -676,7 +708,7 @@ never been watched.
 | `signer_raydium.mjs`, `signer_byreal.mjs`, `signer_pancake.mjs` | the same for Raydium CLMM, Byreal and PancakeSwap V3 |
 | `swap_jupiter.mjs` | Jupiter swaps, for moving the wallet between pairs; `SWAP_HOOK.md` says where the loop will call it |
 | `SIGNER_CONTRACT.md` | what every signer must accept and print |
-| `telegram_bridge.mjs` | forwards `events.jsonl` to Telegram |
+| `telegram_bridge.mjs` | forwards every profile's `run/<profile>/events.jsonl` to Telegram, labelled by pool |
 | `sql/001_schema.sql` | the schema, idempotent |
 | `sql/002_any_pool.sql` | migration for databases created before the pool-agnostic sizing |
 | `sql/003_multi_dex.sql` | the board tables and the pool-move parameters |

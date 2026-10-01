@@ -55,6 +55,7 @@ import { SLIPPAGE_REFUSAL } from './slippage.mjs';
 import { consistentFees } from './fee_snapshot.mjs';
 import { endpoints, overEndpoints, isEntry, AfterSignError } from './rpc_policy.mjs';
 import path from 'node:path';
+import { assertNotHalted } from './halt_guard.mjs';
 import { createRequire } from 'node:module';
 import { waitTurn } from './jupiter_gate.mjs';
 
@@ -79,7 +80,6 @@ const BN = require('bn.js');
 const Decimal = require('decimal.js');
 
 const DIR = path.dirname(new URL(import.meta.url).pathname);
-const HALT = path.join(DIR, 'HALT');
 // A keyed endpoint from the environment first. Indexed reads
 // (getParsedTokenAccountsByOwner) never go to an endpoint that refuses them.
 export const ENDPOINTS = endpoints(process.env, { indexed: true });
@@ -102,7 +102,7 @@ const HEADERS = { accept: 'application/json', 'user-agent': 'Mozilla/5.0' };
 const GECKO_HEADERS = { accept: 'application/json;version=20230203', 'user-agent': 'Mozilla/5.0' };
 
 function guard() {
-  if (fs.existsSync(HALT)) throw new Error(`HALT present: ${fs.readFileSync(HALT, 'utf8').trim()}`);
+  assertNotHalted(DIR);                     // the global HALT and this profile's (halt_guard.mjs)
 }
 
 async function secretBytes() {

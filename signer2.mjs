@@ -11,6 +11,12 @@
 // price are read from the pool itself, so `open` and `status` behave the same
 // on SOL/USDC, on WIF/USDC and on a pool whose quote token is not a dollar.
 //
+// Token-2022 base tokens (DJT): every human amount and dollar figure here is
+// in UI units (token2022.mjs); `price`, `lowerPrice` and `upperPrice` stay
+// pool-native (from the pool's own sqrt price), `uiPrice` is the price in UI
+// units. A paused mint or one with a transfer hook refuses open, harvest and
+// close.
+//
 // The key is read from WALLET_SECRET_PATH inside this process, handed straight
 // to setPayerFromBytes, and never printed or returned. Only the public address
 // is ever shown.
@@ -24,17 +30,24 @@
 //   node signer2.mjs close <mint> [--execute]
 import fs from 'node:fs';
 import path from 'node:path';
+import { assertNotHalted } from './halt_guard.mjs';
 import {
   setRpc, setPayerFromBytes, setNativeMintWrappingStrategy,
   openConcentratedPosition, fetchPositionsForOwner,
-  closePosition, harvestPosition, closePositionInstructions,
+  closePosition, harvestPosition, closePositionInstructions, harvestPositionInstructions,
 } from '@orca-so/whirlpools';
-import { createSolanaRpc, address } from '@solana/kit';
+import {
+  createSolanaRpc, address, pipe, createTransactionMessage, setTransactionMessageFeePayerSigner,
+  setTransactionMessageLifetimeUsingBlockhash, appendTransactionMessageInstructions,
+  signTransactionMessageWithSigners, getBase64EncodedWireTransaction,
+} from '@solana/kit';
+import { fetchWhirlpool, fetchPosition, getPositionAddress } from '@orca-so/whirlpools-client';
+import { sqrtPriceToPrice } from '@orca-so/whirlpools-core';
 import { consistentOrcaFees } from './orca_fees.mjs';
 import { endpoints, overEndpoints, isEntry, AfterSignError } from './rpc_policy.mjs';
+import { readMints, rawToUi, uiToRaw, uiToNative, uiPrice, assertWritable, mintFields } from './token2022.mjs';
 
 const DIR = path.dirname(new URL(import.meta.url).pathname);
-const HALT = path.join(DIR, 'HALT');
 const RPC = process.env.SOLANA_RPC_URL
   ?? (process.env.KAMINO_RPC_KEY
     ? `https://mainnet.helius-rpc.com/?api-key=${process.env.KAMINO_RPC_KEY}`
@@ -52,9 +65,7 @@ const NATIVE_MINT = 'So11111111111111111111111111111111111111112';
 const HEADERS = { accept: 'application/json', 'user-agent': 'Mozilla/5.0' };
 
 function guard() {
-  if (fs.existsSync(HALT)) {
-    throw new Error(`HALT present: ${fs.readFileSync(HALT, 'utf8').trim()}`);
-  }
+  assertNotHalted(DIR);                     // the global HALT and this profile's (halt_guard.mjs)
 }
 
 // Returns the 64-byte secret key. Never logged, never returned to a caller
@@ -94,6 +105,69 @@ async function poolInfo(pool) {
   return info;
 }
 
+// The pool's two mints, read fresh on every command: a pause or a new
+// multiplier must not wait behind a cache.
+export async function poolMints(rpc, mints) {
+  return readMints(async ms => (await rpc.getMultipleAccounts(ms.map(m => address(m)),
+    { encoding: 'jsonParsed' }).send()).value, mints);
+}
+
+// The pool as the chain has it now: the price from its own sqrt price, which
+// is pool-native by construction (Orca's API figure is not documented to be,
+// and on a scaled-UI mint the two differ), and the facts of both mints.
+// Throws when the chain's mints or decimals disagree with Orca's API.
+export async function chainView(rpc, info) {
+  const wp = (await fetchWhirlpool(rpc, address(info.address))).data;
+  if (String(wp.tokenMintA) !== info.mintA || String(wp.tokenMintB) !== info.mintB) {
+    throw new Error(`pool ${info.address}: the chain's mints differ from Orca's API`);
+  }
+  const [fa, fb] = await poolMints(rpc, [info.mintA, info.mintB]);
+  if (fa.decimals !== info.decimalsA || fb.decimals !== info.decimalsB) {
+    throw new Error(`mint decimals ${fa.decimals}/${fb.decimals} disagree with Orca's ${info.decimalsA}/${info.decimalsB}`);
+  }
+  const price = sqrtPriceToPrice(BigInt(wp.sqrtPrice), info.decimalsA, info.decimalsB);
+  const view = { ...info, price, uiPrice: uiPrice(price, fa.multiplier, fb.multiplier), ...mintFields(fa, fb) };
+  // The facts ride along for the write checks but stay out of the JSON.
+  Object.defineProperty(view, 'mints', { value: [fa, fb], enumerable: false });
+  return view;
+}
+
+// The facts of the mints of the pool a position is on, for the write checks
+// of harvest and close, which are given only the position.
+async function positionMints(rpc, positionMint) {
+  const [pda] = await getPositionAddress(address(positionMint));
+  const pos = (await fetchPosition(rpc, pda)).data;
+  const wp = (await fetchWhirlpool(rpc, pos.whirlpool)).data;
+  return poolMints(rpc, [String(wp.tokenMintA), String(wp.tokenMintB)]);
+}
+
+// Simulate built instructions without sending them. Signing is local; the
+// report carries the program's verdict, so a dry run proves the instructions.
+// A wallet without the tokens fails here on the token transfer ("insufficient
+// funds"), after every account and instruction has been checked.
+async function simulate(rpc, signer, instructions) {
+  try {
+    const { value: blockhash } = await rpc.getLatestBlockhash().send();
+    const msg = pipe(createTransactionMessage({ version: 0 }),
+      m => setTransactionMessageFeePayerSigner(signer, m),
+      m => setTransactionMessageLifetimeUsingBlockhash(blockhash, m),
+      m => appendTransactionMessageInstructions(instructions, m));
+    const tx = getBase64EncodedWireTransaction(await signTransactionMessageWithSigners(msg));
+    const { value } = await rpc.simulateTransaction(tx,
+      { encoding: 'base64', sigVerify: false, replaceRecentBlockhash: true }).send();
+    const logs = value.logs ?? [];
+    return {
+      ok: value.err == null,
+      err: value.err == null ? null : JSON.stringify(value.err, (k, x) => (typeof x === 'bigint' ? String(x) : x)),
+      logError: logs.find(l => /Program log: (Error|AnchorError)/.test(l)) ?? null,
+      unitsConsumed: value.unitsConsumed == null ? null : Number(value.unitsConsumed),
+      logTail: logs.slice(-4),
+    };
+  } catch (e) {
+    return { ok: false, err: String(e?.message ?? e).slice(0, 200), unitsConsumed: null, logTail: [] };
+  }
+}
+
 // Dollar value of one unit of the pool's quote token. On a USDC-quoted pool
 // this is 1; on SOL/xSOL it is not, and pretending otherwise turns every
 // dollar figure the bot reports into nonsense.
@@ -130,14 +204,15 @@ async function quoteUsd(info) {
 // Dollar price of native SOL, for valuing the gas balance when SOL is not one
 // of the pool's tokens. When it is, the pool's own price is the answer.
 async function solUsd(info, qUsd) {
-  if (info.mintA === NATIVE_MINT && qUsd != null) return info.price * qUsd;
+  if (info.mintA === NATIVE_MINT && qUsd != null) return info.uiPrice * qUsd;
   if (info.mintB === NATIVE_MINT && qUsd != null) return qUsd;
   try { return await tokenUsd(NATIVE_MINT); } catch { return null; }
 }
 
-// Human-unit balance of one SPL mint. The native mint is the lamport balance:
-// the wrapping strategy wraps it into an ATA on demand at open time.
-async function tokenBalance(rpc, owner, mint, decimals, lamports) {
+// UI-unit balance of one SPL mint (raw / 10^decimals × the mint's multiplier).
+// The native mint is the lamport balance: the wrapping strategy wraps it into
+// an ATA on demand at open time.
+async function tokenBalance(rpc, owner, mint, decimals, multiplier, lamports) {
   if (mint === NATIVE_MINT) return lamports / 1e9;
   const r = await rpc.getTokenAccountsByOwner(owner, { mint: address(mint) },
     { encoding: 'jsonParsed' }).send();
@@ -145,7 +220,7 @@ async function tokenBalance(rpc, owner, mint, decimals, lamports) {
   for (const a of r.value ?? []) {
     raw += BigInt(a.account?.data?.parsed?.info?.tokenAmount?.amount ?? 0);
   }
-  return Number(raw) / 10 ** decimals;
+  return rawToUi(raw, decimals, multiplier);
 }
 
 // Deposit for a band [pa, pb] at price p with per-token caps: the liquidity
@@ -220,17 +295,19 @@ async function balance(pool) {
     const lamports = Number((await rpc.getBalance(signer.address).send()).value);
     const out = { owner: signer.address, sol: lamports / 1e9 };
     if (info) {
+      const v = await chainView(rpc, info);
       const { usd: qUsd } = await quoteUsd(info);
-      const sUsd = await solUsd(info, qUsd);
+      const sUsd = await solUsd(v, qUsd);
       out.pool = pool;
       out.tokenA = info.symbolA; out.tokenB = info.symbolB;
-      out.price = info.price; out.quoteUsd = qUsd;
-      out.balanceA = await tokenBalance(rpc, signer.address, info.mintA, info.decimalsA, lamports);
-      out.balanceB = await tokenBalance(rpc, signer.address, info.mintB, info.decimalsB, lamports);
+      out.price = v.price; out.uiPrice = v.uiPrice; out.quoteUsd = qUsd;
+      Object.assign(out, mintFields(...v.mints));
+      out.balanceA = await tokenBalance(rpc, signer.address, info.mintA, info.decimalsA, v.multiplierA, lamports);
+      out.balanceB = await tokenBalance(rpc, signer.address, info.mintB, info.decimalsB, v.multiplierB, lamports);
       out.nativeSide = info.mintA === NATIVE_MINT ? 'A' : info.mintB === NATIVE_MINT ? 'B' : null;
       // The pool's two tokens in quote units, then dollars; plus the gas SOL
-      // when it is not already one of them.
-      const inQuote = out.balanceA * info.price + out.balanceB;
+      // when it is not already one of them. UI amounts at the UI price.
+      const inQuote = out.balanceA * v.uiPrice + out.balanceB;
       out.walletUsd = qUsd == null ? null : Number((inQuote * qUsd
         + (out.nativeSide ? 0 : out.sol * (sUsd ?? 0))).toFixed(4));
     }
@@ -251,16 +328,23 @@ async function positions() {
   })), null, 1));
 }
 
+// maxA and maxB are UI amounts (what the wallet shows); the deposit is sized
+// in pool-native units at the pool price and reported back in UI units.
 async function open(pool, lower, upper, maxA, maxB, execute) {
   const info = await poolInfo(pool);
-  // The liquidity instructions this package builds are rejected by adaptive-fee
-  // pools with custom error 6069, which reads like slippage and is not. Refuse
-  // before any token is bought for it; the first time this cost a round trip.
-  if (info.adaptiveFee) {
+  // Opens on adaptive-fee pools were rejected with custom error 6069
+  // (PriceSlippageOutOfBounds). On 2026-10-01 the instructions of
+  // @orca-so/whirlpools 8.0.1 simulated green on two adaptive pools (an
+  // in-range SOL/USDC open on Esvfxt3j…, a USDC-only open on DJT/USDC
+  // 7gkB2D1S…), but none has run live. So the refusal stays the default and a
+  // profile that needs such a pool opts in with LPBOT_ORCA_ADAPTIVE=1.
+  if (info.adaptiveFee && process.env.LPBOT_ORCA_ADAPTIVE !== '1') {
     throw new Error(`${info.symbolA}/${info.symbolB} is an adaptive-fee pool; this `
-      + 'signer cannot open positions on it (Whirlpool error 6069). Choose another pool.');
+      + 'signer does not open on it unless LPBOT_ORCA_ADAPTIVE=1 (Whirlpool error 6069 seen). Choose another pool.');
   }
   return withRpc(async ({ signer, rpc }) => {
+    const v = await chainView(rpc, info);
+    assertWritable(v.mints);
     const lamports = await rpc.getBalance(signer.address).send();
     if (Number(lamports.value) / 1e9 < GAS_RESERVE_SOL) {
       throw new Error(`SOL below the ${GAS_RESERVE_SOL} gas reserve; a wallet that cannot `
@@ -269,13 +353,13 @@ async function open(pool, lower, upper, maxA, maxB, execute) {
     // Size the cap at the pool's own price rather than a constant. The old
     // constant was the SOL price on the day it was written.
     const { usd: qUsd } = await quoteUsd(info);
-    const approxUsd = (Number(maxA) * info.price + Number(maxB)) * (qUsd ?? 1);
+    const approxUsd = (Number(maxA) * v.uiPrice + Number(maxB)) * (qUsd ?? 1);
     if (approxUsd > MAX_USD) {
       throw new Error(`position about $${approxUsd.toFixed(0)} exceeds cap $${MAX_USD}`);
     }
     const param = {
-      tokenMaxA: BigInt(Math.floor(Number(maxA) * 10 ** info.decimalsA)),
-      tokenMaxB: BigInt(Math.floor(Number(maxB) * 10 ** info.decimalsB)),
+      tokenMaxA: uiToRaw(maxA, info.decimalsA, v.multiplierA),
+      tokenMaxB: uiToRaw(maxB, info.decimalsB, v.multiplierB),
     };
     // Nothing in 8.0.1 returns the deposit quote, so it is computed here from
     // the CLMM amount formulas: the liquidity both caps allow, and what that
@@ -283,9 +367,10 @@ async function open(pool, lower, upper, maxA, maxB, execute) {
     // ceilings; the ledger must record what actually goes in, which on a
     // wallet short of one side is less than the capital. After a live open
     // the bot replaces this estimate with the chain's own mark.
-    const quote = depositQuote(info.price, Number(lower), Number(upper), Number(maxA), Number(maxB));
-    const estA = quote?.estA ?? null;
-    const estB = quote?.estB ?? null;
+    const quote = depositQuote(v.price, Number(lower), Number(upper),
+      uiToNative(Number(maxA), v.multiplierA), uiToNative(Number(maxB), v.multiplierB));
+    const estA = quote ? quote.estA * v.multiplierA : null;
+    const estB = quote ? quote.estB * v.multiplierB : null;
 
     const result = await openConcentratedPosition(
       address(pool), param, Number(lower), Number(upper),
@@ -298,14 +383,16 @@ async function open(pool, lower, upper, maxA, maxB, execute) {
       approxUsd: Number(approxUsd.toFixed(2)),
       depositEstA: estA, depositEstB: estB,
       depositUsd: (estA != null && qUsd != null)
-        ? Number(((estA * info.price + estB) * qUsd).toFixed(4)) : null,
+        ? Number(((estA * v.uiPrice + estB) * qUsd).toFixed(4)) : null,
+      price: v.price, uiPrice: v.uiPrice, multiplierA: v.multiplierA, multiplierB: v.multiplierB,
       positionMint: result.positionMint ?? null,
       quote,
       initializationCost: result.initializationCost?.toString() ?? null,
       instructions: result.instructions?.length ?? 0,
     };
     if (!execute) {
-      console.log(JSON.stringify({ ...report, sent: false }, null, 1));
+      const simulation = await simulate(rpc, signer, result.instructions);
+      console.log(JSON.stringify({ ...report, simulation, sent: false }, null, 1));
       console.log('DRY RUN — instructions built. Pass --execute to sign and send.');
       return;
     }
@@ -321,17 +408,21 @@ async function status(mintArg) {
   return withRpc(async ({ signer, rpc }) => {
     const list = await fetchPositionsForOwner(rpc, signer.address);
     const hydrated = list.filter(p => !p.isPositionBundle && p.data);
+    // Without a position named, only the loop's own pool (LPBOT_POOL) counts:
+    // one wallet holds positions for several profiles (DJT/USDC beside
+    // SOL/USDC), and the first position of another pool is not this one's.
+    const pool = process.env.LPBOT_POOL;
     const chosen = mintArg
       ? hydrated.find(p => p.data.positionMint === mintArg)
-      : hydrated[0];
+      : hydrated.find(p => !pool || String(p.data.whirlpool) === pool);
     if (!chosen) {
       // Explicit and parseable: the read worked and there is genuinely nothing.
       // The caller must be able to tell this apart from a failed read.
-      console.log(JSON.stringify({ positions: 0, positionMint: null }, null, 1));
+      console.log(JSON.stringify({ positions: 0, positionMint: null, ...(pool ? { pool } : {}) }, null, 1));
       return null;
     }
     const d = chosen.data;
-    const info = await poolInfo(d.whirlpool);
+    const info = await chainView(rpc, await poolInfo(d.whirlpool));
     const price = info.price;
     const q = await quoteUsd(info);
     // Ticks are in raw-amount space; the decimal difference converts them to
@@ -339,11 +430,13 @@ async function status(mintArg) {
     const scale = 10 ** (info.decimalsA - info.decimalsB);
     const lower = 1.0001 ** d.tickLowerIndex * scale;
     const upper = 1.0001 ** d.tickUpperIndex * scale;
-    const ua = (x) => Number(x) / 10 ** info.decimalsA;
-    const ub = (x) => Number(x) / 10 ** info.decimalsB;
+    // Amounts in UI units, valued at the UI price; band and price pool-native.
+    const ua = (x) => rawToUi(x, info.decimalsA, info.multiplierA);
+    const ub = (x) => rawToUi(x, info.decimalsB, info.multiplierB);
+    const up = info.uiPrice;
     const out = {
       positionMint: d.positionMint,
-      whirlpool: d.whirlpool,
+      whirlpool: d.whirlpool, pool: d.whirlpool,
       pair: `${info.symbolA}/${info.symbolB}`,
       tokenA: info.symbolA, tokenB: info.symbolB,
       decimalsA: info.decimalsA, decimalsB: info.decimalsB,
@@ -351,7 +444,8 @@ async function status(mintArg) {
       liquidity: d.liquidity.toString(),
       tickLower: d.tickLowerIndex, tickUpper: d.tickUpperIndex,
       lowerPrice: Number(lower.toFixed(6)), upperPrice: Number(upper.toFixed(6)),
-      price: Number(price.toFixed(6)),
+      price: Number(price.toFixed(6)), uiPrice: up,
+      ...mintFields(...info.mints),
       inRange: price >= lower && price <= upper,
       feeOwedA: ua(d.feeOwedA), feeOwedB: ub(d.feeOwedB),
     };
@@ -378,7 +472,7 @@ async function status(mintArg) {
         out.closeEstB = ub(cq.quote.tokenEstB);
         if (q.usd != null) {
           out.positionUsd = Number(
-            ((out.closeEstA * price + out.closeEstB) * q.usd).toFixed(4));
+            ((out.closeEstA * up + out.closeEstB) * q.usd).toFixed(4));
         }
       }
     } catch { /* reporting only: never fail a status read over the close quote */ }
@@ -396,7 +490,7 @@ async function status(mintArg) {
       // Value the fees in quote units first, then in dollars. Collapsing
       // straight to dollars assumes token B is a dollar, which is true of
       // USDC pools and of nothing else.
-      const inQuote = out.feesAccruedA * price + out.feesAccruedB;
+      const inQuote = out.feesAccruedA * up + out.feesAccruedB;
       out.feesAccrued_quote = Number(inQuote.toFixed(9));
       if (q.usd != null) out.feesAccrued_USD = Number((inQuote * q.usd).toFixed(6));
     } catch { /* reporting only: never fail a status read over fee accounting */ }
@@ -406,13 +500,23 @@ async function status(mintArg) {
 }
 
 async function harvest(mint, execute) {
-  if (!execute) { console.log('DRY RUN — pass --execute to collect fees.'); return; }
   // Writes retry across endpoints too. A 429 here lands while the SDK is
   // FETCHING accounts to build the instruction, before anything is signed or
   // sent, so rotating endpoints is safe. The send itself is never retried
   // (sendOnce). The caller still re-reads chain state after any failure
   // rather than trusting the error alone.
-  return withRpc(async ({ signer }) => {
+  return withRpc(async ({ signer, rpc }) => {
+    assertWritable(await positionMints(rpc, mint));
+    if (!execute) {
+      // Build and simulate: a dry run that returns early proves nothing.
+      const ix = await harvestPositionInstructions(rpc, address(mint), { authority: signer });
+      const simulation = await simulate(rpc, signer, ix.instructions);
+      console.log(JSON.stringify({ mint, instructions: ix.instructions.length,
+        feesQuote: { feeOwedA: ix.feesQuote?.feeOwedA?.toString(), feeOwedB: ix.feesQuote?.feeOwedB?.toString() },
+        simulation, sent: false }, null, 1));
+      console.log('DRY RUN — pass --execute to collect fees.');
+      return;
+    }
     // authority, not funder: harvest and close act on a position you own, and
     // both return an ActionResult that still needs its callback invoked.
     const result = await harvestPosition(address(mint), { authority: signer });
@@ -423,6 +527,7 @@ async function harvest(mint, execute) {
 
 async function close(mint, execute) {
   return withRpc(async ({ signer, rpc }) => {
+    assertWritable(await positionMints(rpc, mint));
     if (!execute) {
       // Actually build the instructions. A dry run that returns early proves
       // nothing, and the close path is the one the bot depends on at 3am.
@@ -439,6 +544,7 @@ async function close(mint, execute) {
           feeOwedA: ix.feesQuote.feeOwedA?.toString(),
           feeOwedB: ix.feesQuote.feeOwedB?.toString(),
         } : null,
+        simulation: await simulate(rpc, signer, ix.instructions),
         sent: false }, null, 1));
       console.log('DRY RUN — close instructions built. Pass --execute to send.');
       return;
@@ -460,7 +566,12 @@ async function main() {
   if (cmd === 'harvest') return harvest(a[0], execute);
   if (cmd === 'close') return close(a[0], execute);
   if (cmd === 'open') return open(a[0], a[1], a[2], a[3], a[4], execute);
-  if (cmd === 'pool') return poolInfo(a[0]).then(i => console.log(JSON.stringify(i, null, 1)));
+  if (cmd === 'pool') {
+    // Read-only: no key is loaded. The API's record plus the chain's price and mint facts.
+    const info = await poolInfo(a[0]);
+    const v = await overEndpoints(ENDPOINTS, async url => chainView(createSolanaRpc(url), info), { tries: 2, pauseMs: 2500 });
+    return console.log(JSON.stringify(v, null, 1));
+  }
   console.log('commands: balance [pool] | positions | status [mint] | pool <pool> | '
     + 'open <pool> <lo> <hi> <maxA> <maxB> [--execute] | harvest <mint> [--execute] '
     + '| close <mint> [--execute]');

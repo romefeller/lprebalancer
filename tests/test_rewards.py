@@ -1,5 +1,6 @@
 """Rewards: parsed from every venue, priced into the board, swept after a harvest;
 and the pool review that keeps running while calm holds the tight band."""
+import json
 import os
 import time
 import unittest
@@ -92,7 +93,7 @@ class CalmReview(unittest.TestCase):
                 mock.patch.object(rebalancer.config, 'VENUE_MIN_HOURS', 6), \
                 mock.patch.object(rebalancer.config, 'REGIME_ENABLED', True), \
                 mock.patch.object(rebalancer.config, 'EXECUTE_DEXES', ('orca', 'raydium-clmm')):
-            r = rebalancer.calm_board_check({}, {'positionMint': 'M', 'price': 121.0})
+            r = rebalancer.calm_board_check({}, {'positionMint': 'M', 'price': 121.0, 'quoteUsd': 1.0})
         return r, moved, sent
 
     def v(self, addr, dex, pct, hours, held=False):
@@ -111,9 +112,21 @@ class CalmReview(unittest.TestCase):
         r, _, sent = self.go([self.v('O', 'orca', 1.4, 8)])                       # no held-pool evidence
         self.assertFalse(r); self.assertIn('held pool', sent[-1][1]['verdict'])
 
+OWNER = '83HxMUUC7cn5oWKgNvUYCv52MVLUWmaUPFdCrgC4tV2f'
+
+
+def harvest_tx(mint, amount):
+    """A harvest transaction that brought `amount` of `mint` to OWNER."""
+    tb = lambda a: {'accountIndex': 3, 'owner': OWNER, 'mint': mint,
+                    'uiTokenAmount': {'amount': str(int(a * 1e6)), 'decimals': 6, 'uiAmountString': str(a)}}
+    return {'meta': {'err': None, 'preTokenBalances': [tb(0.0)], 'postTokenBalances': [tb(amount)]}}
+
+
 class Sweep(unittest.TestCase):
-    def go(self, sol, ray_amount, price=2.0, swap=({'signature': 's', 'bought': {'amount': 3.9}}, None)):
+    def go(self, sol, ray_amount, price=2.0, swap=({'signature': 's', 'bought': {'amount': 3.9}}, None),
+           brought=None, sigs=('H',), theirs=()):
         calls, rows, state = [], [], {}
+        brought = ray_amount if brought is None else brought
         target_bal = iter([10.0, 13.9])                  # the target mint before and after the swap
         def chain(*a, **k):
             calls.append((a, k.get('dex')))
@@ -122,6 +135,7 @@ class Sweep(unittest.TestCase):
             if a[0] == 'balance':
                 return {'amount': next(target_bal, 13.9)}, None
             if a[0] == 'swap':
+                calls[-1] = (a, k.get('dex'), k.get('extra_env'))
                 return swap
             if a[0] == 'send':
                 return {'signature': 't'}, None
@@ -134,13 +148,15 @@ class Sweep(unittest.TestCase):
                 mock.patch.object(rebalancer.config, 'PROFIT_WALLET', PROFIT), \
                 mock.patch.object(rebalancer.config, 'GAS_RESERVE_SOL', 0.05), \
                 mock.patch.object(rebalancer, 'pool_record', lambda: rec), \
-                mock.patch.object(rebalancer, 'wallet', lambda p: {'sol': sol}), \
+                mock.patch.object(rebalancer, 'wallet', lambda p: {'sol': sol, 'owner': OWNER}), \
+                mock.patch.object(rebalancer, 'wallet_mints', lambda: set(theirs)), \
+                mock.patch.object(rebalancer.txfees, 'fetch', lambda rpc, s, **k: harvest_tx(RAY, brought)), \
                 mock.patch.object(rebalancer.dexes, 'jupiter_prices', lambda m: {RAY: price}), \
                 mock.patch.object(rebalancer, 'chain', chain), \
                 mock.patch.object(rebalancer, 'save', lambda s: None), \
                 mock.patch.object(rebalancer, 'notify', lambda *a, **k: None), \
                 mock.patch.object(rebalancer.db, 'record_payout', lambda *a, **k: rows.append(a[6])):
-            rebalancer.distribute_rewards(state, 'M')
+            rebalancer.distribute_rewards(state, 'M', list(sigs))
         return calls, rows, state
 
     def test_reward_swapped_to_usdc_and_paid(self):
@@ -161,6 +177,24 @@ class Sweep(unittest.TestCase):
         self.assertEqual([c[0][0] for c in calls], ['balance']); self.assertEqual(rows, [])
         calls, rows, _ = self.go(sol=0.3, ray_amount=2.0, swap=(None, 'impact'))
         self.assertEqual([c[0][0] for c in calls], ['balance', 'balance', 'swap', 'balance']); self.assertEqual(rows, [])
+
+    def test_only_what_the_harvest_brought_is_sold_and_the_swap_is_told(self):
+        # the wallet holds 50 RAY, this harvest brought 2: another profile's RAY stays
+        calls, rows, state = self.go(sol=0.3, ray_amount=50.0, brought=2.0)
+        swap = [c for c in calls if c[0][0] == 'swap'][0]
+        self.assertEqual(swap[0][3], '2.000000000')
+        self.assertEqual(json.loads(swap[2]['LPBOT_SLEEVE']), {RAY: 2.0})
+        self.assertEqual(state['reward_due'], {RAY: 0.0})
+
+    def test_an_unmeasured_harvest_pays_no_reward(self):
+        calls, rows, state = self.go(sol=0.3, ray_amount=50.0, sigs=())
+        self.assertEqual((calls, rows), ([], []))
+        calls, rows, state = self.go(sol=0.3, ray_amount=2.0, brought=0.2)       # $0.40 waits, carried
+        self.assertEqual(rows, []); self.assertAlmostEqual(state['reward_due'][RAY], 0.2)
+
+    def test_another_profiles_mint_is_never_a_reward_here(self):
+        calls, rows, _ = self.go(sol=0.3, ray_amount=2.0, theirs=(RAY,))
+        self.assertEqual((calls, rows), ([], []))
 
     def test_pool_tokens_are_never_swept(self):
         rec_calls = []

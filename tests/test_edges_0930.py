@@ -188,7 +188,7 @@ class FailoverEdges(unittest.TestCase):
     def tearDown(self):
         clear()
 
-    def run_it(self, status, price, venues, regime=False, choice=None, pinned=False):
+    def run_it(self, status, price, venues, regime=False, choice=None, pinned=False, quote=1.0):
         seen = {'vv': [], 'reopen': [], 'rebalance': []}
         with mock.patch.object(config, 'DEX', 'raydium-clmm'), mock.patch.object(config, 'POOL', 'POOL_raydium-clmm'), \
                 mock.patch.object(config, 'POOL_PINNED', pinned), mock.patch.object(config, 'EXECUTE_DEXES', ARMED), \
@@ -200,7 +200,7 @@ class FailoverEdges(unittest.TestCase):
                 mock.patch.object(rebalancer, 'rebalance', lambda *a, **k: seen['rebalance'].append(k)), \
                 mock.patch.object(rebalancer, 'repoint', lambda row: None), \
                 mock.patch.object(rebalancer, 'reopen', lambda s, r, band=None, recovering=False: seen['reopen'].append(band)):
-            out = rebalancer.venue_failover({}, status, price=price)
+            out = rebalancer.venue_failover({}, status, price=price, quote=quote)
         return out, seen
 
     V = [venue('raydium-clmm', 1.0, held=True), venue('byreal', 0.9)]
@@ -213,7 +213,13 @@ class FailoverEdges(unittest.TestCase):
         self.assertIs(self.run_it(None, 119.6, self.V)[0], False)
 
     def test_the_quote_price_reaches_the_venue_view(self):
-        _, seen = self.run_it({'positionMint': 'M', 'price': 119.6}, None, self.V)
+        # 2026-10-01 (multi-wallet contract): an unknown quote price is no
+        # dollar. No price, no ranking and no move.
+        out, seen = self.run_it({'positionMint': 'M', 'price': 119.6}, None, self.V)
+        self.assertEqual((out, seen['vv'], seen['rebalance']), (False, [], []))
+        out, seen = self.run_it(None, 119.6, self.V, quote=None)
+        self.assertEqual((out, seen['vv'], seen['reopen']), (False, [], []))
+        _, seen = self.run_it(None, 119.6, self.V)
         self.assertEqual(seen['vv'][0], (119.6, 1.0))
         _, seen = self.run_it({'positionMint': 'M', 'price': 119.6, 'quoteUsd': 1.001}, None, self.V)
         self.assertEqual(seen['vv'][0], (119.6, 1.001))
@@ -221,7 +227,7 @@ class FailoverEdges(unittest.TestCase):
     def test_the_width_under_regime_mode(self):
         self.assertEqual(self.run_it(None, 119.6, self.V, regime=True, choice=1.02)[1]['reopen'], [1.02])
         self.assertEqual(self.run_it(None, 119.6, self.V, regime=True, choice=None)[1]['reopen'], [config.REGIME_WIDTHS[-1]])
-        self.assertEqual(self.run_it({'positionMint': 'M', 'price': 119.6}, None, self.V, regime=True, choice=1.03)[1]['rebalance'][0]['band'], 1.03)
+        self.assertEqual(self.run_it({'positionMint': 'M', 'price': 119.6, 'quoteUsd': 1.0}, None, self.V, regime=True, choice=1.03)[1]['rebalance'][0]['band'], 1.03)
 
 
 class TidyEdges(unittest.TestCase):
@@ -311,7 +317,7 @@ class LastSurvivors(unittest.TestCase):
     def test_a_status_without_a_position_reopens(self):
         for _ in range(3):
             health.record_failure('venue:raydium-clmm', 'x', now=time.time())
-        out, seen = FailoverEdges.run_it(FailoverEdges(), {'price': 119.6}, None, FailoverEdges.V)
+        out, seen = FailoverEdges.run_it(FailoverEdges(), {'price': 119.6, 'quoteUsd': 1.0}, None, FailoverEdges.V)
         self.assertTrue(out); self.assertEqual(seen['rebalance'], []); self.assertEqual(len(seen['reopen']), 1)
 
     def test_a_pair_priced_below_one(self):
@@ -391,7 +397,7 @@ class Round3(unittest.TestCase):
     def test_a_failover_move_is_a_voluntary_move(self):
         for _ in range(3):
             health.record_failure('venue:raydium-clmm', 'x', now=time.time())
-        _, seen = FailoverEdges.run_it(FailoverEdges(), {'positionMint': 'M', 'price': 119.6}, None, FailoverEdges.V)
+        _, seen = FailoverEdges.run_it(FailoverEdges(), {'positionMint': 'M', 'price': 119.6, 'quoteUsd': 1.0}, None, FailoverEdges.V)
         self.assertIs(seen['rebalance'][0]['calm_move'], True)
 
 

@@ -35,6 +35,7 @@ import { consistentFees, BYREAL_LAYOUT } from './fee_snapshot.mjs';
 import { SLIPPAGE_REFUSAL } from './slippage.mjs';
 import { endpoints, overEndpoints, isEntry } from './rpc_policy.mjs';
 import path from 'node:path';
+import { assertNotHalted } from './halt_guard.mjs';
 import { createRequire } from 'node:module';
 import { waitTurn } from './jupiter_gate.mjs';
 
@@ -52,7 +53,6 @@ const { Connection, Keypair, PublicKey } = require('@solana/web3.js');
 console.info = (...a) => console.error(...a);
 
 const DIR = path.dirname(new URL(import.meta.url).pathname);
-const HALT = path.join(DIR, 'HALT');
 // A keyed endpoint from the environment first. Indexed reads
 // (getParsedTokenAccountsByOwner) never go to an endpoint that refuses them.
 export const ENDPOINTS = endpoints(process.env, { indexed: true });
@@ -80,7 +80,7 @@ const PROGRAM_NAMES = {
 };
 
 function guard() {
-  if (fs.existsSync(HALT)) throw new Error(`HALT present: ${fs.readFileSync(HALT, 'utf8').trim()}`);
+  assertNotHalted(DIR);                     // the global HALT and this profile's (halt_guard.mjs)
 }
 
 async function secretBytes() {

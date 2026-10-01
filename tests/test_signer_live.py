@@ -150,10 +150,24 @@ class DryRuns(unittest.TestCase):
         self.assertGreater(j['instructions'], 0)
         self.assertIsNotNone(j['feesQuote'])
 
-    def test_harvest_without_execute_sends_nothing(self):
-        rc, j, text = run('harvest', 'anything')
-        self.assertEqual(rc, 0)
+    def test_harvest_dry_run_builds_and_simulates_for_the_live_position(self):
+        # A dry run builds the real instructions (2026-10-01; it used to return
+        # before building, which proved nothing).
+        _, s, _ = run('status')
+        if not s or not s.get('positionMint'):
+            self.skipTest('no open position')
+        rc, j, text = run('harvest', s['positionMint'])
+        self.assertEqual(rc, 0, text[-300:])
+        self.assertFalse(j['sent'])
+        self.assertGreater(j['instructions'], 0)
+        self.assertIn('simulation', j)
         self.assertIn('DRY RUN', text)
+
+    def test_harvest_of_an_unknown_position_fails_loudly(self):
+        rc, j, text = run('harvest', 'anything')
+        self.assertNotEqual(rc, 0)
+        self.assertIn('ERROR', text)
+        self.assertNotIn('"sent"', text)
 
 
 if __name__ == '__main__':

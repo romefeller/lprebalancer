@@ -548,3 +548,64 @@ test('sendOnce: the error text carries the message verbatim, even an empty one',
   const str = { sendRawTransaction: async () => { throw 'boom'; }, confirmTransaction: async () => assert.fail('no confirm') };
   await assert.rejects(M.sendOnce(str, signed(), 'bh', 100, REPORT, () => {}), e => e.message === 'send failed after signing (not retried): boom');
 });
+
+// --- LPBOT_SLEEVE: a wallet several profiles share ------------------------------------
+// The fallback counts and sells at most the profile's sleeve, as swap_jupiter.mjs
+// does; a sleeve that cannot be read refuses the swap.
+function fakeConnection({ lamports = 0n, usdcRaw = 0n, wsolRaw = null }) {
+  const account = (raw) => { const d = Buffer.alloc(165); d.writeBigUInt64LE(BigInt(raw), 64); return { data: d }; };
+  return {
+    getBalance: async () => Number(lamports),
+    getAccountInfo: async (key) => {
+      const k = key.toBase58();
+      const usdcAta = spl.getAssociatedTokenAddressSync(new PublicKey(USDC), OWNER, false, TOKEN).toBase58();
+      const wsolAta = spl.getAssociatedTokenAddressSync(new PublicKey(SOL), OWNER, false, TOKEN).toBase58();
+      if (k === usdcAta) return account(usdcRaw);
+      if (k === wsolAta) return wsolRaw == null ? null : account(wsolRaw);
+      return null;
+    },
+  };
+}
+const OWNER = Keypair.generate().publicKey;
+const USDC_INFO = { mint: USDC, decimals: 6, program: TOKEN.toBase58(), usdPrice: 1 };
+const SOL_INFO = { mint: SOL, decimals: 9, program: TOKEN.toBase58(), usdPrice: 150 };
+
+async function withSleeve(sleeve, fn) {
+  const saved = process.env.LPBOT_SLEEVE;
+  if (sleeve === undefined) delete process.env.LPBOT_SLEEVE; else process.env.LPBOT_SLEEVE = sleeve;
+  try { return await fn(); } finally {
+    if (saved === undefined) delete process.env.LPBOT_SLEEVE; else process.env.LPBOT_SLEEVE = saved;
+  }
+}
+
+test('sleeve: the fallback sells at most the profile\'s share of a shared wallet', async () => {
+  const conn = fakeConnection({ usdcRaw: 500_000_000n });             // 500 USDC in the wallet
+  const none = await withSleeve(undefined, () => M.sellable(conn, OWNER, USDC_INFO));
+  assert.equal(none.avail, 500);
+  const capped = await withSleeve(JSON.stringify({ [USDC]: 40 }), () => M.sellable(conn, OWNER, USDC_INFO));
+  assert.deepEqual([capped.total, capped.avail, capped.usd], [40, 40, 40]);
+  const other = await withSleeve(JSON.stringify({ [SOL]: 1 }), () => M.sellable(conn, OWNER, USDC_INFO));
+  assert.equal(other.avail, 0);                                     // a mint the sleeve does not name: nothing
+});
+
+test('sleeve: native SOL keeps the gas reserve inside the sleeve', async () => {
+  const conn = fakeConnection({ lamports: 2_000_000_000n, wsolRaw: 0n });
+  const r = await withSleeve(JSON.stringify({ [SOL]: 1 }), () => M.sellable(conn, OWNER, SOL_INFO));
+  assert.equal(r.total, 1);
+  assert.ok(Math.abs(r.avail - 0.95) < 1e-12);
+});
+
+test('sleeve: wrapped SOL counts with the lamports, then the sleeve caps both', async () => {
+  const conn = fakeConnection({ lamports: 1_000_000_000n, wsolRaw: 500_000_000n });
+  const all = await withSleeve(undefined, () => M.sellable(conn, OWNER, SOL_INFO));
+  assert.ok(Math.abs(all.total - 1.5) < 1e-12);
+  const capped = await withSleeve(JSON.stringify({ [SOL]: 1.2 }), () => M.sellable(conn, OWNER, SOL_INFO));
+  assert.equal(capped.total, 1.2);
+});
+
+test('sleeve: one that cannot be read refuses the swap, never means the whole wallet', async () => {
+  const conn = fakeConnection({ usdcRaw: 500_000_000n });
+  for (const bad of ['{', '[1]', JSON.stringify({ [USDC]: -1 }), JSON.stringify({ [USDC]: '40' })]) {
+    await assert.rejects(withSleeve(bad, () => M.sellable(conn, OWNER, USDC_INFO)), /LPBOT_SLEEVE/, bad);
+  }
+});

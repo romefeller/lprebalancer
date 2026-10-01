@@ -1,0 +1,9 @@
+{
+  "name": "lp-bot-next",
+  "private": true,
+  "description": "EVM dependencies of the LP bot (Base / Aerodrome Slipstream signer). Solana packages resolve from the parent node_modules.",
+  "license": "UNLICENSED",
+  "dependencies": {
+    "viem": "2.56.9"
+  }
+}

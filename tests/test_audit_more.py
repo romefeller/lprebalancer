@@ -131,7 +131,7 @@ class Hooks(unittest.TestCase):
 
     def test_the_audit_runs_again_after_exactly_an_hour(self):
         runs = []
-        with mock.patch.object(rebalancer.audit, 'run', lambda *a: runs.append(1) or {}), \
+        with mock.patch.object(rebalancer.audit, 'run', lambda *a, **k: runs.append(1) or {}), \
                 mock.patch.object(rebalancer, 'save', lambda s: None), \
                 mock.patch.object(rebalancer.time, 'time', lambda: 10_000.0):
             rebalancer.run_audits({'last_audit': 10_000.0 - 3600})
@@ -141,13 +141,19 @@ class Hooks(unittest.TestCase):
 
 
 class QuoteFallbacks(unittest.TestCase):
-    def test_a_missing_quote_price_counts_the_quote_as_a_dollar(self):
+    def test_a_missing_quote_price_is_unknown_not_a_dollar(self):
+        # 2026-10-01 (multi-wallet contract): a null quoteUsd is unknown on
+        # every path that values money; the open never sizes from it.
         with mock.patch.object(config, 'DEPLOY_ALL', True), mock.patch.object(config, 'MAX_USD', 300.0), \
                 mock.patch.object(config, 'SIDE_CAP_FRACTION', 0.55), mock.patch.object(config, 'GAS_RESERVE_SOL', 0.05):
             b = {'balanceA': 1.0, 'balanceB': 100.0, 'price': 120.0, 'quoteUsd': None, 'nativeSide': 'A'}
             res = 0.05 + rebalancer.OPEN_RENT_HEADROOM_SOL
-            self.assertAlmostEqual(rebalancer.deployable_usd(b), (1.0 - res) * 120.0 + 100.0)
-            a, bb = rebalancer.deposit_caps(b)
+            self.assertIsNone(rebalancer.deployable_usd(b))
+            self.assertRaises(ValueError, rebalancer.capital, b)
+            self.assertRaises(TypeError, rebalancer.deposit_caps, b)
+            self.assertIsNone(rebalancer.position_usd({'closeEstA': 1.0, 'closeEstB': 5.0, 'price': 120.0}))
+            b1 = dict(b, quoteUsd=1.0)
+            a, bb = rebalancer.deposit_caps(b1)
             self.assertAlmostEqual(a, 1.0 - res); self.assertAlmostEqual(bb, 100.0)
             b2 = dict(b, quoteUsd=2.0)
             self.assertAlmostEqual(rebalancer.deployable_usd(b2), ((1.0 - res) * 120.0 + 100.0) * 2.0)

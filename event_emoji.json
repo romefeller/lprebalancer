@@ -48,5 +48,10 @@
  "recentre_deferred": "⏳",
  "open_recovered": "🩹",
  "close_recovered": "🩹",
- "swap_fallback": "🔀"
+ "swap_fallback": "🔀",
+ "PORTFOLIO": "📊",
+ "dormant": "😴",
+ "deposit_seen": "📩",
+ "claim_overdraw": "🧮",
+ "wallet_lock_timeout": "🔒"
 }

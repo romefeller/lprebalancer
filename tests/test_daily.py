@@ -172,7 +172,7 @@ class Line(unittest.TestCase):
         self.assertIn('daily', db.stats())
         with mock.patch.object(db, 'daily_lines', side_effect=RuntimeError('x')):
             self.assertIsNone(db._daily_or_none())
-        with mock.patch.object(db, 'daily_lines', lambda n: ['L'] * n):
+        with mock.patch.object(db, 'daily_lines', lambda n, *scope: ['L'] * n):
             self.assertEqual(db._daily_or_none(), ['L', 'L'])
 
 

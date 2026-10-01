@@ -59,3 +59,7 @@ import tempfile  # noqa: E402
 import rebalancer  # noqa: E402
 FEED = pathlib.Path(tempfile.mkdtemp(prefix='lp_bot_test_feed_')) / 'events.jsonl'
 rebalancer.FEED = FEED
+# The same for the state file and the profile's HALT: run/<profile>/ in the
+# code directory is the live bot's once deployed, never a test's.
+rebalancer.STATE = FEED.parent / 'runtime.json'
+rebalancer.HALT = FEED.parent / 'HALT'

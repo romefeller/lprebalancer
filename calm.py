@@ -41,7 +41,7 @@ def tape_5m(pool, live_price=None, before=None):
     GeckoTerminal sometimes lists a pair the other way up. When the latest
     close is closer to 1/price than to price, every price column is inverted
     (high and low swap) so the series matches the pool."""
-    url = f'{engine.GECKO}/pools/{pool}/ohlcv/minute?aggregate=5&limit=1000&currency=token'
+    url = engine.gecko(f'/pools/{pool}/ohlcv/minute?aggregate=5&limit=1000&currency=token')
     if before:
         url += f'&before_timestamp={int(before)}'
     d = engine.curl(url, accept='application/json;version=20230203')

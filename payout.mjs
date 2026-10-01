@@ -11,19 +11,23 @@
 //   node payout.mjs send <mint> <amount> <to> [--execute]
 //   node payout.mjs balance <mint>
 //
-// `amount` is in human units of the mint. The recipient's associated token
+// `amount` is in human units of the mint: UI units, so a Token-2022 scaled
+// mint's multiplier applies (token2022.mjs), as in every signer. A paused mint
+// or one with a transfer hook refuses. The recipient's associated token
 // account is created if missing (idempotent instruction; the LP wallet pays
 // its rent once, about 0.002 SOL). The native mint So111...112 sends lamports.
 import fs from 'node:fs';
 import path from 'node:path';
+import { assertNotHalted } from './halt_guard.mjs';
 import { createRequire } from 'node:module';
+
+import { readMints, rawToUi, uiToRaw, writeRefusal } from './token2022.mjs';
 
 const require = createRequire(import.meta.url);
 const { Connection, Keypair, PublicKey, SystemProgram, Transaction, sendAndConfirmTransaction } = require('@solana/web3.js');
 const spl = require('@solana/spl-token');
 
 const DIR = path.dirname(new URL(import.meta.url).pathname);
-const HALT = path.join(DIR, 'HALT');
 const RPC = process.env.SOLANA_RPC_URL ?? process.env.LPBOT_RPC ?? 'https://api.mainnet-beta.solana.com';
 const PROFIT = process.env.LPBOT_PROFIT_WALLET ?? '';
 // The pin lives in the service environment, not in the database: a database
@@ -33,7 +37,7 @@ const GAS_RESERVE_SOL = Number(process.env.LPBOT_GAS_RESERVE_SOL ?? 0.05);
 const NATIVE_MINT = 'So11111111111111111111111111111111111111112';
 
 function guard() {
-  if (fs.existsSync(HALT)) throw new Error(`HALT present: ${fs.readFileSync(HALT, 'utf8').trim()}`);
+  assertNotHalted(DIR);                     // the global HALT and this profile's (halt_guard.mjs)
 }
 
 async function secretBytes() {
@@ -43,6 +47,13 @@ async function secretBytes() {
   if (raw.startsWith('[')) return Uint8Array.from(JSON.parse(raw));
   const bs58 = (await import('bs58')).default;
   return bs58.decode(raw);
+}
+
+// The mint's facts (multiplier, pause, transfer hook) from its parsed account.
+async function facts(connection, mint) {
+  const [f] = await readMints(async ms => (await connection.getMultipleParsedAccounts(
+    ms.map(x => new PublicKey(x)), 'confirmed')).value, [mint.toBase58()]);
+  return f;
 }
 
 function key(s, what) {
@@ -79,17 +90,20 @@ async function send(mintArg, amountArg, toArg, execute) {
     if (!info) throw new Error(`mint ${mint.toBase58()} not found`);
     const programId = info.owner;
     const m = await spl.getMint(connection, mint, 'confirmed', programId);
-    const raw = BigInt(Math.floor(amount * 10 ** m.decimals));
+    const f = await facts(connection, mint);
+    const refusal = writeRefusal([f]);
+    if (refusal) throw new Error(refusal);
+    const raw = f.multiplier === 1 ? BigInt(Math.floor(amount * 10 ** m.decimals)) : uiToRaw(amount, m.decimals, f.multiplier);
     if (raw <= 0n) throw new Error('amount rounds to zero');
     const src = spl.getAssociatedTokenAddressSync(mint, payer.publicKey, false, programId);
     const dst = spl.getAssociatedTokenAddressSync(mint, to, false, programId);
     const acct = await spl.getAccount(connection, src, 'confirmed', programId);
-    if (acct.amount < raw) throw new Error(`LP wallet holds ${Number(acct.amount) / 10 ** m.decimals}, less than ${amount}`);
+    if (acct.amount < raw) throw new Error(`LP wallet holds ${rawToUi(acct.amount, m.decimals, f.multiplier)}, less than ${amount}`);
     const dstExists = !!(await connection.getAccountInfo(dst));
     tx.add(spl.createAssociatedTokenAccountIdempotentInstruction(payer.publicKey, dst, to, mint, programId));
     tx.add(spl.createTransferCheckedInstruction(src, mint, dst, payer.publicKey, raw, m.decimals, [], programId));
-    report = { mint: mint.toBase58(), amount: Number(raw) / 10 ** m.decimals, raw: raw.toString(),
-               decimals: m.decimals, recipientAccountExisted: dstExists };
+    report = { mint: mint.toBase58(), amount: rawToUi(raw, m.decimals, f.multiplier), raw: raw.toString(),
+               decimals: m.decimals, multiplier: f.multiplier, recipientAccountExisted: dstExists };
   }
   report = { ...report, from: payer.publicKey.toBase58(), to: to.toBase58() };
   if (!execute) {
@@ -135,11 +149,12 @@ async function balance(mintArg) {
   const info = await connection.getAccountInfo(mint);
   if (!info) throw new Error(`mint ${mint.toBase58()} not found`);
   const m = await spl.getMint(connection, mint, 'confirmed', info.owner);
+  const f = await facts(connection, mint);
   const ata = spl.getAssociatedTokenAddressSync(mint, payer.publicKey, false, info.owner);
   let raw = 0n;
   try { raw = (await spl.getAccount(connection, ata, 'confirmed', info.owner)).amount; } catch { raw = 0n; }
-  console.log(JSON.stringify({ mint: mint.toBase58(), amount: Number(raw) / 10 ** m.decimals,
-                               raw: raw.toString(), decimals: m.decimals }, null, 1));
+  console.log(JSON.stringify({ mint: mint.toBase58(), amount: rawToUi(raw, m.decimals, f.multiplier),
+                               raw: raw.toString(), decimals: m.decimals, multiplier: f.multiplier }, null, 1));
 }
 
 async function main() {

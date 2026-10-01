@@ -28,7 +28,7 @@ import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 OWNED = ('rebalancer.py', 'db.py', 'engine.py', 'dexes.py', 'scanner.py', 'calm.py',
-         'fees.py', 'guards.py', 'txfees.py', 'config.py')
+         'fees.py', 'guards.py', 'txfees.py', 'config.py', 'wallets.py', 'chains.py', 'audit.py')
 TEXT_SUFFIXES = {'.mjs', '.js', '.sql', '.json', '.md', '.sh', '.service'}
 SKIP_DIRS = {'node_modules', '__pycache__', 'research', '.git'}
 

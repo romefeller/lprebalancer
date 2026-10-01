@@ -113,6 +113,28 @@ class Sweep(unittest.TestCase):
         out, _, seen, _, _ = self.go([acc(JITO, 200_000_000, 9)], answers=(({}, None),))
         self.assertEqual(out, []); self.assertEqual(seen[0][0], 'sweep_failed')
 
+    def test_only_foreign_non_empty_tokens_are_priced(self):
+        """Every price and fact read spends Jupiter budget: the pool's tokens,
+        the wallet's other mints and empty accounts are never asked for."""
+        asked = []
+        accounts = [acc(SOL, 10**9, 9), acc(USDC, 10**6, 6), acc(JITO, 0, 9), acc(MSOL, 1, 9), acc('OTHER', 10**6, 6),
+                    acc(SPAM, 10**12, 6)]
+        with mock.patch.object(rebalancer, 'wallet_mints', lambda: {'OTHER'}), \
+                mock.patch.object(rebalancer, 'housekeeper', lambda chore: True), \
+                mock.patch.object(rebalancer.audit, 'token_accounts', lambda url, owner: accounts), \
+                mock.patch.object(rebalancer.dexes, 'jupiter_prices', lambda ms: (asked.append(list(ms)) or {})), \
+                mock.patch.object(rebalancer.dexes, 'jupiter_token', lambda m: FACTS.get(m)), \
+                mock.patch.object(rebalancer, 'pool_tokens', lambda: ((SOL, 'SOL'), (USDC, 'USDC'))), \
+                mock.patch.object(rebalancer, 'chain', lambda *a, **k: (None, 'no')), \
+                mock.patch.object(rebalancer, 'save', lambda s: None), \
+                mock.patch.object(rebalancer, 'notify', lambda ev, **kw: None):
+            rebalancer.sweep_foreign({}, dict(self.BAL))
+            self.assertEqual(asked, [[MSOL, SPAM]])                # one raw unit counts; 0 does not
+            asked.clear()
+            accounts[:] = [acc(SOL, 10**9, 9), acc(JITO, 0, 9), acc('OTHER', 10**6, 6)]
+            rebalancer.sweep_foreign({}, dict(self.BAL))
+            self.assertEqual(asked, [])                            # nothing foreign: no read at all
+
     def test_rewards_seen_are_left_to_the_payout(self):
         _, calls, *_ = self.go([acc(RWD, 10**9, 6)], state={'reward_mints_seen': [RWD]})
         self.assertEqual(calls, [])

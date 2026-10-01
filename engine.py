@@ -37,10 +37,27 @@ concentration, and each DEX kind has its own route to it (see `concentration`).
 import json, math, pathlib, subprocess, threading, time
 import numpy as np
 
+import db
+
 ROOT = pathlib.Path(__file__).resolve().parent
 UA = ('Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 '
       '(KHTML, like Gecko) Chrome/126.0 Safari/537.36')
-GECKO = 'https://api.geckoterminal.com/api/v2/networks/solana'
+GECKO_API = 'https://api.geckoterminal.com/api/v2'
+# The GeckoTerminal network of the running profile (chains.py
+# 'gecko_network'). One process runs one profile, so one network; the bot
+# sets it at import (rebalancer.py), a command-line scan keeps 'solana'.
+NETWORK = ['solana']
+
+
+def use_network(name):
+    """Point every GeckoTerminal call of this process at network `name`."""
+    NETWORK[0] = str(name)
+
+
+def gecko(path):
+    """The GeckoTerminal URL of `path` ('/pools/<address>/...') on this
+    process's network."""
+    return f'{GECKO_API}/networks/{NETWORK[0]}{path}'
 
 # Defaults for a bare scan from the command line. The bot passes its own values
 # from the active profile; nothing below reads these when it is running.
@@ -52,18 +69,44 @@ BANDS = (1.03, 1.05, 1.08, 1.12, 1.18, 1.25, 1.40)
 MAJORS = {'SOL', 'USDC', 'USDT', 'PYUSD', 'USDS', 'DAI', 'FDUSD', 'USDE'}
 
 
-# GeckoTerminal's free tier allows about 30 requests a minute. Every caller in
-# this process — the scanner thread, the re-optimiser, the quote pricer — goes
-# through this one gate, so they cannot add up to a 429 between them.
+# GeckoTerminal's free tier allows about 30 requests a minute, per IP. Every
+# caller in every profile's process — the scanner thread, the re-optimiser,
+# the tapes, the quote pricer — goes through one gate, the `rate_gate` row
+# 'gecko' in Postgres, so N processes together keep the pace one process
+# kept alone. Each call reserves the next free slot in one short transaction
+# (SELECT ... FOR UPDATE) and sleeps outside it, so no row lock is held while
+# waiting. Without the database, the in-process gate still spaces this
+# process's own calls.
 _GECKO_LOCK = threading.Lock()
 _GECKO_LAST = [0.0]
 GECKO_SPACING = 2.1
+# A reservation further ahead than this is not a queue (at most a few dozen
+# callers) but a row written under another clock: it is reset, not waited on.
+GATE_MAX_WAIT_S = 60.0
+
+
+def rate_gate(name, spacing):
+    """Seconds to wait before this call to the service `name`: the next free
+    slot, `spacing` after the last one reserved by any process. Raises when
+    the database cannot be reached (the caller falls back to its own gate)."""
+    with db.cursor(commit=True) as cur:
+        cur.execute('insert into rate_gate (name, next_at) values (%s, 0) on conflict do nothing', (name,))
+        cur.execute('select next_at from rate_gate where name = %s for update', (name,))
+        now = time.time()
+        start = max(now, float(cur.fetchone()['next_at']))
+        if start - now > GATE_MAX_WAIT_S:
+            start = now
+        cur.execute('update rate_gate set next_at = %s where name = %s', (start + spacing, name))
+    return start - now
 
 
 def curl(url, accept='application/json', retries=2, max_time=40):
     if 'geckoterminal.com' in url:
         with _GECKO_LOCK:
-            wait = _GECKO_LAST[0] + GECKO_SPACING - time.time()
+            try:
+                wait = rate_gate('gecko', GECKO_SPACING)
+            except Exception:
+                wait = _GECKO_LAST[0] + GECKO_SPACING - time.time()
             if wait > 0:
                 time.sleep(wait)
             _GECKO_LAST[0] = time.time()
@@ -149,7 +192,8 @@ STABLES = {'USDC', 'USDT', 'PYUSD', 'USDS', 'DAI', 'FDUSD', 'USDE'}      # displ
 STABLE_MINTS = {'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v',   # USDC
                 'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB',   # USDT
                 '2b1kV6DkPAnxd5ixfnxCpjxmKwqjjaYmCZfHsFu24GXo',   # PYUSD
-                'USDSwr9ApdHk5bvJKMjzff41FfuX8bSxdKcR81vTwcA'}    # USDS
+                'USDSwr9ApdHk5bvJKMjzff41FfuX8bSxdKcR81vTwcA',    # USDS
+                '0x833589fcd6edb6e08f4c7c32d4f71b54bda02913'}     # USDC on Base (lower case)
 MAJOR_MINTS = STABLE_MINTS | {'So11111111111111111111111111111111111111112'}   # + SOL
 
 
@@ -157,8 +201,9 @@ def is_stable(tok):
     """A dollar stablecoin by MINT; a token with no address at all (old
     fixtures, raw Orca dicts) falls back to its symbol."""
     tok = tok or {}
-    if tok.get('address'):
-        return tok['address'] in STABLE_MINTS
+    a = tok.get('address')
+    if a:
+        return (a.lower() if a.startswith('0x') else a) in STABLE_MINTS
     return tok.get('symbol') in STABLES
 
 
@@ -184,7 +229,7 @@ def pool_quote_price(pool):
     mint = b.get('address')
     if not mint:
         return None
-    d = curl(f'{GECKO}/simple/networks/solana/token_price/{mint}',
+    d = curl(f'{GECKO_API}/simple/networks/{NETWORK[0]}/token_price/{mint}',
              accept='application/json;version=20230203')
     try:
         p = float(((d or {}).get('data') or {}).get('attributes', {})
@@ -236,7 +281,7 @@ def candles(address, native=True):
     precisely why that calibration passed while SOL/PUMP returned +12%/day.
     """
     cur = 'token' if native else 'usd'
-    d = curl(f'{GECKO}/pools/{address}/ohlcv/hour?aggregate=1&limit=1000&currency={cur}',
+    d = curl(gecko(f'/pools/{address}/ohlcv/hour?aggregate=1&limit=1000&currency={cur}'),
              accept='application/json;version=20230203')
     rows = (((d or {}).get('data') or {}).get('attributes') or {}).get('ohlcv_list') or []
     rows = sorted(rows, key=lambda x: x[0])

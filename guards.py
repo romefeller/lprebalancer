@@ -10,6 +10,8 @@ import math
 import pathlib
 import re
 
+import chains
+
 B58 = re.compile(r'^[1-9A-HJ-NP-Za-km-z]{32,44}$')
 ARG = re.compile(r'^[A-Za-z0-9._:/\-]{1,128}$')
 
@@ -51,12 +53,15 @@ def _finite_pos(x, name):
 
 
 def open_request(*, pool, dex, price, lower, upper, cap_a, cap_b, capital_usd, max_usd,
-                 quote_usd, execute_dexes, signers, model_price=None, max_drift=0.03):
+                 quote_usd, execute_dexes, signers, model_price=None, max_drift=0.03, chain='solana',
+                 ui_price=None):
     """Everything an open must satisfy before a signer is spawned. `price` is
     the LIVE price the wallet read from the chain; `model_price` the one the
     band was centred on, from the DEX's API. They must agree, or the band is
-    centred on a stale number."""
-    if not is_address(pool):
+    centred on a stale number. `pool` must be an address on `chain`. The
+    caps are UI amounts (Token-2022 scaled mints): their value is taken at
+    `ui_price` when given, the pool-native `price` otherwise."""
+    if not chains.is_address(chain, pool):
         raise Refused(f'pool {pool!r} is not an address')
     if model_price is not None:
         _finite_pos(model_price, 'model_price')
@@ -75,12 +80,16 @@ def open_request(*, pool, dex, price, lower, upper, cap_a, cap_b, capital_usd, m
     for x, n in ((cap_a, 'cap_a'), (cap_b, 'cap_b')):
         if not isinstance(x, (int, float)) or not math.isfinite(x) or x < 0:
             raise Refused(f'{n} must be a non-negative finite number, got {x!r}')
-    value_usd = (cap_a * price + cap_b) * quote_usd
+    px = price
+    if ui_price is not None:
+        _finite_pos(ui_price, 'ui_price')
+        px = ui_price
+    value_usd = (cap_a * px + cap_b) * quote_usd
     # Each side is capped at side_cap_fraction (< 1) of the capital, so the two
     # caps together cannot exceed 2x capital, and never the hard ceiling.
     if value_usd > 2.0 * capital_usd + 1e-6:
         raise Refused(f'caps worth ${value_usd:.2f} exceed twice the capital ${capital_usd:.2f}')
-    if min(cap_a * price, cap_b) * quote_usd > max_usd:
+    if min(cap_a * px, cap_b) * quote_usd > max_usd:
         raise Refused(f'a side worth more than the ${max_usd} ceiling')
     return True
 

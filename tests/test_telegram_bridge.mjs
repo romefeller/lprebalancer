@@ -1,0 +1,420 @@
+// The Telegram bridge over many feeds: run/*/events.jsonl and the legacy
+// ROOT/events.jsonl, one cursor per file, the pool's label on every message.
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import os from 'node:os';
+import path from 'node:path';
+import { feedFiles, migrateState, readNew, tailAll, message, render, MOVED_FEED, LEGACY_FEED }
+  from '../telegram_bridge.mjs';
+import { poolLabel, redact, portfolioText, equityLine, sinceStartLine } from '../book_format.mjs';
+
+const HERE = path.dirname(new URL(import.meta.url).pathname);
+// The live bot's directory: its feeds are real rows to render (read only).
+const LIVE = path.join(HERE, '..', '..', 'lp_bot');
+// The reference rendering: main just before the multi-wallet merge. Pinned to a
+// commit, not read from a directory: after the merge every tree holds the new
+// bridge, and comparing against it would be new against new.
+const PRE_MERGE = 'c2c1cc2';
+const gitShow = (file) => {
+  try {
+    const top = execFileSync('git', ['-C', HERE, 'rev-parse', '--show-toplevel'], { encoding: 'utf8' }).trim();
+    return execFileSync('git', ['-C', top, 'show', `${PRE_MERGE}:${file}`], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+  } catch { return null; }
+};
+
+const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'bridge_'));
+const row = (event, extra = {}) => JSON.stringify({ t: '2026-10-01T00:00:00Z', event, ...extra }) + '\n';
+const put = (root, rel, text, flag = 'a') => {
+  fs.mkdirSync(path.dirname(path.join(root, rel)), { recursive: true });
+  fs.writeFileSync(path.join(root, rel), text, { flag });
+};
+const run = (p) => path.join('run', p, 'events.jsonl');
+
+async function tick(state, root) {
+  const got = [];
+  const saved = [];
+  await tailAll(state, root, async (r) => { got.push(r); }, (st) => saved.push(JSON.stringify(st)));
+  return { got, saved };
+}
+
+// --- the feeds ---------------------------------------------------------------------
+
+test('every profile feed and the legacy one are tailed, each from its own cursor', async () => {
+  const root = tmp();
+  put(root, LEGACY_FEED, row('in_band', { n: 1 }));
+  put(root, run('sol-usdc'), row('in_band', { n: 2, pair: 'SOL/USDC' }));
+  put(root, run('mu-usdc'), row('OPEN', { n: 3, pair: 'MU/USDC' }));
+  assert.deepEqual(feedFiles(root), [LEGACY_FEED, run('mu-usdc'), run('sol-usdc')]);
+  const state = { files: {} };
+  assert.deepEqual((await tick(state, root)).got.map(r => r.n), [1, 3, 2]);
+  assert.deepEqual((await tick(state, root)).got, []);                   // nothing twice
+  put(root, run('mu-usdc'), row('CLOSE', { n: 4 }));
+  assert.deepEqual((await tick(state, root)).got.map(r => r.n), [4]);
+  assert.deepEqual(Object.keys(state.files).sort(), [LEGACY_FEED, run('mu-usdc'), run('sol-usdc')].sort());
+});
+
+test('a profile directory that appears while running is read from its start', async () => {
+  const root = tmp();
+  put(root, run('sol-usdc'), row('in_band', { n: 1 }));
+  const state = { files: {} };
+  await tick(state, root);
+  fs.mkdirSync(path.join(root, 'run', 'djt-usdc'));                        // no feed yet: nothing to read
+  assert.deepEqual((await tick(state, root)).got, []);
+  put(root, run('djt-usdc'), row('startup', { n: 2 }) + row('dormant', { n: 3 }));
+  assert.deepEqual((await tick(state, root)).got.map(r => r.n), [2, 3]);
+});
+
+test('a line still being written waits for its newline', async () => {
+  const root = tmp();
+  const full = row('OPEN', { n: 1, pair: 'MU/USDC' });
+  put(root, run('mu-usdc'), full.slice(0, 20));
+  const state = { files: {} };
+  assert.deepEqual((await tick(state, root)).got, []);
+  assert.equal(state.files[run('mu-usdc')].pos, 0);
+  put(root, run('mu-usdc'), full.slice(20, -1));
+  assert.deepEqual((await tick(state, root)).got, []);
+  put(root, run('mu-usdc'), '\n' + row('CLOSE', { n: 2 }).slice(0, 5));
+  assert.deepEqual((await tick(state, root)).got.map(r => r.n), [1]);
+  put(root, run('mu-usdc'), row('CLOSE', { n: 2 }).slice(5));
+  assert.deepEqual((await tick(state, root)).got.map(r => r.n), [2]);
+});
+
+test('a line that is not JSON is dropped, the rest go out', async () => {
+  const root = tmp();
+  put(root, run('a'), row('x', { n: 1 }) + '{"event": "broken"\n' + 'garbage\n' + '\n' + row('x', { n: 2 }));
+  const state = { files: {} };
+  const errors = [];
+  const orig = console.error;
+  console.error = (...a) => errors.push(a.join(' '));
+  try {
+    assert.deepEqual((await tick(state, root)).got.map(r => r.n), [1, 2]);
+  } finally { console.error = orig; }
+  assert.ok(errors.some(e => e.includes('2 line(s) not JSON')), errors.join('|'));
+});
+
+test('a truncated feed is read again from 0', async () => {
+  const root = tmp();
+  put(root, run('a'), row('x', { n: 1 }) + row('x', { n: 2 }));
+  const state = { files: {} };
+  await tick(state, root);
+  fs.truncateSync(path.join(root, run('a')), 0);
+  put(root, run('a'), row('y', { n: 3 }));
+  assert.deepEqual((await tick(state, root)).got.map(r => r.n), [3]);
+});
+
+test('a rotated feed (another inode, even a longer one) is read from 0', async () => {
+  const root = tmp();
+  const f = path.join(root, run('a'));
+  put(root, run('a'), row('x', { n: 1 }));
+  const state = { files: {} };
+  await tick(state, root);
+  fs.renameSync(f, f + '.1');
+  put(root, run('a'), row('y', { n: 2 }) + row('y', { n: 3 }) + row('y', { n: 4 }), 'w');
+  assert.ok(fs.statSync(f).size > state.files[run('a')].pos);
+  assert.deepEqual((await tick(state, root)).got.map(r => r.n), [2, 3, 4]);
+});
+
+test('a moved feed keeps its cursor; a vanished one loses it', async () => {
+  const root = tmp();
+  put(root, LEGACY_FEED, row('x', { n: 1 }));
+  const state = { files: {} };
+  await tick(state, root);
+  fs.mkdirSync(path.join(root, 'run', 'sol-usdc'), { recursive: true });
+  fs.renameSync(path.join(root, LEGACY_FEED), path.join(root, MOVED_FEED));
+  put(root, MOVED_FEED, row('x', { n: 2 }));
+  assert.deepEqual((await tick(state, root)).got.map(r => r.n), [2]);
+  assert.deepEqual(Object.keys(state.files), [MOVED_FEED]);
+  fs.unlinkSync(path.join(root, MOVED_FEED));
+  await tick(state, root);
+  assert.deepEqual(state.files, {});
+});
+
+test('the cursor is saved before the rows are sent, and one failed send does not stop the rest', async () => {
+  const root = tmp();
+  put(root, run('a'), row('x', { n: 1 }) + row('x', { n: 2 }));
+  const state = { files: {} };
+  const order = [];
+  const orig = console.error;
+  console.error = () => {};
+  try {
+    await tailAll(state, root, async (r) => { order.push(`send ${r.n}`); if (r.n === 1) throw new Error('telegram down'); },
+      (st) => order.push(`save ${st.files[run('a')].pos}`));
+  } finally { console.error = orig; }
+  const size = fs.statSync(path.join(root, run('a'))).size;
+  assert.deepEqual(order, [`save ${size}`, 'send 1', 'send 2']);
+});
+
+// --- the cursor at the deploy ---------------------------------------------------------
+
+test('the old single cursor follows the feed the deploy moved: nothing again, nothing skipped', async () => {
+  const root = tmp();
+  const old = row('in_band', { n: 1 }) + row('in_band', { n: 2 });
+  put(root, MOVED_FEED, old + row('OPEN', { n: 3 }));                      // the moved feed, one row since
+  put(root, LEGACY_FEED, row('CLOSE', { n: 4 }));                          // written by the old process after the move
+  put(root, run('mu-usdc'), row('startup', { n: 5 }));                     // a new profile started before the bridge
+  const state = migrateState({ pos: old.length }, root);
+  assert.equal(state.files[MOVED_FEED].pos, old.length);
+  assert.equal(state.files[MOVED_FEED].ino, fs.statSync(path.join(root, MOVED_FEED)).ino);
+  assert.equal(state.files[LEGACY_FEED], undefined);                      // shorter than the cursor: a new file
+  assert.deepEqual((await tick(state, root)).got.map(r => r.n).sort(), [3, 4, 5]);
+});
+
+test('the old cursor stays on the legacy feed when nothing moved it, and on both when the move left a copy', async () => {
+  const root = tmp();
+  const old = row('x', { n: 1 });
+  put(root, LEGACY_FEED, old + row('x', { n: 2 }));
+  let state = migrateState({ pos: old.length }, root);
+  assert.deepEqual(Object.keys(state.files), [LEGACY_FEED]);
+  assert.deepEqual((await tick(state, root)).got.map(r => r.n), [2]);
+  put(root, MOVED_FEED, old + row('x', { n: 2 }));
+  state = migrateState({ pos: old.length }, root);
+  assert.deepEqual(Object.keys(state.files).sort(), [LEGACY_FEED, MOVED_FEED].sort());
+  assert.deepEqual((await tick(state, root)).got.map(r => r.n), [2, 2]);  // the copy's one new row, once per file
+});
+
+test('a migrated state is kept; no state or a bad one starts every feed at 0', () => {
+  const root = tmp();
+  const files = { [run('a')]: { pos: 5, ino: 7 } };
+  assert.deepEqual(migrateState({ files }, root), { files });
+  for (const raw of [null, undefined, {}, { pos: 'x' }, { pos: -3 }, { pos: 0 }, 'junk']) {
+    assert.deepEqual(migrateState(raw, root), { files: {} }, JSON.stringify(raw));
+  }
+  put(root, LEGACY_FEED, row('x'));
+  assert.deepEqual(migrateState({ pos: 10_000 }, root), { files: {} }); // a cursor past every feed: rotated
+});
+
+test('readNew: a cursor at the end reads nothing; a lone newline is consumed', () => {
+  const root = tmp();
+  put(root, 'f', row('x', { n: 1 }));
+  const f = path.join(root, 'f');
+  const size = fs.statSync(f).size;
+  for (const cur of [{ pos: size }, { pos: size, ino: fs.statSync(f).ino }]) {           // with and without an inode
+    const r = readNew(f, cur);
+    assert.deepEqual([r.rows, r.cur.pos], [[], size], JSON.stringify(cur));
+  }
+  put(root, 'f', '\n{"half');
+  const r = readNew(f, { pos: size, ino: fs.statSync(f).ino });
+  assert.deepEqual([r.rows, r.bad, r.cur.pos], [[], 0, size + 1]);
+});
+
+test('migrate: no cursor from zero or less; a feed exactly the cursor long keeps it', () => {
+  const root = tmp();
+  const text = row('x');
+  put(root, MOVED_FEED, text);
+  for (const pos of [0, -3, 'x', null]) assert.deepEqual(migrateState({ pos }, root), { files: {} }, String(pos));
+  assert.equal(migrateState({ pos: text.length }, root).files[MOVED_FEED].pos, text.length);
+});
+
+test('readNew on a missing file keeps the cursor', () => {
+  const cur = { pos: 9, ino: 1 };
+  assert.deepEqual(readNew('/nonexistent/feed', cur), { rows: [], bad: 0, cur });
+});
+
+// --- the messages -------------------------------------------------------------------
+
+test('every message carries its pool, except the portfolio of all pools', () => {
+  assert.equal(poolLabel({ pair: 'MU/USDC', profile: 'mu-usdc' }), '[MU/USDC]');
+  assert.equal(poolLabel({ profile: 'djt-usdc' }), '[djt-usdc]');
+  assert.equal(poolLabel({}), '');
+  assert.equal(poolLabel({ pair: '', profile: 'mu-usdc' }), '[mu-usdc]');
+  assert.equal(poolLabel({ pair: '\u0000‮<b>x</b>' }), '[bx/b]');      // no control or markup characters
+  assert.equal(poolLabel({ pair: 'A'.repeat(80) }).length, 34);
+  assert.ok(message({ event: 'HARVEST', pair: 'MU/USDC', collected_usd: 1 }).startsWith('[MU/USDC] 🌾 HARVESTED $1.0000'));
+  assert.ok(message({ event: 'HARVEST', collected_usd: 1 }).startsWith('🌾 HARVESTED'));
+  assert.ok(message({ event: 'PORTFOLIO', pair: 'SOL/USDC', pools: [], wallets: [] }).startsWith('📊 PORTFOLIO'));
+});
+
+test('the new events render', () => {
+  assert.equal(render({ event: 'dormant', deployable_usd: 1.5, min_deploy_usd: 5, poll_seconds: 300 }),
+    'DORMANT · no position and too little to deploy\ndeployable $1.50 · opens from $5.00 · light poll every 300s');
+  assert.equal(render({ event: 'dormant', reason: 'sleeve $0.20' }), 'DORMANT · sleeve $0.20');
+  assert.equal(render({ event: 'deposit_seen', amount: 12.5, symbol: 'MU', usd: 125 }),
+    'DEPOSIT SEEN · 12.5 MU ($125.00) waking: swap to 50/50, then open');
+  assert.equal(render({ event: 'claim_overdraw', symbol: 'USDC', claim: 3.2, delta: -4.1 }),
+    'CLAIM OVERDRAW · USDC · claim 3.2 · change -4.1 → floored at 0');
+  // the fields rebalancer.settle and locked_chain send
+  assert.equal(render({ event: 'claim_overdraw', reason: 'a write moved more', command: 'open', mint: 'EPjF', claim: 1,
+                        delta: -2, overdraw: 1 }),
+    'CLAIM OVERDRAW · EPjF · claim 1 · change -2 · over by 1 → floored at 0 (open)\na write moved more');
+  assert.equal(render({ event: 'wallet_lock_timeout', wallet_id: 'sol-lp', reason: 'busy', command: 'open', waited_s: 20,
+                        action: 'open not sent; retried at the next poll' }),
+    'WALLET LOCK TIMEOUT · sol-lp busy for 20s · open not sent; retried at the next poll');
+  assert.equal(render({ event: 'deposit_seen', usd: 12, deployable_usd: 12, reason: 'waking: swap to 50/50, then open' }),
+    'DEPOSIT SEEN · ($12.00) waking: swap to 50/50, then open');
+  assert.equal(render({ event: 'wallet_lock_timeout', wallet_id: 'sol-lp', waited_s: 30 }),
+    'WALLET LOCK TIMEOUT · sol-lp busy for 30s · nothing sent; retried at the next poll');
+  for (const ev of ['dormant', 'deposit_seen', 'claim_overdraw', 'wallet_lock_timeout', 'PORTFOLIO']) {
+    assert.ok(!render({ event: ev }).includes('undefined'), ev);
+    assert.notEqual(message({ event: ev }).split(' ')[0], '▫️', `${ev} has its own emoji`);
+  }
+  const emoji = JSON.parse(fs.readFileSync(path.join(HERE, '..', 'event_emoji.json'), 'utf8'));
+  const mine = ['PORTFOLIO', 'dormant', 'deposit_seen', 'claim_overdraw', 'wallet_lock_timeout'].map(e => emoji[e]);
+  const others = Object.entries(emoji).filter(([k]) => !k.startsWith('_') && !['PORTFOLIO', 'dormant', 'deposit_seen',
+    'claim_overdraw', 'wallet_lock_timeout'].includes(k)).map(([, v]) => v);
+  for (const e of mine) assert.ok(!others.includes(e), `${e} is grep-able: no other event has it`);
+});
+
+test('an unknown event shows its fields, without the pool fields the label already shows', () => {
+  assert.equal(render({ event: 'zzz', a: 1, profile: 'mu-usdc', wallet_id: 'sol-lp', chain: 'solana', pair: 'MU/USDC' }),
+    'zzz · {"event":"zzz","a":1}');
+});
+
+test('the DAILY line names the pool\'s token', () => {
+  const d = { event: 'DAILY', day: '2026-10-01', recentres: 3, fees_usd: 1, fees_earned_usd: 2, vs_hold_usd: 0.5,
+              price_open: 10, price_close: 11 };
+  assert.ok(render(d).endsWith('SOL 10.00 → 11.00'));
+  assert.ok(render({ ...d, pair: 'MU/USDC' }).endsWith('MU 10.00 → 11.00'));
+});
+
+test('the book names the pool\'s token, and a sum of pools has no token amount', () => {
+  const r = { equity_usd: 100, last_price: 9.5, token_a: 'MU', since_start: { profit_usd: 1, start_usd: 90,
+    start_sol: 2, since: '2026-10-01T00:00', value_usd: 91, vs_hold_start_assets_usd: 0.5 } };
+  assert.equal(equityLine(r), 'equity      $100.00 · MU $9.50   P&L +1.00 since start · includes pending fees');
+  assert.equal(sinceStartLine(r), 'start       $90.00 (2.0000 MU, 2026-10-01) · now $91.00 · vs holding it +0.50');
+  assert.equal(sinceStartLine({ since_start: { ...r.since_start, start_sol: null } }),
+    'start       $90.00 (2026-10-01) · now $91.00 · vs holding it +0.50');
+});
+
+test('secrets never reach Telegram', () => {
+  const key = Array.from({ length: 64 }, (_, i) => i * 3 % 256).join(',');
+  const cases = [
+    ['rpc https://mainnet.helius-rpc.com/?api-key=abcd-1234&x=1', 'abcd-1234'],
+    ['https://api.telegram.org/bot123456789:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw/sendMessage', 'AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw'],
+    [`key file [${key}]`, key],
+    [`private_key=0x${'ab'.repeat(32)}`, 'ab'.repeat(32)],
+    [`"secret": "${'cd'.repeat(32)}"`, 'cd'.repeat(32)],
+  ];
+  for (const [text, secret] of cases) {
+    assert.ok(!redact(text).includes(secret), text);
+    assert.ok(!message({ event: 'zzz', detail: text }).includes(secret), text);
+  }
+  const tx = '0x' + 'ef'.repeat(32);                                      // a transaction hash is not a key
+  assert.ok(redact(`sent ${tx}`).includes(tx));
+  const sig = '5'.repeat(88);
+  assert.ok(redact(`sig ${sig}`).includes(sig));
+});
+
+const PORTFOLIO = {
+  event: 'PORTFOLIO', ts: '2026-10-01T00:00:00+00:00',
+  pools: [
+    { profile: 'mu-usdc', wallet_id: 'sol-lp', pair: 'MU/USDC', equity_usd: 101, fees_total_usd: 1.3,
+      fees_per_day_24h_usd: 2.5, apr_24h_pct: 903.4, profit_usd: -0.4, in_range_pct: 88 },
+    { profile: 'sol-usdc', wallet_id: 'sol-lp', pair: 'SOL/USDC', equity_usd: 241, fees_total_usd: 2.9,
+      fees_per_day_24h_usd: 5.1, apr_24h_pct: 772.4, profit_usd: 1.2, in_range_pct: 100 },
+    { profile: 'base-weth-usdc', wallet_id: 'base-lp', pair: 'WETH/USDC', equity_usd: 50, fees_total_usd: null,
+      fees_per_day_24h_usd: null, apr_24h_pct: null, profit_usd: null, in_range_pct: null },
+  ],
+  wallets: [
+    { wallet_id: 'base-lp', chain: 'base', pools: ['base-weth-usdc'],
+      subtotal: { equity_usd: 50, lp_usd: 45, idle_usd: 5, fees_total_usd: null, paid_usd: 0 } },
+    { wallet_id: 'sol-lp', chain: 'solana', pools: ['mu-usdc', 'sol-usdc'],
+      subtotal: { equity_usd: 342, lp_usd: 315, idle_usd: 26.2, fees_total_usd: 4.2, paid_usd: 1.5 } },
+  ],
+  total: { pools: 3, equity_usd: 392, lp_usd: 360, idle_usd: 31.2, fees_total_usd: 4.2, fees_today_usd: 4.2,
+           fees_per_day_24h_usd: 7.6, apr_24h_pct: 707.6, paid_usd: 1.5, reinvested_usd: 0.25, gas_usd: 0,
+           profit_usd: 0.8 },
+  dormant: ['djt-usdc'], disabled: [], disabled_holding: [],
+};
+
+test('the portfolio: pools by wallet, subtotals, the total in dollars, dormant names', () => {
+  const t = portfolioText(PORTFOLIO);
+  assert.equal(t.split('\n')[0], 'PORTFOLIO · 3 active pools · 2 wallets');
+  assert.ok(t.includes('▸ sol-lp (solana)\n  MU/USDC  equity $101.00 · fees $1.3000 (24h $2.5000/d) · APR 24h 903% · P&L -0.40 · in range 88%'), t);
+  assert.ok(t.includes('  WETH/USDC  equity $50.00 · fees — (24h —/d) · APR 24h — · P&L — · in range —'), t);
+  assert.ok(t.includes('  subtotal  equity $342.00 · in LP $315.00'), t);
+  assert.ok(t.includes('TOTAL\n  equity $392.00 · in LP $360.00 · idle $31.20'), t);
+  assert.ok(t.includes('paid $1.5000 · reinvested $0.2500 · gas $0.0000 · P&L +0.80'), t);
+  assert.ok(t.endsWith('dormant 1 (djt-usdc) · disabled 0'), t);
+  const one = portfolioText({ ...PORTFOLIO, wallets: [PORTFOLIO.wallets[1]] });
+  assert.ok(!one.includes('subtotal'));                                    // one wallet: its subtotal is the total
+  assert.ok(portfolioText({ ...PORTFOLIO, disabled: ['x'], disabled_holding: ['x'] })
+    .endsWith('disabled 1 (x) · DISABLED BUT HOLDING A POSITION: x'));
+  assert.equal(portfolioText({}), 'PORTFOLIO · 0 active pools · 0 wallets\ndormant 0 · disabled 0');
+  assert.equal(portfolioText({ pools: [{ profile: 'a', pair: '' }], wallets: [{ wallet_id: 'w', chain: '', pools: ['a', 'b'] }] }),
+    'PORTFOLIO · 1 active pool · 1 wallet\n▸ w (—)\n'
+    + '  a  equity — · fees — (24h —/d) · APR 24h — · P&L — · in range —\n'
+    + '  b  equity — · fees — (24h —/d) · APR 24h — · P&L — · in range —\ndormant 0 · disabled 0');
+  assert.ok(portfolioText({ pools: [], wallets: [{ wallet_id: 'w' }] }).includes('▸ w (—)'));
+  assert.ok(!message(PORTFOLIO).includes('undefined'));
+});
+
+// --- the existing events render as they did, with the prefix ---------------------------
+
+async function oldBridge() {
+  // the pre-merge bridge's render(), from git: its file runs a loop at
+  // import, so the function is cut out of it
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'old_bridge_'));
+  const src = OLD_SRC.bridge;
+  const body = src.slice(src.indexOf('function render(row) {'), src.indexOf('async function tail() {'));
+  fs.writeFileSync(path.join(dir, 'book_format.mjs'), OLD_SRC.book);
+  fs.writeFileSync(path.join(dir, 'old.mjs'),
+    "import { equityLine, lpLine, sinceStartLine, emojiFor, healthLine } from './book_format.mjs';\n"
+    + `const EMOJI = ${OLD_SRC.emoji};\n`
+    + body + '\nexport const oldMessage = (row) => `${emojiFor(row.event, EMOJI)} ${render(row)}`;\n');
+  return (await import(path.join(dir, 'old.mjs'))).oldMessage;
+}
+
+const OLD_SRC = { bridge: gitShow('telegram_bridge.mjs'), book: gitShow('book_format.mjs'), emoji: gitShow('event_emoji.json') };
+const hasOld = Object.values(OLD_SRC).every(Boolean) && OLD_SRC.bridge.includes('async function tail() {');
+
+test('every row of the real feed renders as before, behind its pool label', { skip: !hasOld }, async () => {
+  const oldMessage = await oldBridge();
+  const feeds = [path.join(HERE, '..', 'events.jsonl'), path.join(LIVE, 'events.jsonl'),
+    path.join(LIVE, MOVED_FEED)].filter(f => fs.existsSync(f));
+  if (!feeds.length) return;
+  let n = 0;
+  for (const f of feeds) {
+    for (const line of fs.readFileSync(f, 'utf8').split('\n')) {
+      if (!line.trim()) continue;
+      let r;
+      try { r = JSON.parse(line); } catch { continue; }
+      const label = poolLabel(r);
+      let want = oldMessage(r);
+      if (want.includes(` ${r.event} · {`)) {                             // the generic JSON: the label's fields leave it
+        const { profile, wallet_id, chain, pair, ...rest } = r;
+        want = oldMessage(rest);
+      }
+      assert.equal(message(r), (label ? label + ' ' : '') + want, `${f}: ${line.slice(0, 200)}`);
+      n += 1;
+    }
+  }
+  assert.ok(n > 1000, `only ${n} rows`);
+});
+
+// --- the program, end to end, against a stub Telegram -------------------------------------
+
+test('the bridge migrates the old cursor at start and sends only what is new, labelled', async () => {
+  const { spawn } = await import('node:child_process');
+  const dir = tmp();
+  for (const f of ['telegram_bridge.mjs', 'book_format.mjs', 'event_emoji.json']) {
+    fs.copyFileSync(path.join(HERE, '..', f), path.join(dir, f));
+  }
+  const old = row('in_band', { n: 1 }) + row('in_band', { n: 2 });
+  put(dir, MOVED_FEED, old + row('OPEN', { n: 3, pair: 'SOL/USDC', profile: 'sol-usdc' }));
+  put(dir, run('mu-usdc'), row('dormant', { n: 4, pair: 'MU/USDC', reason: 'nothing to deploy' }) + '{"half');
+  fs.writeFileSync(path.join(dir, 'telegram_bridge_state.json'), JSON.stringify({ pos: old.length }));
+  const sent = path.join(dir, 'sent.jsonl');
+  // Telegram, stubbed: every request is written to a file and answered ok
+  fs.writeFileSync(path.join(dir, 'stub.mjs'), `import fs from 'fs';
+globalThis.fetch = async (url, init) => { fs.appendFileSync(${JSON.stringify(sent)},
+  JSON.stringify({ host: new URL(url).host, body: JSON.parse(init.body) }) + '\\n'); return { json: async () => ({ ok: true }) }; };`);
+  const child = spawn(process.execPath, ['--import', path.join(dir, 'stub.mjs'), path.join(dir, 'telegram_bridge.mjs')],
+    { env: { PATH: process.env.PATH, TELEGRAM_BOT_TOKEN: '1:x', TELEGRAM_CHAT_ID: '42' }, stdio: 'ignore' });
+  try {
+    const until = Date.now() + 15000;
+    while (Date.now() < until && !(fs.existsSync(sent) && fs.readFileSync(sent, 'utf8').split('\n').filter(Boolean).length >= 2)) {
+      await new Promise(r => setTimeout(r, 100));
+    }
+  } finally { child.kill(); }
+  const msgs = fs.readFileSync(sent, 'utf8').split('\n').filter(Boolean).map(l => JSON.parse(l));
+  assert.deepEqual(msgs.map(m => m.host), ['api.telegram.org', 'api.telegram.org']);
+  assert.deepEqual(msgs.map(m => m.body.chat_id), ['42', '42']);
+  const texts = msgs.map(m => m.body.text).sort();
+  assert.ok(texts[0].startsWith('[MU/USDC] 😴 DORMANT · nothing to deploy'), texts[0]);
+  assert.ok(texts[1].startsWith('[SOL/USDC] 🟩 OPENED'), texts[1]);
+  const st = JSON.parse(fs.readFileSync(path.join(dir, 'telegram_bridge_state.json'), 'utf8'));
+  assert.equal(st.files[MOVED_FEED].pos, fs.statSync(path.join(dir, MOVED_FEED)).size);
+  assert.equal(st.files[run('mu-usdc')].pos, row('dormant', { n: 4, pair: 'MU/USDC', reason: 'nothing to deploy' }).length);
+});

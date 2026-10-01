@@ -1,0 +1,293 @@
+{
+ "_note": "Recorded from mainnet 2026-10-01 (getMultipleAccounts jsonParsed; DJT whirlpool base64) for tests/test_signer_stocks.mjs. Slot 452393982.",
+ "mints": {
+  "MU": {
+   "data": {
+    "parsed": {
+     "info": {
+      "decimals": 6,
+      "extensions": [
+       {
+        "extension": "metadataPointer",
+        "state": {
+         "authority": "2cVYpagTt7ZGc3mmTXBa7fAznUtx5DUu6aCq8uVDaf4a",
+         "metadataAddress": "MUxEsUKSMACyw5fZf68wxf5FLnZVhtU9CwH8uNNGay1"
+        }
+       },
+       {
+        "extension": "permanentDelegate",
+        "state": {
+         "delegate": "2cVYpagTt7ZGc3mmTXBa7fAznUtx5DUu6aCq8uVDaf4a"
+        }
+       },
+       {
+        "extension": "defaultAccountState",
+        "state": {
+         "accountState": "initialized"
+        }
+       },
+       {
+        "extension": "pausableConfig",
+        "state": {
+         "authority": "2cVYpagTt7ZGc3mmTXBa7fAznUtx5DUu6aCq8uVDaf4a",
+         "paused": false
+        }
+       },
+       {
+        "extension": "confidentialTransferMint",
+        "state": {
+         "auditorElgamalPubkey": null,
+         "authority": "2cVYpagTt7ZGc3mmTXBa7fAznUtx5DUu6aCq8uVDaf4a",
+         "autoApproveNewAccounts": false
+        }
+       },
+       {
+        "extension": "transferHook",
+        "state": {
+         "authority": "2cVYpagTt7ZGc3mmTXBa7fAznUtx5DUu6aCq8uVDaf4a",
+         "programId": null
+        }
+       },
+       {
+        "extension": "scaledUiAmountConfig",
+        "state": {
+         "authority": "6XPofT3JgdoZAkUxqAbYZLNbsDvBCkDqrEWeaTiQKRBD",
+         "multiplier": "1.0001069314314899",
+         "newMultiplier": "1.0001069314314899",
+         "newMultiplierEffectiveTimestamp": 0
+        }
+       },
+       {
+        "extension": "tokenMetadata",
+        "state": {
+         "additionalMetadata": [],
+         "mint": "MUxEsUKSMACyw5fZf68wxf5FLnZVhtU9CwH8uNNGay1",
+         "name": "Micron Technology - Backpack Securities",
+         "symbol": "MU",
+         "updateAuthority": "2cVYpagTt7ZGc3mmTXBa7fAznUtx5DUu6aCq8uVDaf4a",
+         "uri": "https://trek-labs.github.io/heart-metadata/stocks/mu.us.json"
+        }
+       }
+      ],
+      "freezeAuthority": "2cVYpagTt7ZGc3mmTXBa7fAznUtx5DUu6aCq8uVDaf4a",
+      "isInitialized": true,
+      "mintAuthority": "6XPofT3JgdoZAkUxqAbYZLNbsDvBCkDqrEWeaTiQKRBD",
+      "supply": "5154299630"
+     },
+     "type": "mint"
+    },
+    "program": "spl-token-2022",
+    "space": 694
+   },
+   "executable": false,
+   "lamports": 5776800,
+   "owner": "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb",
+   "space": 694
+  },
+  "DJT": {
+   "data": {
+    "parsed": {
+     "info": {
+      "decimals": 6,
+      "extensions": [
+       {
+        "extension": "metadataPointer",
+        "state": {
+         "authority": "2cVYpagTt7ZGc3mmTXBa7fAznUtx5DUu6aCq8uVDaf4a",
+         "metadataAddress": "DJTu7vi8norVzdVAffgvb39VP7wjKeTsgaMBJrzfxvoF"
+        }
+       },
+       {
+        "extension": "permanentDelegate",
+        "state": {
+         "delegate": "2cVYpagTt7ZGc3mmTXBa7fAznUtx5DUu6aCq8uVDaf4a"
+        }
+       },
+       {
+        "extension": "defaultAccountState",
+        "state": {
+         "accountState": "initialized"
+        }
+       },
+       {
+        "extension": "pausableConfig",
+        "state": {
+         "authority": "2cVYpagTt7ZGc3mmTXBa7fAznUtx5DUu6aCq8uVDaf4a",
+         "paused": false
+        }
+       },
+       {
+        "extension": "confidentialTransferMint",
+        "state": {
+         "auditorElgamalPubkey": null,
+         "authority": "2cVYpagTt7ZGc3mmTXBa7fAznUtx5DUu6aCq8uVDaf4a",
+         "autoApproveNewAccounts": false
+        }
+       },
+       {
+        "extension": "transferHook",
+        "state": {
+         "authority": "2cVYpagTt7ZGc3mmTXBa7fAznUtx5DUu6aCq8uVDaf4a",
+         "programId": null
+        }
+       },
+       {
+        "extension": "scaledUiAmountConfig",
+        "state": {
+         "authority": "3zbLadZi7cn7A6SavYkKah2QzUQEGNDtwmf5o17Rx17G",
+         "multiplier": "1",
+         "newMultiplier": "1",
+         "newMultiplierEffectiveTimestamp": 0
+        }
+       },
+       {
+        "extension": "tokenMetadata",
+        "state": {
+         "additionalMetadata": [],
+         "mint": "DJTu7vi8norVzdVAffgvb39VP7wjKeTsgaMBJrzfxvoF",
+         "name": "Trump Media & Technology Group Corp. Common Stock - Backpack Securities",
+         "symbol": "DJT",
+         "updateAuthority": "2cVYpagTt7ZGc3mmTXBa7fAznUtx5DUu6aCq8uVDaf4a",
+         "uri": "https://metadata.backpack.exchange/stocks/djt.us.json"
+        }
+       }
+      ],
+      "freezeAuthority": "2cVYpagTt7ZGc3mmTXBa7fAznUtx5DUu6aCq8uVDaf4a",
+      "isInitialized": true,
+      "mintAuthority": "3zbLadZi7cn7A6SavYkKah2QzUQEGNDtwmf5o17Rx17G",
+      "supply": "113589615455"
+     },
+     "type": "mint"
+    },
+    "program": "spl-token-2022",
+    "space": 720
+   },
+   "executable": false,
+   "lamports": 5421048,
+   "owner": "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb",
+   "space": 720
+  },
+  "MSFTx": {
+   "data": {
+    "parsed": {
+     "info": {
+      "decimals": 8,
+      "extensions": [
+       {
+        "extension": "metadataPointer",
+        "state": {
+         "authority": "5aMNNLQJwAEeoemTEMkv5NVjqKwvvefRYCQ5Z67HFvEq",
+         "metadataAddress": "XspzcW1PRtgf6Wj92HCiZdjzKCyFekVD8P5Ueh3dRMX"
+        }
+       },
+       {
+        "extension": "permanentDelegate",
+        "state": {
+         "delegate": "5aMNNLQJwAEeoemTEMkv5NVjqKwvvefRYCQ5Z67HFvEq"
+        }
+       },
+       {
+        "extension": "defaultAccountState",
+        "state": {
+         "accountState": "initialized"
+        }
+       },
+       {
+        "extension": "scaledUiAmountConfig",
+        "state": {
+         "authority": "S7vYFFWH6BjJyEsdrPQpqpYTqLTrPRK6KW3VwsJuRaS",
+         "multiplier": "1.0045820905025638",
+         "newMultiplier": "1.0059033904787456",
+         "newMultiplierEffectiveTimestamp": 1787185800
+        }
+       },
+       {
+        "extension": "pausableConfig",
+        "state": {
+         "authority": "JDq14BWvqCRFNu1krb12bcRpbGtJZ1FLEakMw6FdxJNs",
+         "paused": false
+        }
+       },
+       {
+        "extension": "confidentialTransferMint",
+        "state": {
+         "auditorElgamalPubkey": null,
+         "authority": "5aMNNLQJwAEeoemTEMkv5NVjqKwvvefRYCQ5Z67HFvEq",
+         "autoApproveNewAccounts": false
+        }
+       },
+       {
+        "extension": "transferHook",
+        "state": {
+         "authority": "5aMNNLQJwAEeoemTEMkv5NVjqKwvvefRYCQ5Z67HFvEq",
+         "programId": null
+        }
+       },
+       {
+        "extension": "tokenMetadata",
+        "state": {
+         "additionalMetadata": [],
+         "mint": "XspzcW1PRtgf6Wj92HCiZdjzKCyFekVD8P5Ueh3dRMX",
+         "name": "Microsoft xStock",
+         "symbol": "MSFTx",
+         "updateAuthority": "5aMNNLQJwAEeoemTEMkv5NVjqKwvvefRYCQ5Z67HFvEq",
+         "uri": "https://xstocks-metadata.backed.fi/tokens/Solana/MSFTx/metadata.json"
+        }
+       }
+      ],
+      "freezeAuthority": "JDq14BWvqCRFNu1krb12bcRpbGtJZ1FLEakMw6FdxJNs",
+      "isInitialized": true,
+      "mintAuthority": "7pt9tkctJPK7PPNQJ77GKg8ZffSF6QxoMiCFYHxrtaCj",
+      "supply": "10497005926319"
+     },
+     "type": "mint"
+    },
+    "program": "spl-token-2022",
+    "space": 682
+   },
+   "executable": false,
+   "lamports": 5637601,
+   "owner": "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb",
+   "space": 682
+  },
+  "USDC": {
+   "data": {
+    "parsed": {
+     "info": {
+      "decimals": 6,
+      "freezeAuthority": "7dGbd2QZcCKcTndnHcTL8q7SMVXAkp688NTQYwrRCrar",
+      "isInitialized": true,
+      "mintAuthority": "BJE5MMbqXjVwjAF7oxwPYXnTXDyspzZyt4vwenNw5ruG",
+      "supply": "7774486398239732"
+     },
+     "type": "mint"
+    },
+    "program": "spl-token",
+    "space": 82
+   },
+   "executable": false,
+   "lamports": 534808027998,
+   "owner": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+   "space": 82
+  }
+ },
+ "addresses": {
+  "MU": "MUxEsUKSMACyw5fZf68wxf5FLnZVhtU9CwH8uNNGay1",
+  "DJT": "DJTu7vi8norVzdVAffgvb39VP7wjKeTsgaMBJrzfxvoF",
+  "MSFTx": "XspzcW1PRtgf6Wj92HCiZdjzKCyFekVD8P5Ueh3dRMX",
+  "USDC": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+ },
+ "djtWhirlpool": {
+  "address": "7gkB2D1SqhUYgKrSpDU5cma4tK9efijHouYituABdJcG",
+  "account": {
+   "data": [
+    "P5XRDOGAYwkT5EH4ORPKaLBjT7Al/eqohzfoQRDRJV41ezN33e4czf9AAAEEuAsUBQcQWyE5AwAAAAAAAAAAAAAGxZ8fg4CZ9wIAAAAAAAAA+VQAAAAAAAAAAAAAAAAAAAAAAAC2xYf+dQ6m7XrZncP9nu50ukANlWVHNJVUc/4TL3h1RhJ85EEfq4/SKxqXiUsIGtMi7OrUXELOEu8JzI8FRX7kTmMkaK0R/gQAAAAAAAAAAMb6evO+2606PWXzaqvJdDGxu+TC0vbg5HymAgNFL11hRp7GLbW1gpznVgE4Fqxf9oXsUB5JlMJUak2fgvz/rws2kKTrRUjBNQAAAAAAAAAAOMG+agAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAui6/LwKaI7GKR1R798LZ7CubYjLuw+NoR9dh+omDPGYAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+    "base64"
+   ],
+   "executable": false,
+   "lamports": 4946073,
+   "owner": "whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc",
+   "space": 653
+  }
+ }
+}

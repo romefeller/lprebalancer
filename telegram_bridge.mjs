@@ -1,41 +1,129 @@
 // Telegram bridge for the rebalancer.
 //
-// Tails events.jsonl and forwards every row to Telegram, so you see each poll,
-// open, close, reband and breaker as it happens. It has NO trading, signing or
-// execution path: it only reads a file and sends text.
+// Tails every profile's feed (run/<profile>/events.jsonl) and the legacy
+// ROOT/events.jsonl, and forwards every row to Telegram with its pool's label,
+// so you see each poll, open, close, reband and breaker as it happens. It has
+// NO trading, signing or execution path: it only reads files and sends text.
+//
+// One cursor per file (telegram_bridge_state.json): the byte offset sent so far
+// and the file's inode, so a rotated or replaced file starts over and a moved
+// one keeps its place. A line is consumed only once its newline is written.
 //
 // Needs TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID in the environment.
 import fs from 'fs';
 import path from 'path';
-import { equityLine, lpLine, sinceStartLine, splitMessage, emojiFor, healthLine } from './book_format.mjs';
+import { fileURLToPath } from 'url';
+import { equityLine, lpLine, sinceStartLine, splitMessage, emojiFor, healthLine, poolLabel, redact,
+  portfolioText } from './book_format.mjs';
 
-const token = process.env.TELEGRAM_BOT_TOKEN;
-const chatId = process.env.TELEGRAM_CHAT_ID;
-if (!token || !chatId) throw new Error('needs TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID');
-
-const DIR = path.dirname(new URL(import.meta.url).pathname);
-const FEED = path.join(DIR, 'events.jsonl');
+const SELF = fileURLToPath(import.meta.url);
+const DIR = path.dirname(SELF);
 const STATE_F = path.join(DIR, 'telegram_bridge_state.json');
+// The profile whose feed was ROOT/events.jsonl before 020; the deploy moves it to run/<this>/.
+export const LEGACY_PROFILE = 'sol-usdc';
+export const LEGACY_FEED = 'events.jsonl';
+export const MOVED_FEED = path.join('run', LEGACY_PROFILE, 'events.jsonl');
 
 let EMOJI = {};
 try { EMOJI = JSON.parse(fs.readFileSync(new URL('./event_emoji.json', import.meta.url), 'utf8')); } catch {}
-let state = { pos: 0 };
-try { state = { ...state, ...JSON.parse(fs.readFileSync(STATE_F, 'utf8')) }; } catch {}
-const save = () => fs.writeFileSync(STATE_F, JSON.stringify(state));
 
-async function send(text) {
-  // Telegram refuses a message over 4,096 characters (2026-09-28: a
-  // DEPLOY_IDLE book was lost that way). Long messages go out in parts.
-  for (const part of splitMessage(text)) {
-    const r = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
-      method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ chat_id: chatId, text: part }) });
-    const j = await r.json();
-    if (!j.ok) throw new Error(`telegram: ${JSON.stringify(j)}`);
+const statOf = (f) => fs.statSync(f, { throwIfNoEntry: false });
+
+// The feeds under `root`, relative to it: the legacy one when it exists, then
+// every run/<profile>/events.jsonl, sorted. A profile's directory that appears
+// while the bridge runs is found at the next tick.
+export function feedFiles(root) {
+  const out = [];
+  if (statOf(path.join(root, LEGACY_FEED))?.isFile()) out.push(LEGACY_FEED);
+  let dirs = [];
+  try { dirs = fs.readdirSync(path.join(root, 'run'), { withFileTypes: true }); } catch {}
+  for (const d of dirs.filter(d => d.isDirectory()).map(d => d.name).sort()) {
+    const rel = path.join('run', d, 'events.jsonl');
+    if (statOf(path.join(root, rel))?.isFile()) out.push(rel);
+  }
+  return out;
+}
+
+// The state file as {files: {relative path: {pos, ino}}}. The pre-020 state
+// is one offset, {pos}, into ROOT/events.jsonl, which the deploy moves to
+// run/sol-usdc/: the offset goes to whichever of the two holds at least that
+// many bytes (both, when the move left a copy), with that file's inode. A
+// shorter one is a new file and starts at 0. Nothing is sent twice, nothing
+// is skipped.
+export function migrateState(raw, root) {
+  if (raw && raw.files && typeof raw.files === 'object') return { files: { ...raw.files } };
+  const files = {};
+  const pos = Number(raw?.pos);
+  if (Number.isFinite(pos) && pos > 0) {
+    for (const rel of [MOVED_FEED, LEGACY_FEED]) {
+      const st = statOf(path.join(root, rel));
+      if (st && st.size >= pos) files[rel] = { pos, ino: st.ino };
+    }
+  }
+  return { files };
+}
+
+// The complete new lines of one feed from its cursor: rows parsed, the count
+// of lines that are not JSON (dropped), and the new cursor. A file shorter
+// than the cursor, or another inode, is a new file: read from 0. The bytes
+// after the last newline are a line still being written: left for the next read.
+export function readNew(file, cur) {
+  const st = statOf(file);
+  if (!st) return { rows: [], bad: 0, cur };
+  let pos = cur && cur.ino === st.ino && st.size >= cur.pos ? cur.pos : 0;
+  if (cur && cur.ino == null && st.size >= cur.pos) pos = cur.pos;      // a cursor with no inode yet
+  const rows = [];
+  let bad = 0;
+  const fd = fs.openSync(file, 'r');
+  const buf = Buffer.alloc(st.size - pos);
+  try { fs.readSync(fd, buf, 0, buf.length, pos); } finally { fs.closeSync(fd); }
+  const end = buf.lastIndexOf(0x0a);
+  if (end >= 0) {
+    for (const line of buf.subarray(0, end).toString('utf8').split('\n')) {
+      if (!line.trim()) continue;
+      try { rows.push(JSON.parse(line)); } catch { bad += 1; }
+    }
+    pos += end + 1;
+  }
+  return { rows, bad, cur: { pos, ino: st.ino } };
+}
+
+// One tick over every feed. A feed with no cursor takes the cursor of a feed
+// that vanished with the same inode (it was moved), else starts at 0. Cursors
+// of vanished feeds are dropped. The state is saved before sending, as it
+// always was: a crash mid-send loses rows rather than repeating them.
+export async function tailAll(state, root, sendRow, save = () => {}) {
+  const now = feedFiles(root);
+  const gone = Object.keys(state.files).filter(rel => !now.includes(rel));
+  for (const rel of now) {
+    if (state.files[rel]) continue;
+    const ino = statOf(path.join(root, rel))?.ino;
+    const was = gone.find(g => state.files[g].ino === ino);
+    if (was) state.files[rel] = state.files[was];
+  }
+  for (const g of gone) delete state.files[g];
+  for (const rel of now) {
+    const { rows, bad, cur } = readNew(path.join(root, rel), state.files[rel]);
+    state.files[rel] = cur;
+    save(state);
+    if (bad) console.error(`${rel}: ${bad} line(s) not JSON, dropped`);
+    for (const row of rows) {
+      try { await sendRow(row); } catch (e) { console.error('send:', redact(e.message)); }
+    }
   }
 }
 
-function render(row) {
+// The message of one row: the pool's label, the event's emoji, the text,
+// with every secret-shaped string masked.
+export function message(row) {
+  const label = row && row.event !== 'PORTFOLIO' ? poolLabel(row) : '';
+  return redact(`${label ? label + ' ' : ''}${emojiFor(row.event, EMOJI)} ${render(row)}`);
+}
+
+// The pool's base token: the row's token_a, else the first half of its pair.
+const baseSymbol = (row) => row.token_a ?? (typeof row.pair === 'string' && row.pair.includes('/') ? row.pair.split('/')[0] : 'SOL');
+
+export function render(row) {
   const { event } = row;
   const n = (x, d = 2) => (x === undefined || x === null ? '—' : Number(x).toFixed(d));
   const tok = (x, d = 6) => (x === undefined || x === null ? '—' : Number(x).toFixed(d).replace(/0+$/, '').replace(/\.$/, ''));
@@ -276,7 +364,7 @@ function render(row) {
       return `DAILY ${row.day} · ${row.recentres} re-centres${row.idle_redeploys ? ` (${row.idle_redeploys} idle redeploys)` : ''}`
         + ` · fees earned $${n(row.fees_earned_usd ?? row.fees_usd)}${row.fees_earned_usd != null ? ` (harvested $${n(row.fees_usd)})` : ''}`
         + ` · vs 50/50 hold ${sign(row.vs_hold_usd)}`
-        + ` · SOL ${n(row.price_open)} → ${n(row.price_close)}`;
+        + ` · ${baseSymbol(row)} ${n(row.price_open)} → ${n(row.price_close)}`;
     case 'HARVEST':
       return `HARVESTED $${n(row.collected_usd, 4)}\n${row.signature ?? ''}`;
     case 'harvest_skipped':
@@ -332,31 +420,59 @@ function render(row) {
     case 'idle':          return `idle · ${row.reason}`;
     case 'BREAKER':       return `BREAKER · ${row.reason}\n${row.action}`;
     case 'halted':        return `HALTED · ${row.reason}`;
-    default:              return `${event} · ${JSON.stringify(row)}`;
+    case 'PORTFOLIO':
+      return portfolioText(row);
+    case 'dormant':
+      return `DORMANT · ${row.reason ?? 'no position and too little to deploy'}`
+        + (row.deployable_usd != null ? `\ndeployable $${n(row.deployable_usd)} · opens from $${n(row.min_deploy_usd)}` : '')
+        + (row.poll_seconds != null ? ` · light poll every ${row.poll_seconds}s` : '');
+    case 'deposit_seen':
+      return `DEPOSIT SEEN · ${row.amount != null ? `${tok(row.amount)} ${row.symbol ?? ''} ` : ''}`
+        + `${row.usd != null ? `($${n(row.usd)}) ` : ''}${row.reason ?? 'waking: swap to 50/50, then open'}`;
+    case 'claim_overdraw':
+      return `CLAIM OVERDRAW · ${row.symbol ?? row.mint ?? 'token'} · claim ${row.claim ?? '—'} · change ${row.delta ?? '—'}`
+        + `${row.overdraw != null ? ` · over by ${row.overdraw}` : ''} → floored at 0`
+        + `${row.command ? ` (${row.command})` : ''}${row.reason ? `\n${row.reason}` : ''}`;
+    case 'wallet_lock_timeout':
+      return `WALLET LOCK TIMEOUT · ${row.wallet_id ?? 'wallet'} busy${row.waited_s != null ? ` for ${n(row.waited_s, 0)}s` : ''}`
+        + ` · ${row.action ?? 'nothing sent; retried at the next poll'}`;
+    // the pool's label is the prefix: the row's own copy of it is not repeated
+    default: {
+      const { profile, wallet_id, chain, pair, ...rest } = row;
+      return `${event} · ${JSON.stringify(rest)}`;
+    }
   }
 }
 
-async function tail() {
-  const st = fs.statSync(FEED, { throwIfNoEntry: false });
-  if (!st) return;
-  if (st.size < state.pos) state.pos = 0;        // the feed was rotated
-  if (st.size === state.pos) return;
-  const fd = fs.openSync(FEED, 'r');
-  const buf = Buffer.alloc(st.size - state.pos);
-  fs.readSync(fd, buf, 0, buf.length, state.pos);
-  fs.closeSync(fd);
-  state.pos = st.size;
-  save();
-  for (const line of buf.toString().split('\n')) {
-    if (!line.trim()) continue;
-    let row;
-    try { row = JSON.parse(line); } catch { continue; }
-    try { await send(`${emojiFor(row.event, EMOJI)} ${render(row)}`); } catch (e) { console.error('send:', e.message); }
+async function main() {
+  const token = process.env.TELEGRAM_BOT_TOKEN;
+  const chatId = process.env.TELEGRAM_CHAT_ID;
+  if (!token || !chatId) throw new Error('needs TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID');
+
+  async function send(text) {
+    // Telegram refuses a message over 4,096 characters (2026-09-28: a
+    // DEPLOY_IDLE book was lost that way). Long messages go out in parts.
+    for (const part of splitMessage(text)) {
+      const r = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ chat_id: chatId, text: part }) });
+      const j = await r.json();
+      if (!j.ok) throw new Error(`telegram: ${JSON.stringify(j)}`);
+    }
+  }
+
+  let raw = null;
+  try { raw = JSON.parse(fs.readFileSync(STATE_F, 'utf8')); } catch {}
+  const state = migrateState(raw, DIR);
+  const save = (st) => fs.writeFileSync(STATE_F, JSON.stringify(st));
+  save(state);
+  console.error('telegram_bridge running');
+  for (;;) {
+    try { await tailAll(state, DIR, (row) => send(message(row)), save); } catch (e) { console.error('tail:', redact(e.message)); }
+    await new Promise(s => setTimeout(s, 5000));
   }
 }
 
-console.error('telegram_bridge running');
-for (;;) {
-  try { await tail(); } catch (e) { console.error('tail:', e.message); }
-  await new Promise(s => setTimeout(s, 5000));
-}
+// Run as a program (node telegram_bridge.mjs, through a symlink too), not when a test imports it.
+const isMain = () => { try { return fs.realpathSync(process.argv[1]) === fs.realpathSync(SELF); } catch { return false; } };
+if (process.argv[1] && isMain()) await main();

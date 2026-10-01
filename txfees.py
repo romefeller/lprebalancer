@@ -90,3 +90,30 @@ def harvested(rpc, signatures, pool, mint_a, mint_b, fetcher=None):
     if a < 0 or b < 0:
         return None
     return a, b
+
+
+def _ui(token_amount):
+    ui = token_amount.get('uiAmountString')
+    return float(ui) if ui not in (None, '') else int(token_amount['amount']) / 10 ** int(token_amount['decimals'])
+
+
+def inflow(rpc, signatures, owner, mints, fetcher=None):
+    """{mint: what `owner` received of it (UI units)} over a harvest's
+    transactions: post less pre of its token accounts, never below 0. None
+    when there is no signature or a transaction cannot be read: a reward is
+    paid out only up to what the harvest is shown to have brought."""
+    sigs = [s for s in (signatures or []) if s]
+    if not sigs or not owner:
+        return None
+    fetcher = fetcher or fetch                   # looked up at call time: tests replace it
+    got = {m: 0.0 for m in mints}
+    for s in sigs:
+        tx = fetcher(rpc, s)
+        if tx is None or tx.get('meta') is None:
+            return None
+        meta = tx['meta']
+        for m in mints:
+            side = lambda key: sum(_ui(b['uiTokenAmount']) for b in meta.get(key) or []
+                                   if b.get('owner') == owner and b.get('mint') == m)
+            got[m] += side('postTokenBalances') - side('preTokenBalances')
+    return {m: max(v, 0.0) for m, v in got.items()}

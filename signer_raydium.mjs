@@ -20,6 +20,11 @@
 // unreadable or fails its invariants, the stale figure is reported and
 // `feesSource` says so.
 //
+// Token-2022 base tokens (MSFTx): every human amount and dollar figure here
+// is in UI units (token2022.mjs); `price`, `lowerPrice`, `upperPrice` and the
+// tick prices stay pool-native, `uiPrice` is the price in UI units. A paused
+// mint or one with a transfer hook refuses open, harvest and close.
+//
 // The key is read from WALLET_SECRET_PATH inside this process, handed to the
 // SDK as the owner, and never printed. The pool comes from --pool <address> or
 // LPBOT_POOL for every command that needs one.
@@ -38,7 +43,9 @@ import { PRICE_SLIPPAGE_BPS, SLIPPAGE_REFUSAL, openToleranceBps, safeBase } from
 import { executeBuilt, isProgramFailure, signerError } from './signer_errors.mjs';
 import { consistentFees } from './fee_snapshot.mjs';
 import { endpoints, overEndpoints, isEntry } from './rpc_policy.mjs';
+import { readMints, rawToUi, uiToNative, uiPrice, assertWritable, mintFields } from './token2022.mjs';
 import path from 'node:path';
+import { assertNotHalted } from './halt_guard.mjs';
 import { createRequire } from 'node:module';
 import { waitTurn } from './jupiter_gate.mjs';
 
@@ -53,7 +60,6 @@ const BN = require('bn.js');
 const Decimal = require('decimal.js');
 
 const DIR = path.dirname(new URL(import.meta.url).pathname);
-const HALT = path.join(DIR, 'HALT');
 // A keyed endpoint from the environment first. Indexed reads
 // (getParsedTokenAccountsByOwner) never go to an endpoint that refuses them.
 export const ENDPOINTS = endpoints(process.env, { indexed: true });
@@ -81,7 +87,7 @@ if (!CLMM_PROGRAM_ID.equals(PROGRAM_ID)) {
 }
 
 function guard() {
-  if (fs.existsSync(HALT)) throw new Error(`HALT present: ${fs.readFileSync(HALT, 'utf8').trim()}`);
+  assertNotHalted(DIR);                     // the global HALT and this profile's (halt_guard.mjs)
 }
 
 async function secretBytes() {
@@ -158,23 +164,38 @@ async function loadPool(raydium, pool) {
   return r;
 }
 
-async function describe(pool, r) {
+// The pool's two mints, read fresh on every command: a pause or a new
+// multiplier must not wait behind a cache.
+export async function poolMints(connection, mints) {
+  return readMints(async ms => (await connection.getMultipleParsedAccounts(ms.map(m => new PublicKey(m)))).value, mints);
+}
+
+async function describe(pool, r, connection) {
   const pi = r.poolInfo, rpc = r.rpcPoolInfo;
   const da = pi.mintA.decimals, db = pi.mintB.decimals;
+  const [fa, fb] = await poolMints(connection, [pi.mintA.address, pi.mintB.address]);
+  if (fa.decimals !== da || fb.decimals !== db) {
+    throw new Error(`mint decimals ${fa.decimals}/${fb.decimals} disagree with the pool's ${da}/${db}`);
+  }
   const sym = await symbols(pool, pi);
   const q = await quoteUsd(sym.b, pi.mintB.address);
-  return {
+  // the pool's own sqrt price, so the tick boundaries and the price agree
+  const price = Number(TickUtil.sqrtPriceX64ToPrice(rpc.sqrtPriceX64, da, db).toString());
+  const info = {
     pool, dex: DEX, programId: pi.programId,
     tickSpacing: pi.config.tickSpacing, tickCurrent: rpc.tickCurrent,
-    // the pool's own sqrt price, so the tick boundaries and the price agree
-    price: Number(TickUtil.sqrtPriceX64ToPrice(rpc.sqrtPriceX64, da, db).toString()),
+    price, uiPrice: uiPrice(price, fa.multiplier, fb.multiplier),
     feeRate: Number(pi.feeRate) / 1e6,
     liquidity: rpc.liquidity.toString(),
     symbolA: sym.a, symbolB: sym.b, decimalsA: da, decimalsB: db,
     mintA: pi.mintA.address, mintB: pi.mintB.address,
     quoteUsd: q.usd, quoteUsdSource: q.source,
     nativeSide: pi.mintA.address === NATIVE_MINT ? 'A' : pi.mintB.address === NATIVE_MINT ? 'B' : null,
+    ...mintFields(fa, fb),
   };
+  // The facts ride along for the write checks but stay out of the JSON.
+  Object.defineProperty(info, 'mints', { value: [fa, fb], enumerable: false });
+  return info;
 }
 
 async function connect(url, { withKey = true } = {}) {
@@ -198,25 +219,26 @@ export async function withRpc(fn, opts, deps = {}) {
   return overEndpoints(urls, async url => fn(await connectFn(url, opts)), { tries: 2, pauseMs: 2500, sleep });
 }
 
-async function splBalance(connection, owner, mint, decimals, lamports) {
+// UI units: raw / 10^decimals × the mint's multiplier.
+async function splBalance(connection, owner, mint, decimals, multiplier, lamports) {
   if (mint === NATIVE_MINT) return lamports / 1e9;
   const r = await connection.getParsedTokenAccountsByOwner(owner, { mint: new PublicKey(mint) });
   let raw = 0n;
   for (const a of r.value ?? []) raw += BigInt(a.account.data.parsed.info.tokenAmount.amount ?? 0);
-  return Number(raw) / 10 ** decimals;
+  return rawToUi(raw, decimals, multiplier);
 }
 
 async function balance(poolExplicit) {
   const pool = poolArg(poolExplicit);
   return withRpc(async ({ connection, payer, raydium }) => {
-    const info = await describe(pool, await loadPool(raydium, pool));
+    const info = await describe(pool, await loadPool(raydium, pool), connection);
     const lamports = await connection.getBalance(payer.publicKey);
     const out = { owner: payer.publicKey.toBase58(), sol: lamports / 1e9, pool, dex: DEX,
-      tokenA: info.symbolA, tokenB: info.symbolB, price: info.price, quoteUsd: info.quoteUsd,
-      nativeSide: info.nativeSide };
-    out.balanceA = await splBalance(connection, payer.publicKey, info.mintA, info.decimalsA, lamports);
-    out.balanceB = await splBalance(connection, payer.publicKey, info.mintB, info.decimalsB, lamports);
-    const inQuote = out.balanceA * info.price + out.balanceB;
+      tokenA: info.symbolA, tokenB: info.symbolB, price: info.price, uiPrice: info.uiPrice,
+      quoteUsd: info.quoteUsd, nativeSide: info.nativeSide, ...mintFields(...info.mints) };
+    out.balanceA = await splBalance(connection, payer.publicKey, info.mintA, info.decimalsA, info.multiplierA, lamports);
+    out.balanceB = await splBalance(connection, payer.publicKey, info.mintB, info.decimalsB, info.multiplierB, lamports);
+    const inQuote = out.balanceA * info.uiPrice + out.balanceB;
     const solUsd = info.nativeSide ? null : await tokenUsd(NATIVE_MINT);
     out.walletUsd = info.quoteUsd == null ? null
       : Number((inQuote * info.quoteUsd + (info.nativeSide ? 0 : out.sol * (solUsd ?? 0))).toFixed(4));
@@ -261,9 +283,10 @@ function positionAmounts(p, r, feeOf) {
   return { amountA, amountB, feeA, feeB, feesSource };
 }
 
-function positionView(p, r, info, tickOf) {
-  const ua = (x) => Number(x.toString()) / 10 ** info.decimalsA;
-  const ub = (x) => Number(x.toString()) / 10 ** info.decimalsB;
+// Amounts in UI units, valued at the UI price; band and price pool-native.
+export function positionView(p, r, info, tickOf) {
+  const ua = (x) => rawToUi(x, info.decimalsA, info.multiplierA);
+  const ub = (x) => rawToUi(x, info.decimalsB, info.multiplierB);
   const am = positionAmounts(p, r, tickOf);
   const lower = tickPrice(p.tickLower, info.decimalsA, info.decimalsB);
   const upper = tickPrice(p.tickUpper, info.decimalsA, info.decimalsB);
@@ -276,21 +299,23 @@ function positionView(p, r, info, tickOf) {
     tickLower: p.tickLower, tickUpper: p.tickUpper,
     liquidity: p.liquidity.toString(),
     lowerPrice: Number(lower.toFixed(6)), upperPrice: Number(upper.toFixed(6)),
-    price: Number(info.price.toFixed(6)),
+    price: Number(info.price.toFixed(6)), uiPrice: info.uiPrice,
+    multiplierA: info.multiplierA, multiplierB: info.multiplierB,
+    paused: info.paused, transferHookA: info.transferHookA, transferHookB: info.transferHookB,
     inRange: info.tickCurrent >= p.tickLower && info.tickCurrent < p.tickUpper,
     closeEstA: estA, closeEstB: estB,
     feesAccruedA: feeA, feesAccruedB: feeB, feesSource: am.feesSource,
-    feesAccrued_quote: Number((feeA * info.price + feeB).toFixed(9)),
+    feesAccrued_quote: Number((feeA * info.uiPrice + feeB).toFixed(9)),
   };
   if (info.quoteUsd != null) {
-    out.positionUsd = Number(((estA * info.price + estB) * info.quoteUsd).toFixed(4));
+    out.positionUsd = Number(((estA * info.uiPrice + estB) * info.quoteUsd).toFixed(4));
     out.feesAccrued_USD = Number((out.feesAccrued_quote * info.quoteUsd).toFixed(6));
   }
   return out;
 }
 
 // The union of every position the wallet holds on the pool, as one.
-function unionView(list, r, info, tickOf) {
+export function unionView(list, r, info, tickOf) {
   const views = list.map(p => positionView(p, r, info, tickOf));
   if (views.length === 1) return views[0];
   const sum = (k) => views.reduce((n, v) => n + (v[k] ?? 0), 0);
@@ -306,9 +331,9 @@ function unionView(list, r, info, tickOf) {
     feesAccruedA: sum('feesAccruedA'), feesAccruedB: sum('feesAccruedB'),
     feesSource: views.every(v => v.feesSource === 'feeGrowth') ? 'feeGrowth' : 'mixed',
   };
-  out.feesAccrued_quote = Number((out.feesAccruedA * info.price + out.feesAccruedB).toFixed(9));
+  out.feesAccrued_quote = Number((out.feesAccruedA * info.uiPrice + out.feesAccruedB).toFixed(9));
   if (info.quoteUsd != null) {
-    out.positionUsd = Number(((out.closeEstA * info.price + out.closeEstB) * info.quoteUsd).toFixed(4));
+    out.positionUsd = Number(((out.closeEstA * info.uiPrice + out.closeEstB) * info.quoteUsd).toFixed(4));
     out.feesAccrued_USD = Number((out.feesAccrued_quote * info.quoteUsd).toFixed(6));
   }
   return out;
@@ -318,7 +343,7 @@ async function status(positionArg) {
   const pool = poolArg();
   return withRpc(async ({ connection, payer, raydium }) => {
     const r = await loadPool(raydium, pool);
-    const info = await describe(pool, r);
+    const info = await describe(pool, r, connection);
     const list = await positionsOnPool(raydium, pool);
     if (!list.length || (positionArg && !list.some(p => p.nftMint.toBase58() === positionArg))) {
       console.log(JSON.stringify({ positions: 0, positionMint: null, pool }, null, 1));
@@ -344,7 +369,7 @@ async function rentOf(connection, owner, nftMints, programId) {
 }
 
 async function rentUsdOf(info, rentSol) {
-  const su = info.nativeSide === 'A' && info.quoteUsd != null ? info.price * info.quoteUsd
+  const su = info.nativeSide === 'A' && info.quoteUsd != null ? info.uiPrice * info.quoteUsd
     : info.nativeSide === 'B' && info.quoteUsd != null ? info.quoteUsd
     : await tokenUsd(NATIVE_MINT);
   return su != null ? Number((rentSol * su).toFixed(4)) : null;
@@ -447,12 +472,16 @@ export async function sendAll(builts, report) {
   return sigs;
 }
 
-async function open(pool, lower, upper, maxA, maxB, execute) {
-  [lower, upper, maxA, maxB] = [lower, upper, maxA, maxB].map(Number);
-  if (![lower, upper, maxA, maxB].every(Number.isFinite)) throw new Error('open needs numeric <lower> <upper> <maxA> <maxB>');
+// maxA and maxB are UI amounts (what the wallet shows); the deposit is sized
+// in pool-native units at the pool price and reported back in UI units.
+async function open(pool, lower, upper, uiMaxA, uiMaxB, execute) {
+  [lower, upper, uiMaxA, uiMaxB] = [lower, upper, uiMaxA, uiMaxB].map(Number);
+  if (![lower, upper, uiMaxA, uiMaxB].every(Number.isFinite)) throw new Error('open needs numeric <lower> <upper> <maxA> <maxB>');
   return withRpc(async ({ connection, payer, raydium }) => {
     const r = await loadPool(raydium, pool);
-    const info = await describe(pool, r);
+    const info = await describe(pool, r, connection);
+    assertWritable(info.mints);
+    const maxA = uiToNative(uiMaxA, info.multiplierA), maxB = uiToNative(uiMaxB, info.multiplierB);
     const lamports = await connection.getBalance(payer.publicKey);
     const sol = lamports / 1e9;
     if (sol < GAS_RESERVE_SOL) {
@@ -467,8 +496,8 @@ async function open(pool, lower, upper, maxA, maxB, execute) {
     // computes the second amount from the ticks it is given.
     const quote = depositQuote(price, band.tickLowerPrice, band.tickUpperPrice, maxA, maxB);
     if (!quote) throw new Error('nothing to deposit: the band or the caps are empty');
-    const estA = quote.estA, estB = quote.estB;
-    const approxUsd = (estA * price + estB) * (info.quoteUsd ?? 1);
+    const estA = quote.estA * info.multiplierA, estB = quote.estB * info.multiplierB;
+    const approxUsd = (estA * info.uiPrice + estB) * (info.quoteUsd ?? 1);
     if (approxUsd > MAX_USD) throw new Error(`position about $${approxUsd.toFixed(0)} exceeds cap $${MAX_USD}`);
     if (!(estA > 0 || estB > 0)) throw new Error('nothing to deposit: both sides are zero');
     const nativeIn = info.nativeSide === 'A' ? estA : info.nativeSide === 'B' ? estB : 0;
@@ -508,17 +537,27 @@ async function open(pool, lower, upper, maxA, maxB, execute) {
       // has not run live yet, so the lean path stays off until it has.
       ...(process.env.LPBOT_RAYDIUM_LEAN === '1' ? { withMetadata: 'no-create', nft2022: true } : {}),
       txVersion: TX_VERSION,
+    }).catch(e => {
+      // The SDK creates a token account only for a side it deposits nothing
+      // of; a side it must take from an account that does not exist is this
+      // error, with the missing account left out of its text.
+      if (/cannot found target token accounts/.test(String(e?.message ?? e))) {
+        throw new Error(`the wallet has no token account for ${info.symbolA} or ${info.symbolB}, and the open `
+          + 'deposits both: fund the wallet with both tokens first');
+      }
+      throw e;
     });
     const report = {
       pool, dex: DEX, pair: `${info.symbolA}/${info.symbolB}`,
       requestedLower: lower, requestedUpper: upper,
       lowerPrice: Number(band.tickLowerPrice.toFixed(6)), upperPrice: Number(band.tickUpperPrice.toFixed(6)),
       tickLower: band.tickLower, tickUpper: band.tickUpper, tickSpacing: info.tickSpacing,
-      price: Number(price.toFixed(6)),
-      tokenMaxA: maxA, tokenMaxB: maxB, tokenA: info.symbolA, tokenB: info.symbolB,
+      price: Number(price.toFixed(6)), uiPrice: info.uiPrice,
+      multiplierA: info.multiplierA, multiplierB: info.multiplierB,
+      tokenMaxA: uiMaxA, tokenMaxB: uiMaxB, tokenA: info.symbolA, tokenB: info.symbolB,
       depositEstA: estA, depositEstB: estB, binding: quote.binding,
-      chainEstA: Number(chain.amountA.toString()) / 10 ** info.decimalsA,
-      chainEstB: Number(chain.amountB.toString()) / 10 ** info.decimalsB,
+      chainEstA: rawToUi(chain.amountA, info.decimalsA, info.multiplierA),
+      chainEstB: rawToUi(chain.amountB, info.decimalsB, info.multiplierB),
       liquidity: liquidity.toString(),
       approxUsd: Number(approxUsd.toFixed(2)),
       depositUsd: info.quoteUsd != null ? Number(approxUsd.toFixed(4)) : null,
@@ -573,7 +612,8 @@ async function harvest(address, execute) {
   const pool = poolArg();
   return withRpc(async ({ connection, raydium }) => {
     const r = await loadPool(raydium, pool);
-    const info = await describe(pool, r);
+    const info = await describe(pool, r, connection);
+    assertWritable(info.mints);
     const ps = await findPositions(raydium, pool, address);
     const tickOf = await tickStates(connection, pool, ps, info.tickSpacing);
     const builts = [];
@@ -584,8 +624,8 @@ async function harvest(address, execute) {
       mint: address, pool, positions: ps.length, transactions: builts.length,
       instructions: builts.reduce((n, b) => n + b.transaction.instructions.length, 0),
       feesQuote: { feeOwedA: sum('feeA').toString(), feeOwedB: sum('feeB').toString(),
-        feesAccruedA: Number(sum('feeA').toString()) / 10 ** info.decimalsA,
-        feesAccruedB: Number(sum('feeB').toString()) / 10 ** info.decimalsB },
+        feesAccruedA: rawToUi(sum('feeA'), info.decimalsA, info.multiplierA),
+        feesAccruedB: rawToUi(sum('feeB'), info.decimalsB, info.multiplierB) },
     };
     if (!execute) {
       const simulation = [];
@@ -603,7 +643,8 @@ async function close(address, execute) {
   const pool = poolArg();
   return withRpc(async ({ connection, raydium }) => {
     const r = await loadPool(raydium, pool);
-    const info = await describe(pool, r);
+    const info = await describe(pool, r, connection);
+    assertWritable(info.mints);
     const ps = await findPositions(raydium, pool, address);
     const tickOf = await tickStates(connection, pool, ps, info.tickSpacing);
     const builts = [], ests = [];
@@ -624,8 +665,8 @@ async function close(address, execute) {
       instructions: builts.reduce((n, b) => n + b.transaction.instructions.length, 0),
       quote: { liquidity: ps.reduce((n, p) => n.add(p.liquidity), new BN(0)).toString(),
         tokenEstA: sum('amountA').toString(), tokenEstB: sum('amountB').toString(),
-        closeEstA: Number(sum('amountA').toString()) / 10 ** info.decimalsA,
-        closeEstB: Number(sum('amountB').toString()) / 10 ** info.decimalsB },
+        closeEstA: rawToUi(sum('amountA'), info.decimalsA, info.multiplierA),
+        closeEstB: rawToUi(sum('amountB'), info.decimalsB, info.multiplierB) },
       feesQuote: { feeOwedA: sum('feeA').toString(), feeOwedB: sum('feeB').toString() },
     };
     if (!execute) {
@@ -671,8 +712,8 @@ async function main() {
   if (cmd === 'pool') {
     // Read-only: no key is loaded.
     const pool = poolArg(rest[0]);
-    return withRpc(async ({ raydium }) => {
-      console.log(JSON.stringify(await describe(pool, await loadPool(raydium, pool)), null, 1));
+    return withRpc(async ({ connection, raydium }) => {
+      console.log(JSON.stringify(await describe(pool, await loadPool(raydium, pool), connection), null, 1));
     }, { withKey: false });
   }
   console.log('commands: balance [pool] | positions | status [position] | pool [pool] | '

@@ -1,0 +1,41 @@
+# Rebalancer — one process per profile (MULTI_DESIGN.md). The instance name is
+# the profile: lp-bot@sol-usdc runs the row `sol-usdc` of rebalancer.config.
+#
+# Installed by deploy.sh (which also retires the single lp-bot.service):
+#   sudo install -m 644 ops/lp-bot@.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now lp-bot@sol-usdc
+#
+# Every trading parameter comes from the rebalancer.config table, not from here.
+# The keys stay out of the repository and out of this file: the variables hold
+# PATHS to them, and the wallet row of the profile names which one it signs
+# with (WALLET_SECRET_PATH for Solana, LPBOT_EVM_KEY_PATH for Base).
+# Payouts go only to the pinned addresses, whatever the database says.
+#
+# Stop one profile:     touch /home/ubuntu/agent-fin/lp_bot/run/<profile>/HALT
+# Stop every profile:   touch /home/ubuntu/agent-fin/lp_bot/HALT
+[Unit]
+Description=Rebalancer profile %i
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/agent-fin/lp_bot
+Environment=LPBOT_PROFILE=%i
+# Raydium open without Metaplex metadata, Token-2022 NFT (saves ~0.0148 SOL a cycle)
+Environment=LPBOT_RAYDIUM_LEAN=1
+Environment=LPBOT_PROFIT_WALLET_PIN=8funmDkPNBtjqfNkBEoBF16eBfyQ4vMAFrs4Nyys5D1h
+Environment=LPBOT_EVM_PROFIT_WALLET_PIN=0x2b35948898e1b4897E7FC5a70e39b213dcfd0142
+EnvironmentFile=-/home/ubuntu/.kamino-keys/env
+Environment=WALLET_SECRET_PATH=/home/ubuntu/.kamino-keys/bot-wallet.secret
+Environment=LPBOT_EVM_KEY_PATH=/home/ubuntu/.kamino-keys/evm-wallet.secret
+Environment=SOLANA_RPC_URL=https://api.mainnet-beta.solana.com
+Environment=LPBOT_DSN=dbname=rebalancer
+ExecStart=/usr/bin/python3 -u /home/ubuntu/agent-fin/lp_bot/rebalancer.py
+Restart=on-failure
+RestartSec=60
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

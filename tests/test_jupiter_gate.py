@@ -635,7 +635,7 @@ class BreakerProbe(unittest.TestCase):
                 mock.patch.object(rebalancer, 'venue_view', lambda p, q=1.0: []), \
                 mock.patch.object(rebalancer, 'notify', lambda ev, **kw: self.__dict__.setdefault('ev', []).append(ev)), \
                 mock.patch.object(rebalancer, 'save', lambda s: None), mock.patch.object(rebalancer.db, 'event', lambda *a: None):
-            rebalancer.venue_failover({}, None, price=120.0)
+            rebalancer.venue_failover({}, None, price=120.0, quote=1.0)    # an unknown quote price moves nothing
         self.assertIn('failover_none', self.ev)                                          # it looked for a target
 
     def test_the_loop_probes_every_poll(self):

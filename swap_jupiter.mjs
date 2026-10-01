@@ -29,22 +29,29 @@
 // below it. With enough value both sides end at or above target; with too
 // little, the wallet is split in the targets' proportion. Within 2% -> noop.
 //
+// LPBOT_SLEEVE={"<mint>": <human amount>} (from the loop, when the wallet is
+// shared by several profiles): the most of each mint `rebalance` may count
+// and sell. The wallet may hold another profile's tokens; the plan sees only
+// this profile's sleeve. A sleeve that does not parse refuses the call.
+//
 // Refusals before any send: HALT present; priceImpactPct above LPBOT_MAX_IMPACT
 // (ratio, default 0.01 = 1%); Jupiter's own simulation of the built transaction
 // failed; the quote is older than QUOTE_MAX_AGE_MS at send time; the wallet
 // holds less than the amount to sell.
 import fs from 'node:fs';
 import path from 'node:path';
+import { assertNotHalted } from './halt_guard.mjs';
 import { createRequire } from 'node:module';
 
 import { endpoints, overEndpoints, JupiterError, AfterSignError } from './rpc_policy.mjs';
 import { waitTurn } from './jupiter_gate.mjs';
+import { readMints, rawToUi, uiToRaw, writeRefusal } from './token2022.mjs';
+import { planRebalance, TARGET_TOLERANCE } from './rebalance_plan.mjs';
 const require = createRequire(import.meta.url);
 const { Connection, Keypair, PublicKey, VersionedTransaction } = require('@solana/web3.js');
 const spl = require('@solana/spl-token');
 
 const DIR = path.dirname(new URL(import.meta.url).pathname);
-const HALT = path.join(DIR, 'HALT');
 // The swap reads token balances (getTokenAccountsByOwner): indexed-capable
 // endpoints only (rpc_policy.mjs; 2026-09-30 publicnode 403).
 const ENDPOINTS = endpoints(process.env, { indexed: true });
@@ -53,14 +60,13 @@ const SLIPPAGE_BPS = Number(process.env.LPBOT_SLIPPAGE_BPS ?? 100);
 const GAS_RESERVE_SOL = Number(process.env.LPBOT_GAS_RESERVE_SOL ?? 0.05);
 const MAX_IMPACT = Number(process.env.LPBOT_MAX_IMPACT ?? 0.01);   // ratio: 0.01 = 1%
 const QUOTE_MAX_AGE_MS = 20_000;
-const TARGET_TOLERANCE = 0.02;                                       // "at target" = within 2%
 
 const NATIVE_MINT = 'So11111111111111111111111111111111111111112';
 const JUPITER = 'https://lite-api.jup.ag';
 const HEADERS = { accept: 'application/json', 'user-agent': 'Mozilla/5.0' };
 
 function guard() {
-  if (fs.existsSync(HALT)) throw new Error(`HALT present: ${fs.readFileSync(HALT, 'utf8').trim()}`);
+  assertNotHalted(DIR);                     // the global HALT and this profile's (halt_guard.mjs)
 }
 
 async function secretBytes() {
@@ -169,6 +175,19 @@ function toRaw(human, decimals) {
 }
 const toHuman = (raw, decimals) => Number(raw) / 10 ** decimals;
 
+// Token-2022 scaled UI amounts (token2022.mjs): the loop, the sleeve and
+// Jupiter's usdPrice speak UI units; the quote and the chain speak raw. A
+// plain mint (multiplier 1, or not read yet) converts exactly as before.
+export function uiOf(raw, info) {
+  const m = info.multiplier ?? 1;
+  return m === 1 ? toHuman(raw, info.decimals) : rawToUi(raw, info.decimals, m);
+}
+
+export function amountToRaw(amount, info) {
+  const m = info.multiplier ?? 1;
+  return m === 1 ? toRaw(amount, info.decimals) : uiToRaw(amount, info.decimals, m);
+}
+
 async function getQuote(inMint, outMint, rawIn) {
   const q = new URLSearchParams({
     inputMint: inMint, outputMint: outMint, amount: rawIn.toString(),
@@ -182,13 +201,13 @@ async function getQuote(inMint, outMint, rawIn) {
 
 function quoteView(quote, inInfo, outInfo) {
   const impact = Number(quote.priceImpactPct);
-  const outHuman = toHuman(quote.outAmount, outInfo.decimals);
-  const inHuman = toHuman(quote.inAmount, inInfo.decimals);
+  const outHuman = uiOf(quote.outAmount, outInfo);
+  const inHuman = uiOf(quote.inAmount, inInfo);
   return {
     inMint: inInfo.mint, inSymbol: inInfo.symbol, amountIn: inHuman,
     outMint: outInfo.mint, outSymbol: outInfo.symbol,
     quoteOutAmount: outHuman,
-    minOutAmount: toHuman(quote.otherAmountThreshold, outInfo.decimals),
+    minOutAmount: uiOf(quote.otherAmountThreshold, outInfo),
     priceOutPerIn: inHuman > 0 ? outHuman / inHuman : null,
     priceImpactPct: impact,                                   // ratio, as Jupiter returns it
     priceImpactPercent: Number((impact * 100).toFixed(6)),    // the same number in percent
@@ -275,8 +294,8 @@ export function verifyQuote(quote, inInfo, outInfo, rawIn) {
   if (Number(quote.slippageBps) > SLIPPAGE_BPS) throw new Error(`quote slippage ${quote.slippageBps} bps above ${SLIPPAGE_BPS}; refusing`);
   if (BigInt(quote.otherAmountThreshold) > BigInt(quote.outAmount)) throw new Error('quote minimum exceeds its own output; refusing');
   if (inInfo.usdPrice != null && outInfo.usdPrice != null) {
-    const inUsd = toHuman(quote.inAmount, inInfo.decimals) * inInfo.usdPrice;
-    const outUsd = toHuman(quote.otherAmountThreshold, outInfo.decimals) * outInfo.usdPrice;
+    const inUsd = uiOf(quote.inAmount, inInfo) * inInfo.usdPrice;
+    const outUsd = uiOf(quote.otherAmountThreshold, outInfo) * outInfo.usdPrice;
     if (outUsd < inUsd * (1 - MAX_VALUE_LOSS - Number(quote.slippageBps) / 1e4)) {
       throw new Error(`quote pays $${outUsd.toFixed(4)} at worst for $${inUsd.toFixed(4)}; more than ${MAX_VALUE_LOSS * 100}% below fair value; refusing`);
     }
@@ -336,12 +355,17 @@ async function verifyBalances(connection, payer, tx, inInfo, outInfo, rawIn, quo
   return { inDrop: inDrop.toString(), outGain: outGain.toString(), solDrop: solDrop.toString() };
 }
 
-// Decimals from the mint account itself; a hint that disagrees is refused.
-async function chainDecimals(connection, info) {
-  if (info.mint === NATIVE_MINT) return 9;
-  const mi = await connection.getAccountInfo(new PublicKey(info.mint));
-  if (!mi || mi.data.length < 45) throw new Error(`mint ${info.mint} not readable on chain`);
-  return mi.data[44];
+// The mint's facts from the chain (token2022.mintFacts): decimals (a hint
+// that disagrees is refused), the UI multiplier, and whether a transfer may
+// be built at all (a paused mint or a transfer hook refuses, as the signers do).
+async function chainFacts(connection, info) {
+  const [f] = await readMints(async ms => (await connection.getMultipleParsedAccounts(
+    ms.map(m => new PublicKey(m)), 'confirmed')).value, [info.mint]);
+  if (info.decimals !== f.decimals) throw new Error(`${info.symbol} decimals ${info.decimals} disagree with the chain's ${f.decimals}; refusing`);
+  const refusal = writeRefusal([f]);
+  if (refusal) throw new Error(refusal);
+  info.multiplier = f.multiplier;
+  return f;
 }
 
 // --- wallet reads -------------------------------------------------------------------
@@ -353,10 +377,35 @@ async function rawBalance(connection, owner, mint) {
   return raw;
 }
 
-// What the wallet may sell of a mint: the native balance keeps the gas reserve.
+// LPBOT_SLEEVE as {mint: cap}, or null when unset. Anything else refuses:
+// a sleeve that cannot be read must not become "the whole wallet".
+export function parseSleeve(text) {
+  if (text == null || text === '') return null;
+  let j;
+  try { j = JSON.parse(text); } catch { throw new Error('LPBOT_SLEEVE is not JSON; refusing'); }
+  if (!j || typeof j !== 'object' || Array.isArray(j)) throw new Error('LPBOT_SLEEVE is not an object; refusing');
+  const out = {};
+  for (const [m, v] of Object.entries(j)) {
+    const n = Number(v);
+    if (typeof v !== 'number' || !Number.isFinite(n) || n < 0) throw new Error(`LPBOT_SLEEVE[${m}] is not a non-negative number; refusing`);
+    out[m] = n;
+  }
+  return out;
+}
+
+// The balance a plan may count: the wallet's, capped at the sleeve. A mint
+// the sleeve does not name counts nothing when a sleeve is set.
+export function sleeveCap(total, mint, sleeve) {
+  if (sleeve == null) return total;
+  return Math.min(total, Object.hasOwn(sleeve, mint) ? sleeve[mint] : 0);
+}
+
+// What the wallet may sell of a mint: the sleeve's share at most; the native
+// balance keeps the gas reserve. The sleeve is parsed here, so a bad one is
+// an `ERROR:` like any refusal.
 async function sellable(connection, owner, info) {
   const raw = await rawBalance(connection, owner, info.mint);
-  const total = toHuman(raw, info.decimals);
+  const total = sleeveCap(uiOf(raw, info), info.mint, parseSleeve(process.env.LPBOT_SLEEVE));
   const avail = info.mint === NATIVE_MINT ? Math.max(0, total - GAS_RESERVE_SOL) : total;
   return { total, avail, usd: info.usdPrice != null ? avail * info.usdPrice : null };
 }
@@ -364,14 +413,11 @@ async function sellable(connection, owner, info) {
 // --- the swap itself -------------------------------------------------------------
 // Quote, build, (dry run: report) or (execute: sign, send once, confirm).
 async function performSwap({ connection, payer }, inInfo, outInfo, amountHuman, execute, extra = {}) {
-  for (const info of [inInfo, outInfo]) {
-    const d = await chainDecimals(connection, info);
-    if (info.decimals !== d) throw new Error(`${info.symbol} decimals ${info.decimals} disagree with the chain's ${d}; refusing`);
-  }
-  const rawIn = toRaw(amountHuman, inInfo.decimals);
+  for (const info of [inInfo, outInfo]) await chainFacts(connection, info);
+  const rawIn = amountToRaw(amountHuman, inInfo);
   if (rawIn <= 0n) throw new Error(`amount ${amountHuman} ${inInfo.symbol} rounds to zero`);
   const have = await sellable(connection, payer.publicKey, inInfo);
-  if (toHuman(rawIn, inInfo.decimals) > have.avail + 1e-12) {
+  if (uiOf(rawIn, inInfo) > have.avail + 1e-12) {
     throw new Error(`wallet can sell ${have.avail} ${inInfo.symbol}`
       + (inInfo.mint === NATIVE_MINT ? ` (after the ${GAS_RESERVE_SOL} SOL gas reserve)` : '')
       + `, asked ${amountHuman}`);
@@ -458,25 +504,6 @@ async function swapCmd(inMint, outMint, amount, execute) {
   return withRpc(ctx => performSwap(ctx, inInfo, outInfo, amount, execute));
 }
 
-// Decide the one swap that brings the wallet's split of A and B to the targets.
-// Pure so it can be reasoned about: returns null for noop.
-export function planRebalance(usdA, usdB, targetA, targetB) {
-  const total = usdA + usdB, want = targetA + targetB;
-  if (!(want > 0)) return null;
-  // Enough value: fill the short side up to its target from the other's surplus.
-  // Too little: split what there is in the targets' proportion.
-  const mode = total >= want ? 'fill' : 'proportional';
-  const desiredA = mode === 'fill' ? targetA : total * targetA / want;
-  const desiredB = mode === 'fill' ? targetB : total * targetB / want;
-  let side, sellUsd, deficit;
-  if (usdA < desiredA) { side = 'A'; deficit = desiredA - usdA; sellUsd = Math.min(deficit, Math.max(0, usdB - desiredB)); }
-  else if (usdB < desiredB) { side = 'B'; deficit = desiredB - usdB; sellUsd = Math.min(deficit, Math.max(0, usdA - desiredA)); }
-  else return null;
-  const ref = side === 'A' ? desiredA : desiredB;
-  if (deficit <= TARGET_TOLERANCE * ref || !(sellUsd > 0)) return null;
-  return { mode, buySide: side, sellSide: side === 'A' ? 'B' : 'A', sellUsd, desiredA, desiredB };
-}
-
 async function rebalanceCmd(mintA, mintB, targetA, targetB, execute) {
   guard();
   const [infoA, infoB] = await tokenInfos([assertMint(mintA, 'mintA'), assertMint(mintB, 'mintB')]);
@@ -486,13 +513,14 @@ async function rebalanceCmd(mintA, mintB, targetA, targetB, execute) {
   if (!(tA >= 0 && tB >= 0)) throw new Error(`targets must be non-negative dollars, got ${targetA} ${targetB}`);
   return withRpc(async (ctx) => {
     const { connection, payer } = ctx;
+    for (const info of [infoA, infoB]) await chainFacts(connection, info);     // multipliers before any amount
     const balA = await sellable(connection, payer.publicKey, infoA);
     const balB = await sellable(connection, payer.publicKey, infoB);
     const balances = {
       owner: payer.publicKey.toBase58(), gasReserveSol: GAS_RESERVE_SOL,
       A: { mint: infoA.mint, symbol: infoA.symbol, amount: balA.total, sellable: balA.avail, usd: Number(balA.usd.toFixed(4)), usdPrice: infoA.usdPrice },
       B: { mint: infoB.mint, symbol: infoB.symbol, amount: balB.total, sellable: balB.avail, usd: Number(balB.usd.toFixed(4)), usdPrice: infoB.usdPrice },
-      targetUsdA: tA, targetUsdB: tB,
+      targetUsdA: tA, targetUsdB: tB, sleeve: parseSleeve(process.env.LPBOT_SLEEVE),
     };
     const plan = planRebalance(balA.usd, balB.usd, tA, tB);
     if (!plan) {

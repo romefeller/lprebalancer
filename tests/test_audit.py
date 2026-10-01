@@ -485,7 +485,7 @@ class Hooks(unittest.TestCase):
 
     def test_run_audits_is_hourly_and_never_raises(self):
         runs = []
-        with mock.patch.object(rebalancer.audit, 'run', lambda *a: runs.append(a) or {'idle': 'ok'}), \
+        with mock.patch.object(rebalancer.audit, 'run', lambda *a, **k: runs.append(a) or {'idle': 'ok'}), \
                 mock.patch.object(rebalancer, 'save', lambda s: None):
             state = {}
             self.assertEqual(rebalancer.run_audits(state), {'idle': 'ok'})

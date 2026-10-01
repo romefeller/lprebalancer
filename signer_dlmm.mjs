@@ -15,6 +15,11 @@
 // The whole band still may not exceed POSITION_MAX_LENGTH bins; the engine's
 // `feasible_bands` keeps such a band from being chosen, and `open` refuses it.
 //
+// Token-2022 base tokens (MU): every human amount and dollar figure here is
+// in UI units (token2022.mjs); `price`, `lowerPrice`, `upperPrice` and the bin
+// prices stay pool-native, `uiPrice` is the price in UI units. A paused mint
+// or one with a transfer hook refuses open, harvest and close.
+//
 // The key is read from WALLET_SECRET_PATH inside this process and never
 // printed. The pool comes from --pool <address> or LPBOT_POOL: a position on
 // DLMM is only readable through its pool.
@@ -28,9 +33,11 @@
 //   node signer_dlmm.mjs close <position> [--execute]
 import fs from 'node:fs';
 import path from 'node:path';
+import { assertNotHalted } from './halt_guard.mjs';
 import { createRequire } from 'node:module';
 import { waitTurn } from './jupiter_gate.mjs';
 import { endpoints, overEndpoints, isEntry, AfterSignError } from './rpc_policy.mjs';
+import { readMints, rawToUi, uiToNative, uiPrice, assertWritable, mintFields } from './token2022.mjs';
 
 // The package's ESM build imports a directory and fails to load under Node 24;
 // the CommonJS build resolves cleanly.
@@ -42,7 +49,6 @@ const { Connection, Keypair, PublicKey, Transaction, sendAndConfirmTransaction }
 const { BN } = require('@coral-xyz/anchor');
 
 const DIR = path.dirname(new URL(import.meta.url).pathname);
-const HALT = path.join(DIR, 'HALT');
 // A keyed endpoint from the environment first. Indexed reads
 // (getParsedTokenAccountsByOwner) never go to an endpoint that refuses them.
 export const ENDPOINTS = endpoints(process.env, { indexed: true });
@@ -61,7 +67,7 @@ const JUPITER = 'https://lite-api.jup.ag';
 const HEADERS = { accept: 'application/json', 'user-agent': 'Mozilla/5.0' };
 
 function guard() {
-  if (fs.existsSync(HALT)) throw new Error(`HALT present: ${fs.readFileSync(HALT, 'utf8').trim()}`);
+  assertNotHalted(DIR);                     // the global HALT and this profile's (halt_guard.mjs)
 }
 
 async function secretBytes() {
@@ -120,19 +126,34 @@ function binPrice(id, step, dx, dy) {
   return (1 + step / 10000) ** id * 10 ** (dx - dy);
 }
 
-async function describe(pool, dlmm) {
+// The pool's two mints, read fresh on every command: a pause or a new
+// multiplier must not wait behind a cache.
+export async function poolMints(connection, mints) {
+  return readMints(async ms => (await connection.getMultipleParsedAccounts(ms.map(m => new PublicKey(m)))).value, mints);
+}
+
+async function describe(pool, dlmm, connection) {
   const dx = dlmm.tokenX.mint.decimals, dy = dlmm.tokenY.mint.decimals;
   const active = await dlmm.getActiveBin();
   const sym = await symbols(pool, dlmm);
   const mintX = dlmm.tokenX.publicKey.toBase58(), mintY = dlmm.tokenY.publicKey.toBase58();
+  const [fx, fy] = await poolMints(connection, [mintX, mintY]);
+  if (fx.decimals !== dx || fy.decimals !== dy) {
+    throw new Error(`mint decimals ${fx.decimals}/${fy.decimals} disagree with the pool's ${dx}/${dy}`);
+  }
   const q = await quoteUsd(sym.y, mintY);
-  return {
+  const price = Number(active.pricePerToken);
+  const info = {
     pool, step: dlmm.lbPair.binStep, activeBin: active.binId,
-    price: Number(active.pricePerToken),
+    price, uiPrice: uiPrice(price, fx.multiplier, fy.multiplier),
     symbolA: sym.x, symbolB: sym.y, decimalsA: dx, decimalsB: dy, mintA: mintX, mintB: mintY,
     quoteUsd: q.usd, quoteUsdSource: q.source,
     nativeSide: mintX === NATIVE_MINT ? 'A' : mintY === NATIVE_MINT ? 'B' : null,
+    ...mintFields(fx, fy),
   };
+  // The facts ride along for the write checks but stay out of the JSON.
+  Object.defineProperty(info, 'mints', { value: [fx, fy], enumerable: false });
+  return info;
 }
 
 async function connect(url) {
@@ -152,26 +173,27 @@ export async function withRpc(fn, opts, deps = {}) {
   return overEndpoints(urls, async url => fn(await connectFn(url, opts)), { tries: 2, pauseMs: 2500, sleep });
 }
 
-async function splBalance(connection, owner, mint, decimals, lamports) {
+// UI units: raw / 10^decimals × the mint's multiplier.
+async function splBalance(connection, owner, mint, decimals, multiplier, lamports) {
   if (mint === NATIVE_MINT) return lamports / 1e9;
   const r = await connection.getParsedTokenAccountsByOwner(owner, { mint: new PublicKey(mint) });
   let raw = 0n;
   for (const a of r.value ?? []) raw += BigInt(a.account.data.parsed.info.tokenAmount.amount ?? 0);
-  return Number(raw) / 10 ** decimals;
+  return rawToUi(raw, decimals, multiplier);
 }
 
 async function balance(poolExplicit) {
   const pool = poolArg(poolExplicit);
   return withRpc(async ({ connection, payer }) => {
     const dlmm = await DLMM.create(connection, new PublicKey(pool));
-    const info = await describe(pool, dlmm);
+    const info = await describe(pool, dlmm, connection);
     const lamports = await connection.getBalance(payer.publicKey);
     const out = { owner: payer.publicKey.toBase58(), sol: lamports / 1e9, pool, dex: 'meteora-dlmm',
-      tokenA: info.symbolA, tokenB: info.symbolB, price: info.price, quoteUsd: info.quoteUsd,
-      nativeSide: info.nativeSide };
-    out.balanceA = await splBalance(connection, payer.publicKey, info.mintA, info.decimalsA, lamports);
-    out.balanceB = await splBalance(connection, payer.publicKey, info.mintB, info.decimalsB, lamports);
-    const inQuote = out.balanceA * info.price + out.balanceB;
+      tokenA: info.symbolA, tokenB: info.symbolB, price: info.price, uiPrice: info.uiPrice,
+      quoteUsd: info.quoteUsd, nativeSide: info.nativeSide, ...mintFields(...info.mints) };
+    out.balanceA = await splBalance(connection, payer.publicKey, info.mintA, info.decimalsA, info.multiplierA, lamports);
+    out.balanceB = await splBalance(connection, payer.publicKey, info.mintB, info.decimalsB, info.multiplierB, lamports);
+    const inQuote = out.balanceA * info.uiPrice + out.balanceB;
     const solUsd = info.nativeSide ? null : await tokenUsd(NATIVE_MINT);
     out.walletUsd = info.quoteUsd == null ? null
       : Number((inQuote * info.quoteUsd + (info.nativeSide ? 0 : out.sol * (solUsd ?? 0))).toFixed(4));
@@ -180,10 +202,11 @@ async function balance(poolExplicit) {
   });
 }
 
-function positionView(p, info) {
+// Amounts in UI units, valued at the UI price; band and price pool-native.
+export function positionView(p, info) {
   const d = p.positionData;
-  const ua = (x) => Number(x.toString()) / 10 ** info.decimalsA;
-  const ub = (x) => Number(x.toString()) / 10 ** info.decimalsB;
+  const ua = (x) => rawToUi(x, info.decimalsA, info.multiplierA);
+  const ub = (x) => rawToUi(x, info.decimalsB, info.multiplierB);
   const lower = binPrice(d.lowerBinId, info.step, info.decimalsA, info.decimalsB);
   const upper = binPrice(d.upperBinId + 1, info.step, info.decimalsA, info.decimalsB);
   const estA = ua(new BN(d.totalXAmount.split('.')[0])), estB = ub(new BN(d.totalYAmount.split('.')[0]));
@@ -197,21 +220,23 @@ function positionView(p, info) {
     // no single L on DLMM; the bin count stands in for the snapshot column
     liquidity: String(d.upperBinId - d.lowerBinId + 1),
     lowerPrice: Number(lower.toFixed(6)), upperPrice: Number(upper.toFixed(6)),
-    price: Number(info.price.toFixed(6)),
+    price: Number(info.price.toFixed(6)), uiPrice: info.uiPrice,
+    multiplierA: info.multiplierA, multiplierB: info.multiplierB,
+    paused: info.paused, transferHookA: info.transferHookA, transferHookB: info.transferHookB,
     inRange: info.activeBin >= d.lowerBinId && info.activeBin <= d.upperBinId,
     closeEstA: estA, closeEstB: estB,
     feesAccruedA: feeA, feesAccruedB: feeB,
-    feesAccrued_quote: Number((feeA * info.price + feeB).toFixed(9)),
+    feesAccrued_quote: Number((feeA * info.uiPrice + feeB).toFixed(9)),
   };
   if (info.quoteUsd != null) {
-    out.positionUsd = Number(((estA * info.price + estB) * info.quoteUsd).toFixed(4));
-    out.feesAccrued_USD = Number(((feeA * info.price + feeB) * info.quoteUsd).toFixed(6));
+    out.positionUsd = Number(((estA * info.uiPrice + estB) * info.quoteUsd).toFixed(4));
+    out.feesAccrued_USD = Number(((feeA * info.uiPrice + feeB) * info.quoteUsd).toFixed(6));
   }
   return out;
 }
 
 // The union of every position the wallet holds on the pool, as one.
-function unionView(list, info) {
+export function unionView(list, info) {
   const views = list.map(p => positionView(p, info)).sort((a, b) => a.lowerBinId - b.lowerBinId);
   const sum = (k) => views.reduce((n, v) => n + (v[k] ?? 0), 0);
   const out = {
@@ -225,9 +250,9 @@ function unionView(list, info) {
     closeEstA: sum('closeEstA'), closeEstB: sum('closeEstB'),
     feesAccruedA: sum('feesAccruedA'), feesAccruedB: sum('feesAccruedB'),
   };
-  out.feesAccrued_quote = Number((out.feesAccruedA * info.price + out.feesAccruedB).toFixed(9));
+  out.feesAccrued_quote = Number((out.feesAccruedA * info.uiPrice + out.feesAccruedB).toFixed(9));
   if (info.quoteUsd != null) {
-    out.positionUsd = Number(((out.closeEstA * info.price + out.closeEstB) * info.quoteUsd).toFixed(4));
+    out.positionUsd = Number(((out.closeEstA * info.uiPrice + out.closeEstB) * info.quoteUsd).toFixed(4));
     out.feesAccrued_USD = Number((out.feesAccrued_quote * info.quoteUsd).toFixed(6));
   }
   return out;
@@ -243,7 +268,7 @@ async function rentOf(connection, pubkeys) {
 }
 
 async function solUsd(info) {
-  if (info.nativeSide === 'A' && info.quoteUsd != null) return info.price * info.quoteUsd;
+  if (info.nativeSide === 'A' && info.quoteUsd != null) return info.uiPrice * info.quoteUsd;
   if (info.nativeSide === 'B' && info.quoteUsd != null) return info.quoteUsd;
   return tokenUsd(NATIVE_MINT);
 }
@@ -252,7 +277,7 @@ async function status(positionArg) {
   const pool = poolArg();
   return withRpc(async ({ connection, payer }) => {
     const dlmm = await DLMM.create(connection, new PublicKey(pool));
-    const info = await describe(pool, dlmm);
+    const info = await describe(pool, dlmm, connection);
     const { userPositions } = await dlmm.getPositionsByUserAndLbPair(payer.publicKey);
     if (!userPositions.length
         || (positionArg && !userPositions.some(p => p.publicKey.toBase58() === positionArg))) {
@@ -305,10 +330,41 @@ function reportSent(base, r) {
   console.log(JSON.stringify(out, null, 1));
 }
 
+// Simulate one built transaction without sending it. Signing is local; the
+// report carries the program's verdict, so a dry run proves the instructions.
+// A wallet without the tokens fails here on the token transfer ("insufficient
+// funds"), after every account and instruction has been checked.
+async function simulate(connection, ixs, signers, feePayer) {
+  try {
+    const tx = new Transaction().add(...ixs);
+    tx.feePayer = feePayer;
+    tx.recentBlockhash = (await connection.getLatestBlockhash('confirmed')).blockhash;
+    tx.sign(...signers);
+    const res = await connection.simulateTransaction(tx);
+    const logs = res.value.logs ?? [];
+    return { ok: res.value.err == null, err: res.value.err == null ? null : JSON.stringify(res.value.err),
+      // the program's own words for a failure ("Error: insufficient funds")
+      logError: logs.find(l => /Program log: (Error|AnchorError)/.test(l)) ?? null,
+      unitsConsumed: res.value.unitsConsumed ?? null, logTail: logs.slice(-4) };
+  } catch (e) {
+    return { ok: false, err: String(e?.message ?? e).slice(0, 200), unitsConsumed: null, logTail: [] };
+  }
+}
+
+// The keypairs a transaction needs: the payer, plus the new position's key
+// when an instruction expects its signature.
+function signersOf(ixs, part, payer) {
+  return ixs.some(ix => ix.keys.some(k => k.isSigner && k.pubkey.equals(part.positionKeypair.publicKey)))
+    ? [payer, part.positionKeypair] : [payer];
+}
+
+// maxA and maxB are UI amounts (what the wallet shows); the deposit is sized
+// in pool-native units at the pool price and reported back in UI units.
 async function open(pool, lower, upper, maxA, maxB, execute) {
   return withRpc(async ({ connection, payer }) => {
     const dlmm = await DLMM.create(connection, new PublicKey(pool));
-    const info = await describe(pool, dlmm);
+    const info = await describe(pool, dlmm, connection);
+    assertWritable(info.mints);
     const lamports = await connection.getBalance(payer.publicKey);
     if (lamports / 1e9 < GAS_RESERVE_SOL) {
       throw new Error(`SOL below the ${GAS_RESERVE_SOL} gas reserve; a wallet that cannot pay fees cannot close its own position`);
@@ -327,10 +383,12 @@ async function open(pool, lower, upper, maxA, maxB, execute) {
     // the bins below, so the deposit is whatever amounts are handed in. Take a
     // 50/50 split in quote terms, bounded by both caps.
     const price = info.price;
-    let amtA = Math.min(Number(maxA), Number(maxB) / price);
-    let amtB = Math.min(Number(maxB), amtA * price);
+    const capA = uiToNative(Number(maxA), info.multiplierA), capB = uiToNative(Number(maxB), info.multiplierB);
+    let amtA = Math.min(capA, capB / price);
+    let amtB = Math.min(capB, amtA * price);
     amtA = Math.min(amtA, amtB / price);
-    const approxUsd = (amtA * price + amtB) * (info.quoteUsd ?? 1);
+    const estA = amtA * info.multiplierA, estB = amtB * info.multiplierB;
+    const approxUsd = (estA * info.uiPrice + estB) * (info.quoteUsd ?? 1);
     if (approxUsd > MAX_USD) throw new Error(`position about $${approxUsd.toFixed(0)} exceeds cap $${MAX_USD}`);
     if (!(amtA > 0 && amtB > 0)) throw new Error('nothing to deposit: one side is zero');
 
@@ -348,7 +406,8 @@ async function open(pool, lower, upper, maxA, maxB, execute) {
       binLower: binPrice(minBinId, info.step, info.decimalsA, info.decimalsB),
       binUpper: binPrice(maxBinId + 1, info.step, info.decimalsA, info.decimalsB),
       tokenMaxA: Number(maxA), tokenMaxB: Number(maxB), tokenA: info.symbolA, tokenB: info.symbolB,
-      depositEstA: amtA, depositEstB: amtB,
+      depositEstA: estA, depositEstB: estB, price: info.price, uiPrice: info.uiPrice,
+      multiplierA: info.multiplierA, multiplierB: info.multiplierB,
       approxUsd: Number(approxUsd.toFixed(2)),
       depositUsd: info.quoteUsd != null ? Number(approxUsd.toFixed(4)) : null,
       positions: parts.map(p => p.positionKeypair.publicKey.toBase58()),
@@ -357,7 +416,10 @@ async function open(pool, lower, upper, maxA, maxB, execute) {
       instructions: parts.reduce((n, p) => n + p.transactionInstructions.reduce((m, t) => m + t.length, 0), 0),
     };
     if (!execute) {
-      console.log(JSON.stringify({ ...report, sent: false }, null, 1));
+      // The first transaction only: the later ones act on the position it creates.
+      const first = parts[0]?.transactionInstructions[0];
+      const simulation = first ? await simulate(connection, first, signersOf(first, parts[0], payer), payer.publicKey) : null;
+      console.log(JSON.stringify({ ...report, simulation, simulated: first ? `1 of ${txCount}` : 'none', sent: false }, null, 1));
       console.log('DRY RUN — instructions built. Pass --execute to sign and send.');
       return;
     }
@@ -371,9 +433,7 @@ async function open(pool, lower, upper, maxA, maxB, execute) {
         for (const ixs of part.transactionInstructions) {
           const tx = new Transaction().add(...ixs);
           tx.feePayer = payer.publicKey;
-          const signers = ixs.some(ix => ix.keys.some(k => k.isSigner
-            && k.pubkey.equals(part.positionKeypair.publicKey))) ? [payer, part.positionKeypair] : [payer];
-          sigs.push(await sendAndConfirmTransaction(connection, tx, signers, { commitment: 'confirmed' }));
+          sigs.push(await sendAndConfirmTransaction(connection, tx, signersOf(ixs, part, payer), { commitment: 'confirmed' }));
         }
       }
     } catch (e) {
@@ -400,6 +460,7 @@ async function harvest(address, execute) {
   const pool = poolArg();
   return withRpc(async ({ connection, payer }) => {
     const dlmm = await DLMM.create(connection, new PublicKey(pool));
+    assertWritable(await poolMints(connection, [dlmm.tokenX.publicKey.toBase58(), dlmm.tokenY.publicKey.toBase58()]));
     const ps = await findPositions(dlmm, payer.publicKey, address);
     const txs = await dlmm.claimAllSwapFee({ owner: payer.publicKey, positions: ps });
     if (!execute) {
@@ -416,6 +477,7 @@ async function close(address, execute) {
   const pool = poolArg();
   return withRpc(async ({ connection, payer }) => {
     const dlmm = await DLMM.create(connection, new PublicKey(pool));
+    assertWritable(await poolMints(connection, [dlmm.tokenX.publicKey.toBase58(), dlmm.tokenY.publicKey.toBase58()]));
     const ps = await findPositions(dlmm, payer.publicKey, address);
     // All liquidity out, fees claimed, accounts closed: one batch per position.
     const txs = [];
@@ -457,7 +519,7 @@ async function main() {
     const pool = poolArg(rest[0]);
     const connection = new Connection(ENDPOINTS[0], 'confirmed');
     const dlmm = await DLMM.create(connection, new PublicKey(pool));
-    return console.log(JSON.stringify(await describe(pool, dlmm), null, 1));
+    return console.log(JSON.stringify(await describe(pool, dlmm, connection), null, 1));
   }
   console.log('commands: balance [pool] | positions | status [position] | pool [pool] | '
     + 'open <pool> <lo> <hi> <maxA> <maxB> [--execute] | harvest <position> [--execute] '

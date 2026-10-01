@@ -47,10 +47,18 @@ reports nothing may open.
 every time you rebalance. Cumulative earnings live in the ledger, split into
 realised (harvested into the wallet) and unrealised (still in the position).
 
-Stop it at any time with:       touch HALT
-Force one rebalance now with:   touch REBALANCE
-Force the pool and band review: touch REOPT
-Move to a pool by hand:         echo "<dex> <pool>" > MIGRATE
+One process runs one profile (LPBOT_PROFILE). Its runtime files and the
+operator triggers live in run/<profile>/:
+
+Stop this profile:              touch run/<profile>/HALT
+Stop every profile and signer:  touch HALT
+Force one rebalance now with:   touch run/<profile>/REBALANCE
+Force the pool and band review: touch run/<profile>/REOPT
+Move to a pool by hand:         echo "<dex> <pool>" > run/<profile>/MIGRATE
+
+Profiles that share a wallet share its tokens through sleeves (wallets.py):
+every write runs under the wallet's lock, and the wallet read the loop sizes
+from is the profile's own sleeve, not the whole wallet.
 
 The trigger exists because the rebalance path is the one that runs unattended,
 and a path that has only ever run at 3am has never been watched. Touch the file
@@ -79,16 +87,23 @@ import engine
 import fees
 import guards
 import scanner
+import stats
 import txfees
 import audit
+import chains
+import wallets
 
 ROOT = pathlib.Path(__file__).resolve().parent
-STATE = ROOT / 'runtime.json'
-FEED = ROOT / 'events.jsonl'
-HALT = ROOT / 'HALT'
-REBALANCE = ROOT / 'REBALANCE'
-REOPT = ROOT / 'REOPT'          # run the board and band review on the next poll
-MIGRATE = ROOT / 'MIGRATE'      # "<dex> <pool>": move there on the next poll
+RUN = config.RUN_DIR            # run/<profile>: this profile's state, feed and triggers
+STATE = RUN / 'runtime.json'
+FEED = RUN / 'events.jsonl'
+HALT = RUN / 'HALT'             # stops this profile
+HALT_ALL = ROOT / 'HALT'        # stops every profile, and every signer (they check it themselves)
+REBALANCE = RUN / 'REBALANCE'
+REOPT = RUN / 'REOPT'           # run the board and band review on the next poll
+MIGRATE = RUN / 'MIGRATE'       # "<dex> <pool>": move there on the next poll
+CLOSE = RUN / 'CLOSE'           # a disabled profile: harvest and close its position, open nothing
+engine.use_network(config.CAPS['gecko_network'])
 # One signer per DEX. A DEX without an entry can be scanned and recommended
 # but never opened; `execute_dexes` must not name it.
 SIGNERS = {'orca': str(ROOT / 'signer2.mjs'),
@@ -96,6 +111,7 @@ SIGNERS = {'orca': str(ROOT / 'signer2.mjs'),
            'raydium-clmm': str(ROOT / 'signer_raydium.mjs'),
            'byreal': str(ROOT / 'signer_byreal.mjs'),
            'pancakeswap-v3-solana': str(ROOT / 'signer_pancake.mjs'),
+           'aerodrome-slipstream': str(ROOT / 'signer_aerodrome.mjs'),     # Base: positions, swaps, payouts
            'jupiter': str(ROOT / 'swap_jupiter.mjs'),       # swaps, not positions
            'orca-swap': str(ROOT / 'swap_orca.mjs'),        # the fallback swap, direct on an Orca whirlpool
            'payout': str(ROOT / 'payout.mjs'),              # transfers to the profit wallet only
@@ -200,9 +216,38 @@ def redact(text):
     return SECRET_IN_URL.sub(r'\1***', str(text))
 
 
+def halted():
+    """The text of the HALT that stops this profile (the global one first),
+    or None."""
+    for f in (HALT_ALL, HALT):
+        if f.exists():
+            return f.read_text().strip() or str(f)
+    return None
+
+
+def route(kind):
+    """The SIGNERS key that does `kind` ('swap' or 'payout') on this chain:
+    its own script on Solana (Jupiter, payout.mjs), the venue signer where the
+    chain row says 'venue' (Base)."""
+    via = config.CAPS[f'{kind}_via']
+    return config.DEX if via == 'venue' else via
+
+
+def housekeeper(kind):
+    """Whether this process runs the wallet-wide chore `kind` ('sweep',
+    'janitor', 'audit', 'scanner'): only the wallet's residual owner, and
+    only where the chain allows it."""
+    return bool(config.RESIDUAL_OWNER and config.CAPS.get(kind))
+
+
 def notify(event, **payload):
+    # Every row says whose it is: the bridge tails every profile's feed.
     row = {'t': stamp(), 'event': event, **payload}
+    for k, v in (('profile', config.PROFILE), ('wallet_id', config.WALLET_ID), ('chain', config.CHAIN),
+                 ('pair', config.PAIR_LABEL)):
+        row.setdefault(k, v)
     line = redact(json.dumps(row, default=str))
+    FEED.parent.mkdir(parents=True, exist_ok=True)
     with open(FEED, 'a') as fh:
         fh.write(line + '\n')
     print(redact(f'[{row["t"]}] {emoji_for(event)} {event}: {json.dumps(payload, default=str, sort_keys=True)}'),
@@ -210,18 +255,21 @@ def notify(event, **payload):
 
 
 def probe_rpc(url=None, fallback=None, timeout=10):
-    """Whether the configured RPC answers getSlot. At startup: a keyed
-    endpoint that does not answer (a bad or expired key) is replaced by the
-    public one, and the book says so, host only. Returns the URL in use."""
+    """Whether the configured RPC answers the chain's probe (getSlot on
+    Solana, eth_blockNumber on Base). At startup: a keyed endpoint that does
+    not answer (a bad or expired key) is replaced by the public one, and the
+    book says so, host only. Returns the URL in use."""
     import urllib.request
     url, fallback = url or config.RPC, fallback or config.PUBLIC_RPC
     if url == fallback:
         return url
+    method = config.CAPS['probe']
     try:
-        req = urllib.request.Request(url, data=json.dumps({'jsonrpc': '2.0', 'id': 1, 'method': 'getSlot'}).encode(),
+        req = urllib.request.Request(url, data=json.dumps({'jsonrpc': '2.0', 'id': 1, 'method': method}).encode(),
                                      headers={'Content-Type': 'application/json'})
         with urllib.request.urlopen(req, timeout=timeout) as r:
-            ok = isinstance(json.load(r).get('result'), int)
+            res = json.load(r).get('result')
+            ok = isinstance(res, int) or (isinstance(res, str) and res.startswith('0x'))
     except Exception as e:
         ok, why = False, f'{type(e).__name__}: {redact(e)}'
     else:
@@ -392,18 +440,201 @@ def chain(*args, dex=None, timeout=420, extra_env=None, record=True):
     (health.py): the venue's for open/close/harvest, 'swap' for the swap.
     A caller that retries passes record=False for each attempt and records
     the operation once with record_health (2026-10-01: three attempts of one
-    rate-limited swap counted as three failures and tripped the breaker)."""
+    rate-limited swap counted as three failures and tripped the breaker).
+    A write (--execute) of a profile with a wallet runs under the wallet's
+    lock and books what it moved of shared tokens to this profile's claims
+    (locked_chain)."""
     d = dex or config.DEX
-    out, err = _chain(*args, dex=d, timeout=timeout, extra_env=extra_env)
+    if '--execute' in args and config.WALLET_ID:
+        out, err = locked_chain(*args, dex=d, timeout=timeout, extra_env=extra_env)
+    else:
+        out, err = _chain(*args, dex=d, timeout=timeout, extra_env=extra_env)
+    if '--execute' in args:
+        note_mint_refusal(str(args[0]), err, out)
     if record:
         record_health(health_key(args, d), out, err)
     return out, err
+
+
+# A write's balances are read at `confirmed` commitment from a node at or past
+# the write's own slot (wallets.read_balances, wallets.write_slot): a node a
+# few slots behind is asked again every CLAIM_POLL_S, for up to CLAIM_SETTLE_S.
+CLAIM_SETTLE_S = 60
+CLAIM_POLL_S = 2
+# A signature no node knows this long after the send never landed: its
+# blockhash expired (~90 s). The pending write is then booked from the slot
+# before it (its balances unchanged but the fee).
+PENDING_EXPIRE_S = 300
+
+
+def me_row(mint_a, mint_b):
+    """This profile as wallets.py describes profiles, with its pool's live mints."""
+    return {'name': config.PROFILE, 'mints': [mint_a, mint_b], 'deposit_mint': config.DEPOSIT_MINT,
+            'residual_owner': config.RESIDUAL_OWNER, 'enabled': config.ENABLED}
+
+
+def claim_problem(kind, why, **detail):
+    """A claim left as it was, said in the feed and the events table."""
+    notify(kind, reason=why, **detail)
+    try:
+        db.event(kind, f'{why} {json.dumps(detail, default=str)}')
+    except Exception:
+        pass
+
+
+def claim_mints():
+    """(mints, why, shared): the shared mints whose movements go to this
+    profile's claims (wallets.claimed_mints), or None with `why` when they
+    cannot be known; `shared` whether another profile signs with this wallet
+    (then every write's slot is tracked). Alone on its wallet: no read."""
+    try:
+        profiles = wallets.wallet_profiles(config.WALLET_ID)
+        if not any(p['name'] != config.PROFILE for p in profiles):
+            return [], None, False
+        (ma, _), (mb, _) = pool_tokens()
+        return (wallets.claimed_mints(config.PROFILE, [ma, mb], wallets.with_self(profiles, me_row(ma, mb))),
+                None, True)
+    except Exception as e:
+        return None, f'mints unknown: {type(e).__name__}: {tidy(e)}', True
+
+
+def tries_in(wait_s):
+    """How many reads fit in `wait_s` at one every CLAIM_POLL_S. Pure."""
+    return 1 + max(int(wait_s // CLAIM_POLL_S), 0)
+
+
+def measure(mints, min_slot=0, wait_s=0.0):
+    """(balances of `mints`, slot) read at or past `min_slot`, asking again
+    for up to `wait_s`; None when no such read came."""
+    for k in range(tries_in(wait_s)):
+        if k:
+            time.sleep(CLAIM_POLL_S)
+        got = wallets.read_balances(config.CHAIN, config.RPC, config.WALLET_ADDRESS, mints,
+                                    config.CAPS['native_mint'])
+        if got is not None and got[1] >= min_slot:
+            return got
+    return None
+
+
+def signatures_of(out):
+    """Every transaction signature a signer's answer names."""
+    out = out or {}
+    sigs = out.get('signatures') or [out.get('signature')]
+    return [x for x in sigs if isinstance(x, str) and x]
+
+
+def settle_pending(wait_s=0.0):
+    """Book the wallet's pending write (wallet_settle), if one is there: its
+    balances after it, read at or past the slot its signatures confirmed at,
+    less its balances before, to the claims of the profile that sent it. No
+    other write of the wallet goes out while one is pending, so the
+    difference is that write's, after a crash too. True when nothing is left
+    pending; False when it cannot be booked yet (nothing is guessed)."""
+    settled, p = wallets.settle_state(config.WALLET_ID)
+    if not p:
+        return True
+    need = max(int(p['before_slot']), settled)
+    if p.get('signatures'):
+        at = None
+        for k in range(tries_in(wait_s)):
+            if k:
+                time.sleep(CLAIM_POLL_S)
+            at = wallets.write_slot(config.CHAIN, config.RPC, p['signatures'])
+            if at is not None:
+                break
+        if at is None and time.time() - float(p.get('sent_at') or 0) <= PENDING_EXPIRE_S:
+            return False
+        need = max(need, at or 0)
+    if not p['mints']:
+        wallets.book(config.WALLET_ID, p['profile'], {}, need)        # nothing claimed: the slot moves on
+        return True
+    got = measure(p['mints'], need, wait_s)
+    if got is None:
+        return False
+    after, slot = got
+    deltas = {m: after[m] - p['before'][m] for m in p['mints'] if abs(after[m] - p['before'][m]) > wallets.DUST}
+    res = wallets.book(config.WALLET_ID, p['profile'], deltas, slot)
+    for m, (new, over) in res.items():
+        if over > wallets.DUST:
+            # new - over is claim + delta (wallets.claim_after)
+            claim_problem('claim_overdraw', 'a write moved more of a shared token than this profile claimed',
+                          command=p['command'], mint=m, claim=round(new - over - deltas[m], 9),
+                          delta=round(deltas[m], 9), overdraw=round(over, 9))
+    return True
+
+
+UNMEASURABLE = {}                 # the last 'claims unmeasurable' reason said, so it is said once
+
+
+def unmeasurable(command, why):
+    """The refusal of a write whose claims cannot be measured: nothing is
+    sent, the next poll tries again. Said once per reason."""
+    if UNMEASURABLE.get('why') != why:
+        UNMEASURABLE['why'] = why
+        claim_problem('claim_unmeasured', f'{why}; {command} not sent', command=command)
+    return None, f'refused: claims unmeasurable ({why}); {command} not sent'
+
+
+def locked_chain(*args, dex, timeout, extra_env):
+    """_chain() under the wallet's advisory lock. On a wallet other profiles
+    share, the claimed mints are read before (at or past the wallet's
+    settled slot) and the write is recorded as pending before it is sent;
+    after it, settle_pending books it. A write is refused, not sent, while an
+    earlier write is unbooked, the mints are unknown or the before-read
+    fails. A lock that cannot be taken sends nothing either. Every refusal
+    starts 'refused:' (no breaker counts it)."""
+    command = str(args[0])
+    try:
+        with wallets.wallet_lock(config.WALLET_ID):
+            if not settle_pending(CLAIM_SETTLE_S):
+                return unmeasurable(command, 'an earlier write of the wallet is not booked yet')
+            mints, why, shared = claim_mints()
+            if mints is None:
+                return unmeasurable(command, why)
+            if shared:
+                # Even a write that books no claim (the holder's) moves the
+                # wallet's settled slot: the next before-read starts after it.
+                settled, _ = wallets.settle_state(config.WALLET_ID)
+                got = measure(mints, settled, CLAIM_SETTLE_S) if mints else ({}, settled)
+                if got is None:
+                    return unmeasurable(command, 'balance before the write unreadable')
+                pending = {'profile': config.PROFILE, 'command': command, 'mints': mints, 'before': got[0],
+                           'before_slot': got[1], 'signatures': []}
+                wallets.set_pending(config.WALLET_ID, pending)
+            UNMEASURABLE.pop('why', None)
+            out, err = _chain(*args, dex=dex, timeout=timeout, extra_env=extra_env)
+            if shared:
+                if signatures_of(out):
+                    wallets.set_pending(config.WALLET_ID, dict(pending, signatures=signatures_of(out),
+                                                               sent_at=time.time()))
+                if not settle_pending(CLAIM_SETTLE_S):
+                    # Never guessed: the write stays pending, every write of
+                    # the wallet waits until a measurement books it.
+                    claim_problem('claim_unsettled', 'the write is sent and not yet measured; the wallet '
+                                                     'sends nothing until it is booked',
+                                  command=command, signatures=signatures_of(out))
+            return out, err
+    except wallets.LockError as e:
+        why = f'refused: {e}; {args[0]} not sent'
+        notify('wallet_lock_timeout', reason=str(e), command=str(args[0]), waited_s=wallets.LOCK_WAIT_S,
+               action=f'{args[0]} not sent; retried at the next poll')
+        try:
+            db.event('wallet_lock_timeout', why)
+        except Exception:
+            pass
+        return None, why
 
 
 def _chain(*args, dex=None, timeout=420, extra_env=None):
     script = SIGNERS.get(dex or config.DEX)
     if not script or not pathlib.Path(script).exists():
         return None, f'no signer for {dex or config.DEX}'
+    # A HALT (global or this profile's) stops every write here too, not only
+    # in the loop and the signers: a write already on its way when the
+    # operator halts is not spawned.
+    stop = halted() if '--execute' in args else None
+    if stop:
+        return None, f'refused: halted ({stop})'
     # Arguments reach node's argv, never a shell, but an address with a
     # newline in it is still not an address. Refuse before spawning.
     try:
@@ -411,13 +642,24 @@ def _chain(*args, dex=None, timeout=420, extra_env=None):
         guards.inside(pathlib.Path(script), ROOT)
     except guards.Refused as e:
         return None, f'refused: {e}'
-    env = dict(os.environ,
+    # The whole service environment passes through (LPBOT_PROFIT_WALLET_PIN,
+    # LPBOT_EVM_PROFIT_WALLET_PIN: the signers check the pin themselves).
+    # The gas reserve is in the chain's native token: _SOL for the Solana
+    # scripts, _NATIVE for every signer that is not Solana's. LPBOT_RUN_DIR:
+    # a signer refuses writes on this profile's HALT as on the global one.
+    # The profile's own signer gets its opt-ins (config.SIGNER_ENV); no other
+    # script does.
+    own = config.SIGNER_ENV if (dex or config.DEX) == config.DEX else {}
+    env = dict(os.environ, **own,
                WALLET_SECRET_PATH=config.WALLET,
                SOLANA_RPC_URL=config.RPC,
+               LPBOT_RPC=config.RPC,
                LPBOT_POOL=config.POOL,
                LPBOT_MAX_USD=str(config.MAX_USD),
                LPBOT_SLIPPAGE_BPS=str(config.SLIPPAGE_BPS),
                LPBOT_GAS_RESERVE_SOL=str(config.GAS_RESERVE_SOL),
+               LPBOT_GAS_RESERVE_NATIVE=str(config.GAS_RESERVE_SOL),
+               LPBOT_RUN_DIR=str(RUN),
                LPBOT_PROFIT_WALLET=config.PROFIT_WALLET, **(extra_env or {}))
     try:
         r = subprocess.run(['node', script, *args], capture_output=True,
@@ -457,6 +699,7 @@ def read_status(mint=None):
     earned), `feesSuspect` says why, and nothing downstream (the harvest
     record, the split, the gas refill) sees the bad number."""
     out, err = chain('status', *([mint] if mint else []))
+    note_scale(out)
     if not (out and out.get('positionMint')):
         return out, err
     why = fee_problem(out)
@@ -487,8 +730,8 @@ def sanitised(status, why):
     out['feesAccruedA'] = prev.get('accrued_a') or 0.0
     out['feesAccruedB'] = prev.get('accrued_b') or 0.0
     out['feesAccrued_USD'] = prev.get('accrued_usd') or 0.0
-    q = out.get('quoteUsd') or 1.0
-    out['feesAccrued_quote'] = out['feesAccrued_USD'] / q
+    q = quote_price(out)
+    out['feesAccrued_quote'] = out['feesAccrued_USD'] / q if q else None      # unknown quote price: no figure
     out['feesSuspect'] = why
     out['feesRejected'] = {k: status.get(k) for k in ('feesAccruedA', 'feesAccruedB', 'feesAccrued_USD')}
     try:
@@ -523,43 +766,130 @@ def load():
 
 
 def save(s):
+    STATE.parent.mkdir(parents=True, exist_ok=True)
     tmp = STATE.with_suffix('.tmp')
     tmp.write_text(json.dumps(s, indent=1, default=str))
     tmp.replace(STATE)
 
 
 def halt(reason):
+    """Stop this profile (its own HALT; the others run on)."""
+    HALT.parent.mkdir(parents=True, exist_ok=True)
     HALT.write_text(f'{stamp()} {reason}')
     db.event('BREAKER', reason)
     notify('BREAKER', reason=reason, action='HALT written; will not restart')
 
 
 def wallet(pool):
-    """What the wallet holds of this pool's two tokens, and its dollar value.
+    """What this profile holds of this pool's two tokens, and its dollar
+    value: its sleeve of the wallet (sleeve_of).
 
     Both tokens, not just SOL. After a close the withdrawn quote token sits in
     the wallet; counting SOL alone would drop it from equity and report a loss
     on every rebalance that never happened.
     """
     out, _ = chain('balance', pool)
+    note_scale(out)
     if not out or 'balanceA' not in out:
         # One retry. The read that follows a close lands on an endpoint that
         # has just confirmed a transaction for us and is quick to rate-limit;
         # a second try ten seconds later has read cleanly every time so far.
         time.sleep(10)
         out, _ = chain('balance', pool)
-    return out or {}
+        note_scale(out)
+    return sleeve_of(out or {})
+
+
+_MINTS_SEEN = {}                  # profile -> the mints last written to config.mints
+
+
+def is_stable_mint(mint):
+    return wallets.norm(mint) in engine.STABLE_MINTS
+
+
+def sleeve_of(bal):
+    """`bal` as this profile sees it (wallets.sleeve): the wallet's figures
+    stay under rawBalanceA/rawBalanceB/rawWalletUsd. A quote price the signer
+    could not give is unknown, except for a stablecoin by mint, which is a
+    dollar. Without a wallet (a pre-020 profile), or when this profile is its
+    wallet's only enabled one, the read as it is. When the sleeve cannot be
+    worked out the answer is {}: an unreadable wallet, never the whole one."""
+    if 'balanceA' not in bal or (config.WALLET_ID is None and bal.get('quoteUsd') is not None):
+        return bal                                        # a pre-020 profile with a priced read: as it is
+    try:
+        (ma, _), (mb, _) = pool_tokens()
+    except Exception:
+        ma = mb = None
+    if bal.get('quoteUsd') is None and mb and is_stable_mint(mb):
+        bal = dict(bal, quoteUsd=1.0, quoteUsdSource='stable mint')
+    if not config.WALLET_ID:
+        return bal
+    try:
+        profiles = wallets.wallet_profiles(config.WALLET_ID)
+        if ma is None:
+            if any(p['name'] != config.PROFILE for p in profiles):
+                notify('sleeve_unreadable', reason='pool tokens unknown; the wallet is shared, so no figure')
+                return {}
+            return bal
+        if _MINTS_SEEN.get(config.PROFILE) != [ma, mb]:
+            wallets.register_mints(config.PROFILE, [ma, mb])
+            _MINTS_SEEN[config.PROFILE] = [ma, mb]
+        view = wallets.sleeve(bal, config.PROFILE, ma, mb, wallets.with_self(profiles, me_row(ma, mb)),
+                              wallets.claims(config.WALLET_ID), config.CAPS['native_mint'])
+        if view.get('nativeSide') is not None:
+            # This profile's pool holds the native token: every other profile
+            # of the wallet pays its opens' rent from it, so it keeps that back.
+            view['nativeReserve'] = config.GAS_RESERVE_SOL + open_headroom(config.DEX) + sum(
+                open_headroom(p.get('dex')) for p in profiles if p['name'] != config.PROFILE)
+        return view
+    except Exception as e:
+        notify('sleeve_unreadable', reason=f'{type(e).__name__}: {tidy(e)}')
+        return {}
+
+
+def ui_price(rec):
+    """B per A in UI units, for valuing the UI amounts a signer reports
+    (balances, caps, close estimates). The signer's `uiPrice`; its pool-native
+    `price` when it has none (a plain mint: the same number). Bands and the
+    open's lower/upper stay pool-native. Pure."""
+    v = rec.get('uiPrice')
+    return float(v if v is not None else rec['price'])
+
+
+# The rent an open takes and does not give back at once, by venue, in SOL: a
+# position's accounts and the tick or bin arrays its range is first to use.
+# Raydium layout: 0.0053 + two tick arrays of 0.0018. Meteora DLMM: a new bin
+# array is 0.0435 (the MU open, simulated 2026-10-01).
+OPEN_RENT_HEADROOM_SOL = 0.009       # every venue not listed below
+# Aerodrome (Base) keeps no rent: an NFT mint costs gas only, inside the gas
+# reserve; 0.009 of ETH there would leave ~$25 never deployed.
+OPEN_RENT_HEADROOM = {'meteora-dlmm': 0.05, 'aerodrome-slipstream': 0.0}
+
+
+def open_headroom(dex):
+    return OPEN_RENT_HEADROOM.get(dex, OPEN_RENT_HEADROOM_SOL)
+
+
+def native_reserve(bal):
+    """Native SOL never deployed: the gas reserve and this venue's open rent,
+    plus (sleeve_of puts it in `nativeReserve`) the open rent of every other
+    profile of the wallet, which pays its rent and fees from this SOL too."""
+    v = bal.get('nativeReserve')
+    return float(v) if v is not None else config.GAS_RESERVE_SOL + open_headroom(config.DEX)
 
 
 def deployable_usd(bal):
     """What the wallet can put into a position, in dollars: every unit of the
-    pool's two tokens, less the gas reserve and the open's rent on the native
-    side. The only money that stays out is the gas the bot needs."""
-    q = bal.get('quoteUsd') or 1.0
-    res = config.GAS_RESERVE_SOL + OPEN_RENT_HEADROOM_SOL
+    pool's two tokens, less the native reserve on the native side. The only
+    money that stays out is the gas the bot needs. None when the quote
+    token's price is unknown: never valued as a dollar."""
+    q = bal.get('quoteUsd')
+    if q is None:
+        return None
+    res = native_reserve(bal)
     a = max(float(bal.get('balanceA') or 0.0) - (res if bal.get('nativeSide') == 'A' else 0.0), 0.0)
     b = max(float(bal.get('balanceB') or 0.0) - (res if bal.get('nativeSide') == 'B' else 0.0), 0.0)
-    return (a * float(bal['price']) + b) * q
+    return (a * ui_price(bal) + b) * q
 
 
 def capital(bal=None):
@@ -567,9 +897,12 @@ def capital(bal=None):
     side is at most side_cap_fraction of it, and the signer refuses an open
     worth more than max_usd). With deploy_all and a wallet read, it is
     everything the wallet can deploy (deployable_usd); otherwise the
-    configured capital plus every fee reinvested under the split."""
+    configured capital plus every fee reinvested under the split. Callers
+    with a wallet read check its quote price first (quote_known)."""
     if config.DEPLOY_ALL and bal and 'balanceA' in bal and bal.get('price'):
         base = deployable_usd(bal)
+        if base is None:
+            raise ValueError('quote price unknown: no capital figure')
     else:
         base = config.CAPITAL_USD
         if config.PAYOUT_ENABLED:
@@ -588,9 +921,6 @@ def side_target_fraction():
     return 0.5 if config.DEPLOY_ALL else config.SIDE_CAP_FRACTION
 
 
-OPEN_RENT_HEADROOM_SOL = 0.009       # position accounts + two tick arrays, Raydium layout
-
-
 def deposit_caps(bal):
     """Per-token deposit caps for an open, from what the wallet actually holds.
 
@@ -598,15 +928,15 @@ def deposit_caps(bal):
     own units, and at the wallet's balance of it less the gas reserve when the
     token is native SOL. The SDK's quote picks the liquidity both caps allow, so
     a wallet that is short one side opens a smaller position rather than failing.
+    Caps are UI amounts, so token A's is divided by the UI price.
     """
-    price = bal['price']
-    quote_usd = bal.get('quoteUsd') or 1.0
+    price = ui_price(bal)
+    quote_usd = float(bal['quoteUsd'])               # known: reopen() checked (quote_known)
     capital_quote = capital(bal) / quote_usd
-    # The gas reserve, plus the rent the open itself takes: a position's
-    # accounts (0.0053 SOL on Raydium-layout venues) and any tick array its
-    # range is first to use (0.0018 each, two at most). Without it every open
-    # left gas below the reserve (0.0429 of 0.05 on 2026-09-26).
-    reserve = config.GAS_RESERVE_SOL + OPEN_RENT_HEADROOM_SOL
+    # The gas reserve, plus the rent the open itself takes (open_headroom)
+    # and the other profiles' (native_reserve). Without it every open left
+    # gas below the reserve (0.0429 of 0.05 on 2026-09-26).
+    reserve = native_reserve(bal)
     avail_a = bal['balanceA'] - (reserve if bal.get('nativeSide') == 'A' else 0)
     avail_b = bal['balanceB'] - (reserve if bal.get('nativeSide') == 'B' else 0)
     cap_a = min(max(avail_a, 0), capital_quote * config.SIDE_CAP_FRACTION / price)
@@ -628,16 +958,72 @@ def position_usd(status):
     rent = status.get('rentUsd') or 0.0
     if status.get('positionUsd') is not None:
         return status['positionUsd'] + rent
-    a, b = status.get('closeEstA'), status.get('closeEstB')
-    if a is None or b is None:
+    a, b, q = status.get('closeEstA'), status.get('closeEstB'), status.get('quoteUsd')
+    if a is None or b is None or q is None:
+        return None                                  # an unknown quote price is no dollar
+    return (a * ui_price(status) + b) * q + rent
+
+
+def quote_price(rec):
+    """USD per unit of the quote token for a balance or status read, or None
+    when unknown. A null from the signer is unknown, never a dollar, except
+    for a stablecoin quote by mint (the held pool's token B)."""
+    q = rec.get('quoteUsd')
+    if q is not None:
+        return float(q)
+    try:
+        mb = pool_tokens()[1][0]
+    except Exception:
         return None
-    return (a * status['price'] + b) * (status.get('quoteUsd') or 1) + rent
+    return 1.0 if is_stable_mint(mb) else None
+
+
+def quote_known(state, bal, what):
+    """Whether `bal` carries its quote token's price. When it does not, the
+    move (`what`) is skipped and why is said once, until a price is back."""
+    if bal.get('quoteUsd') is not None:
+        if state.pop('quote_unknown_told', None) is not None:
+            save(state)
+        return True
+    if not state.get('quote_unknown_told'):
+        state['quote_unknown_told'] = time.time(); save(state)
+        why = f'{config.PAIR_LABEL}: the quote token has no USD price; {what} skipped until it has one'
+        notify('quote_unknown', reason=why)
+        try:
+            db.event('quote_unknown', why)
+        except Exception:
+            pass
+    return False
 
 
 # --- the tape, the forecast, the dividend -------------------------------------
 
 _TAPE = {}                      # pool -> (fetched_at, candles)
 TAPE_REFRESH = 3600             # one GeckoTerminal call an hour, at most
+# GeckoTerminal prices a pool in UI units; the bands, the status price and
+# the stored tape are pool-native. pool -> pool-native / UI price, from the
+# last signer read that gave both (1 for a pool of plain mints). A Token-2022
+# stock's multiplier (MSFTx 1.0059) is more than half a +/-1% band's margin.
+UI_SCALE = {}
+
+
+def note_scale(rec):
+    """Remember the pool's native/UI price ratio from a signer read."""
+    rec = rec or {}
+    pool, px, ui = rec.get('whirlpool') or rec.get('pool'), rec.get('price'), rec.get('uiPrice')
+    try:
+        if pool and px and ui and float(px) > 0 and float(ui) > 0:
+            UI_SCALE[pool] = float(px) / float(ui)
+    except (TypeError, ValueError):
+        pass
+
+
+def native_bars(bars, scale):
+    """Bars with their price columns (open, high, low, close) times `scale`:
+    UI prices made pool-native. Pure; None stays None."""
+    if bars is None or scale == 1.0:
+        return bars
+    return tuple(c * scale if i in (1, 2, 3, 4) else c for i, c in enumerate(bars))
 
 
 def tape(pool):
@@ -650,7 +1036,8 @@ def tape(pool):
         except Exception:
             fresh = None
         if fresh:
-            c = fresh
+            s = UI_SCALE.get(pool, 1.0)
+            c = (fresh[0], fresh[1] * s, fresh[2]) if s != 1.0 else fresh
             _TAPE[pool] = (time.time(), c)
     return c
 
@@ -684,10 +1071,12 @@ _POOL_REC = {}
 
 def profit_wallet_pinned():
     """The payout destination must match the address pinned in the service
-    environment (LPBOT_PROFIT_WALLET_PIN), which a database write cannot
-    change. payout.mjs checks the same pin itself."""
-    pin = os.environ.get('LPBOT_PROFIT_WALLET_PIN', '')
-    return bool(pin) and pin == config.PROFIT_WALLET and guards.is_address(pin)
+    environment, which a database write cannot change: the chain row names
+    the variable (LPBOT_PROFIT_WALLET_PIN on Solana, LPBOT_EVM_PROFIT_WALLET_PIN
+    on Base). payout.mjs and the EVM signer check the same pin themselves."""
+    pin = os.environ.get(config.CAPS['pin_env'], '')
+    # an EVM address is one address in any letter case (EIP-55 checksums)
+    return bool(pin) and wallets.norm(pin) == wallets.norm(config.PROFIT_WALLET) and chains.is_address(config.CHAIN, pin)
 
 
 def pool_record():
@@ -705,20 +1094,26 @@ def pool_record():
 
 
 def pool_tokens():
-    """(mint, symbol) of token A and token B of the held pool."""
+    """(mint, symbol) of token A and token B of the held pool; an EVM token
+    address in lower case (wallets.norm), as every mint the loop compares."""
     rec = pool_record()
-    return ((rec['token_a']['address'], rec['token_a']['symbol']),
-            (rec['token_b']['address'], rec['token_b']['symbol']))
+    return ((wallets.norm(rec['token_a']['address']), rec['token_a']['symbol']),
+            (wallets.norm(rec['token_b']['address']), rec['token_b']['symbol']))
 
 
-def distribute_rewards(state, position):
+def distribute_rewards(state, position, signatures=()):
     """Reward tokens, after a harvest: every reward mint the pool names (and
     every one it has named before, so a program that just ended is still
-    swept), other than the pool's own two tokens. Under the 'payout' policy a
-    balance worth at least reward_min_usd is swapped through Jupiter to the
-    payout token and sent to the profit wallet; while gas is under the
-    reserve it is swapped to native SOL and kept as gas. Never blocks a move."""
-    if not config.PAYOUT_ENABLED or config.REWARD_POLICY != 'payout':
+    swept), other than the pool's own two tokens and every mint of every
+    profile of the wallet. Only what this profile's harvests are shown to
+    have brought is paid (txfees.inflow over the harvest's `signatures`,
+    carried in state['reward_due'] until paid): the wallet's balance of a
+    reward token may be another profile's. Under the 'payout' policy an amount
+    worth at least reward_min_usd is swapped through Jupiter (LPBOT_SLEEVE:
+    that amount at most) to the payout token and sent to the profit wallet;
+    while gas is under the reserve it is swapped to native SOL and kept as
+    gas. Never blocks a move."""
+    if not config.PAYOUT_ENABLED or config.REWARD_POLICY != 'payout' or not config.CAPS.get('rewards'):
         return None
     rec = pool_record()
     own = {rec['token_a']['address'], rec['token_b']['address']}
@@ -727,10 +1122,19 @@ def distribute_rewards(state, position):
         if guards.is_address(m) and m not in seen:
             seen.append(m)
     del seen[:-8]                                       # a bounded memory of programs
-    mints = [m for m in seen if m not in own and guards.is_address(m)]
+    theirs = wallet_mints()
+    mints = [m for m in seen if m not in own and m not in theirs and guards.is_address(m)]
     if not mints:
         return None
     bal = wallet(config.POOL)
+    arrived = txfees.inflow(config.RPC, signatures, bal.get('owner') or config.WALLET_ADDRESS, mints)
+    due = state.setdefault('reward_due', {})
+    if arrived is None:
+        notify('reward_unmeasured', reason='the harvest transactions are unreadable: rewards wait')
+        save(state)
+        return None
+    for m, v in arrived.items():
+        due[m] = float(due.get(m, 0.0)) + v
     gas_low = (bal.get('sol') or 0.0) < config.GAS_RESERVE_SOL
     target = fees.NATIVE_MINT if gas_low else config.PAYOUT_MINT
     if not target:
@@ -739,7 +1143,7 @@ def distribute_rewards(state, position):
     done = []
     for m in mints:
         out, err = chain('balance', m, dex='payout')
-        amt = float((out or {}).get('amount') or 0.0)
+        amt = min(float((out or {}).get('amount') or 0.0), float(due.get(m, 0.0)))
         usd = amt * prices.get(m, 0.0)
         if amt <= 0 or usd < config.REWARD_MIN_USD:
             continue
@@ -749,7 +1153,8 @@ def distribute_rewards(state, position):
             notify('reward_held', reason=f'${usd:.2f} of {m} exceeds reward_max_usd ${config.REWARD_MAX_USD:.2f}')
             continue
         before, _ = chain('balance', target, dex='payout')
-        sw, err = chain('swap', m, target, f'{amt:.9f}', '--execute', dex='jupiter')
+        sw, err = chain('swap', m, target, f'{amt:.9f}', '--execute', dex='jupiter',
+                        extra_env={'LPBOT_SLEEVE': json.dumps({m: amt})})
         after, _ = chain('balance', target, dex='payout')
         # Pay what actually arrived, not what the quote promised.
         measured = float((after or {}).get('amount') or 0.0) - float((before or {}).get('amount') or 0.0)
@@ -758,6 +1163,7 @@ def distribute_rewards(state, position):
         if err or not (sw or {}).get('signature') or got <= 0:
             notify('reward_swap_failed', reason=err or 'no signature', mint=m, amount=amt)
             continue
+        due[m] = max(float(due.get(m, 0.0)) - amt, 0.0)
         if gas_low:
             db.record_payout(config.PROFILE, position, target, 'SOL', got, usd, 'gas',
                              signature=sw['signature'], detail=f'reward {m} swapped for gas')
@@ -797,8 +1203,11 @@ def distribute(state, position, fee_a, fee_b):
     if 'balanceA' not in bal:
         notify('payout_skipped', reason='could not read the LP wallet; the fees stay in it')
         return None
-    q = bal.get('quoteUsd') or 1.0
-    px_a, px_b = bal['price'] * q, q
+    q = quote_price(bal)
+    if q is None:
+        notify('payout_skipped', reason='the quote token has no USD price; the fees stay in the wallet')
+        return None
+    px_a, px_b = ui_price(bal) * q, q
     native_fee = fee_a if mint_a == fees.NATIVE_MINT else fee_b if mint_b == fees.NATIVE_MINT else 0.0
     sol_before = (bal.get('sol') or 0.0) - (native_fee or 0.0)
     # The harvest has landed, so the wallet holds every fee it names. A fee
@@ -812,7 +1221,7 @@ def distribute(state, position, fee_a, fee_b):
                                         'the fee read is wrong, nothing split')
         return None
     parts = fees.split([(mint_a, sym_a, fee_a, px_a), (mint_b, sym_b, fee_b, px_b)],
-                       config.PAYOUT_MINT, sol_before, config.GAS_RESERVE_SOL)
+                       wallets.norm(config.PAYOUT_MINT), sol_before, config.GAS_RESERVE_SOL)
     owed = state.setdefault('payout_owed', {})
     held = {mint_a: bal['balanceA'], mint_b: bal['balanceB']}
     sent = []
@@ -837,7 +1246,7 @@ def distribute(state, position, fee_a, fee_b):
             notify('payout_refused', reason='profit_wallet in the database does not match the pinned address',
                    symbol=p['symbol'], owed=round(due, 6))
             continue
-        out, err = chain('send', p['mint'], f'{amt:.9f}', config.PROFIT_WALLET, '--execute', dex='payout')
+        out, err = chain('send', p['mint'], f'{amt:.9f}', config.PROFIT_WALLET, '--execute', dex=route('payout'))
         if out and out.get('signature') and not err:
             rest = due - amt
             if rest > 1e-9:
@@ -878,7 +1287,15 @@ def measured_fees(out, status, a, b, usd):
     """What the harvest really took out of the pool, from its transactions
     (txfees.py): (a, b, usd). The status figures stand when the transactions
     cannot be read; a disagreement is reported. The status read is an
-    estimate made before the harvest; the transaction is what happened."""
+    estimate made before the harvest; the transaction is what happened.
+    On a chain whose transactions txfees cannot read, the status figures
+    stand, guarded as always."""
+    if not config.CAPS.get('txfees'):
+        why = fee_problem(dict(status, feesAccruedA=a, feesAccruedB=b, feesAccrued_USD=usd))
+        if why:
+            s2 = sanitised(status, why)
+            return s2['feesAccruedA'], s2['feesAccruedB'], s2['feesAccrued_USD']
+        return a, b, usd
     try:
         (mint_a, _), (mint_b, _) = pool_tokens()
         sigs = (out or {}).get('signatures') or [(out or {}).get('signature')]
@@ -895,8 +1312,16 @@ def measured_fees(out, status, a, b, usd):
             return s2['feesAccruedA'], s2['feesAccruedB'], s2['feesAccrued_USD']
         notify('harvest_unmeasured', reason='harvest transactions unreadable; the status figures stand')
         return a, b, usd
-    ma, mb = m
-    musd = (ma * status['price'] + mb) * (status.get('quoteUsd') or 1.0)
+    # txfees measures raw / 10^decimals; the book, like every amount the
+    # signers report, is in UI units (a Token-2022 scaled mint's multiplier).
+    ma, mb = m[0] * float(status.get('multiplierA') or 1.0), m[1] * float(status.get('multiplierB') or 1.0)
+    q = quote_price(status)
+    if q is None:
+        # The amounts are the transaction's; their dollar value is not known.
+        notify('harvest_measured', reported_usd=usd, measured_a=ma, measured_b=mb,
+               reason='quote price unknown: the status dollar figure stands')
+        return ma, mb, usd
+    musd = (ma * ui_price(status) + mb) * q
     if abs(musd - (usd or 0.0)) > max(0.01, 0.05 * musd):
         notify('harvest_measured', reported_a=a, reported_b=b, reported_usd=usd,
                measured_a=ma, measured_b=mb, measured_usd=round(musd, 6))
@@ -919,10 +1344,12 @@ def dividend(state, status):
     a, b, usd = status.get('feesAccruedA', 0.0), status.get('feesAccruedB', 0.0), status.get('feesAccrued_USD', 0.0)
     out, err = chain('harvest', mint, '--execute')
     state['last_harvest'] = time.time(); save(state)
+    if held(err):
+        return False                # said once by chain(); the next interval tries again
     if out and out.get('signature') and not err:
         a, b, usd = measured_fees(out, status, a, b, usd)
         db.record_harvest(mint, a, b, usd, out['signature'])
-        db.snapshot(mint, status['price'], status.get('inRange'), status.get('liquidity'),
+        db.snapshot(mint, ui_price(status), status.get('inRange'), status.get('liquidity'),
                     0.0, 0.0, 0.0, wallet(status['whirlpool']).get('walletUsd'), position_usd(status))
         db.event('DIVIDEND', f'${usd:.4f} harvested to the wallet')
         band_profile(mint, 'harvest')
@@ -930,7 +1357,7 @@ def dividend(state, status):
                     signature=out['signature'])
         try:
             distribute(state, mint, a, b)
-            distribute_rewards(state, mint)
+            distribute_rewards(state, mint, signatures_of(out))
         except Exception as e:          # the split must never stop the loop
             notify('payout_failed', reason=f'{type(e).__name__}: {tidy(e)}')
         return True
@@ -985,8 +1412,9 @@ def tape5(pool, price, pair=None):
             b = None
         if b is not None and abs(b[4][-1] / price - 1) > 0.15:
             b = None                           # another orientation or stale rows: rebuild
+    scale = UI_SCALE.get(pool, 1.0)
     try:
-        fresh = calm.tape_5m(pool, live_price=price)
+        fresh = native_bars(calm.tape_5m(pool, live_price=price / scale), scale)
     except Exception:
         fresh = None
     merged = _merge([b, fresh])
@@ -998,7 +1426,8 @@ def tape5(pool, price, pair=None):
             # it joins (the oldest one held), not today's price: SOL moved
             # more than 15% in a month, and the check threw every older page
             # away, capping the tape at ten days.
-            older = calm.tape_5m(pool, live_price=float(merged[4][0]), before=float(merged[0][0]))
+            older = native_bars(calm.tape_5m(pool, live_price=float(merged[4][0]) / scale,
+                                             before=float(merged[0][0])), scale)
         except Exception:
             older = None
         if older is None:
@@ -1109,6 +1538,8 @@ def deploy_idle(state, status, wbal, rv, price):
     opened = db.position_opened(status['positionMint'])
     age = (datetime.now(timezone.utc) - opened).total_seconds() if opened else None
     idle = deployable_usd(wbal)
+    if idle is None:
+        return False                                     # quote price unknown: nothing is valued
     equity = float(wbal['walletUsd']) + (position_usd(status) or 0.0)
     # What a balanced open leaves out is its price tolerance, by design: in a
     # narrow band the deposit ratio moves ~80x faster than the price, so a
@@ -1169,7 +1600,7 @@ def plan_sweep(accounts, pool_mints, reward_mints, prices, facts):
             continue
         if a['decimals'] == 0 and a['amount'] == 1:
             continue                                   # a position NFT
-        human = a['amount'] / 10 ** a['decimals']
+        human = audit.human(a)                          # UI units: a scaled mint's multiplier applied
         usd = human * float(prices.get(m) or 0.0)
         if usd < SWEEP_MIN_USD or not (facts.get(m) or {}).get('verified'):
             continue
@@ -1178,10 +1609,26 @@ def plan_sweep(accounts, pool_mints, reward_mints, prices, facts):
     return plan
 
 
+def wallet_mints():
+    """Every mint of every profile of this wallet, disabled ones too (their pools'
+    tokens and deposit mints): what the sweep must not sell and the janitor
+    must not close. Empty without a wallet. Raises when the table cannot be
+    read: a chore that cannot tell whose a token is does not run."""
+    if not config.WALLET_ID:
+        return set()
+    out = set()
+    for p in wallets.wallet_profiles(config.WALLET_ID):
+        out |= {wallets.norm(m) for m in (p.get('mints') or []) + [p.get('deposit_mint')] if m}
+    return out
+
+
 def sweep_foreign(state, bal):
     """Convert foreign tokens in the LP wallet into the pool's quote token
-    (plan_sweep); deploy_idle then puts them in the band. Never blocks the
-    loop. Returns the swaps made."""
+    (plan_sweep); deploy_idle then puts them in the band. Wallet-wide: the
+    residual owner's chore only, and never a token any profile of the wallet
+    uses. Never blocks the loop. Returns the swaps made."""
+    if not housekeeper('sweep'):
+        return []
     if time.time() - state.get('last_sweep', 0) < SWEEP_EVERY_S:
         return []
     state['last_sweep'] = time.time(); save(state)
@@ -1190,18 +1637,20 @@ def sweep_foreign(state, bal):
         if not owner:
             return []
         (mint_a, _), (mint_b, _) = pool_tokens()
+        mine = {mint_a, mint_b} | wallet_mints()
         accounts = audit.token_accounts(config.RPC, owner)
         rewards = set(state.get('reward_mints_seen') or [])
-        others = [a['mint'] for a in accounts if a['amount'] > 0 and a['mint'] not in (mint_a, mint_b)]
+        others = [a['mint'] for a in accounts if a['amount'] > 0 and a['mint'] not in mine]
         if not others:
             return []
         prices = dexes.jupiter_prices(others)
         # Facts only for what is worth a sweep: dust is never swapped, so its
-        # token search is wasted Jupiter budget (2026-10-01).
+        # token search is wasted Jupiter budget (2026-10-01). Valued in UI
+        # units, so a scaled mint's multiplier counts (audit.human).
         worth = {a['mint'] for a in accounts if a['mint'] in prices
-                 and a['amount'] / 10 ** a['decimals'] * float(prices[a['mint']] or 0.0) >= SWEEP_MIN_USD}
+                 and audit.human(a) * float(prices[a['mint']] or 0.0) >= SWEEP_MIN_USD}
         facts = {m: dexes.jupiter_token(m) for m in others if m in worth}
-        plan = plan_sweep(accounts, {mint_a, mint_b}, rewards, prices, facts)
+        plan = plan_sweep(accounts, mine, rewards, prices, facts)
         target = mint_b if mint_b != fees.NATIVE_MINT else mint_a
         done = []
         for p in plan:
@@ -1251,7 +1700,7 @@ def failover_pick(held_dex, venues, allowed, *, execute_dexes, signers, min_hour
     return max(ok, key=lambda v: v.get('total_pct_day') or 0.0) if ok else None
 
 
-def venue_failover(state, status, price=None):
+def venue_failover(state, status, price=None, quote=None):
     """Fail over when the held venue's breaker is tripped (TRIP_FAILS
     failures of its own transactions in a row): move to the best venue with
     similar on-chain income. With a position, a rebalance to the target
@@ -1270,10 +1719,11 @@ def venue_failover(state, status, price=None):
             notify('failover_none', venue=config.DEX, reason='pool pinned: no failover', fails=rec.get('fails'))
         return False
     p = price if price is not None else (status or {}).get('price')
-    if not p:
-        return False
+    q = status.get('quoteUsd') if status else quote
+    if not p or q is None:
+        return False                    # income cannot be compared in dollars: no move on a guess
     try:
-        venues = venue_view(p, (status or {}).get('quoteUsd') or 1.0)
+        venues = venue_view(p, q)
     except Exception as e:
         venues = []
         notify('venue_sample_failed', reason=tidy(e))
@@ -1540,16 +1990,56 @@ def daily_report(state):
         return None
 
 
+def portfolio_report(state):
+    """Once per UTC day: every wallet's active pools, their subtotals and
+    the TOTAL (stats.portfolio) as one PORTFOLIO row. Sent by one process
+    only: the residual owner of the first wallet by id. Never blocks the
+    loop."""
+    try:
+        today = datetime.now(timezone.utc).date().isoformat()
+        if not (config.WALLET_ID and config.RESIDUAL_OWNER) or state.get('last_portfolio') == today:
+            return None
+        ids = sorted(w['id'] for w in db.wallets())
+        if not ids or ids[0] != config.WALLET_ID:
+            return None
+        state['last_portfolio'] = today; save(state)
+        p = stats.portfolio()
+        notify('PORTFOLIO', **p)
+        return p
+    except Exception as e:
+        notify('portfolio_failed', reason=f'{type(e).__name__}: {tidy(e)}')
+        return None
+
+
 AUDIT_EVERY_S = 3600
 
 
+def wallet_book():
+    """The wallet as audit.run reconciles it: every profile of the wallet
+    (a disabled one's position and tokens are still in the wallet), the mints they use,
+    each one's pool mints, and the claims. None without a wallet: the ledger
+    is one book."""
+    if not config.WALLET_ID:
+        return None
+    rows = [{'name': r['name'], 'mints': list(r['mints']) if r.get('mints') else None,
+             'deposit_mint': r.get('deposit_mint'), 'residual_owner': r.get('residual_owner'),
+             'enabled': r.get('enabled')} for r in db.profiles(config.WALLET_ID, enabled_only=False)]
+    return {'profiles': rows,
+            'mints': {wallets.norm(m) for r in rows for m in (r['mints'] or []) + [r['deposit_mint']] if m},
+            'mints_of': {r['name']: r['mints'] for r in rows if r['mints']},
+            'claims': wallets.claims(config.WALLET_ID)}
+
+
 def run_audits(state):
-    """The hourly audit (audit.py). Never blocks the loop."""
+    """The hourly audit (audit.py) of the whole wallet: the residual owner's
+    chore, where the chain has the audits. Never blocks the loop."""
+    if not housekeeper('audit'):
+        return None
     if time.time() - state.get('last_audit', 0) < AUDIT_EVERY_S:
         return None
     state['last_audit'] = time.time(); save(state)
     try:
-        return audit.run(sys.modules[__name__], db, config, txfees, notify)
+        return audit.run(sys.modules[__name__], db, config, txfees, notify, wallet=wallet_book())
     except Exception as e:
         notify('audit_failed', reason=f'{type(e).__name__}: {tidy(e)}')
         return None
@@ -1559,14 +2049,17 @@ def janitor(state):
     """Once a day: reclaim the rent of empty token accounts the bot does not
     use (janitor.mjs). A dry run first, which costs nothing; a close only when
     there is rent to reclaim. The rent returns to the LP wallet and the next
-    open deploys it. Never blocks the loop."""
+    open deploys it. Wallet-wide: the residual owner's chore, keeping every
+    mint of every profile of the wallet. Never blocks the loop."""
+    if not housekeeper('janitor'):
+        return None
     today = datetime.now(timezone.utc).date().isoformat()
     if state.get('last_janitor') == today:
         return None
     state['last_janitor'] = today; save(state)
     try:
         (mint_a, _), (mint_b, _) = pool_tokens()
-        keep = sorted(audit.keep_mints(sys.modules[__name__], mint_a, mint_b))
+        keep = sorted(audit.keep_mints(sys.modules[__name__], mint_a, mint_b, wallet_mints()))
         plan, err = chain('close-empty', *keep, dex='janitor')
         if err or not plan:
             notify('janitor_failed', reason=err or 'no answer')
@@ -1695,9 +2188,12 @@ def balance_wallet(state, bal, rec):
     state['open_unbalanced'] = False
     if not config.REBALANCE_SWAP or not rec:
         return bal
-    q = bal.get('quoteUsd') or 1.0
-    res = config.GAS_RESERVE_SOL + OPEN_RENT_HEADROOM_SOL
-    usd_a = max(bal['balanceA'] - (res if bal.get('nativeSide') == 'A' else 0), 0) * bal['price'] * q
+    q = bal.get('quoteUsd')
+    if q is None:
+        notify('swap_skipped', reason='the quote token has no USD price; no swap sized on a guess')
+        return bal
+    res = native_reserve(bal)
+    usd_a = max(bal['balanceA'] - (res if bal.get('nativeSide') == 'A' else 0), 0) * ui_price(bal) * q
     usd_b = max(bal['balanceB'] - (res if bal.get('nativeSide') == 'B' else 0), 0) * q
     C = capital(bal)
     # Swap when either side is short of what the open may deposit of it (its
@@ -1710,15 +2206,16 @@ def balance_wallet(state, bal, rec):
         return bal
     mint_a = (rec.get('token_a') or {}).get('address')
     mint_b = (rec.get('token_b') or {}).get('address')
-    if not (guards.is_address(mint_a) and guards.is_address(mint_b)):
+    if not (chains.is_address(config.CHAIN, mint_a) and chains.is_address(config.CHAIN, mint_b)):
         notify('swap_skipped', reason='pool record has no mints')
         return bal
     # The swap script keeps the gas reserve out of what it sells, but not the
     # open's rent headroom: the native side's target carries it, or an open
     # after a buy of SOL comes up short by the headroom and leaves the other
     # token idle.
-    head_usd = OPEN_RENT_HEADROOM_SOL * bal['price'] * q if bal.get('nativeSide') == 'A' else \
-        (OPEN_RENT_HEADROOM_SOL * q if bal.get('nativeSide') == 'B' else 0.0)
+    head = res - config.GAS_RESERVE_SOL
+    head_usd = head * ui_price(bal) * q if bal.get('nativeSide') == 'A' else \
+        (head * q if bal.get('nativeSide') == 'B' else 0.0)
     share = C * side_target_fraction()
     target_a = f"{share + (head_usd if bal.get('nativeSide') == 'A' else 0.0):.2f}"
     target_b = f"{share + (head_usd if bal.get('nativeSide') == 'B' else 0.0):.2f}"
@@ -1728,12 +2225,18 @@ def balance_wallet(state, bal, rec):
     try:
         ra, rb = rec.get('token_a') or {}, rec.get('token_b') or {}
         if ra.get('decimals') is not None and rb.get('decimals') is not None:
-            hints = {mint_a: {'usd': bal['price'] * q, 'decimals': int(ra['decimals']), 'symbol': ra.get('symbol')},
+            hints = {mint_a: {'usd': ui_price(bal) * q, 'decimals': int(ra['decimals']), 'symbol': ra.get('symbol')},
                      mint_b: {'usd': q, 'decimals': int(rb['decimals']), 'symbol': rb.get('symbol')}}
     except (KeyError, TypeError, ValueError):
         hints = {}
     env = {'LPBOT_TOKEN_HINTS': json.dumps(hints)} if hints else None
-    out, err = chain('rebalance', mint_a, mint_b, target_a, target_b, '--execute', dex='jupiter', extra_env=env,
+    if config.WALLET_ID:
+        # The wallet may hold other profiles' tokens: the swap plans from
+        # this profile's sleeve only (swap_jupiter.mjs, swap_orca.mjs, the
+        # venue signer).
+        env = dict(env or {}, LPBOT_SLEEVE=json.dumps(wallets.sleeve_caps(bal, mint_a, mint_b)))
+    swap_dex = route('swap')
+    out, err = chain('rebalance', mint_a, mint_b, target_a, target_b, '--execute', dex=swap_dex, extra_env=env,
                      record=False)
     limited = re.search(r'Jupiter (rate limited|429)', str(err))        # an RPC limit rotates endpoints instead
     for pause in (SWAP_RATE_LIMIT_PAUSES if limited else SWAP_RETRY_PAUSES):
@@ -1744,12 +2247,16 @@ def balance_wallet(state, bal, rec):
                 and re.search(r'rate limit|429|timeout|timed out|ECONNRESET|blockhash', str(err), re.I)):
             break
         time.sleep(pause)
-        out, err = chain('rebalance', mint_a, mint_b, target_a, target_b, '--execute', dex='jupiter', extra_env=env,
+        out, err = chain('rebalance', mint_a, mint_b, target_a, target_b, '--execute', dex=swap_dex, extra_env=env,
                          record=False)
-    # 'jupiter' is Jupiter's own health; 'swap' is whether the bot could swap
-    # at all, by Jupiter or the fallback: deploy_idle waits on 'swap' only.
-    record_health('jupiter', out, err)                # one swap, one outcome, whatever the attempts
-    if (SWAP_FALLBACK and SWAP_FALLBACK in SIGNERS and counts_as_failure(err or 'no result')
+    if held(err):
+        return None                 # the open would be refused too: hold, no failure counted
+    # The swapper's own health ('jupiter' on Solana, the venue signer on Base);
+    # 'swap' is whether the bot could swap at all, by it or the fallback:
+    # deploy_idle waits on 'swap' only.
+    record_health(swap_dex, out, err)                 # one swap, one outcome, whatever the attempts
+    if (SWAP_FALLBACK and SWAP_FALLBACK in SIGNERS and swap_dex == 'jupiter'
+            and counts_as_failure(err or 'no result')
             and (err or not out) and not (out or {}).get('signature') and not (out or {}).get('partial')):
         notify('swap_fallback', reason=f'Jupiter failed without sending ({err or "no result"}); swapping on Orca')
         out, err = chain('rebalance', mint_a, mint_b, target_a, target_b, '--execute', dex=SWAP_FALLBACK,
@@ -1933,7 +2440,9 @@ def venue_candidates():
 def sample_fee_growth(state, status=None):
     """Every VENUE_SAMPLE_S: one RPC call reads the fee counters of the held
     pool and every same-pair candidate, stores one sample each, and refreshes
-    the ranking the book shows."""
+    the ranking the book shows. Only where the chain has the counters."""
+    if not config.CAPS.get('venues'):
+        return
     if time.time() - state.get('last_fee_sample', 0) < config.VENUE_SAMPLE_S:
         return
     state['last_fee_sample'] = time.time(); save(state)
@@ -1943,8 +2452,8 @@ def sample_fee_growth(state, status=None):
         for d, a, _ in cands:
             if a in states:
                 db.record_fee_state(d, a, states[a])
-        if status:
-            venue_view(status['price'], status.get('quoteUsd') or 1.0)
+        if status and status.get('quoteUsd') is not None:
+            venue_view(status['price'], status['quoteUsd'])
     except Exception as e:
         notify('venue_sample_failed', reason=tidy(e))
 
@@ -2004,13 +2513,13 @@ def calm_board_check(state, status):
     band, a dollar at the active price earns in proportion to it. Moves to the
     densest eligible pool, still tight, when it beats the held one by
     migrate_min_gain. Returns True when a move started."""
-    if config.POOL_PINNED:
+    if config.POOL_PINNED or status.get('quoteUsd') is None:
         return False
     # On-chain evidence first: the board's density put PancakeSwap 18% above
     # Raydium and live it earned half (2026-09-26). A move needs at least
     # VENUE_MIN_HOURS of counter samples on both pools.
     try:
-        venues = venue_view(status['price'], status.get('quoteUsd') or 1.0)
+        venues = venue_view(status['price'], status['quoteUsd'])
     except Exception as e:
         venues = []
         notify('venue_sample_failed', reason=tidy(e))
@@ -2094,6 +2603,96 @@ def repoint(target):
         'config did not reload to the target pool'
 
 
+REFUSED_MINT = re.compile(r'^refused: (mint paused|transfer hook)')
+MINT_HOLD = {'why': None}       # the mint refusal in force, said once per change
+
+
+def mint_refusal(err):
+    """Whether `err` is a signer's refusal to write on a pool whose mint is
+    paused or carries a transfer hook. Not the venue's fault: no breaker
+    counts it (counts_as_failure), no failure is counted, and the profile
+    holds where it is (no failover: another venue has the same mint)."""
+    return bool(err) and bool(REFUSED_MINT.match(str(err)))
+
+
+# Refusals that say nothing about the venue and need only time: the wallet's
+# lock was busy or unreachable, the claims could not be measured, a HALT.
+WAIT_REFUSAL = re.compile(r'^refused: (wallet \S+ lock|claims unmeasurable|halted)')
+
+
+def held(err):
+    """Whether a write was refused for a reason that holds the profile where
+    it is (mint_refusal, or WAIT_REFUSAL): nothing was sent, no failure is
+    counted, no HALT is written, the next poll tries again."""
+    return mint_refusal(err) or (bool(err) and bool(WAIT_REFUSAL.match(str(err))))
+
+
+def note_mint_refusal(command, err, out):
+    """The mint hold as chain() sees each write: 'mint_paused' once when a
+    refusal starts or changes, 'mint_resumed' once when a write goes through
+    again."""
+    if mint_refusal(err):
+        if MINT_HOLD['why'] != err:
+            MINT_HOLD['why'] = err
+            notify('mint_paused', reason=err, command=command,
+                   action='holding: no open, no close, no failover until the mint is writable again')
+            try:
+                db.event('mint_paused', f'{command}: {err}')
+            except Exception:
+                pass
+    elif MINT_HOLD['why'] and (out or {}).get('signature') and not err:
+        MINT_HOLD['why'] = None
+        notify('mint_resumed', command=command)
+
+
+def gas_for_open(state, bal):
+    """Whether native gas covers this open's rent and the reserve after it.
+    A profile whose pool holds no native token pays its open's rent (a new
+    DLMM bin array: 0.0435 SOL) from SOL another profile owns; short of the
+    reserve it holds, says so once, and counts no failure."""
+    if bal.get('nativeSide') is not None:
+        return True                                      # deposit_caps keeps the reserve out of the deposit
+    have, need = float(bal.get('sol') or 0.0), native_reserve(bal)
+    if have >= need:
+        state.pop('gas_short_told', None)
+        return True
+    if not state.get('gas_short_told'):
+        state['gas_short_told'] = time.time(); save(state)
+        why = (f'{have:.4f} {config.CAPS["native_symbol"]} in the wallet, an open on {config.DEX} needs '
+               f'{need:.4f} (reserve + rent): holding until gas is topped up')
+        notify('gas_short', reason=why)
+        db.event('gas_short', why)
+    return False
+
+
+def record_baseline(bal):
+    """The capital a profile started with, once: its sleeve when its first
+    open went in (capital_flows kind 'baseline', one per wallet and profile;
+    db.since_start measures profit and the hold benchmarks against it). Token
+    A in amounts[<mint A>] and, when it is native SOL, in `sol`; the stablecoin
+    side in `usdc`; the price in UI units, B per A, as the snapshots'. A profile
+    without a wallet (pre-020) has its baseline already. Never blocks the
+    open that just landed."""
+    if not config.WALLET_ID:
+        return False
+    try:
+        (ma, _), (mb, _) = pool_tokens()
+        a, b, q = float(bal.get('balanceA') or 0.0), float(bal.get('balanceB') or 0.0), float(bal['quoteUsd'])
+        px = ui_price(bal)
+        usdc = a if is_stable_mint(ma) and not is_stable_mint(mb) else b
+        with db.cursor(commit=True) as cur:
+            cur.execute("insert into capital_flows (ts, kind, sol, usdc, usd, price, signature, detail, amounts, "
+                        "wallet_id, profile) values (%s, 'baseline', %s, %s, %s, %s, null, %s, %s, %s, %s) "
+                        "on conflict do nothing",
+                        (db.now(), a if ma == config.CAPS['native_mint'] else 0.0, usdc, (a * px + b) * q, px,
+                         'the sleeve at the first open', json.dumps({ma: a, mb: b}), config.WALLET_ID,
+                         config.PROFILE))
+            return cur.rowcount == 1
+    except Exception as e:
+        notify('baseline_failed', reason=f'{type(e).__name__}: {tidy(e)}')
+        return False
+
+
 def reopen(state, reason, band=None, recovering=False):
     """Open a fresh position at the best band, or at `band` when calm mode
     asks for the tight one, sized to what the wallet holds (after a swap to
@@ -2116,6 +2715,8 @@ def reopen(state, reason, band=None, recovering=False):
     if 'balanceA' not in bal:
         notify('idle', reason='could not read the wallet; opening nothing')
         return False
+    if not quote_known(state, bal, 'the open'):
+        return False
     if recovering and band and config.REGIME_ENABLED:
         k_now = regime_choice_now(pool, bal['price'])
         if k_now is None:
@@ -2135,15 +2736,18 @@ def reopen(state, reason, band=None, recovering=False):
             if not v['calm'] or v['p_touch_fresh'] >= config.CALM_THRESHOLD:
                 band = None
     k = band or best['band']
+    if not gas_for_open(state, bal):
+        return False                                     # before the swap: no swap for an open that cannot run
+    funded = bal                                         # the sleeve as funded: a first open's baseline
     bal = balance_wallet(state, bal, best.get('record'))
-    if bal is None:
+    if bal is None or not quote_known(state, bal, 'the open'):
         return False
     # A tight band is centred on the LIVE price: the ladder's price can be
     # minutes old, and on a +/-1% band that is a large part of the width.
     price = bal['price'] if band else best['price']
     lower, upper = price / k, price * k
     cap_a, cap_b = deposit_caps(bal)
-    if cap_a * price + cap_b < capital(bal) * 0.1 / (bal.get('quoteUsd') or 1):
+    if cap_a * ui_price(bal) + cap_b < capital(bal) * 0.1 / bal['quoteUsd']:
         notify('idle', reason=f'wallet holds too little {bal["tokenA"]} and '
                               f'{bal["tokenB"]} to open; nothing to do',
                balanceA=bal['balanceA'], balanceB=bal['balanceB'])
@@ -2156,7 +2760,7 @@ def reopen(state, reason, band=None, recovering=False):
         guards.open_request(pool=pool, dex=config.DEX, price=bal['price'], model_price=price,
                             lower=lower, upper=upper, cap_a=cap_a, cap_b=cap_b,
                             capital_usd=capital(bal), max_usd=config.MAX_USD,
-                            quote_usd=bal.get('quoteUsd') or 1.0,
+                            quote_usd=bal['quoteUsd'], chain=config.CHAIN, ui_price=ui_price(bal),
                             execute_dexes=config.EXECUTE_DEXES, signers=SIGNERS)
     except guards.Refused as e:
         state['failures'] += 1; save(state)
@@ -2167,6 +2771,8 @@ def reopen(state, reason, band=None, recovering=False):
         return False
     out, err = chain('open', pool, f'{lower:.6f}', f'{upper:.6f}',
                      f'{cap_a:.9f}', f'{cap_b:.9f}', '--execute')
+    if held(err):
+        return False                                     # held, said once by chain(): no failure, no retry storm
     if err:
         # The open may still have landed. Ask the chain before believing this.
         time.sleep(15)
@@ -2198,10 +2804,11 @@ def reopen(state, reason, band=None, recovering=False):
     if deposit_usd is None:
         deposit_usd = (out or {}).get('depositUsd')
     if deposit_usd is None:
-        deposit_usd = min(capital(bal), cap_a * price + cap_b)
+        deposit_usd = min(capital(bal), (cap_a * ui_price(bal) + cap_b) * bal['quoteUsd'])
     db.open_position(mint, pool, config.PAIR_LABEL, lower, upper,
                      (k - 1) * 100, (out or {}).get('signature'),
                      deposit_usd, reason, config_name=config.PROFILE, dex=config.DEX)
+    record_baseline(funded)
     state.pop('pending_reopen', None)
     save(state)
     notify_book('OPEN', pair=config.PAIR_LABEL, pool=pool, dex=config.DEX, lp_now_usd=deposit_usd,
@@ -2218,7 +2825,7 @@ def reopen(state, reason, band=None, recovering=False):
     return True
 
 
-def rebalance(state, status, reason, target=None, band=None, calm_move=False, exit_move=False):
+def rebalance(state, status, reason, target=None, band=None, calm_move=False, exit_move=False, close_only=False):
     """Harvest, close, and reopen: on the same pool, or on `target` (a board
     row) after repointing the profile. The close runs on the DEX the position
     is on, whatever the profile says by then.
@@ -2251,6 +2858,8 @@ def rebalance(state, status, reason, target=None, band=None, calm_move=False, ex
     accrued_b = status.get('feesAccruedB', 0.0)
     accrued_usd = status.get('feesAccrued_USD', 0.0)
     out, err = chain('harvest', mint, '--execute')
+    if held(err):
+        return                      # a paused mint refuses the close too: hold the position as it is
     state['last_harvest'] = now
     harvested = False
     if out and out.get('signature') and not err:
@@ -2261,7 +2870,7 @@ def rebalance(state, status, reason, target=None, band=None, calm_move=False, ex
         # The fees just moved from the position to the wallet. Record the
         # position's counter at zero now, or the book double-counts them as
         # both realised and unrealised until the next poll.
-        db.snapshot(mint, status['price'], status.get('inRange'),
+        db.snapshot(mint, ui_price(status), status.get('inRange'),
                     status.get('liquidity'), 0.0, 0.0, 0.0,
                     wallet(status['whirlpool']).get('walletUsd'),
                     position_usd(status))
@@ -2269,7 +2878,7 @@ def rebalance(state, status, reason, target=None, band=None, calm_move=False, ex
                signature=out['signature'])
         try:
             distribute(state, mint, accrued_a, accrued_b)
-            distribute_rewards(state, mint)
+            distribute_rewards(state, mint, signatures_of(out))
         except Exception as e:          # the split must never stop a move
             notify('payout_failed', reason=f'{type(e).__name__}: {tidy(e)}')
     else:
@@ -2288,6 +2897,9 @@ def rebalance(state, status, reason, target=None, band=None, calm_move=False, ex
 
     venue = health_key(('close',), config.DEX)
     out, err = chain('close', mint, '--execute', record=False)
+    if held(err):
+        state.pop('pending_reopen', None); save(state)
+        return                      # held: said once by chain(), no failure counted
     if err and re.search(r'rate limit|429|timeout|timed out|ECONNRESET|blockhash', str(err), re.I):
         # A transport failure: if the position is provably still there, the
         # close did not land and one more try is safe. On 2026-09-26 a
@@ -2354,30 +2966,107 @@ def rebalance(state, status, reason, target=None, band=None, calm_move=False, ex
     save(state)
     notify_book('CLOSE', positionMint=mint, lp_now_usd=0.0, moves_24h_now=config.CALM_MAX_MOVES - calm_budget_left(state),
                 signature=(out or {}).get('signature'), reason=reason)
+    if close_only:
+        return                      # a disabled profile's last move: nothing reopens
     if target:
         repoint(target)
         notify('REPOINTED', dex=config.DEX, pool=config.POOL, pair=config.PAIR_LABEL)
     reopen(state, reason, band=band)
 
 
+def profile_enabled():
+    """Whether this profile is enabled now (config.enabled, read every poll:
+    an operator disables a running profile with an UPDATE). A pre-020
+    profile (no wallet) is always. A read that fails changes nothing."""
+    if not config.WALLET_ID:
+        return True
+    try:
+        with db.cursor() as cur:
+            cur.execute('select enabled from config where name = %s', (config.PROFILE,))
+            r = cur.fetchone()
+        return bool(r and r['enabled'])
+    except Exception:
+        return True
+
+
+def disabled_hold(state, status):
+    """A disabled profile with a position: it holds it (no swap, no open, no
+    move), its claim and mints still its own, and closes it only when the
+    operator asks (touch run/<profile>/CLOSE)."""
+    if CLOSE.exists():
+        CLOSE.unlink()                    # consumed before it runs, like the other triggers
+        db.event('CLOSE_REQUESTED', 'operator touched CLOSE on a disabled profile')
+        rebalance(state, status, 'operator closed a disabled profile', close_only=True)
+        return
+    if not state.get('disabled_told'):
+        state['disabled_told'] = time.time(); save(state)
+        notify('disabled', reason='profile disabled: holding its position; touch CLOSE to close it',
+               positionMint=status['positionMint'])
+
+
+DORMANT_POLL_S = 300              # a dormant profile reads its wallet at most this often
+
+
+def dormant(state, bal):
+    """Whether this profile, which holds no position, stays dormant: its
+    sleeve could not deploy min_deploy_usd. A dormant profile attempts no
+    open and fetches no tape; the feed hears 'dormant' once on entry and
+    'deposit_seen' once on exit, never a line per poll. A wallet that cannot
+    be read, or a quote with no price, changes nothing: a dormant profile
+    stays dormant, an active one goes on as before. A reopen intent left by
+    a close is never dormant: its funds are in the wallet."""
+    was = bool(state.get('dormant'))
+    if state.get('pending_reopen'):
+        return False
+    if 'balanceA' not in bal:
+        return was
+    usd = deployable_usd(bal)
+    if usd is None:
+        return was
+    if usd < config.MIN_DEPLOY_USD:
+        if not was:
+            state['dormant'] = True; save(state)
+            notify('dormant', deployable_usd=round(usd, 4), min_deploy_usd=config.MIN_DEPLOY_USD,
+                   poll_seconds=max(DORMANT_POLL_S, config.POLL_SECONDS),
+                   reason='no position and too little to deploy: no open until a deposit')
+            db.event('dormant', f'${usd:.2f} deployable, under ${config.MIN_DEPLOY_USD:.2f}')
+        return True
+    if was:
+        state['dormant'] = False; save(state)
+        notify('deposit_seen', usd=round(usd, 2), deployable_usd=round(usd, 4),
+               reason='waking: swap to 50/50, then open')
+        db.event('deposit_seen', f'${usd:.2f} deployable: leaving dormant')
+    return False
+
+
 def main():
-    if HALT.exists():
-        print(f'HALT present: {HALT.read_text().strip()}')
+    if halted():
+        print(f'HALT present: {halted()}')
         return 2
     config.require_wallet()
     probe_rpc()
     state = load()
     notify_book('startup', mode='ARMED — signs its own rebalances',
                 **config.summary())
-    scanner.Scanner(notify).start()
+    # The board is wallet-wide work for the residual owner, and only for a
+    # profile that may move pools.
+    if housekeeper('scanner') and not config.POOL_PINNED:
+        scanner.Scanner(notify, active=lambda: not state.get('dormant')).start()
 
     while True:
-        if HALT.exists():
-            notify('halted', reason=HALT.read_text().strip())
+        why = halted()
+        if why:
+            notify('halted', reason=why)
             return 2
 
         status, err = read_status()
 
+        if status is None and state.get('dormant'):
+            # A dormant profile holds nothing and attempts nothing: a flaky
+            # read is no news and no reason to halt. It waits for the next one.
+            print(f'status unreadable while dormant: {err}', flush=True)
+            time.sleep(max(DORMANT_POLL_S, config.POLL_SECONDS))
+            continue
         if status is None:
             state['read_failures'] += 1; save(state)
             notify('status_unreadable', reason=err,
@@ -2388,11 +3077,24 @@ def main():
             time.sleep(config.POLL_SECONDS)
             continue
         state['read_failures'] = 0; save(state)
+        if not profile_enabled():
+            if not status.get('positionMint'):
+                notify('disabled', reason='profile disabled and holds no position: the process stops')
+                return 0
+            disabled_hold(state, status)
+            time.sleep(config.POLL_SECONDS)
+            continue
+        state.pop('disabled_told', None)
+        portfolio_report(state)
 
         if not status.get('positionMint'):
+            b0 = wallet(config.POOL)
+            if dormant(state, b0):
+                time.sleep(max(DORMANT_POLL_S, config.POLL_SECONDS))
+                continue
             notify('no_position', detail='chain reports no open position')
             try:
-                fo = venue_failover(state, None, price=(wallet(config.POOL) or {}).get('price'))
+                fo = venue_failover(state, None, price=b0.get('price'), quote=b0.get('quoteUsd'))
             except Exception as e:
                 fo = False
                 notify('failover_failed', reason=f'{type(e).__name__}: {tidy(e)}')
@@ -2417,7 +3119,8 @@ def main():
             k0 = None
             if config.REGIME_ENABLED:
                 try:
-                    b0 = wallet(config.POOL)
+                    if b0.get('pool') != config.POOL:
+                        b0 = wallet(config.POOL)                 # repointed above: the new pool's read
                     k0 = regime_choice_now(config.POOL, b0['price']) if 'price' in b0 else None
                 except Exception:
                     k0 = None
@@ -2448,7 +3151,9 @@ def main():
             # five-minute rule in calm.py is in charge of it.
             fc = dict(fc, act=False, suspended=('regime mode: the five-minute width rule is in charge' if rv
                                                   else 'tight band: the five-minute calm rule is in charge'))
-        db.snapshot(status['positionMint'], price, status.get('inRange'),
+        # The book's price is in UI units (Token-2022 scaled mints), as the
+        # baseline's and the flows': a plain pool's uiPrice is its price.
+        db.snapshot(status['positionMint'], ui_price(status), status.get('inRange'),
                         status.get('liquidity'),
                         status.get('feesAccruedA', 0.0),
                         status.get('feesAccruedB', 0.0),

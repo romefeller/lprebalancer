@@ -25,9 +25,12 @@ REBALANCE
 REOPT
 MIGRATE
 RESCAN
+# per-profile runtime directories (state, feed, triggers): run/<profile>/
+run/
 
 # --- local junk ---------------------------------------------------------------
 __pycache__/
+.hypothesis/
 *.pyc
 node_modules/
 *.log

@@ -22,11 +22,20 @@ Checks (2026-09-28, the owner: "put audits on everything"):
   owed          payouts owed for more than three days
   empty         empty token accounts whose rent the janitor can reclaim
   fee_reads     status reads the plausibility guard rejected in the last day
+
+One wallet, many profiles (MULTI_DESIGN.md): the audits run in the wallet's
+residual owner only, and `run(..., wallet=book)` reconciles the WHOLE wallet
+against the sum of its profiles: every profile's tokens are equity, every
+profile's open position is counted, every profile's rows are checked.
+Without a book (a pre-020 profile) the ledger is one book, as before.
 """
 import json
 import time
 import urllib.request
 import uuid
+
+import engine
+import wallets
 
 NATIVE = 'So11111111111111111111111111111111111111112'
 USDC = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'
@@ -91,13 +100,15 @@ def check_equity(chain_total_usd, snapshot_equity_usd, uncounted_usd):
     return ('warn', d) if abs(diff) > EQUITY_TOLERANCE_USD else ('ok', d)
 
 
-def classify_tx(tx, owner, watch=()):
+def classify_tx(tx, owner, watch=(), capital=()):
     """What one wallet transaction was: ('failed'|'poison'|'dust'|'bot'|
     'deposit'|'withdrawal'|'other', detail). `tx` is jsonParsed; the runner
     counts known signatures before it fetches, so none reaches here.
     `watch` are addresses an attacker may imitate (the owner, the profit
     wallet): an unsigned transaction paid by a lookalike is 'poison'. Neither
-    poison nor dust is capital."""
+    poison nor dust is capital. `capital` are the mints, beyond SOL and USDC,
+    that are money in this wallet (the tokens of its profiles' pools): their
+    movements are flows, in `amounts` (human units), not other tokens."""
     m = tx['meta']
     keys = [k['pubkey'] if isinstance(k, dict) else k for k in tx['transaction']['message']['accountKeys']]
     if m.get('err') is not None:
@@ -115,29 +126,48 @@ def classify_tx(tx, owner, watch=()):
         return post - pre
     mints = {b.get('mint') for b in (m.get('preTokenBalances') or []) + (m.get('postTokenBalances') or [])
              if b.get('owner') == owner}
+    def ui(mint):
+        side = lambda key: sum(ui_amount(b['uiTokenAmount']) for b in m.get(key) or []
+                               if b.get('owner') == owner and b.get('mint') == mint)
+        return side('postTokenBalances') - side('preTokenBalances')
     moves = {mt: tok(mt) for mt in mints if tok(mt) != 0}
     wsol = moves.pop(NATIVE, 0)
     sol = lam / 1e9 + wsol / 1e9
     usdc = moves.pop(USDC, 0) / 1e6
+    extra = {mt: ui(mt) for mt in sorted(moves) if mt in set(capital)}
+    for mt in extra:
+        moves.pop(mt)
     progs = sorted({BOT_PROGRAMS[k] for k in keys if k in BOT_PROGRAMS})
     d = {'sol': round(sol, 9), 'usdc': round(usdc, 6), 'programs': progs, 'other_tokens': moves, 'signer': signer}
+    if extra:
+        d['amounts'] = extra
     if not signer and lookalike(keys[0] if keys else None, [owner, *watch]):
         d['lookalike_of'] = next(k for k in [owner, *watch] if lookalike(keys[0], [k]))
         d['sender'] = keys[0]
         return 'poison', d
     # wrapped SOL is SOL: 0.5 wSOL sent in is a deposit, not dust
-    if not signer and abs(lam + wsol) <= DUST_LAMPORTS and not moves and 0 <= usdc <= DUST_USDC:
+    if not signer and abs(lam + wsol) <= DUST_LAMPORTS and not moves and not extra and 0 <= usdc <= DUST_USDC:
         return 'dust', d
     if signer and progs:
         return 'bot', d
     # A flow moves money one way only: in (a deposit) or out (a withdrawal).
     # SOL and USDC in opposite directions is a swap-like movement, not a flow.
     if not progs:                     # other tokens (dust, airdrops) may ride along; they are noted
-        if sol >= 0 and usdc >= 0 and (sol > 0 or usdc > 0):
+        flow = [sol, usdc, *extra.values()]
+        if all(x >= 0 for x in flow) and any(x > 0 for x in flow):
             return 'deposit', d
-        if sol <= 0 and usdc <= 0 and (sol < 0 or usdc < 0):
+        if all(x <= 0 for x in flow) and any(x < 0 for x in flow):
             return 'withdrawal', d
     return 'other', d
+
+
+def flow_owner(d, profiles):
+    """The profile a deposit or withdrawal belongs to (d: classify_tx's
+    detail): the one its token routes to (wallets.holder: the profile whose
+    deposit mint it is, else the residual owner), by the first token moved
+    that is not USDC; USDC alone is the residual owner's. Pure."""
+    moved = ([NATIVE] if d.get('sol') else []) + sorted(d.get('amounts') or {})
+    return wallets.holder(moved[0] if moved else USDC, profiles)
 
 
 def check_flows(classified):
@@ -159,12 +189,14 @@ def check_flows(classified):
 
 
 def check_harvest(row_a, row_b, measured):
-    """A harvest row against its transaction's pool outflow (txfees)."""
+    """A harvest row against its transaction's pool outflow (txfees), both in
+    UI units (the runner scales a Token-2022 mint's outflow)."""
     if measured is None:
         return 'warn', {'note': 'transaction unreadable'}
     ma, mb = measured
     d = {'row': [row_a, row_b], 'tx': [ma, mb]}
-    # rows are booked from the same transaction (txfees), so they match it exactly
+    # rows are booked from the same transaction (txfees), times the same
+    # multiplier, so they match it exactly
     ok = abs(ma - row_a) <= HARVEST_TOLERANCE and abs(mb - row_b) <= HARVEST_TOLERANCE
     return ('ok', d) if ok else ('fail', d)
 
@@ -175,7 +207,7 @@ def payout_received(tx, profit_wallet, mint, amount):
         return False
     m = tx['meta']
     def total(key):
-        return sum(int(b['uiTokenAmount']['amount']) / 10 ** int(b['uiTokenAmount']['decimals'])
+        return sum(ui_amount(b['uiTokenAmount'])
                    for b in m.get(key) or [] if b.get('owner') == profit_wallet and b.get('mint') == mint)
     got = total('postTokenBalances') - total('preTokenBalances')
     return abs(got - amount) <= PAYOUT_TOLERANCE
@@ -184,21 +216,61 @@ def payout_received(tx, profit_wallet, mint, amount):
 DLMM_PROGRAM = 'LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo'
 
 
-def check_positions(db_open_mints, chain_nft_mints, db_open_dexes, dlmm_live):
+def check_positions(db_open_mints, chain_nft_mints, db_open_dexes, dlmm_live, db_open_profiles=None):
     """Open positions in the ledger against the chain: the position NFTs the
     wallet holds, and for Meteora (positions are accounts, not NFTs) the
     position accounts that exist and belong to the DLMM program (`dlmm_live`).
     A DLMM position the ledger does not know cannot be found without an
-    indexed read: orphans are NFT-only."""
+    indexed read: orphans are NFT-only. Each profile holds at most one
+    position; `db_open_profiles` names each row's profile (None: one book)."""
     nft = set(chain_nft_mints)
     rows = list(zip(db_open_mints, db_open_dexes))
     missing = [m for m, dx in rows if dx != 'meteora-dlmm' and m not in nft] + \
               [m for m, dx in rows if dx == 'meteora-dlmm' and m not in set(dlmm_live)]
     orphans = [m for m in nft if m not in set(db_open_mints)]
     d = {'db_open': list(db_open_mints), 'nfts': sorted(nft), 'missing_on_chain': missing, 'orphans': orphans}
-    if missing or orphans or len(db_open_mints) > 1:
+    if db_open_profiles is None:
+        doubled = len(db_open_mints) > 1
+    else:
+        books = list(db_open_profiles)
+        doubled = sorted({str(b) for b in books if books.count(b) > 1})
+        if doubled:
+            d['more_than_one'] = doubled
+    if missing or orphans or doubled:
         return 'fail', d
     return 'ok', d
+
+
+def ui_amount(token_amount):
+    """A jsonParsed tokenAmount in UI units: the RPC's uiAmountString, which
+    carries a Token-2022 scaled mint's multiplier; raw / 10^decimals when the
+    string is absent. Pure."""
+    ui = token_amount.get('uiAmountString')
+    if ui not in (None, ''):
+        return float(ui)
+    return int(token_amount['amount']) / 10 ** int(token_amount['decimals'])
+
+
+PLAIN_MINTS = {NATIVE, USDC}        # SPL Token mints: no multiplier to read
+
+
+def mint_scale(url, mint, now=None):
+    """The UI multiplier of `mint` now: a Token-2022 scaledUiAmountConfig's
+    newMultiplier from its timestamp on, else its multiplier; 1.0 for a plain
+    mint; None when the mint cannot be read."""
+    if mint in PLAIN_MINTS:
+        return 1.0
+    r = rpc(url, 'getAccountInfo', [mint, {'encoding': 'jsonParsed'}])
+    try:
+        info = r['value']['data']['parsed']['info']
+    except (TypeError, KeyError):
+        return None
+    for e in info.get('extensions') or []:
+        if e.get('extension') == 'scaledUiAmountConfig':
+            st = e['state']
+            t = time.time() if now is None else now
+            return float(st['newMultiplier'] if t >= float(st['newMultiplierEffectiveTimestamp']) else st['multiplier'])
+    return 1.0
 
 
 def check_owed(owed_rows_old):
@@ -239,8 +311,13 @@ def token_accounts(url, owner):
             info = a['account']['data']['parsed']['info']
             out.append({'pubkey': a['pubkey'], 'program': prog, 'lamports': a['account']['lamports'],
                         'mint': info['mint'], 'amount': int(info['tokenAmount']['amount']),
-                        'decimals': int(info['tokenAmount']['decimals'])})
+                        'decimals': int(info['tokenAmount']['decimals']), 'ui': ui_amount(info['tokenAmount'])})
     return out
+
+
+def human(account):
+    """A token_accounts row in UI units (its uiAmountString when read)."""
+    return account['ui'] if account.get('ui') is not None else account['amount'] / 10 ** account['decimals']
 
 
 def known_signatures(db, feed_path):
@@ -271,12 +348,32 @@ def known_signatures(db, feed_path):
     return known
 
 
-def run(bot, db, config, txfees, notify, now=None):
+def idle_sleeves_usd(profiles, claims, balances, prices, holding):
+    """Dollar value of the wallet money of the profiles that hold no position:
+    no snapshot counts it, so the equity check adds it beside the snapshots.
+    `balances` {mint: human} is the whole wallet; each mint is split as the
+    sleeves split it (wallets.split); `holding` names the profiles with an
+    open position. Pure."""
+    total = 0.0
+    for m, amt in balances.items():
+        views, _over, _rest = wallets.split(amt, m, profiles, claims)
+        total += sum(v for n, v in views.items() if n not in holding) * float(prices.get(m) or 0.0)
+    return total
+
+
+def run(bot, db, config, txfees, notify, now=None, wallet=None):
     """One audit run. `bot` is the rebalancer module (wallet, read_status,
-    deployable_usd, pool_tokens, FEED, ROOT). Returns {check: status}."""
+    deployable_usd, pool_tokens, FEED, ROOT). `wallet` is the wallet's book
+    (rebalancer.wallet_book: every profile of the wallet, their mints, the
+    claims); None audits the ledger as one book (a pre-020 profile).
+    Returns {check: status}."""
     run_id = uuid.uuid4().hex[:12]
     url = config.RPC
     results = {}
+    names = [p['name'] for p in wallet['profiles']] if wallet else None
+    # every profile of the wallet, disabled ones too: their sleeves are theirs
+    everyone = list(wallet['profiles']) if wallet else []
+    capital = set(wallet['mints']) if wallet else set()
 
     def record(name, status, detail):
         results[name] = status
@@ -296,27 +393,50 @@ def run(bot, db, config, txfees, notify, now=None):
     bal = bot.wallet(config.POOL)
     status, _ = bot.read_status()
     open_ = bool(status and status.get('positionMint'))
+    own_mint = status.get('positionMint') if open_ else None
+    others_open = []                     # the wallet's other open positions, by their last snapshot
     with db.cursor() as c:
-        c.execute('select equity_usd from snapshots where equity_usd is not null order by ts desc, id desc limit 1')
-        r = c.fetchone()
-    snap_equity = float(r['equity_usd']) if r else None
+        if names is None:
+            c.execute('select equity_usd from snapshots where equity_usd is not null order by ts desc, id desc limit 1')
+            r = c.fetchone()
+            snap_equity = float(r['equity_usd']) if r else None
+        else:
+            c.execute("""select distinct on (p.mint) p.mint, p.config_name, s.equity_usd, s.position_usd, s.accrued_usd
+                         from positions p join snapshots s using (mint)
+                         where p.closed_at is null and p.config_name = any(%s) and s.equity_usd is not null
+                         order by p.mint, s.ts desc, s.id desc""", (names,))
+            rows = c.fetchall()
+            snap_equity = sum(float(r['equity_usd']) for r in rows) if rows else None
+            others_open = [r for r in rows if r['mint'] != own_mint]
+            c.execute('select distinct config_name from positions where closed_at is null and config_name = any(%s)',
+                      (names,))
+            holding = {r['config_name'] for r in c.fetchall()}
     owner = bal.get('owner')
 
     accts = token_accounts(url, owner) if owner else []
     (mint_a, _), (mint_b, _) = bot.pool_tokens()
-    keep = keep_mints(bot, mint_a, mint_b)
+    keep = keep_mints(bot, mint_a, mint_b, capital)
+    # A quote price the signer could not give is unknown, except for a
+    # stablecoin quote by mint: then the wallet is not valued at all.
+    q = bal.get('quoteUsd')
+    if q is None and engine.is_stable({'address': mint_b}):
+        q = 1.0
+    ours = {mint_a, mint_b} | capital              # every token a profile of the wallet uses
 
     def idle():
         # the pool's tokens beyond the gas reserve, plus every foreign token
         # the sweep would convert: all of it belongs in the LP
-        others = [a['mint'] for a in accts if a['amount'] > 0 and a['mint'] not in (mint_a, mint_b)]
-        sweep = bot.plan_sweep(accts, {mint_a, mint_b}, keep - {mint_a, mint_b, NATIVE, USDC},
+        others = [a['mint'] for a in accts if a['amount'] > 0 and a['mint'] not in ours]
+        sweep = bot.plan_sweep(accts, ours, keep - ours - {NATIVE, USDC},
                                bot.dexes.jupiter_prices(others) if others else {},
                                {m: bot.dexes.jupiter_token(m) for m in others}) if others else []
+        deployable = bot.deployable_usd(dict(bal, quoteUsd=q)) if q is not None else None
+        if deployable is None:
+            return 'warn', {'note': 'quote price unknown: idle money not valued'}
         # the open's tolerance leftover is by design (rebalancer.deploy_idle)
         base = (bot.load().get('idle_baseline') or {})
         excused = float(base.get('usd') or 0.0) if open_ and base.get('mint') == status.get('positionMint') else 0.0
-        st, d = check_idle(max(bot.deployable_usd(bal) - excused, 0.0) + sum(p['usd'] for p in sweep), snap_equity or 0.0, open_)
+        st, d = check_idle(max(deployable - excused, 0.0) + sum(p['usd'] for p in sweep), snap_equity or 0.0, open_)
         d['tolerance_leftover_usd'] = round(excused, 4)
         d['foreign_usd'] = round(sum(p['usd'] for p in sweep), 4)
         return st, d
@@ -326,32 +446,53 @@ def run(bot, db, config, txfees, notify, now=None):
 
     def equity():
         # Independent of the signer's walletUsd: the native balance and every
-        # token account, priced here, plus the position's mark and accrual.
+        # token account, priced here, plus the positions' marks and accrual.
+        # With a wallet book: every profile's tokens, every open position,
+        # against the sum of the profiles' snapshots plus the sleeves of the
+        # profiles that hold no position (idle_sleeves_usd).
         native = (rpc(url, 'getBalance', [owner]) or {}).get('value')
         if native is None:
             return 'warn', {'note': 'native balance unreadable'}
-        q = bal.get('quoteUsd') or 1.0
+        if q is None:
+            return 'warn', {'note': 'quote price unknown: the wallet cannot be valued'}
         px = {mint_a: bal['price'] * q, mint_b: q}
+        extra = sorted(capital - set(px) - {NATIVE})
+        if extra:
+            px.update({m: p for m, p in bot.dexes.jupiter_prices(extra).items() if m in extra})
         sol_usd = px[NATIVE] if NATIVE in px else bot.dexes.jupiter_prices([NATIVE]).get(NATIVE, 0.0)
-        # the pool's SPL tokens are equity; wrapped SOL, reward dust and other
-        # tokens are not counted by equity and go to `uncounted`
-        pool_usd = sum(a['amount'] / 10 ** a['decimals'] * px[a['mint']] for a in accts
-                       if a['mint'] in px and a['mint'] != NATIVE)
+        # the profiles' SPL tokens are equity; wrapped SOL, reward dust and
+        # other tokens are not counted by equity and go to `uncounted`
+        pool_usd = sum(human(a) * px[a['mint']] for a in accts if a['mint'] in px and a['mint'] != NATIVE)
         others = [a for a in accts if a['amount'] > 0 and (a['mint'] not in px or a['mint'] == NATIVE)
                   and not (a['decimals'] == 0 and a['amount'] == 1)]            # position NFTs are in the position mark
         prices = dict(bot.dexes.jupiter_prices([a['mint'] for a in others if a['mint'] != NATIVE]) if others else {})
         prices[NATIVE] = sol_usd
-        dust_usd = sum(a['amount'] / 10 ** a['decimals'] * prices.get(a['mint'], 0.0) for a in others)
+        dust_usd = sum(human(a) * prices.get(a['mint'], 0.0) for a in others)
         rent_usd = sum(a['lamports'] for a in empty) / 1e9 * sol_usd
         uncounted = dust_usd + rent_usd
         db.set_audit_value('uncounted_usd', round(uncounted, 6))
         pos_usd = (bot.position_usd(status) or 0.0) if open_ else 0.0
-        chain_total = native / 1e9 * sol_usd + pool_usd + pos_usd + \
+        other_pos = sum(float(r['position_usd'] or 0.0) + float(r['accrued_usd'] or 0.0) for r in others_open)
+        chain_total = native / 1e9 * sol_usd + pool_usd + pos_usd + other_pos + \
             float((status or {}).get('feesAccrued_USD') or 0.0) + uncounted
-        return check_equity(chain_total, snap_equity, uncounted)
+        books = snap_equity
+        if names is not None:
+            held = {}
+            for a in accts:
+                if a['mint'] in px and a['mint'] != NATIVE:
+                    held[a['mint']] = held.get(a['mint'], 0.0) + human(a)
+            held[NATIVE] = native / 1e9
+            idle_usd = idle_sleeves_usd(everyone, wallet['claims'], held, dict(px, **{NATIVE: sol_usd}), holding)
+            books = (snap_equity or 0.0) + idle_usd if (snap_equity is not None or idle_usd) else None
+        st, d = check_equity(chain_total, books, uncounted)
+        if names is not None:
+            d['open_positions'] = len(others_open) + (1 if open_ else 0)
+        return st, d
     guarded('equity', equity)
 
     def flows():
+        if q is None:
+            return 'warn', {'note': 'quote price unknown: flows wait for a price'}       # the cursor stays
         cursor = db.audit_value('flows_cursor')
         params = {'limit': 200}
         if cursor:
@@ -369,14 +510,27 @@ def run(bot, db, config, txfees, notify, now=None):
             if tx is None:
                 classified.append(('other', {'sig': s['signature'], 'note': 'unreadable'}))
                 continue
-            kind, d = classify_tx(tx, owner, watch=(config.PROFIT_WALLET,))
+            kind, d = classify_tx(tx, owner, watch=(config.PROFIT_WALLET,), capital=capital - {NATIVE, USDC})
             d['sig'] = s['signature']
             if kind in ('deposit', 'withdrawal'):
-                px = bal['price'] * (bal.get('quoteUsd') or 1.0)
-                usd = abs(d['sol']) * px + abs(d['usdc'])
+                px = bal['price'] * q
+                moved = d.get('amounts') or {}
+                tok_px = bot.dexes.jupiter_prices(sorted(moved)) if moved else {}
+                usd = abs(d['sol']) * px + abs(d['usdc']) + sum(abs(v) * tok_px.get(m, 0.0) for m, v in moved.items())
                 ts = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(tx.get('blockTime') or time.time()))
-                db.record_flow(ts, kind, abs(d['sol']), abs(d['usdc']), usd, px, s['signature'],
-                               f"found by the flows audit; other tokens {d['other_tokens']}")
+                detail = f"found by the flows audit; other tokens {d['other_tokens']}"
+                if names is None:
+                    db.record_flow(ts, kind, abs(d['sol']), abs(d['usdc']), usd, px, s['signature'], detail)
+                else:
+                    # the profile the token routes to, its token A amount and
+                    # its price (UI units), USDC in `usdc`, SOL only for SOL
+                    who = flow_owner(d, everyone) or db.CONTEXT['profile']     # no residual owner: this process
+                    ma = (wallet['mints_of'].get(who) or [None])[0]
+                    a = abs(d['sol']) if ma == NATIVE else abs(moved.get(ma, 0.0))
+                    pa = px if ma == NATIVE else tok_px.get(ma)
+                    db.record_flow(ts, kind, abs(d['sol']) if ma == NATIVE else 0.0, abs(d['usdc']), usd, pa,
+                                   s['signature'], detail, amounts={ma: a, USDC: abs(d['usdc'])} if ma else
+                                   {USDC: abs(d['usdc'])}, profile=who, wallet_id=config.WALLET_ID)
             classified.append((kind, d))
             time.sleep(0.3)
         db.set_audit_value('flows_cursor', max(sigs, key=lambda x: x.get('blockTime') or 0)['signature'])
@@ -386,14 +540,23 @@ def run(bot, db, config, txfees, notify, now=None):
     def harvests():
         last = int(db.audit_value('harvest_cursor') or 0)
         with db.cursor() as c:
-            c.execute("""select h.id, h.fee_a, h.fee_b, h.signature, p.pool from harvests h join positions p using (mint)
+            c.execute("""select h.id, h.fee_a, h.fee_b, h.signature, p.pool, p.config_name
+                         from harvests h join positions p using (mint)
                          where h.id > %s and h.signature not like 'close:%%'
                            and h.signature not in (select close_sig from positions where close_sig is not null)
-                         order by h.id limit 30""", (last,))
+                           and (%s::text[] is null or p.config_name = any(%s))
+                         order by h.id limit 30""", (last, names, names))
             rows = c.fetchall()
-        worst, details = 'ok', []
+        worst, details, scales = 'ok', [], {}
         for r in rows:
-            m = txfees.harvested(url, [r['signature']], r['pool'], mint_a, mint_b)
+            a, b = (wallet['mints_of'].get(r['config_name']) if wallet else None) or (mint_a, mint_b)
+            m = txfees.harvested(url, [r['signature']], r['pool'], a, b)
+            for x in (a, b):
+                if x not in scales:
+                    scales[x] = mint_scale(url, x)
+            if m is not None:
+                # rows are UI amounts; txfees measures raw / 10^decimals
+                m = None if None in (scales[a], scales[b]) else (m[0] * scales[a], m[1] * scales[b])
             st, d = check_harvest(float(r['fee_a']), float(r['fee_b']), m)
             if st != 'ok':
                 details.append({'id': r['id'], **d})
@@ -406,7 +569,8 @@ def run(bot, db, config, txfees, notify, now=None):
         last = int(db.audit_value('payout_cursor') or 0)
         with db.cursor() as c:
             c.execute("select id, token_mint, amount, signature from payouts where kind = 'paid' and id > %s "
-                      "and signature is not null order by id limit 30", (last,))
+                      "and signature is not null and (%s::text[] is null or config_name = any(%s)) "
+                      "order by id limit 30", (last, names, names))
             rows = c.fetchall()
         bad = []
         for r in rows:
@@ -419,7 +583,8 @@ def run(bot, db, config, txfees, notify, now=None):
 
     def positions():
         with db.cursor() as c:
-            c.execute('select mint, dex from positions where closed_at is null order by opened_at')
+            c.execute('select mint, dex, config_name from positions where closed_at is null '
+                      'and (%s::text[] is null or config_name = any(%s)) order by opened_at', (names, names))
             rows = c.fetchall()
         nfts = [a['mint'] for a in accts if a['decimals'] == 0 and a['amount'] == 1]
         live = []
@@ -431,15 +596,18 @@ def run(bot, db, config, txfees, notify, now=None):
                 v = info.get('value')
                 if v and v.get('owner') == DLMM_PROGRAM and (v.get('lamports') or 0) > 0:
                     live.append(r['mint'])
-        return check_positions([r['mint'] for r in rows], nfts, [r['dex'] for r in rows], dlmm_live=live)
+        return check_positions([r['mint'] for r in rows], nfts, [r['dex'] for r in rows], dlmm_live=live,
+                               db_open_profiles=[r['config_name'] for r in rows] if names is not None else None)
     guarded('positions', positions)
 
     def band_profiles():
         with db.cursor() as c:
             c.execute("""select p.mint, p.open_reason from positions p
                          where p.closed_at is not null
+                           and (%s::text[] is null or p.config_name = any(%s))
                            and p.closed_at > (select coalesce(min(ts), now()) from risk_profile)
-                           and not exists (select 1 from band_profile b where b.mint = p.mint and b.final)""")
+                           and not exists (select 1 from band_profile b where b.mint = p.mint and b.final)""",
+                      (names, names))
             rows = c.fetchall()
         for r in rows:
             db.record_band_profile(r['mint'], 'rebalance', 'written by the audit')
@@ -448,8 +616,8 @@ def run(bot, db, config, txfees, notify, now=None):
 
     def owed():
         with db.cursor() as c:
-            c.execute("select id, usd from payouts where kind = 'owed' and ts < now() - make_interval(days => %s)",
-                      (OWED_DAYS,))
+            c.execute("select id, usd from payouts where kind = 'owed' and ts < now() - make_interval(days => %s) "
+                      "and (%s::text[] is null or config_name = any(%s))", (OWED_DAYS, names, names))
             return check_owed([dict(r) for r in c.fetchall()])
     guarded('owed', owed)
 
@@ -457,16 +625,18 @@ def run(bot, db, config, txfees, notify, now=None):
 
     def fee_reads():
         with db.cursor() as c:
-            c.execute("select count(*) n from events where kind = 'fee_read_rejected' and ts > now() - interval '1 day'")
+            c.execute("select count(*) n from events where kind = 'fee_read_rejected' and ts > now() - interval '1 day' "
+                      "and (%s::text[] is null or profile = any(%s))", (names, names))
             return check_fee_reads(c.fetchone()['n'])
     guarded('fee_reads', fee_reads)
     return results
 
 
-def keep_mints(bot, mint_a, mint_b):
+def keep_mints(bot, mint_a, mint_b, wallet_mints=()):
     """Accounts the janitor must not close even when empty: the pool's two
-    tokens, the payout token, native SOL, and every reward mint seen."""
-    keep = {NATIVE, USDC, mint_a, mint_b}
+    tokens, every mint of every profile of the wallet (`wallet_mints`), the
+    payout token, native SOL, and every reward mint seen."""
+    keep = {NATIVE, USDC, mint_a, mint_b} | set(wallet_mints)
     try:
         st = bot.load()
         keep |= set(st.get('reward_mints_seen') or []) | set(st.get('janitor_keep') or [])

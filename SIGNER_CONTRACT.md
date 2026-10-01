@@ -79,6 +79,29 @@ approxUsd over LPBOT_MAX_USD; the price is outside [lower, upper].
 
 `harvest`: `{harvested: <position>, signature}`. `close`: `{closed: <position>, signature}`.
 
+## Token-2022 scaled UI amounts (2026-10-01)
+
+Some mints (tokenized stocks: MU, DJT, MSFTx) carry a `scaledUiAmountConfig`
+multiplier. Every human amount a signer reads or reports, and every cap it is
+given (`maxA`, `maxB`), is in UI units: raw / 10^decimals x the effective
+multiplier (`newMultiplier` once its timestamp has passed; `token2022.mjs`).
+`price`, `lowerPrice` and `upperPrice` stay pool-native (what the pool's math
+uses); the band and the open's price arguments are always pool-native.
+
+`balance`, `pool` and `status` add: `uiPrice` (B per A in UI units: value UI
+amounts with this), `multiplierA`, `multiplierB`, `paused`, `pausedA`,
+`pausedB`, `transferHookA`, `transferHookB`, `tokenProgramA`, `tokenProgramB`.
+
+Writes refuse before building with `refused: mint paused` when a pool mint is
+paused and `refused: transfer hook` when a transfer hook program is set. Reads
+keep working. An interest-bearing or unparseable extension is refused even
+for reads.
+
+Dry runs of Orca and DLMM opens, harvests and closes simulate and report
+`simulation` ({ok, err, logError, logTail}). Orca `status` without a position
+argument is scoped to `LPBOT_POOL`. Orca refuses adaptive-fee pools unless
+`LPBOT_ORCA_ADAPTIVE=1`.
+
 ## Sizing
 
 `maxA`, `maxB` are CEILINGS in human units. Deposit as much as the band allows
