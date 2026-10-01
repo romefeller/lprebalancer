@@ -338,6 +338,54 @@ def record_health(key, out, err):
         health.record_success(key)
 
 
+USDC_MINT = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'
+PROBE_QUOTE = (f'{dexes.JUPITER}/swap/v1/quote?inputMint={fees.NATIVE_MINT}&outputMint={USDC_MINT}'
+               '&amount=10000000&slippageBps=50')                  # 0.01 SOL: a quote, never a swap
+
+
+def jupiter_answers():
+    """(ok, why): whether Jupiter quotes a small SOL to USDC swap now. Read-only,
+    one gated request (jupgate). Never raises."""
+    try:
+        d = dexes._get(PROBE_QUOTE, timeout=15)
+    except Exception as e:
+        return False, f'{type(e).__name__}: {tidy(e)}'
+    try:
+        ok = int((d or {}).get('outAmount') or 0) > 0
+    except (TypeError, ValueError, AttributeError):
+        ok = False
+    return ok, None if ok else tidy(json.dumps(d)[:300] if d is not None else 'no answer')
+
+
+def probe_breakers(now=None):
+    """Closes the 'jupiter' and 'swap' breakers once their cooldown is over and
+    Jupiter quotes again, so the light shows what the bot can do now, not the
+    last failure (2026-10-01: red for hours after the cooldown, with nothing to
+    clear it until a real swap). One read-only quote, only when a breaker is
+    PROBING and Jupiter's own breaker allows a request. A failed probe counts
+    for 'jupiter' only: the Orca fallback may still swap. Returns True or False
+    after a probe, None when none was due. Never raises."""
+    try:
+        now = time.time() if now is None else now
+        states = {k: health.allowed(k, now) for k in ('jupiter', 'swap')}
+        due = [k for k, (_ok, st, _w, _r) in states.items() if st == health.PROBING]
+        if not due or not states['jupiter'][0]:
+            return None
+        ok, why = jupiter_answers()
+        if ok:
+            for k in due:
+                health.record_success(k, now)
+            print(f"🟢 health probe: Jupiter quotes again; {', '.join(due)} closed", flush=True)
+        else:
+            if 'jupiter' in due:
+                health.record_failure('jupiter', f'probe: {why}', now)
+            print(f'🟡 health probe: Jupiter still failing ({why})', flush=True)
+        return ok
+    except Exception as e:
+        print(f'health probe failed: {type(e).__name__}: {e}', flush=True)
+        return None
+
+
 def chain(*args, dex=None, timeout=420, extra_env=None, record=True):
     """Call the signer for `dex` (the active pool's by default).
     Returns (parsed_json, tidy_error). Every write feeds its breaker
@@ -1212,7 +1260,7 @@ def venue_failover(state, status, price=None):
     bring the bot back once it earns more again. True when a move started."""
     key = f'venue:{config.DEX}'
     _ok, st, wait, rec = health.allowed(key)
-    if st != health.TRIPPED:
+    if int(rec.get('fails') or 0) < health.TRIP_FAILS:    # failover follows the count, not the light
         return False
     told = state.get('failover_told')
     tell = told != rec.get('last_fail')
@@ -2409,6 +2457,7 @@ def main():
         record_risk(status, rv, fc)
         daily_report(state)
         run_audits(state)
+        probe_breakers()
 
         try:
             fo = venue_failover(state, status)

@@ -120,3 +120,9 @@ test('health line without emoji fields', () => {
 test('a missing share is refused even when zero would agree', () => {
   assert.equal(shareAgrees({ equity_usd: 200, lp_usd: 0, deployed_pct: null }), false);
 });
+
+test('a cooled breaker reads yellow and probing', () => {
+  assert.equal(healthLine([{ key: 'swap', state: 'probing', emoji: '🟡', fails: 3, wait_s: 0 }]),
+    '🩺 health   🟡 swap 3x probing');
+  assert.equal(healthLine([{ key: 'swap', state: 'probing', fails: 3, wait_s: 0 }]), '🩺 health   🟡 swap 3x probing');
+});

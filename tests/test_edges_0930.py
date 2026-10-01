@@ -28,7 +28,7 @@ class HealthEdges(unittest.TestCase):
         self.assertEqual((r['fails'], r['trips']), (3, 1))
         for rec in (None, {}, {'fails': None}, {'fails': 0}):
             self.assertEqual(health.verdict(rec, 5.0), (health.CLOSED, True, 0.0), rec)
-        self.assertEqual(health.verdict({'fails': 2, 'retry_at': None}, 5.0), (health.BACKOFF, True, 0.0))
+        self.assertEqual(health.verdict({'fails': 2, 'retry_at': None}, 5.0), (health.PROBING, True, 0.0))
 
     def test_no_use_even_half_a_second_early(self):
         self.assertFalse(health.verdict({'fails': 1, 'retry_at': 100.0}, 99.5)[1])

@@ -387,5 +387,98 @@ class LessJupiterTraffic(unittest.TestCase):
         self.assertEqual(asked, ['RICH'])
 
 
+
+class BreakerProbe(unittest.TestCase):
+    """A breaker past its cooldown shows yellow and a read-only quote clears it (2026-10-01)."""
+
+    def setUp(self):
+        clear()
+
+    def tearDown(self):
+        clear()
+
+    def trip(self, key, at):
+        for _ in range(3):
+            health.record_failure(key, 'Jupiter 429', now=at)
+
+    def probe(self, answer, now):
+        seen = []
+        def fake():
+            seen.append(1)
+            if isinstance(answer, Exception):
+                raise answer
+            return answer
+        with mock.patch.object(rebalancer, 'jupiter_answers', fake), mock.patch('builtins.print'):
+            out = rebalancer.probe_breakers(now)
+        return out, len(seen)
+
+    def test_the_light_follows_the_cooldown(self):
+        t = 1_000_000.0
+        self.trip('swap', t)
+        self.assertEqual(health.verdict(db.health_get('swap'), t + 1)[0], health.TRIPPED)
+        self.assertEqual(health.verdict(db.health_get('swap'), t + 2400)[:2], (health.PROBING, True))
+        self.assertEqual(health.EMOJI[health.PROBING], '🟡')
+
+    def test_replay_2026_10_01_the_probe_clears_a_cooled_swap_breaker(self):
+        t = 1_000_000.0
+        self.trip('swap', t)
+        self.assertEqual(self.probe((True, None), t + 100), (None, 0))                   # still cooling: no request
+        self.assertEqual(self.probe((True, None), t + 2401), (True, 1))
+        self.assertEqual(db.health_get('swap')['fails'], 0)
+        self.assertEqual(self.probe((True, None), t + 2500), (None, 0))                  # nothing due: no request
+
+    def test_a_failed_probe_counts_for_jupiter_only(self):
+        t = 1_000_000.0
+        self.trip('swap', t); self.trip('jupiter', t)
+        out, n = self.probe((False, 'Jupiter 429'), t + 2401)
+        self.assertEqual((out, n), (False, 1))
+        self.assertEqual(db.health_get('jupiter')['fails'], 4)                           # backoff grows
+        self.assertEqual(db.health_get('swap')['fails'], 3)                              # Orca may still swap
+        self.assertEqual(self.probe((True, None), t + 2402), (None, 0))                  # Jupiter cooling: no request
+
+    def test_both_due_and_both_cleared(self):
+        t = 1_000_000.0
+        self.trip('swap', t); self.trip('jupiter', t)
+        self.assertEqual(self.probe((True, None), t + 2401), (True, 1))
+        self.assertEqual((db.health_get('swap')['fails'], db.health_get('jupiter')['fails']), (0, 0))
+
+    def test_a_venue_breaker_is_never_probed(self):
+        t = 1_000_000.0
+        self.trip('venue:orca', t)
+        self.assertEqual(self.probe((True, None), t + 2401), (None, 0))
+        self.assertEqual(db.health_get('venue:orca')['fails'], 3)
+
+    def test_the_probe_never_raises(self):
+        t = 1_000_000.0
+        self.trip('swap', t)
+        self.assertIsNone(self.probe(RuntimeError('boom'), t + 2401)[0])
+        with mock.patch.object(rebalancer.health, 'allowed', side_effect=RuntimeError('db')), mock.patch('builtins.print'):
+            self.assertIsNone(rebalancer.probe_breakers(t))
+
+    def test_jupiter_answers_reads_the_quote(self):
+        for d, ok in (({'outAmount': '1180000'}, True), ({'outAmount': '0'}, False), ({'error': 'Rate limit'}, False),
+                      (None, False), ([], False), ({'outAmount': 'x'}, False)):
+            with mock.patch.object(rebalancer.dexes, '_get', lambda url, **k: d):
+                self.assertEqual(rebalancer.jupiter_answers()[0], ok, d)
+        with mock.patch.object(rebalancer.dexes, '_get', side_effect=ValueError('bad json')):
+            self.assertEqual(rebalancer.jupiter_answers()[0], False)
+        self.assertIn('/swap/v1/quote?', rebalancer.PROBE_QUOTE); self.assertIn('amount=10000000', rebalancer.PROBE_QUOTE)
+
+    def test_failover_still_follows_the_failure_count(self):
+        t = time.time()
+        self.trip('venue:raydium-clmm', t - 10 * 3600)                                   # long cooled: yellow
+        with mock.patch.object(rebalancer.config, 'DEX', 'raydium-clmm'), \
+                mock.patch.object(rebalancer, 'venue_view', lambda p, q=1.0: []), \
+                mock.patch.object(rebalancer, 'notify', lambda ev, **kw: self.__dict__.setdefault('ev', []).append(ev)), \
+                mock.patch.object(rebalancer, 'save', lambda s: None), mock.patch.object(rebalancer.db, 'event', lambda *a: None):
+            rebalancer.venue_failover({}, None, price=120.0)
+        self.assertIn('failover_none', self.ev)                                          # it looked for a target
+
+    def test_the_loop_probes_every_poll(self):
+        src = (ROOT / 'rebalancer.py').read_text()
+        i = src.index('        run_audits(state)\n')
+        self.assertEqual(src[i:i + 60].split('\n')[1].strip(), 'probe_breakers()')
+
+
 if __name__ == '__main__':
     unittest.main()

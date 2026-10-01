@@ -32,8 +32,8 @@ BASE_S = 600                 # the first retry, after one failure
 MAX_S = 6 * 3600             # no wait longer than this
 TRIP_FAILS = 3               # this many failures in a row: the dependency is out
 
-CLOSED, BACKOFF, TRIPPED = 'closed', 'backoff', 'tripped'
-EMOJI = {CLOSED: '🟢', BACKOFF: '🟡', TRIPPED: '🔴'}
+CLOSED, BACKOFF, TRIPPED, PROBING = 'closed', 'backoff', 'tripped', 'probing'
+EMOJI = {CLOSED: '🟢', BACKOFF: '🟡', TRIPPED: '🔴', PROBING: '🟡'}
 
 
 def cooldown(fails, base_s=BASE_S, max_s=MAX_S):
@@ -72,13 +72,16 @@ def after_success(rec, now):
 def verdict(rec, now):
     """(state, allowed, wait_s) for a record at `now`. Pure. `allowed` is
     whether the loop may use the dependency now: always while closed; after
-    the cooldown while in backoff or tripped (one probe: its result closes or
-    re-opens the breaker)."""
+    the cooldown while it still holds failures (state PROBING: the next use,
+    or rebalancer.probe_breakers, closes the breaker or re-opens it).
+    2026-10-01: a breaker past its cooldown still showed red for hours, until
+    a real swap happened to clear it."""
     if not rec or int(rec.get('fails') or 0) <= 0:
         return CLOSED, True, 0.0
-    state = TRIPPED if int(rec['fails']) >= TRIP_FAILS else BACKOFF
     wait = min(max(0.0, float(rec.get('retry_at') or 0.0) - now), float(MAX_S))   # float rounding: never past MAX_S
-    return state, wait <= 0, wait
+    if wait <= 0:
+        return PROBING, True, 0.0
+    return (TRIPPED if int(rec['fails']) >= TRIP_FAILS else BACKOFF), False, wait
 
 
 # --- persistence ---------------------------------------------------------------
@@ -145,5 +148,5 @@ def summary(now=None):
         state, _ok, wait = verdict(r, now)
         out.append({'key': r['key'], 'state': state, 'emoji': EMOJI[state], 'fails': int(r.get('fails') or 0),
                     'trips': int(r.get('trips') or 0), 'wait_s': round(wait), 'last_error': r.get('last_error')})
-    order = {TRIPPED: 0, BACKOFF: 1, CLOSED: 2}
+    order = {TRIPPED: 0, BACKOFF: 1, PROBING: 2, CLOSED: 3}
     return sorted(out, key=lambda x: (order[x['state']], x['key']))

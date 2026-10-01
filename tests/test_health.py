@@ -34,7 +34,7 @@ class Core(unittest.TestCase):
         self.assertEqual(health.verdict(r, now), (health.CLOSED, True, 0.0))
         r = health.after_failure(r, now, 'x')
         self.assertEqual(health.verdict(r, now)[:2], (health.BACKOFF, False))
-        self.assertEqual(health.verdict(r, now + 600), (health.BACKOFF, True, 0.0))         # the probe
+        self.assertEqual(health.verdict(r, now + 600), (health.PROBING, True, 0.0))         # cooled: yellow, allowed
         r = health.after_failure(health.after_failure(r, now + 600, 'x'), now + 1800, 'x')
         self.assertEqual((r['fails'], r['trips']), (3, 1))
         self.assertEqual(health.verdict(r, now + 1800)[:2], (health.TRIPPED, False))
