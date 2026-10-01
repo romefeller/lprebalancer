@@ -40,6 +40,7 @@ import { consistentFees } from './fee_snapshot.mjs';
 import { endpoints, overEndpoints, isEntry } from './rpc_policy.mjs';
 import path from 'node:path';
 import { createRequire } from 'node:module';
+import { waitTurn } from './jupiter_gate.mjs';
 
 // The SDK's ESM build loads under Node 24, but the CommonJS build is used so
 // that this file, the SDK and web3.js share one copy of PublicKey and BN.
@@ -127,6 +128,7 @@ async function symbols(pool, poolInfo) {
 
 async function tokenUsd(mint) {
   try {
+    await waitTurn();                                 // one Jupiter slot (jupiter_gate.mjs)
     const j = await fetchJson(`${JUPITER}/price/v3?ids=${mint}`);
     const p = Number(j?.[mint]?.usdPrice);
     return p > 0 ? p : null;

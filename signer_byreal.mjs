@@ -36,6 +36,7 @@ import { SLIPPAGE_REFUSAL } from './slippage.mjs';
 import { endpoints, overEndpoints, isEntry } from './rpc_policy.mjs';
 import path from 'node:path';
 import { createRequire } from 'node:module';
+import { waitTurn } from './jupiter_gate.mjs';
 
 const require = createRequire(import.meta.url);
 // The SDK's ESM entry loads cleanly under Node 24. BN and Decimal come from
@@ -125,6 +126,7 @@ async function meta(pool) {
 
 async function tokenUsd(mint) {
   try {
+    await waitTurn();                                 // one Jupiter slot (jupiter_gate.mjs)
     const j = await (await fetch(`${JUPITER}/price/v3?ids=${mint}`, { headers: HEADERS })).json();
     const p = Number(j?.[mint]?.usdPrice);
     return p > 0 ? p : null;

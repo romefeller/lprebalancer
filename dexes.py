@@ -38,6 +38,9 @@ import urllib.request
 import math
 import os
 import subprocess
+import time
+
+import jupgate
 
 UA = ('Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 '
       '(KHTML, like Gecko) Chrome/126.0 Safari/537.36')
@@ -58,6 +61,8 @@ KNOWN = ('orca', 'raydium-clmm', 'byreal', 'pancakeswap-v3-solana', 'meteora-dlm
 
 
 def _get(url, accept='application/json', timeout=40):
+    if 'jup.ag' in url:
+        jupgate.wait_turn()                       # one Jupiter slot across every process (jupgate.py)
     r = subprocess.run(['curl', '-s', '--max-time', str(timeout),
                         '-H', f'accept: {accept}', '-H', f'user-agent: {UA}', url],
                        capture_output=True, text=True)
@@ -723,10 +728,30 @@ def jupiter_prices(mints):
     return out
 
 
-def jupiter_token(mint):
+_TOKEN_FACTS = {}                   # mint -> (fetched_at, facts): token facts change slowly
+TOKEN_FACTS_TTL_S = 6 * 3600
+TOKEN_FACTS_MAX = 512               # memory-lean: the oldest entries leave first
+
+
+def jupiter_token(mint, now=None):
     """What Jupiter knows about a token: name, verification, organic score,
     holder count, audit flags. What the token screen decides on, so it rests on
-    more than a ticker."""
+    more than a ticker. A found token is cached TOKEN_FACTS_TTL_S (the sweep
+    asked every ten minutes for the same mints, 2026-10-01); a miss is not."""
+    t0 = time.time() if now is None else now
+    hit = _TOKEN_FACTS.get(mint)
+    if hit and t0 - hit[0] < TOKEN_FACTS_TTL_S:
+        return hit[1]
+    facts = _jupiter_token(mint)
+    if facts is not None:
+        _TOKEN_FACTS[mint] = (t0, facts)
+        while len(_TOKEN_FACTS) > TOKEN_FACTS_MAX:
+            _TOKEN_FACTS.pop(min(_TOKEN_FACTS, key=lambda k: _TOKEN_FACTS[k][0]))
+    return facts
+
+
+def _jupiter_token(mint):
+    """One token-search request; the facts, or None."""
     try:
         d = _get(f'{JUPITER}/tokens/v2/search?query={mint}')
     except Exception:

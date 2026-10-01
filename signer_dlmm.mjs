@@ -29,6 +29,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { createRequire } from 'node:module';
+import { waitTurn } from './jupiter_gate.mjs';
 import { endpoints, overEndpoints, isEntry, AfterSignError } from './rpc_policy.mjs';
 
 // The package's ESM build imports a directory and fails to load under Node 24;
@@ -101,6 +102,7 @@ async function symbols(pool, dlmm) {
 
 async function tokenUsd(mint) {
   try {
+    await waitTurn();                                 // one Jupiter slot (jupiter_gate.mjs)
     const j = await (await fetch(`${JUPITER}/price/v3?ids=${mint}`, { headers: HEADERS })).json();
     const p = Number(j?.[mint]?.usdPrice);
     return p > 0 ? p : null;

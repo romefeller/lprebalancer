@@ -97,6 +97,7 @@ SIGNERS = {'orca': str(ROOT / 'signer2.mjs'),
            'byreal': str(ROOT / 'signer_byreal.mjs'),
            'pancakeswap-v3-solana': str(ROOT / 'signer_pancake.mjs'),
            'jupiter': str(ROOT / 'swap_jupiter.mjs'),       # swaps, not positions
+           'orca-swap': str(ROOT / 'swap_orca.mjs'),        # the fallback swap, direct on an Orca whirlpool
            'payout': str(ROOT / 'payout.mjs'),              # transfers to the profit wallet only
            'janitor': str(ROOT / 'janitor.mjs')}            # closes empty token accounts, rent to the wallet
 
@@ -321,22 +322,33 @@ def counts_as_failure(err):
     return bool(e) and not re.search(r'^refused:|HALT present|^no signer for', e)
 
 
-def chain(*args, dex=None, timeout=420, extra_env=None):
+def record_health(key, out, err):
+    """Feeds one operation's outcome to its breaker (health.py): a failure
+    when nothing was sent and the error is the dependency's, a success when
+    the call answered or sent. One call per operation, after its retries."""
+    if not key:
+        return
+    failed = (err or not out) and not (out or {}).get('signature') and not (out or {}).get('noop')
+    if failed and counts_as_failure(err or 'no result'):
+        rec = health.record_failure(key, err or 'no result')
+        state, _ok, wait = health.verdict(rec, time.time())
+        print(f"{health.EMOJI[state]} health {key}: {state} after {rec['fails']} failure(s); "
+              f"retry in {wait / 60:.0f} min: {err}", flush=True)
+    elif not failed:
+        health.record_success(key)
+
+
+def chain(*args, dex=None, timeout=420, extra_env=None, record=True):
     """Call the signer for `dex` (the active pool's by default).
     Returns (parsed_json, tidy_error). Every write feeds its breaker
-    (health.py): the venue's for open/close/harvest, 'swap' for the swap."""
+    (health.py): the venue's for open/close/harvest, 'swap' for the swap.
+    A caller that retries passes record=False for each attempt and records
+    the operation once with record_health (2026-10-01: three attempts of one
+    rate-limited swap counted as three failures and tripped the breaker)."""
     d = dex or config.DEX
     out, err = _chain(*args, dex=d, timeout=timeout, extra_env=extra_env)
-    key = health_key(args, d)
-    if key:
-        failed = (err or not out) and not (out or {}).get('signature') and not (out or {}).get('noop')
-        if failed and counts_as_failure(err or 'no result'):
-            rec = health.record_failure(key, err or 'no result')
-            state, _ok, wait = health.verdict(rec, time.time())
-            print(f"{health.EMOJI[state]} health {key}: {state} after {rec['fails']} failure(s); "
-                  f"retry in {wait / 60:.0f} min: {err}", flush=True)
-        elif not failed:
-            health.record_success(key)
+    if record:
+        record_health(health_key(args, d), out, err)
     return out, err
 
 
@@ -1136,7 +1148,11 @@ def sweep_foreign(state, bal):
         if not others:
             return []
         prices = dexes.jupiter_prices(others)
-        facts = {m: dexes.jupiter_token(m) for m in others}
+        # Facts only for what is worth a sweep: dust is never swapped, so its
+        # token search is wasted Jupiter budget (2026-10-01).
+        worth = {a['mint'] for a in accounts if a['mint'] in prices
+                 and a['amount'] / 10 ** a['decimals'] * float(prices[a['mint']] or 0.0) >= SWEEP_MIN_USD}
+        facts = {m: dexes.jupiter_token(m) for m in others if m in worth}
         plan = plan_sweep(accounts, {mint_a, mint_b}, rewards, prices, facts)
         target = mint_b if mint_b != fees.NATIVE_MINT else mint_a
         done = []
@@ -1604,6 +1620,14 @@ def resume_reopen(state):
 
 
 SWAP_RETRY_PAUSES = (15, 30)      # three attempts in all
+# Jupiter's free API limits by IP per minute: its 429 needs the minute to pass,
+# not 15 s (2026-10-01 20:33Z: all three attempts inside 76 s were refused).
+# An RPC rate limit keeps the short pauses: rpc_policy moves to the next endpoint.
+SWAP_RATE_LIMIT_PAUSES = (30, 60)
+# When Jupiter fails without sending, the same swap is tried once directly on
+# an Orca whirlpool (swap_orca.mjs), so a Jupiter outage or rate limit does not
+# open a lopsided band (owner, 2026-10-01). '' turns the fallback off.
+SWAP_FALLBACK = os.environ.get('LPBOT_SWAP_FALLBACK', 'orca-swap')
 
 
 def balance_wallet(state, bal, rec):
@@ -1661,8 +1685,10 @@ def balance_wallet(state, bal, rec):
     except (KeyError, TypeError, ValueError):
         hints = {}
     env = {'LPBOT_TOKEN_HINTS': json.dumps(hints)} if hints else None
-    out, err = chain('rebalance', mint_a, mint_b, target_a, target_b, '--execute', dex='jupiter', extra_env=env)
-    for pause in SWAP_RETRY_PAUSES:
+    out, err = chain('rebalance', mint_a, mint_b, target_a, target_b, '--execute', dex='jupiter', extra_env=env,
+                     record=False)
+    limited = re.search(r'Jupiter (rate limited|429)', str(err))        # an RPC limit rotates endpoints instead
+    for pause in (SWAP_RATE_LIMIT_PAUSES if limited else SWAP_RETRY_PAUSES):
         # Nothing left this process: a transport failure is safe to repeat.
         # One retry was not enough: two rate limits in a row on 2026-09-28
         # 18:16Z opened a lopsided band and left $22 of SOL idle.
@@ -1670,7 +1696,17 @@ def balance_wallet(state, bal, rec):
                 and re.search(r'rate limit|429|timeout|timed out|ECONNRESET|blockhash', str(err), re.I)):
             break
         time.sleep(pause)
-        out, err = chain('rebalance', mint_a, mint_b, target_a, target_b, '--execute', dex='jupiter', extra_env=env)
+        out, err = chain('rebalance', mint_a, mint_b, target_a, target_b, '--execute', dex='jupiter', extra_env=env,
+                         record=False)
+    # 'jupiter' is Jupiter's own health; 'swap' is whether the bot could swap
+    # at all, by Jupiter or the fallback: deploy_idle waits on 'swap' only.
+    record_health('jupiter', out, err)                # one swap, one outcome, whatever the attempts
+    if (SWAP_FALLBACK and SWAP_FALLBACK in SIGNERS and counts_as_failure(err or 'no result')
+            and (err or not out) and not (out or {}).get('signature') and not (out or {}).get('partial')):
+        notify('swap_fallback', reason=f'Jupiter failed without sending ({err or "no result"}); swapping on Orca')
+        out, err = chain('rebalance', mint_a, mint_b, target_a, target_b, '--execute', dex=SWAP_FALLBACK,
+                         extra_env=env, record=False)
+    record_health('swap', out, err)
     if (err or not out) and not (out or {}).get('signature') and not (out or {}).get('partial'):
         # Nothing was sent. Open with what the wallet holds: a smaller
         # position earning fees beats capital idle until the next poll.
@@ -2202,7 +2238,8 @@ def rebalance(state, status, reason, target=None, band=None, calm_move=False, ex
                                    'withdraw_usd': position_usd(status), 'closed': False}
         save(state)
 
-    out, err = chain('close', mint, '--execute')
+    venue = health_key(('close',), config.DEX)
+    out, err = chain('close', mint, '--execute', record=False)
     if err and re.search(r'rate limit|429|timeout|timed out|ECONNRESET|blockhash', str(err), re.I):
         # A transport failure: if the position is provably still there, the
         # close did not land and one more try is safe. On 2026-09-26 a
@@ -2211,13 +2248,14 @@ def rebalance(state, status, reason, target=None, band=None, calm_move=False, ex
         check, _ = read_status()
         if check is not None and check.get('positionMint') == mint:
             notify('close_retry', reason=err)
-            out, err = chain('close', mint, '--execute')
+            out, err = chain('close', mint, '--execute', record=False)
     if err:
         # A close that reports failure may have landed. This exact false
         # negative left a position closed and the capital idle in production.
         time.sleep(15)
         check, _ = read_status()
         if check is not None and not check.get('positionMint'):
+            health.record_success(venue)              # the close landed: the venue works
             db.event('close_recovered', err)
             notify('close_recovered',
                    detail='close reported an error but the position is gone; '
@@ -2228,12 +2266,15 @@ def rebalance(state, status, reason, target=None, band=None, calm_move=False, ex
             # intent would replay after an unrelated failure, on a pool the
             # bot may have left by then.
             state.pop('pending_reopen', None)
+            record_health(venue, None, err)            # one close, one failure, whatever the attempts
             state['failures'] += 1; save(state)
             db.event('close_failed', err)
             notify('close_failed', reason=err, failures=state['failures'])
             if state['failures'] >= config.MAX_CONSECUTIVE_FAILURES:
                 halt(f'{state["failures"]} consecutive failures')
             return
+    else:
+        record_health(venue, out, None)
     # What the close returns: the mark taken just before it, tokens plus the
     # rent the chain refunds. The best figure available without a second
     # read, and what per-pool P&L is measured against.

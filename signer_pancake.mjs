@@ -56,6 +56,7 @@ import { consistentFees } from './fee_snapshot.mjs';
 import { endpoints, overEndpoints, isEntry, AfterSignError } from './rpc_policy.mjs';
 import path from 'node:path';
 import { createRequire } from 'node:module';
+import { waitTurn } from './jupiter_gate.mjs';
 
 // The project is "type": "commonjs"; the SDK's CommonJS build resolves cleanly.
 const require = createRequire(import.meta.url);
@@ -211,6 +212,7 @@ async function symbols(pool, mintA, mintB) {
 
 async function tokenUsd(mint) {
   try {
+    await waitTurn();                                 // one Jupiter slot (jupiter_gate.mjs)
     const j = await (await fetch(`${JUPITER}/price/v3?ids=${mint}`, { headers: HEADERS })).json();
     const p = Number(j?.[mint]?.usdPrice);
     return p > 0 ? p : null;

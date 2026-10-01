@@ -38,6 +38,7 @@ import path from 'node:path';
 import { createRequire } from 'node:module';
 
 import { endpoints, overEndpoints, JupiterError, AfterSignError } from './rpc_policy.mjs';
+import { waitTurn } from './jupiter_gate.mjs';
 const require = createRequire(import.meta.url);
 const { Connection, Keypair, PublicKey, VersionedTransaction } = require('@solana/web3.js');
 const spl = require('@solana/spl-token');
@@ -93,9 +94,11 @@ async function withRpc(fn) {
 // Jupiter's free API rate-limits by IP, and the scanner shares it. A 429 on a
 // read or on building a transaction is retried with backoff: neither sends
 // anything. Sending is never retried (see SentError).
-const JUP_RETRY_MS = [1500, 4000, 9000];
+// A 429 needs the per-minute window to pass (2026-10-01): longer than the old 1.5/4/9 s.
+const JUP_RETRY_MS = [2000, 6000, 15000];
 async function jfetch(url, init) {
   for (let attempt = 0; ; attempt++) {
+    await waitTurn();                                   // one Jupiter slot (jupiter_gate.mjs)
     const r = await fetch(url, init);
     const text = await r.text();
     let j; try { j = JSON.parse(text); } catch { j = null; }

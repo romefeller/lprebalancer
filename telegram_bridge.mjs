@@ -219,6 +219,8 @@ function render(row) {
       return `CALM OVER · widening to the ladder band\nsigma ${n(row.calm?.sigma_5m_pct, 4)}% vs leave-above ${n(row.calm?.exit_cut_pct, 4)}%\n` + book(row);
     case 'SWAP':
       return `SWAP · $${n(row.usd, 2)} to 50/50 before the open · impact ${n(row.price_impact_pct, 3)}\n${row.signature ?? ''}`;
+    case 'swap_fallback':
+      return `swap fallback · ${row.reason}`;
     case 'swap_skipped':
       return `swap skipped · ${row.reason}`;
     case 'swap_failed':
