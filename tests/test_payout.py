@@ -119,6 +119,10 @@ class Capital(unittest.TestCase):
 
 
 class SwapRetry(unittest.TestCase):
+    def setUp(self):
+        # Jupiter's own retries; the Orca fallback has its own tests (test_jupiter_gate.OrcaFallback)
+        p = mock.patch.object(rebalancer, 'SWAP_FALLBACK', ''); p.start(); self.addCleanup(p.stop)
+
     BAL = {'price': 100.0, 'quoteUsd': 1.0, 'balanceA': 0.06, 'balanceB': 300.0, 'nativeSide': 'A'}
     REC = {'token_a': {'address': SOL, 'decimals': 9, 'symbol': 'SOL'},
            'token_b': {'address': USDC, 'decimals': 6, 'symbol': 'USDC'}}

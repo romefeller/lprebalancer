@@ -22,6 +22,8 @@ def bal(a=1.0, b=100.0, price=120.0, q=1.0, native='A'):
 class Patched(unittest.TestCase):
     def setUp(self):
         # balance_wallet records the swap outcome itself: no breaker state may leak between tests
+        # These tests pin Jupiter's own retries; the Orca fallback has its own (test_jupiter_gate.OrcaFallback).
+        p = mock.patch.object(rebalancer, 'SWAP_FALLBACK', ''); p.start(); self.addCleanup(p.stop)
         with rebalancer.db.cursor(commit=True) as cur:
             cur.execute('truncate health')
         for name, v in (('DEPLOY_ALL', True), ('MAX_USD', 300.0), ('SIDE_CAP_FRACTION', 0.55),
