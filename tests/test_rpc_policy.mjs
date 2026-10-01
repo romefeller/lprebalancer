@@ -98,3 +98,10 @@ test('isEntry: true only for the script node was started with', () => {
     assert.equal(isEntry(import.meta.url, ['node', path.join(dir, 'link.mjs')]), true);
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
+
+test('a dollar figure or a decimal is not an HTTP 5xx', () => {
+  for (const m of ['refused: swap of $500.12 is over the cap', 'value 502.5 USDC', 'amount 1,503 SOL', 'impact 0.504%'])
+    assert.equal(errorKind(new Error(m)), 'fatal', m);
+  for (const m of ['500 Internal Server Error', 'HTTP 502', 'status 503', '504 Gateway Timeout', 'error 501'])
+    assert.equal(errorKind(new Error(m)), 'rotate', m);
+});
