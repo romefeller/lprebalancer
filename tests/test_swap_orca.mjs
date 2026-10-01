@@ -220,14 +220,15 @@ const pk = (s) => new PublicKey(s);
 const ro = (s) => ({ pubkey: pk(s), isSigner: false, isWritable: false });
 const rw = (s) => ({ pubkey: pk(s), isSigner: false, isWritable: true });
 
-function swapIx({ amount = 1000n, threshold = 900n, aToB = true, isInput = true, authority = owner, ownerB = usdcAta, pool = POOL } = {}) {
+function swapIx({ amount = 1000n, threshold = 900n, aToB = true, isInput = true, authority = owner, ownerB = usdcAta, pool = POOL,
+  vA = vaultA, vB = vaultB, sqrtPriceLimit = 0n } = {}) {
   const data = Buffer.from(getSwapV2InstructionDataEncoder().encode({
-    amount, otherAmountThreshold: threshold, sqrtPriceLimit: 0n, amountSpecifiedIsInput: isInput, aToB,
+    amount, otherAmountThreshold: threshold, sqrtPriceLimit, amountSpecifiedIsInput: isInput, aToB,
     remainingAccountsInfo: { __option: 'None' },
   }));
   const keys = [ro(TOKEN.toBase58()), ro(TOKEN.toBase58()), ro('MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr'),
     { pubkey: pk(authority), isSigner: true, isWritable: false }, rw(pool), ro(SOL), ro(USDC),
-    rw(wsolAta), rw(vaultA), rw(ownerB), rw(vaultB),
+    rw(wsolAta), rw(vA), rw(ownerB), rw(vB),
     rw(Keypair.generate().publicKey.toBase58()), rw(Keypair.generate().publicKey.toBase58()),
     rw(Keypair.generate().publicKey.toBase58()), rw(Keypair.generate().publicKey.toBase58())];
   return new TransactionInstruction({ programId: pk(M.WHIRLPOOL_PROGRAM), keys, data });
@@ -418,4 +419,132 @@ test('noop report has the caller\'s shape', () => {
   const r = M.noopReport('within 2%', { owner, A: {}, B: {} });
   assert.equal(r.noop, true); assert.equal(r.reason, 'within 2%'); assert.equal(r.owner, owner);
   assert.equal(r.sent, undefined); assert.equal(r.signature, undefined);
+});
+
+// --- exact boundaries and partial conditions (mutation gaps) -------------------------
+test('toRaw: empty, a lone dot and two dots are refused; a number is read with its decimals', () => {
+  for (const bad of ['', '.', '1.2.3', 'abc']) assert.throws(() => M.toRaw(bad, 9), /bad amount/, JSON.stringify(bad));
+  assert.equal(M.toRaw('.5', 9), 500_000_000n);
+  assert.equal(M.toRaw('5.', 9), 5_000_000_000n);
+  assert.equal(M.toRaw(1e-7, 9), 100n);            // String(1e-7) is '1e-7': only toFixed reads it
+  assert.equal(M.toRaw(2, 6), 2_000_000n);
+  assert.equal(M.toRaw('2', 6), 2_000_000n);
+});
+
+test('parseHints keeps the given symbol and falls back to the mint prefix', () => {
+  const h = M.parseHints(JSON.stringify({ [SOL]: { usd: 120, decimals: 9, symbol: 'SOL' }, [USDC]: { usd: 1, decimals: 6 } }));
+  assert.equal(h.get(SOL).symbol, 'SOL');
+  assert.equal(h.get(USDC).symbol, USDC.slice(0, 6));
+});
+
+test('planSwap: a positive amount gives its raw units', () => {
+  const s = M.planSwap({ sellSide: 'A', sellUsd: 120 }, infoSol, infoUsdc, 2, 0);
+  assert.equal(s.rawIn, 1_000_000_000n); assert.equal(s.amount, 1);
+  assert.equal(M.planSwap({ sellSide: 'B', sellUsd: 50 }, infoSol, infoUsdc, 0, 30).rawIn, 30_000_000n);
+});
+
+test('priceImpact: no input after the fee is the full impact; a bad fee is not zero', () => {
+  const sqrt = BigInt(Math.floor(Math.sqrt(120 * 1e6 / 1e9) * 2 ** 64));
+  assert.equal(M.priceImpact({ tokenIn: 1000n, tradeFee: 1000n, tokenEstOut: 5n }, sqrt, true), 1);
+  assert.equal(M.priceImpact({ tokenIn: 0n, tradeFee: 0n, tokenEstOut: 0n }, sqrt, true), 1);
+  assert.throws(() => M.priceImpact({ tokenIn: 1000n, tradeFee: NaN, tokenEstOut: 5n }, sqrt, true));
+  const noFee = { tokenIn: 1_000_000_000n, tokenEstOut: 120_000_000n };
+  assert.ok(M.priceImpact(noFee, sqrt, true) < 1e-6);   // a missing fee is zero
+});
+
+test('valueLossOk: exactly at the cap passes; a zero input passes with zero output', () => {
+  assert.equal(M.valueLossOk(100, 98, 0.02), true);
+  assert.equal(M.valueLossOk(100, 50, 0.5), true);
+  assert.equal(M.valueLossOk(100, 49.999999, 0.5), false);
+  assert.equal(M.valueLossOk(0, 0, 0.02), true);
+});
+
+test('checkImpact: exactly at the limit passes', () => {
+  assert.equal(M.MAX_IMPACT, 0.01);
+  assert.ok(M.checkImpact(0.01));
+  assert.ok(M.checkImpact(0.005, 0.005));
+  assert.throws(() => M.checkImpact(0.0050001, 0.005), /exceeds/);
+});
+
+test('chooseCuPrice: zero fees are not counted; a non-list is not the default', () => {
+  const recent = [0, 0, 0, 0, { prioritizationFee: 100_000 }].map(f => (typeof f === 'number' ? { prioritizationFee: f } : f));
+  assert.equal(M.chooseCuPrice(recent, 100_000), 100_000);
+  assert.equal(M.chooseCuPrice([0, 0, 0, 0, 100_000], 100_000), 100_000);
+  assert.equal(M.chooseCuPrice(null, 100_000), 50_000);
+  assert.throws(() => M.chooseCuPrice(0, 100_000));
+});
+
+test('withWsolClose: only a token-program CloseAccount of the wSOL ATA counts', () => {
+  const other = Keypair.generate().publicKey;
+  const cases = [
+    ['wrap, no close', [...budget(), ...wrap(), swapIx()]],                                   // SyncNative: token program, key 0 = wSOL ATA
+    ['close of another account', [...budget(), swapIx(), spl.createCloseAccountInstruction(other, payer.publicKey, payer.publicKey)]],
+    ['data 9 from another program', [...budget(), swapIx(), new TransactionInstruction({ programId: pk(M.WHIRLPOOL_PROGRAM), keys: [rw(wsolAta)], data: Buffer.from([9]) })]],
+    ['token ix 9 at a non-token program', [...budget(), swapIx(), new TransactionInstruction({ programId: other, keys: [rw(wsolAta)], data: Buffer.from([9]) })]],
+  ];
+  for (const [name, ixs] of cases) {
+    const out = M.withWsolClose(ixs, wsolAta, owner);
+    assert.equal(out.length, ixs.length + 1, name);
+    const last = out[out.length - 1];
+    assert.equal(last.programId.toBase58(), TOKEN.toBase58(), name);
+    assert.equal(last.data[0], 9, name);
+    assert.equal(last.keys[0].pubkey.toBase58(), wsolAta, name);
+  }
+  const done = [...budget(), ...wrap(), swapIx(), close()];
+  assert.equal(M.withWsolClose(done, wsolAta, owner), done);
+});
+
+test('decodeSwapV2: exactly 42 bytes decode; the sqrt price high word is shifted 64 bits', () => {
+  const full = Buffer.from(swapIx({ sqrtPriceLimit: (3n << 64n) + 5n }).data);
+  assert.equal(full.length > 42, true);
+  const d42 = M.decodeSwapV2(full.subarray(0, 42));
+  assert.ok(d42);
+  assert.equal(d42.sqrtPriceLimit, (3n << 64n) + 5n);
+  assert.equal(d42.amount, 1000n);
+  assert.equal(M.decodeSwapV2(full.subarray(0, 41)), null);
+  const max = (1n << 128n) - 1n;
+  assert.equal(M.decodeSwapV2(swapIx({ sqrtPriceLimit: max }).data).sqrtPriceLimit, max);
+});
+
+test('verifyTxShape: ATA create forms pass, others and a foreign funder are refused', () => {
+  const base = spl.createAssociatedTokenAccountIdempotentInstruction(payer.publicKey, pk(wsolAta), payer.publicKey, pk(SOL));
+  const ata = (data, keys = base.keys) => new TransactionInstruction({ programId: base.programId, keys, data: Buffer.from(data) });
+  for (const data of [[], [0], [1]]) assert.ok(M.verifyTxShape(txOf([...budget(), ata(data), swapIx()]), want), JSON.stringify(data));
+  for (const data of [[2], [3], [2, 0]]) {
+    assert.throws(() => M.verifyTxShape(txOf([...budget(), ata(data), swapIx()]), want), /ATA instruction/, JSON.stringify(data));
+  }
+  const other = Keypair.generate().publicKey;
+  const funder = [ro(other.toBase58()), ...base.keys.slice(1)];            // not a signer: one signature only
+  const tx = txOf([...budget(), ata([1], funder), swapIx()]);
+  assert.equal(tx.message.header.numRequiredSignatures, 1);
+  assert.throws(() => M.verifyTxShape(tx, want), /ATA instruction/);
+  const ownerKeys = [...base.keys.slice(0, 2), ro(other.toBase58()), ...base.keys.slice(3)];
+  assert.throws(() => M.verifyTxShape(txOf([...budget(), ata([1], ownerKeys), swapIx()]), want), /ATA instruction/);
+});
+
+test('verifyTxShape: vault A or vault B alone differing is refused', () => {
+  const other = Keypair.generate().publicKey.toBase58();
+  assert.throws(() => M.verifyTxShape(txOf([...budget(), swapIx({ vA: other })]), want), /vaults/);
+  assert.throws(() => M.verifyTxShape(txOf([...budget(), swapIx({ vB: other })]), want), /vaults/);
+});
+
+test('verifyTxShape: lookup tables refused; an empty or missing list passes', () => {
+  const tx = txOf([...budget(), swapIx()]);
+  assert.deepEqual(tx.message.addressTableLookups, []);
+  assert.ok(M.verifyTxShape(tx, want));
+  const missing = { message: { ...tx.message, staticAccountKeys: tx.message.staticAccountKeys, header: tx.message.header, compiledInstructions: tx.message.compiledInstructions, addressTableLookups: undefined } };
+  assert.ok(M.verifyTxShape(missing, want));
+  const withTable = { message: { ...missing.message, addressTableLookups: [{ accountKey: pk(owner), writableIndexes: [0], readonlyIndexes: [] }] } };
+  assert.throws(() => M.verifyTxShape(withTable, want), /lookup tables/);
+});
+
+test('sendOnce: the error text carries the message verbatim, even an empty one', async () => {
+  const noSig = { sendRawTransaction: async () => { throw new Error(''); }, confirmTransaction: async () => assert.fail('no confirm') };
+  await assert.rejects(M.sendOnce(noSig, signed(), 'bh', 100, REPORT, () => {}), e => e instanceof AfterSignError && e.message === 'send failed after signing (not retried): ');
+  const out = [];
+  const unconf = { sendRawTransaction: async () => 'SIG4', confirmTransaction: async () => { throw new Error(''); } };
+  await assert.rejects(M.sendOnce(unconf, signed(), 'bh', 100, REPORT, s => out.push(s)), M.SentError);
+  assert.equal(JSON.parse(out[0]).error, '');
+  const str = { sendRawTransaction: async () => { throw 'boom'; }, confirmTransaction: async () => assert.fail('no confirm') };
+  await assert.rejects(M.sendOnce(str, signed(), 'bh', 100, REPORT, () => {}), e => e.message === 'send failed after signing (not retried): boom');
 });

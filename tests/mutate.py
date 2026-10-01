@@ -289,6 +289,15 @@ EQUIVALENT = {
         'error-message text only: ?? and || differ only for an error with an empty message',
     ('rpc_orca', 'sendOnce', '\\?\\? -> ||', 'throw new AfterSignError(`send failed after signing (not retried): ${e?.message ?? e}`);', 0):
         'error-message text only: ?? and || differ only for an error with an empty message',
+    # swap_orca.mjs
+    ('swap_orca', 'planSwap', '(?<![<>=!-])>(?![>=]) -> >=', 'const raw = amount > 0 ? BigInt(Math.floor(amount * 10 ** sellInfo.decimals)) : 0n;', 0):
+        'only amount 0 (or -0) differs, and BigInt(Math.floor(0)) is 0n, the same as the else branch',
+    ('swap_orca', 'chooseCuPrice', '\\?\\? -> ||', 'const fees = (recent ?? []).map(r => Number(r.prioritizationFee ?? r)).filter(f => f > 0).sort((a, b) => a - b);', 1):
+        'a falsy fee (0, empty string, false, NaN) is dropped by f > 0, and the fallback Number(plain object) is NaN, dropped too',
+    ('swap_orca', 'verifyTxShape', '\\?\\? -> ||', "if ((msg.addressTableLookups ?? []).length) throw new Refused('transaction uses lookup tables; refusing');", 0):
+        'for every falsy non-nullish value v, v.length is 0 or undefined: falsy, like [].length',
+    ('swap_orca', 'verifyTxShape', '\\?\\? -> ||', "if (pid === undefined || !ALLOWED_PROGRAMS.has(pid)) throw new Refused(`transaction calls ${pid ?? 'a program from a lookup table'}; refusing`);", 0):
+        'error text only, and pid is undefined or a base58 key from toBase58, never the empty string',
 }
 
 # Old-style entries (target, function, 'description @L<line>'). They did not

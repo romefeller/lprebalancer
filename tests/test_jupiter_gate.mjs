@@ -55,3 +55,35 @@ test('an unwritable place never throws', async () => {
   assert.equal(await reserve({ gate: '/nonexistent-dir/x.gate', now: c.now, sleep: c.sleep }), c.t);
   await waitTurn({ gate: '/nonexistent-dir/x.gate', now: c.now, sleep: c.sleep });
 });
+
+// A lock file with an exact mtime (whole seconds, so mtimeMs is exact).
+function lockAt(gate, ms) {
+  fs.writeFileSync(`${gate}.lock`, '');
+  fs.utimesSync(`${gate}.lock`, ms / 1000, ms / 1000);
+  assert.equal(fs.statSync(`${gate}.lock`).mtimeMs, ms);
+}
+
+test('a lock exactly STALE_MS old is still live; one ms older is stale', async () => {
+  const T = 1_700_000_000_000;
+  let gate = tmp(), c = clock(T + STALE_MS);
+  lockAt(gate, T);
+  assert.equal(await reserve({ gate, spacingMs: 1100, now: c.now, sleep: c.sleep }), c.t);
+  assert.deepEqual(c.slept, [20]);              // waited once, then the lock was stale
+  gate = tmp(); c = clock(T + STALE_MS + 1);
+  lockAt(gate, T);
+  await reserve({ gate, spacingMs: 1100, now: c.now, sleep: c.sleep });
+  assert.deepEqual(c.slept, []);
+});
+
+test('the wait gives up only after more than WAIT_MS', async () => {
+  const T = 1_700_000_000_000, gate = tmp();
+  const c = { t: T, slept: [] };
+  c.now = () => c.t;
+  c.sleep = async ms => { c.slept.push(ms); c.t += WAIT_MS / 2; };
+  lockAt(gate, T);
+  // waits at 0, WAIT_MS/2 and exactly WAIT_MS; then the lock is stale and is taken
+  const t = await reserve({ gate, spacingMs: 1100, now: c.now, sleep: c.sleep });
+  assert.equal(c.slept.length, 3);
+  assert.equal(t, c.t);
+  assert.equal(Number(fs.readFileSync(gate, 'utf8')) * 1000, c.t);   // the slot was reserved: the lock was taken
+});
