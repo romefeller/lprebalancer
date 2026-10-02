@@ -130,7 +130,9 @@ def drop_in(swing_row):
     """The systemd drop-in that pins a swing profile's pools. Pure."""
     return (f'# /etc/systemd/system/lp-bot@{swing_row["profile"]}.service.d/swing.conf\n'
             f'# The pools a pair-changing move of {swing_row["profile"]} may name (config.SWING_POOLS).\n'
-            f'[Service]\nEnvironment=LPBOT_SWING_POOLS={swing_row["open_pool"]} {swing_row["closed_pool"]}\n')
+            # a comma, not a space: systemd splits an unquoted Environment= value at
+            # whitespace, and the second pool would be dropped (2026-10-02)
+            f'[Service]\nEnvironment=LPBOT_SWING_POOLS={swing_row["open_pool"]},{swing_row["closed_pool"]}\n')
 
 
 def parse(argv):

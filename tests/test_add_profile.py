@@ -165,7 +165,9 @@ class Build(unittest.TestCase):
     def test_the_drop_in_pins_both_pools(self):
         text = ap.drop_in(ap.build(args(), TEMPLATE, REC, None, 0)[2])
         self.assertIn('lp-bot@ap-swing.service.d', text)
-        self.assertIn(f'Environment=LPBOT_SWING_POOLS={DJT_POOL} {SOL_POOL}', text)
+        self.assertIn(f'Environment=LPBOT_SWING_POOLS={DJT_POOL},{SOL_POOL}\n', text)
+        env = [ln for ln in text.splitlines() if ln.startswith('Environment=')]
+        self.assertEqual(len(env), 1); self.assertNotIn(' ', env[0])               # one systemd word
 
     def test_venues_are_the_signers_without_the_routes(self):
         self.assertIn('orca', ap.VENUES); self.assertIn('aerodrome-slipstream', ap.VENUES)
@@ -228,7 +230,9 @@ class Main(unittest.TestCase):
             ap.main(self.argv())
         text = out.getvalue()
         self.assertIn(f"wallet: ('ap-lp2', 'solana', '{ADDR}'", text)
-        self.assertIn(f'Environment=LPBOT_SWING_POOLS={DJT_POOL} {SOL_POOL}', text)
+        self.assertIn(f'Environment=LPBOT_SWING_POOLS={DJT_POOL},{SOL_POOL}\n', text)
+        env = [ln for ln in text.splitlines() if ln.startswith('Environment=')]
+        self.assertEqual(len(env), 1); self.assertNotIn(' ', env[0])               # one systemd word
         out = io.StringIO()
         argv = self.argv()
         for flag in ('--swing-open', '--swing-closed', '--address'):
