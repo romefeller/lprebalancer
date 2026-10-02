@@ -100,8 +100,9 @@ TARGETS = {
     'book_lines': ('book_format.mjs', ['shareAgrees', 'lpLine', 'emojiFor', 'healthLine'], NODE_TESTS('test_book_format.mjs')),
     'surrogate': ('calm.py', ['pair_tokens', 'clean_bars', 'fit_surrogate', 'binance_5m', 'surrogate_5m',
                               'missing_slots', 'tape_fresh'], PY_TESTS('test_tape_surrogate')),
-    'surrogate_overlay': ('rebalancer.py', ['with_surrogate', 'tape_source', 'track_tape_source', 'regime_view'],
-                          PY_TESTS('test_tape_surrogate', 'test_regime', 'test_hardening.StaleTape')),
+    'surrogate_overlay': ('rebalancer.py', ['with_surrogate', '_with_surrogate', 'tape_source', 'track_tape_source', 'regime_view'],
+                          PY_TESTS('test_tape_surrogate', 'test_regime', 'test_hardening.StaleTape',
+                                   'test_quiet_pool')),
     'daily_report': ('rebalancer.py', ['daily_report'], PY_TESTS('test_daily.Report')),
     'priority_fee': ('swap_jupiter.mjs', ['swapRequestBody', 'priorityFeeLamports', 'verifyPriorityFee'],
                      NODE_TESTS('test_priority_fee.mjs', 'test_security.mjs')),
@@ -157,6 +158,10 @@ TARGETS = {
     'shared_books_db': ('db.py', ['since_start', 'native_price'],
                         PY_TESTS('test_shared_wallet_books', 'test_since_start_scope', 'test_audit.SinceStart',
                                  'test_audit_more.SinceStartEdges', 'test_db', 'test_scaled')),
+    'quiet_pool': ('calm.py', ['quiet_tail_ok', 'quiet_fill'], PY_TESTS('test_quiet_pool')),
+    'quiet_overlay': ('rebalancer.py', ['quiet_ref_ts', 'with_surrogate', '_surrogate_ts', '_merge_all', 'tape_source'],
+                      PY_TESTS('test_quiet_pool', 'test_tape_surrogate')),
+    'quiet_db': ('db.py', ['tape_ref_pool'], PY_TESTS('test_quiet_pool')),
     'tape_prune': ('db.py', ['config_pools', 'tape_prune_other_pools'], PY_TESTS('test_tape_prune')),
     'stock_loop': ('rebalancer.py', ['ui_price', 'open_headroom', 'native_reserve', 'deployable_usd', 'deposit_caps',
                                      'position_usd', 'note_scale', 'native_bars', 'mint_refusal', 'note_mint_refusal',
@@ -196,6 +201,38 @@ SQL_TARGETS = {'band_profile', 'daily', 'capital_db', 'book_scope', 'book_sums',
 # The report prints each survivor's key: copy it here with a reason. The line
 # number is not in the key, so an edit above a mutant keeps its entry valid.
 EQUIVALENT = {
+    # the surrogate overlay's body, renamed _with_surrogate on 2026-10-02 (reasons as before)
+    ('surrogate_overlay', '_with_surrogate', 'skip if body', 'if bars is None:', 0):
+        'None[0] raises inside the try, which returns bars (None) either way',
+    ('surrogate_overlay', '_with_surrogate', 'swap Gt->GtE', 'if any(g not in have for g in gaps) and now - t > SURROGATE_REFRESH:', 0):
+        'only an ask exactly SURROGATE_REFRESH later differs: a float clock never lands there',
+    ('surrogate_overlay', '_with_surrogate', 'const 0->1', 't, name, s = _SURR.get(pool, (0, None, None))', 0):
+        'an empty cache asked at t = 0 or t = 1: both are decades past the refresh',
+    ('surrogate_overlay', '_with_surrogate', 'flip bool', "print(f'surrogate tape failed: {type(e).__name__}: {e}', flush=True)", 0):
+        'print flush only',
+    ('surrogate_overlay', '_with_surrogate', 'swap GtE->Gt', 's = tuple(c[s[0] >= now - SURROGATE_LOOKBACK_S - 3600] for c in s)   # the last day only', 0):
+        'the trim is an hour beyond the fill window: a bar at its edge is never used',
+    ('surrogate_overlay', '_with_surrogate', 'const 3600->3601', 's = tuple(c[s[0] >= now - SURROGATE_LOOKBACK_S - 3600] for c in s)   # the last day only', 0):
+        'the trim is an hour beyond the fill window: a bar at its edge is never used',
+    ('surrogate_overlay', 'regime_view', 'const 0->1', 'hold_left = 0', 0):
+        'hold_left is read only in STALE mode on a fresh tape, where it is assigned first',
+    ('surrogate_overlay', 'regime_view', 'drop operand 0', 'if v and not fresh:', 0):
+        'calm.regime_view returns None only for no bars, which returned before',
+    # the quiet-pool fill (2026-10-02)
+    ('quiet_pool', 'quiet_fill', 'swap LtE->Lt', 'while j + 1 < len(t_arr) and t_arr[j + 1] <= s:', 0):
+        'a bar at slot s is in `have` and skipped; j steps onto it at the next slot, before it is used',
+    ('quiet_pool', 'quiet_fill', 'swap Gt->GtE', 'quiet = (s < now - history_s or s in ref or (ref_live and s > ref_newest))', 0):
+        's == ref_newest is in ref, so the slot is quiet either way',
+    ('quiet_pool', 'quiet_fill', 'swap Lt->LtE', 'if quiet and (s < last_bar or tail_fill):', 0):
+        's == last_bar is in `have` and was skipped before this line',
+    ('quiet_overlay', 'quiet_ref_ts', 'drop operand 0', "if c and c.get('for') == pool and now - c['at'] <= QUIET_REF_REFRESH:", 0):
+        "an empty cache has no 'for', and None is never a pool: the test fails either way",
+    ('quiet_overlay', 'with_surrogate', 'skip if body', 'if out is None:', 0):
+        'out[4] of None raises inside the try, whose except returns out (None) either way',
+    ('quiet_overlay', 'with_surrogate', 'skip if body', 'if q is None:', 0):
+        '_merge_all over None raises inside the try, whose except returns out either way',
+    ('quiet_overlay', 'with_surrogate', 'flip bool', "print(f'quiet fill failed: {type(e).__name__}: {e}', flush=True)", 0):
+        'print flush only',
     ('shared_books_loop', 'settle_pending', 'const 0.0->1.0', 'def settle_pending(wait_s=0.0):', 0):
         'as claims_loop: tries_in(1.0) == tries_in(0.0) == 1 (1.0 // CLAIM_POLL_S is 0): one read either way',
     ('shared_books_loop', 'settle_pending', 'const 0->1', "if at is None and time.time() - float(p.get('sent_at') or 0) <= PENDING_EXPIRE_S:", 0):
@@ -547,6 +584,7 @@ def share_equivalents(table, function, source, targets):
 
 share_equivalents(EQUIVALENT, 'balance_wallet', 'one_outcome', ('deploy_all', 'deploy_idle'))
 share_equivalents(EQUIVALENT, 'deploy_idle', 'resilience', ('deploy_idle', 'idle_capital'))
+share_equivalents(EQUIVALENT, 'with_surrogate', 'quiet_overlay', ('surrogate_overlay',))
 
 # Old-style entries (target, function, 'description @L<line>'). They did not
 # resolve to exactly one mutant when the keys were migrated on 2026-09-30:
@@ -584,30 +622,6 @@ EQUIVALENT_OLD = {
     # 2 mutants on this line share the old key; it hides all of them. Candidates now: 5 lines
     ('surrogate', 'fit_surrogate', 'const 0->1 @L135'):
         'bars[0] and bars[1] have the same length (the <= 0 -> <= 1 twin is killed by the sub-1 price test)',
-    # no older copy has this line. Candidates now: 5 lines
-    ('surrogate_overlay', 'with_surrogate', 'skip if body @L831'):
-        'None[0] raises inside the try, which returns bars (None) either way',
-    # no older copy has this line. Candidates now: 11 lines
-    ('surrogate_overlay', 'with_surrogate', 'const 0->1 @L841'):
-        'an empty cache asked at t = 0 or t = 1: both are decades past the refresh',
-    # no older copy has this line. Candidates now: 'if any(g not in have for g in gaps) and now - t > SURROGATE_'
-    ('surrogate_overlay', 'with_surrogate', 'swap Gt->GtE @L843'):
-        'only an ask exactly SURROGATE_REFRESH later differs: a float clock never lands there',
-    # no older copy has this line. Candidates now: 's = tuple(c[s[0] >= now - SURROGATE_LOOKBACK_S - 3600] for c'
-    ('surrogate_overlay', 'with_surrogate', 'swap GtE->Gt @L847'):
-        'the trim is an hour beyond the fill window: a bar at its edge is never used',
-    # no older copy has this line. Candidates now: 's = tuple(c[s[0] >= now - SURROGATE_LOOKBACK_S - 3600] for c'
-    ('surrogate_overlay', 'with_surrogate', 'const 3600->3601 @L847'):
-        'the trim is an hour beyond the fill window: a bar at its edge is never used',
-    # no older copy has this line. Candidates now: "print(f'surrogate tape failed: {type(e).__name__}: {e}', flu"
-    ('surrogate_overlay', 'with_surrogate', 'flip bool @L861'):
-        'print flush only',
-    # no older copy has this line. Candidates now: 5 lines
-    ('surrogate_overlay', 'regime_view', 'const 0->1 @L1053'):
-        'hold_left is read only in STALE mode on a fresh tape, where it is assigned first',
-    # no older copy has this line. Candidates now: "pool = status.get('whirlpool') or config.POOL" / 'if v and not fresh:' / 'src = dict(LAST_SURROGATE.get(pool) or tape_source(bars[0], '
-    ('surrogate_overlay', 'regime_view', 'drop operand 0 @L1066'):
-        'calm.regime_view returns None only for no bars, which returned before',
     # older copies give different lines. Candidates now: 19 lines
     ('distribute', 'distribute', 'drop operand 1 @L578'):
         'split never yields a part of amount 0, so the zero-amount guard of the price cannot bind',

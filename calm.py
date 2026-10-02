@@ -216,6 +216,83 @@ def missing_slots(ts, now, lookback_s, grace_s=GECKO_GRACE_S):
     return [s for s in range(first, last + 1, BAR_SECONDS) if s not in have]
 
 
+# A quiet pool: GeckoTerminal emits no bar for a five-minute slot without a
+# swap. MU/USDC had no bar in 54% of its slots (2026-10-02, 30 days; on chain,
+# 92.5% of those slots had no successful transaction and the rest no swap),
+# so tape_fresh called it STALE 91.6% of the time, and its gapped tape
+# overstated P(touch 2h) 2-3x. A slot the pool did not trade in is a flat bar
+# at the last close; quiet_fill decides which missing slots were quiet.
+QUIET_HISTORY_S = 86400           # older missing slots are quiet: GeckoTerminal backfills an outage
+QUIET_TOL = 0.003                 # the live price this close to the last close: no swap moved it
+QUIET_MISMATCH_S = BAR_SECONDS + GECKO_GRACE_S   # a moved price waits this long for its bar
+QUIET_MAX_S = 6 * 3600            # a quiet tail longer than this is an outage (longest seen: 4.75 h)
+# The canary's newest bar may be this old: its own freshness limit, plus its
+# process's refresh (rebalancer.TAPE5_REFRESH, 240 s) and the reader's cache
+# (rebalancer.QUIET_REF_REFRESH, 60 s), so a lagging copy is not an outage.
+QUIET_REF_FRESH_S = FRESH_MAX_AGE_S + 240 + 60
+
+
+def quiet_tail_ok(price, last_close, mismatch_since, now, tol=QUIET_TOL, wait_s=QUIET_MISMATCH_S):
+    """(ok, mismatch_since): whether the slots after the pool's last bar may
+    be filled flat. They may while the live price is within `tol` of the last
+    close (no swap moved the pool), and for `wait_s` after it first differs
+    (the swap's bar is still forming or within GeckoTerminal's grace). A
+    price that stays moved with no bar is a swap GeckoTerminal missed. An
+    unknown price is not ok. Pure."""
+    if price is None or last_close is None or not last_close > 0 or not price > 0:
+        return False, None
+    if abs(price / last_close - 1) <= tol:
+        return True, None
+    since = now if mismatch_since is None else mismatch_since
+    return now - since <= wait_s, since
+
+
+def quiet_fill(ts, close, now, ref_ts, tail_ok, window_s, history_s=QUIET_HISTORY_S,
+               max_tail_s=QUIET_MAX_S, grace_s=GECKO_GRACE_S, fresh_s=QUIET_REF_FRESH_S):
+    """Flat bars (ts, o, h, l, c, volume 0) at the previous close for the
+    closed five-minute slots of the last `window_s` the tape lacks, where the
+    pool was quiet; None when there are none. Pure.
+
+    A missing slot is quiet when it is older than `history_s` (GeckoTerminal
+    backfills an outage, so an old gap is a slot without a swap), or when
+    the reference pool `ref_ts` (one that trades every slot: GeckoTerminal's
+    canary) has a bar in it, or the slot is newer than the reference's newest
+    bar and that bar is at most `fresh_s` old (the reference not refreshed
+    yet). Without a reference only old slots are quiet: a pool cannot vouch
+    for itself, so a gap in the reference pool's own recent tape stays a gap.
+    Slots after the tape's last bar (the tail) also need `tail_ok`
+    (quiet_tail_ok) and a tail at most `max_tail_s` long. A lone bar after a
+    gap the canary did not cover (2026-09-29) still leaves the gap."""
+    if ts is None or not len(ts):
+        return None
+    last = int((now - BAR_SECONDS - grace_s) // BAR_SECONDS) * BAR_SECONDS
+    t_arr = np.asarray(ts, dtype=float).astype(np.int64)
+    c_arr = np.asarray(close, dtype=float)
+    first = max(int(t_arr[0]), last - int(window_s) // BAR_SECONDS * BAR_SECONDS)   # bars sit on the grid
+    ref = set(int(t) for t in (ref_ts if ref_ts is not None else []))
+    ref_newest = max(ref) if ref else None
+    ref_live = ref_newest is not None and now - ref_newest <= fresh_s
+    last_bar = int(t_arr[-1])
+    tail_fill = tail_ok and last - last_bar <= max_tail_s
+    have = set(int(t) for t in t_arr)
+    out_t, out_c = [], []
+    j = 0                                                          # the newest bar before slot s
+    for s in range(first, last + BAR_SECONDS, BAR_SECONDS):
+        while j + 1 < len(t_arr) and t_arr[j + 1] <= s:
+            j += 1
+        if s in have:
+            continue
+        quiet = (s < now - history_s or s in ref or (ref_live and s > ref_newest))
+        if quiet and (s < last_bar or tail_fill):
+            out_t.append(s)
+            out_c.append(float(c_arr[j]))
+    if not out_t:
+        return None
+    t = np.array(out_t, dtype=float)
+    c = np.array(out_c, dtype=float)
+    return t, c.copy(), c.copy(), c.copy(), c, np.zeros(len(t))
+
+
 def tape_fresh(ts, now, bars=FRESH_BARS, max_age_s=FRESH_MAX_AGE_S):
     """Whether the tape describes the market now: its last `bars` bars are
     consecutive (no gap) and the newest is at most `max_age_s` old. A lone

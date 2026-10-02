@@ -409,6 +409,17 @@ def tape_store(pool, bars, keep_from_ts):
     return len(rows)
 
 
+def tape_ref_pool(native_mint, stable_mints, not_pool):
+    """The pool of a profile whose token A is `native_mint` and token B a
+    stablecoin, other than `not_pool`: one that trades every five minutes,
+    GeckoTerminal's canary for the quiet-pool fill. None when there is none."""
+    with cursor() as cur:
+        cur.execute("""select pool from config where mints[1] = %s and mints[2] = any(%s) and pool <> %s
+                        order by enabled desc, name limit 1""", (native_mint, list(stable_mints), not_pool))
+        r = cur.fetchone()
+    return r['pool'] if r else None
+
+
 def config_pools():
     """Every profile's pool, enabled or not: tapes that some process reads."""
     with cursor() as cur:

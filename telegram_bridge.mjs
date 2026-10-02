@@ -210,12 +210,14 @@ export function render(row) {
   }
 
   // Where the five-minute bars came from: GeckoTerminal, a surrogate
-  // (Binance klines) in the slots GeckoTerminal lacks, or none (stale).
+  // (Binance klines) in the slots GeckoTerminal lacks, or none (stale). A
+  // quiet pool's slots without a swap are flat bars (quiet_1h of the hour).
   function dataSource(d) {
     if (!d || !d.source) return 'Gecko';
     if (d.source === 'none') return 'none · GeckoTerminal and the surrogate both lack recent bars';
-    if (d.source === 'Gecko') return 'Gecko' + (d.filled_24h ? ` · ${d.surrogate} still fills ${d.filled_24h} older bars of 24h` : '');
-    return `${d.source} · ${d.surrogate} fills ${d.filled_1h}/${d.bars_1h} bars of the last hour (Gecko lacks them)`;
+    const quiet = d.quiet_1h ? ` · quiet pool: ${d.quiet_1h} flat bars of the last hour (no swap)` : '';
+    if (d.source === 'Gecko') return 'Gecko' + (d.filled_24h ? ` · ${d.surrogate} still fills ${d.filled_24h} older bars of 24h` : '') + quiet;
+    return `${d.source} · ${d.surrogate} fills ${d.filled_1h}/${d.bars_1h} bars of the last hour (Gecko lacks them)` + quiet;
   }
 
   function calmBlock(c) {

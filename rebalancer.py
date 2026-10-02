@@ -1549,7 +1549,7 @@ SURROGATE_LOOKBACK_S = 86400    # a slot GeckoTerminal lacks in the last day is 
 SURROGATE_REFRESH = TAPE5_REFRESH
 
 
-def tape_source(ts, filled_ts, now, name, fresh):
+def tape_source(ts, filled_ts, now, name, fresh, quiet_ts=()):
     """Where the last hour's bars came from, for the book: 'Gecko', 'Binance'
     (every bar of the hour), 'Gecko+Binance', or 'none' when the tape is
     stale. Pure."""
@@ -1557,11 +1557,82 @@ def tape_source(ts, filled_ts, now, name, fresh):
     filled = set(int(t) for t in filled_ts)
     n_s = sum(1 for t in hour if int(t) in filled)
     label = ('none' if not fresh else 'Gecko' if n_s == 0 else name if n_s == len(hour) else f'Gecko+{name}')
+    quiet = set(int(t) for t in quiet_ts)
     return {'source': label, 'surrogate': name if filled else None,
-            'filled_1h': n_s, 'bars_1h': len(hour), 'filled_24h': len(filled)}
+            'filled_1h': n_s, 'bars_1h': len(hour), 'filled_24h': len(filled),
+            'quiet_1h': sum(1 for t in hour if int(t) in quiet)}
+
+
+_QUIET_MISMATCH = {}              # pool -> when the live price first left the last close
+_QUIET_REF = {}                   # {'at', 'pool', 'ts'}: the canary pool's bar times, cached
+QUIET_REF_REFRESH = 60
+
+
+def quiet_ref_ts(pool, now):
+    """Bar times of the last QUIET_HISTORY_S of the reference pool, the one
+    pool that trades every slot (a native/stable profile's: sol-usdc's), from
+    the database; None for that pool itself, when there is none, or on a
+    failed read. Cached QUIET_REF_REFRESH seconds."""
+    c = _QUIET_REF
+    if c and c.get('for') == pool and now - c['at'] <= QUIET_REF_REFRESH:
+        return c['ts']
+    try:
+        ref = db.tape_ref_pool(config.CAPS['native_mint'], sorted(engine.STABLE_MINTS), pool)
+        got = db.tape_load(ref, now - calm.QUIET_HISTORY_S) if ref else None
+        ts = got[0] if got is not None else None
+    except Exception:
+        ts = None
+    _QUIET_REF.clear(); _QUIET_REF.update({'at': now, 'for': pool, 'ts': ts})
+    return ts
 
 
 def with_surrogate(pool, bars, price, pair=None):
+    """_with_surrogate's tape with the slots a quiet pool did not trade in
+    filled flat at the last close (calm.quiet_fill): GeckoTerminal emits no
+    bar for a slot without a swap, and a thin pool (MU/USDC) read as STALE
+    91.6% of the time. Flat bars are never stored; a GeckoTerminal or a
+    surrogate bar always wins over one. The last hour's flat bars are
+    `quiet_1h` in LAST_SURROGATE. Any failure returns the tape unfilled."""
+    out = _with_surrogate(pool, bars, price, pair)
+    if out is None:
+        return None
+    now = time.time()
+    try:
+        ok, _QUIET_MISMATCH[pool] = calm.quiet_tail_ok(price, float(out[4][-1]), _QUIET_MISMATCH.get(pool), now)
+        window_s = tape_bars() * calm.BAR_SECONDS
+        q = calm.quiet_fill(out[0], out[4], now, quiet_ref_ts(pool, now), ok, window_s)
+        if q is None:
+            return out
+        merged = _merge_all([q, out])                         # the later array wins: the real bars
+        keep = merged[0] >= merged[0][-1] - window_s
+        merged = tuple(c[keep] for c in merged)
+        src = LAST_SURROGATE.get(pool) or {}
+        LAST_SURROGATE[pool] = dict(tape_source(merged[0], _surrogate_ts(src, out, bars), now, src.get('surrogate'),
+                                                calm.tape_fresh(merged[0], now), q[0]))
+        return merged
+    except Exception as e:
+        print(f'quiet fill failed: {type(e).__name__}: {e}', flush=True)
+        return out
+
+
+def _surrogate_ts(src, out, bars):
+    """The bar times of `out` that are not GeckoTerminal's `bars`: the surrogate's."""
+    gecko = set(int(t) for t in bars[0])
+    return [t for t in out[0] if int(t) not in gecko]
+
+
+def _merge_all(bars_list):
+    """_merge without its trim to tape_bars(): union by timestamp, the later
+    array winning, oldest first."""
+    rows = {}
+    for b in bars_list:
+        for row in zip(*b):
+            rows[int(row[0])] = row
+    cols = list(zip(*[rows[k] for k in sorted(rows)]))
+    return tuple(np.array(c, dtype=float) for c in cols)
+
+
+def _with_surrogate(pool, bars, price, pair=None):
     """The GeckoTerminal tape with the slots it lacks in the last day filled
     from a surrogate (calm.surrogate_5m). GeckoTerminal wins wherever it has a
     bar; surrogate bars are never stored, so a late GeckoTerminal bar replaces
