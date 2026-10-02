@@ -1,0 +1,17 @@
+[Unit]
+Description=Swing controller: the market-session pool switch of every rebalancer.swing row (swing.py)
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/agent-fin/lp_bot
+Environment=LPBOT_DSN=dbname=rebalancer
+ExecStart=/usr/bin/python3 -u /home/ubuntu/agent-fin/lp_bot/swing.py
+Restart=on-failure
+RestartSec=60
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

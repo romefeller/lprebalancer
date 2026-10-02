@@ -164,6 +164,21 @@ TARGETS = {
     'quiet_db': ('db.py', ['tape_ref_pool'], PY_TESTS('test_quiet_pool')),
     # 2026-10-02: a payout's priority fee, and the send loop that proves an expired one never landed
     'payout_send': ('payout.mjs', ['payoutCuPrice', 'sendUntilLanded'], NODE_TESTS('test_payout_send.mjs')),
+    # 2026-10-02: the swing (a profile on one pool in its market's session, another outside it)
+    'swing_calendar': ('swing.py', ['session', 'is_open', 'wanted', 'decide', 'audit'],
+                       PY_TESTS('test_swing.Calendar', 'test_swing.Decide', 'test_swing.Audit', 'test_swing.TickMore')),
+    'swing_tick': ('swing.py', ['tick', 'tick_all', 'main', 'feed', 'rows', 'left_behind'],
+                   PY_TESTS('test_swing.Tick', 'test_swing.TickMore')),
+    'swing_loop': ('rebalancer.py', ['left_behind', 'repoint_with_leftovers', 'sell_left_behind', 'operator_target'],
+                   PY_TESTS('test_swing', 'test_multi_loop', 'test_rebalancer')),
+    # rebalance() as a whole: 2026-10-02, 38 survivors in lines older than the swing (harvest, close retries,
+    # the 24 h windows, failure counts) are open work, not equivalents.
+    'swing_rebalance': ('rebalancer.py', ['rebalance'],
+                        PY_TESTS('test_swing', 'test_multi_loop', 'test_calm', 'test_regime', 'test_band_profile',
+                                 'test_fee_integrity', 'test_hardening', 'test_rewards', 'test_jupiter_gate',
+                                 'test_rebalancer', 'test_money_paths', 'test_move_books', 'test_edges_0930')),
+    'add_profile': ('ops/add_profile.py', ['pool_spec', 'signer_env', 'build', 'drop_in', 'main'],
+                    PY_TESTS('test_add_profile')),
     'tape_prune': ('db.py', ['config_pools', 'tape_prune_other_pools'], PY_TESTS('test_tape_prune')),
     'stock_loop': ('rebalancer.py', ['ui_price', 'open_headroom', 'native_reserve', 'deployable_usd', 'deposit_caps',
                                      'position_usd', 'note_scale', 'native_bars', 'mint_refusal', 'note_mint_refusal',
@@ -203,6 +218,33 @@ SQL_TARGETS = {'band_profile', 'daily', 'capital_db', 'book_scope', 'book_sums',
 # The report prints each survivor's key: copy it here with a reason. The line
 # number is not in the key, so an edit above a mutant keeps its entry valid.
 EQUIVALENT = {
+    # the swing (2026-10-02)
+    ('swing_calendar', 'decide', 'const 0->1', "now_utc.timestamp() - float(last_request.get('at') or 0) < REQUEST_AGAIN_S:", 0):
+        'a request without a time is read at epoch 0 or 1: decades past REQUEST_AGAIN_S either way',
+    ('swing_tick', 'feed', 'flip bool', 'print(json.dumps(row), flush=True)', 0):
+        'print flush only',
+    ('swing_tick', 'tick', 'negate if', 'if dry:', 0):
+        "the body is one print: the dry run's report line, nothing else",
+    ('swing_tick', 'tick', 'skip if body', 'if dry:', 0):
+        "the body is one print: the dry run's report line, nothing else",
+    ('swing_tick', 'tick', 'flip bool', 'print(f\'{profile}: hold {want[0]} {want[1]} (position on {row["position_pool"]})\', flush=True)', 0):
+        'print flush only',
+    ('swing_tick', 'tick', 'flip bool', 'print(f\'{profile}: would write {migrate}: {want[0]} {want[1]} (holds {row["held_pool"]})\', flush=True)', 0):
+        'print flush only',
+    ('swing_tick', 'tick_all', 'flip bool', 'print(f\'swing {row["profile"]}: tick failed: {type(e).__name__}: {e}\', flush=True)', 0):
+        'print flush only',
+    ('swing_tick', 'main', 'flip bool', 'print(f\'swing: serving {", ".join(r["profile"] for r in rows()) or "no row"}\', flush=True)', 0):
+        'print flush only',
+    ('swing_tick', 'main', 'flip bool', "print(f'swing tick failed: {type(e).__name__}: {e}', flush=True)", 0):
+        'print flush only',
+    ('swing_loop', 'operator_target', 'drop operand 0', 'if held is None or want != held:', 0):
+        'held None makes want != held true anyway: want is a set, never None',
+    ('swing_loop', 'sell_left_behind', 'const 0->1', "if not force and time.time() - float(state.get('left_behind_at') or 0) < LEFT_BEHIND_RETRY_S:", 0):
+        'a leftover never tried is read at epoch 0 or 1: decades past LEFT_BEHIND_RETRY_S either way',
+    ('add_profile', 'build', 'drop operand 1', "if not (WALLET_ID.match(args.wallet) and ADDRESS[chain](args.address or '')", 1):
+        'ADDRESS[chain] checks isinstance(str) first: None and empty are both refused',
+    ('swing_rebalance', 'rebalance', 'flip bool', 'sell_left_behind(state, force=True)', 0):
+        'repoint_with_leftovers pops left_behind_at just before: the retry wait is already over',
     ('payout_send', 'payoutCuPrice', '\\?\\? -> ||', 'const fees = (recent ?? []).map(r => Number(r?.prioritizationFee ?? r)).filter(f => f > 0).sort((a, b) => a - b);', 0):
         'recent is an array, null or undefined (a failed read gives []): || and ?? agree on all three',
     ('payout_send', 'payoutCuPrice', '\\?\\? -> ||', 'const fees = (recent ?? []).map(r => Number(r?.prioritizationFee ?? r)).filter(f => f > 0).sort((a, b) => a - b);', 1):

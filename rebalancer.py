@@ -2731,28 +2731,114 @@ def operator_target(spec):
         return None
     try:
         rec = dexes.pool(dex, pool)
-    except Exception as e:
+    except Exception:
         rec = None
-        err = str(e)[:120]
     if not rec:
         notify('migrate_refused', reason=f'{dex} does not know a pool at {pool}')
         return None
-    if dex == 'orca' and rec.get('adaptive_fee'):
+    if dex == 'orca' and rec.get('adaptive_fee') and config.SIGNER_ENV.get('LPBOT_ORCA_ADAPTIVE') != '1':
         notify('migrate_refused', reason='adaptive-fee Orca pool: the signer cannot open it')
         return None
-    if not config.ALLOW_SWAP:
-        try:
-            held = {m for m, _ in pool_tokens()}
-        except Exception:
-            held = None
-        want = {(rec.get('token_a') or {}).get('address'), (rec.get('token_b') or {}).get('address')}
-        if held is None or want != held:
-            # Security review, 2026-09-26: with rebalance_swap on, the reopen
-            # would swap half the capital into whatever the target names.
+    try:
+        held = {m for m, _ in pool_tokens()}
+    except Exception:
+        held = None
+    want = {wallets.norm((rec.get('token_a') or {}).get('address')), wallets.norm((rec.get('token_b') or {}).get('address'))}
+    if held is None or want != held:
+        # Security review, 2026-09-26: with rebalance_swap on, the reopen
+        # would swap half the capital into whatever the target names. A pair
+        # change needs allow_swap AND a pool the service environment pins
+        # (LPBOT_SWING_POOLS: the swing's two pools).
+        if not config.ALLOW_SWAP:
             notify('migrate_refused', reason='target holds a different pair and allow_swap is off')
+            return None
+        if pool not in config.SWING_POOLS:
+            notify('migrate_refused', reason='target holds a different pair and is not in LPBOT_SWING_POOLS')
             return None
     return {'dex': dex, 'address': pool, 'pair': rec['pair'], 'token_a': rec['token_a'],
             'token_b': rec['token_b'], 'net_day_pct': None, 'band_pct': None}
+
+
+LEFT_BEHIND_RETRY_S = 600        # an unsold leftover is tried again this often
+LEFT_BEHIND_GAS_MARGIN = 0.002   # native kept above reserve + rent: float dust must not fail gas_for_open
+
+
+def left_behind(old_tokens, new_tokens):
+    """The old pool's mints the new pool does not hold: what a pair-changing
+    move leaves in the wallet. Pure."""
+    new = {wallets.norm(m) for m, _ in new_tokens}
+    return [wallets.norm(m) for m, _ in old_tokens if wallets.norm(m) not in new]
+
+
+def repoint_with_leftovers(state, target):
+    """repoint(), and remember in state['left_behind'] the old pool's tokens
+    the new pool does not hold (sell_left_behind sells them)."""
+    old = pool_tokens()
+    repoint(target)
+    rest = left_behind(old, pool_tokens())
+    state['left_behind'] = sorted(set(state.get('left_behind') or []) | set(rest))
+    state.pop('left_behind_at', None)
+    save(state)
+    notify('REPOINTED', dex=config.DEX, pool=config.POOL, pair=config.PAIR_LABEL, left_behind=rest)
+
+
+def sell_left_behind(state, force=False):
+    """Sell what a pair-changing move left behind (state['left_behind'])
+    into the held pool's stablecoin side, so the reopen and deploy_idle put
+    it in the band (the swing: SOL when it moves to DJT/USDC, DJT when it
+    moves back). The native token is sold above the gas reserve only (the
+    swap keeps it). Only a profile alone on its wallet sells: on a shared
+    wallet the balance may be another profile's. Tried at most every
+    LEFT_BEHIND_RETRY_S unless `force`; a mint leaves the list once sold or
+    worth under SWEEP_MIN_USD. True when something was sold."""
+    todo = list(state.get('left_behind') or [])
+    if not todo:
+        return False
+    if not force and time.time() - float(state.get('left_behind_at') or 0) < LEFT_BEHIND_RETRY_S:
+        return False
+    state['left_behind_at'] = time.time(); save(state)
+    mints, why, shared = claim_mints()
+    if shared or mints is None:
+        notify('left_behind_held', reason=why or 'the wallet is shared: a leftover may be another profile\'s',
+               mints=todo)
+        return False
+    (ma, _), (mb, _) = pool_tokens()
+    quote = mb if is_stable_mint(mb) or not is_stable_mint(ma) else ma
+    native = wallets.norm(config.CAPS['native_mint'])
+    got = wallets.read_balances(config.CHAIN, config.RPC, config.WALLET_ADDRESS, todo, native)
+    if got is None:
+        notify('left_behind_unsold', reason='balance unreadable', mints=todo)
+        return False
+    try:
+        px = dexes.jupiter_prices(todo)
+    except Exception:
+        px = {}
+    sold = False
+    for m in todo:
+        have = float(got[0].get(m) or 0.0)
+        # The native token keeps the gas reserve (the swap keeps that itself)
+        # and the new venue's open rent (held out of the cap): selling down
+        # to the reserve left an Orca open 0.009 SOL short (test, 2026-10-02).
+        cap = max(have - open_headroom(config.DEX) - LEFT_BEHIND_GAS_MARGIN, 0.0) if m == native else have
+        amt = max(cap - config.GAS_RESERVE_SOL, 0.0) if m == native else cap
+        usd = amt * float(px.get(m) or 0.0)
+        if amt <= 0 or (px.get(m) and usd < SWEEP_MIN_USD):
+            state['left_behind'] = [x for x in state['left_behind'] if x != m]; save(state)
+            continue
+        out, err = chain('rebalance', m, quote, '0', '1000000', '--execute', dex='jupiter',
+                         extra_env={'LPBOT_SLEEVE': json.dumps({m: cap, quote: 0.0})})
+        if out and out.get('signature') and not err:
+            state['left_behind'] = [x for x in state['left_behind'] if x != m]; save(state)
+            db.event('LEFT_BEHIND_SOLD', f"{m} {amt:.9f} -> {quote} {out['signature']}")
+            notify('LEFT_BEHIND_SOLD', mint=m, amount=round(amt, 9), usd=round(usd, 4) if usd else None,
+                   into=quote, signature=out['signature'])
+            sold = True
+        elif out and out.get('noop'):
+            state['left_behind'] = [x for x in state['left_behind'] if x != m]; save(state)
+        else:
+            notify('left_behind_unsold', reason=err or 'no signature', mint=m, amount=round(amt, 9),
+                   retry_in_s=LEFT_BEHIND_RETRY_S)
+    return sold
 
 
 def repoint(target):
@@ -2991,7 +3077,8 @@ def reopen(state, reason, band=None, recovering=False):
     return True
 
 
-def rebalance(state, status, reason, target=None, band=None, calm_move=False, exit_move=False, close_only=False):
+def rebalance(state, status, reason, target=None, band=None, calm_move=False, exit_move=False, close_only=False,
+              operator=False):
     """Harvest, close, and reopen: on the same pool, or on `target` (a board
     row) after repointing the profile. The close runs on the DEX the position
     is on, whatever the profile says by then.
@@ -3000,13 +3087,16 @@ def rebalance(state, status, reason, target=None, band=None, calm_move=False, ex
     its own gap (`calm_min_gap_seconds`) and its own budget, counted apart
     from the normal ones; both together sit under one hard ceiling,
     max_rebalances_per_day + calm_max_moves_per_day, past which the bot
-    halts as before."""
+    halts as before. An operator move (the MIGRATE file: the swing's switch
+    at the US open and close) never waits for the gap either; the ceilings
+    hold."""
     now = time.time()
     recent = [t for t in state['rebalance_times'] if now - t < 86400]
     calm_recent = [t for t in state.get('calm_times', []) if now - t < 86400]
     last_any = max([state['last_rebalance']] + calm_recent)
     # An exit under regime mode never waits: out of range earns nothing.
-    gap = 0 if (exit_move and config.REGIME_ENABLED) else (config.CALM_MIN_GAP if calm_move else config.MIN_REBALANCE_GAP)
+    gap = 0 if (exit_move and config.REGIME_ENABLED) or operator else \
+        (config.CALM_MIN_GAP if calm_move else config.MIN_REBALANCE_GAP)
     last = last_any if calm_move else state['last_rebalance']
     if now - last < gap:
         notify('rebalance_deferred', seconds_remaining=int(gap - (now - last)),
@@ -3135,8 +3225,8 @@ def rebalance(state, status, reason, target=None, band=None, calm_move=False, ex
     if close_only:
         return                      # a disabled profile's last move: nothing reopens
     if target:
-        repoint(target)
-        notify('REPOINTED', dex=config.DEX, pool=config.POOL, pair=config.PAIR_LABEL)
+        repoint_with_leftovers(state, target)
+        sell_left_behind(state, force=True)
     reopen(state, reason, band=band)
 
 
@@ -3254,6 +3344,18 @@ def main():
         portfolio_report(state)
 
         if not status.get('positionMint'):
+            if MIGRATE.exists():
+                # An operator move with nothing held (the swing's switch when
+                # an open failed): no close, the pool changes and what the
+                # old pair left behind is sold before the dormant test.
+                spec = MIGRATE.read_text().split()
+                MIGRATE.unlink()
+                target = operator_target(spec)
+                if target:
+                    db.event('MIGRATE_REQUESTED', f'operator: {target["dex"]} {target["address"]} (no position)')
+                    repoint_with_leftovers(state, target)
+                    sell_left_behind(state, force=True)
+            sell_left_behind(state)
             b0 = wallet(config.POOL)
             if dormant(state, b0):
                 time.sleep(max(DORMANT_POLL_S, config.POLL_SECONDS))
@@ -3356,6 +3458,8 @@ def main():
         # Calm mode: narrow when the market goes cold, re-centre the tight
         # band before it is touched, widen when the calm ends.
         sweep_foreign(state, wbal)
+        if sell_left_behind(state):
+            wbal = wallet(status['whirlpool'])                  # the sale's quote token is idle now
         if deploy_idle(state, status, wbal, rv, price):
             time.sleep(config.CALM_POLL_SECONDS)
             continue
@@ -3438,7 +3542,7 @@ def main():
                 k = (regime_choice_now(target['address'], price, target.get('pair')) or rv['choice'] if rv
                      else calm_reopen_band(cv, state)) if tight else None
                 rebalance(state, status, 'operator requested move', target=target,
-                          band=k, calm_move=bool(k))
+                          band=k, calm_move=bool(k), operator=True)
                 time.sleep(config.POLL_SECONDS)
                 continue
 

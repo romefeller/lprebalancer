@@ -162,6 +162,11 @@ POOL_PINNED = _env('LPBOT_POOL_PINNED', lambda s: s.lower() in ('1', 'true', 'ye
 # it may, migration is limited to pools of the pair the wallet already holds.
 ALLOW_SWAP = _env('LPBOT_ALLOW_SWAP', lambda s: s.lower() in ('1', 'true', 'yes'),
                   bool(_CFG.get('allow_swap')))
+# The pools a pair-changing operator move may name (the swing, swing.py):
+# from the service environment, never the database, so a database write
+# alone cannot swap the capital into another token (security review,
+# 2026-09-26). Empty: no pair-changing operator move.
+SWING_POOLS = tuple(p for p in os.environ.get('LPBOT_SWING_POOLS', '').replace(',', ' ').split() if p)
 
 # A voluntary move (reband, pool move) waits for a quiet hour, one whose
 # volume multiplier is at or under 1.0, when ten minutes out of market costs
