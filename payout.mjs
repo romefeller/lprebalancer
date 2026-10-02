@@ -23,6 +23,9 @@ import { createRequire } from 'node:module';
 
 import { readMints, rawToUi, uiToRaw, writeRefusal } from './token2022.mjs';
 import { isEntry } from './rpc_policy.mjs';
+import { NeverLanded, sendUntilLanded, REBROADCAST_MS } from './tx_send.mjs';
+
+export { NeverLanded, sendUntilLanded, REBROADCAST_MS };
 
 const require = createRequire(import.meta.url);
 const { ComputeBudgetProgram, Connection, Keypair, PublicKey, SystemProgram, Transaction } = require('@solana/web3.js');
@@ -46,7 +49,6 @@ const NATIVE_MINT = 'So11111111111111111111111111111111111111112';
 export const CU_LIMIT = 60_000;
 export const CU_PRICE_FLOOR = 10_000;                       // micro-lamports per unit: 600 lamports in all
 export const PRIORITY_MAX_LAMPORTS = Number(process.env.LPBOT_PAYOUT_PRIORITY_MAX_LAMPORTS ?? 50_000);
-export const REBROADCAST_MS = 2_000;
 
 // Compute-unit price (micro-lamports) from recent prioritization fees. Pure.
 export function payoutCuPrice(recent, units = CU_LIMIT, cap = PRIORITY_MAX_LAMPORTS) {
@@ -54,39 +56,6 @@ export function payoutCuPrice(recent, units = CU_LIMIT, cap = PRIORITY_MAX_LAMPO
   const p75 = fees.length ? fees[Math.min(fees.length - 1, Math.floor(fees.length * 0.75))] : 0;
   const ceiling = Math.floor(Number(cap) * 1_000_000 / Math.max(1, units));
   return Math.max(0, Math.min(Math.max(p75, CU_PRICE_FLOOR), ceiling));
-}
-
-// Thrown when a sent payout's blockhash expired and the chain does not know
-// its signature: it never landed and never can, so the loop owes it again.
-export class NeverLanded extends Error {}
-
-// Send `raw` and send it again every REBROADCAST_MS until it is confirmed or
-// its blockhash expires. Returns the signature once confirmed. An error of
-// the first send is thrown as it is: nothing proves the payout went out.
-// Every later error carries `afterSend` and the signature, so the caller
-// reports it as partial and never pays it twice; NeverLanded (the block
-// height passed lastValidBlockHeight and a history search does not find the
-// signature) is the one later error that proves nothing went out.
-export async function sendUntilLanded(connection, raw, lastValidBlockHeight, { sleep = ms => new Promise(r => setTimeout(r, ms)) } = {}) {
-  const signature = await connection.sendRawTransaction(raw, { skipPreflight: false, maxRetries: 0 });
-  try {
-    for (;;) {
-      const st = (await connection.getSignatureStatuses([signature])).value?.[0];
-      if (st?.err) throw new Error(`transaction failed on chain: ${JSON.stringify(st.err)}`);
-      if (st && (st.confirmationStatus === 'confirmed' || st.confirmationStatus === 'finalized')) return signature;
-      if ((await connection.getBlockHeight('confirmed')) > lastValidBlockHeight) {
-        const last = (await connection.getSignatureStatuses([signature], { searchTransactionHistory: true })).value?.[0];
-        if (last?.err) throw new Error(`transaction failed on chain: ${JSON.stringify(last.err)}`);
-        if (last) return signature;                         // it landed after all
-        throw new NeverLanded(`payout expired: block height passed and the chain has no record of ${signature}; `
-                              + 'nothing was sent, it is owed again');
-      }
-      await sleep(REBROADCAST_MS);
-      try { await connection.sendRawTransaction(raw, { skipPreflight: true, maxRetries: 0 }); } catch { /* the next status read decides */ }
-    }
-  } catch (e) {
-    throw Object.assign(e, { afterSend: true, signature });
-  }
 }
 
 function guard() {
@@ -188,7 +157,8 @@ async function send(mintArg, amountArg, toArg, execute) {
   try {
     signature = await sendUntilLanded(connection, tx.serialize(), bh.lastValidBlockHeight);
   } catch (e) {
-    if (e instanceof NeverLanded || !e.afterSend) throw e;     // nothing went out: the loop owes it
+    if (e instanceof NeverLanded) throw new NeverLanded(`payout ${e.message}, it is owed again`);
+    if (!e.afterSend) throw e;                                   // the first send failed: nothing proves it went
     console.log(JSON.stringify({ ...report, signature: e.signature, sent: true, partial: true,
                                  error: String(e.message ?? e) }, null, 1));
     process.exitCode = 1;

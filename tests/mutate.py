@@ -163,7 +163,9 @@ TARGETS = {
                       PY_TESTS('test_quiet_pool', 'test_tape_surrogate')),
     'quiet_db': ('db.py', ['tape_ref_pool'], PY_TESTS('test_quiet_pool')),
     # 2026-10-02: a payout's priority fee, and the send loop that proves an expired one never landed
-    'payout_send': ('payout.mjs', ['payoutCuPrice', 'sendUntilLanded'], NODE_TESTS('test_payout_send.mjs')),
+    'payout_send': ('payout.mjs', ['payoutCuPrice'], NODE_TESTS('test_payout_send.mjs')),
+    'tx_send': ('tx_send.mjs', ['sendUntilLanded'], NODE_TESTS('test_payout_send.mjs')),
+    'swap_send': ('swap_jupiter.mjs', ['sendSwap'], NODE_TESTS('test_payout_send.mjs')),
     # 2026-10-02: the swing (a profile on one pool in its market's session, another outside it)
     'swing_calendar': ('swing.py', ['session', 'is_open', 'wanted', 'decide', 'audit'],
                        PY_TESTS('test_swing.Calendar', 'test_swing.Decide', 'test_swing.Audit', 'test_swing.TickMore')),
@@ -180,6 +182,7 @@ TARGETS = {
     'add_profile': ('ops/add_profile.py', ['pool_spec', 'signer_env', 'build', 'drop_in', 'main'],
                     PY_TESTS('test_add_profile')),
     'tape_prune': ('db.py', ['config_pools', 'tape_prune_other_pools'], PY_TESTS('test_tape_prune')),
+    'gas_open': ('rebalancer.py', ['gas_for_open'], PY_TESTS('test_swing.Loop', 'test_swing.GasForOpen', 'test_multi_loop', 'test_scaled')),
     'stock_loop': ('rebalancer.py', ['ui_price', 'open_headroom', 'native_reserve', 'deployable_usd', 'deposit_caps',
                                      'position_usd', 'note_scale', 'native_bars', 'mint_refusal', 'note_mint_refusal',
                                      'gas_for_open'],
@@ -218,6 +221,12 @@ SQL_TARGETS = {'band_profile', 'daily', 'capital_db', 'book_scope', 'book_sums',
 # The report prints each survivor's key: copy it here with a reason. The line
 # number is not in the key, so an edit above a mutant keeps its entry valid.
 EQUIVALENT = {
+    ('swap_send', 'sendSwap', '\\?\\? -> ||', 'if (!e.afterSend) throw new AfterSignError(`send failed after signing (not retried): ${e.message ?? e}`);', 0):
+        'they differ only for an empty message, in the text of the error; the error kind is the same',
+    ('swap_send', 'sendSwap', '\\?\\? -> ||', '(deps.log ?? console.log)(JSON.stringify({ ...report, signature: e.signature, sent: true, partial: true,', 0):
+        'deps.log is a function or absent: || and ?? pick the same',
+    ('swap_send', 'sendSwap', '\\?\\? -> ||', 'error: String(e.message ?? e) }, null, 1));', 0):
+        'they differ only for an empty message, in the report text; partial, sent and the signature are the same',
     # the swing (2026-10-02)
     ('swing_calendar', 'decide', 'const 0->1', "now_utc.timestamp() - float(last_request.get('at') or 0) < REQUEST_AGAIN_S:", 0):
         'a request without a time is read at epoch 0 or 1: decades past REQUEST_AGAIN_S either way',
@@ -853,7 +862,15 @@ def js_functions(src, names):
         m = re.search(rf'^(export )?(async )?function {name}\b', src, re.M)
         if not m:
             raise SystemExit(f'function {name} not found')
-        i = src.index('{', m.end())
+        # The body starts after the parameter list: a default parameter
+        # ({ sleep } = {}) holds braces too, and taking its '{' as the body's
+        # left the function unmutated (2026-10-02: sendUntilLanded had none).
+        p, depth = src.index('(', m.end()), 0
+        for k in range(p, len(src)):
+            depth += {'(': 1, ')': -1}.get(src[k], 0)
+            if depth == 0:
+                break
+        i = src.index('{', k)
         depth = 0
         for j in range(i, len(src)):
             if src[j] == '{':

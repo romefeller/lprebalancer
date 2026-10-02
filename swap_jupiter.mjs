@@ -38,6 +38,7 @@
 // (ratio, default 0.01 = 1%); Jupiter's own simulation of the built transaction
 // failed; the quote is older than QUOTE_MAX_AGE_MS at send time; the wallet
 // holds less than the amount to sell.
+import { NeverLanded, sendUntilLanded } from './tx_send.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
 import { assertNotHalted } from './halt_guard.mjs';
@@ -412,6 +413,25 @@ async function sellable(connection, owner, info) {
 
 // --- the swap itself -------------------------------------------------------------
 // Quote, build, (dry run: report) or (execute: sign, send once, confirm).
+// Send a signed swap (tx_send.sendUntilLanded) and turn its failures into
+// what the loop needs. Expired and unknown to the chain: a plain error with no
+// signature, nothing was swapped, so the wallet's next write goes at once
+// (2026-10-02: two expired swaps each held the wallet five minutes, the band
+// empty). The first send failing: AfterSignError, never retried (it may have
+// reached a node). Anything after the send: a partial report on stdout with
+// the signature, then SentError. Returns the confirmed signature.
+export async function sendSwap(connection, raw, lastValidBlockHeight, report, deps = {}) {
+  try {
+    return await sendUntilLanded(connection, raw, lastValidBlockHeight, deps);
+  } catch (e) {
+    if (e instanceof NeverLanded) throw new Error(`swap ${e.message}`);
+    if (!e.afterSend) throw new AfterSignError(`send failed after signing (not retried): ${e.message ?? e}`);
+    (deps.log ?? console.log)(JSON.stringify({ ...report, signature: e.signature, sent: true, partial: true,
+                                               error: String(e.message ?? e) }, null, 1));
+    throw new SentError(`sent ${e.signature} but could not confirm it: ${e.message}`);
+  }
+}
+
 async function performSwap({ connection, payer }, inInfo, outInfo, amountHuman, execute, extra = {}) {
   for (const info of [inInfo, outInfo]) await chainFacts(connection, info);
   const rawIn = amountToRaw(amountHuman, inInfo);
@@ -464,20 +484,9 @@ async function performSwap({ connection, payer }, inInfo, outInfo, amountHuman, 
   if (age > QUOTE_MAX_AGE_MS) throw new Error(`quote is ${(age / 1000).toFixed(1)}s old at send time (limit ${QUOTE_MAX_AGE_MS / 1000}s); refusing`);
   tx.sign([payer]);
   const raw = tx.serialize();
-  // From here on the transaction may be on chain: no retry, report what we know.
-  let signature = null;
-  try {
-    signature = await connection.sendRawTransaction(raw, { skipPreflight: false, maxRetries: 2 });
-    const conf = await connection.confirmTransaction({
-      signature, blockhash: tx.message.recentBlockhash, lastValidBlockHeight: built.lastValidBlockHeight,
-    }, 'confirmed');
-    if (conf.value?.err) throw new Error(`transaction ${signature} failed on chain: ${JSON.stringify(conf.value.err)}`);
-  } catch (e) {
-    // No signature: the send may still have reached a node. Never retried.
-    if (!signature) throw new AfterSignError(`send failed after signing (not retried): ${e.message ?? e}`);
-    console.log(JSON.stringify({ ...report, signature, sent: true, partial: true, error: String(e.message ?? e) }, null, 1));
-    throw new SentError(`sent ${signature} but could not confirm it: ${e.message}`);
-  }
+  // From here on the transaction may be on chain. The same signed bytes are
+  // re-sent until they confirm (tx_send.mjs); never a new transaction.
+  const signature = await sendSwap(connection, raw, built.lastValidBlockHeight, report);
   const out = { ...report, signature, sent: true };
   console.log(JSON.stringify(out, null, 1));
   return out;

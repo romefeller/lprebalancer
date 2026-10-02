@@ -2898,11 +2898,18 @@ def note_mint_refusal(command, err, out):
 def gas_for_open(state, bal):
     """Whether native gas covers this open's rent and the reserve after it.
     A profile whose pool holds no native token pays its open's rent (a new
-    DLMM bin array: 0.0435 SOL) from SOL another profile owns; short of the
-    reserve it holds, says so once, and counts no failure."""
-    if bal.get('nativeSide') is not None:
-        return True                                      # deposit_caps keeps the reserve out of the deposit
-    have, need = float(bal.get('sol') or 0.0), native_reserve(bal)
+    DLMM bin array: 0.0435 SOL) from SOL another profile owns. A pool that
+    holds it needs only the reserve in the wallet first: deposit_caps keeps
+    reserve and rent out of the deposit, and the swap to 50/50 buys the rest;
+    but every signer refuses every write below the reserve (2026-10-02: a
+    SOL/USDC profile funded with USDC alone failed its open on each poll,
+    toward a halt). Short of it, it holds, says so once, counts no failure."""
+    side = bal.get('nativeSide')
+    have = bal.get('sol')
+    if have is None and side is not None:
+        have = bal.get('balanceA' if side == 'A' else 'balanceB')      # the pool's native token is the gas
+    have = float(have or 0.0)
+    need = config.GAS_RESERVE_SOL if side is not None else native_reserve(bal)
     if have >= need:
         state.pop('gas_short_told', None)
         return True

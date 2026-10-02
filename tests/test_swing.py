@@ -385,6 +385,21 @@ class Loop(tml.Fixture):
         self.assertIn(DJT_POOL, self.chain.positions)                      # the ceiling halts it
         self.assertIn('BREAKER', self.events('e2e-swing'))
 
+    def test_usdc_alone_waits_for_gas_without_a_failure(self):
+        self.chain.wallet.update({tml.USDC: 200.0, tml.SOL: 0.0})
+        for _ in range(4):
+            with self.pins():
+                self.poll('e2e-swing')
+        self.assertEqual([c for c in self.chain.calls if '--execute' in c['args']], [])
+        self.assertEqual(self.events('e2e-swing').count('gas_short'), 1)        # said once
+        with self.as_profile('e2e-swing'):
+            st_ = json.loads(rebalancer.STATE.read_text())
+        self.assertEqual(st_.get('failures', 0), 0)
+        self.chain.wallet[tml.SOL] = 0.06                                         # gas arrives
+        with self.pins():
+            self.poll('e2e-swing')
+        self.assertIn(tml.SOL_POOL, self.chain.positions)
+
     def test_a_pool_outside_the_pins_is_refused_and_nothing_moves(self):
         self.chain.wallet.update({tml.USDC: 200.0, tml.SOL: 0.1})
         with self.pins():
@@ -784,3 +799,25 @@ class TickMore(Tick):
             with mock.patch.object(swing.time, 'sleep', sleep), self.assertRaises(Stop):
                 swing.main([])
         self.assertEqual(calls, [True, False])
+
+
+class GasForOpen(unittest.TestCase):
+    """gas_for_open on a pool that holds the native token: the reserve must
+    be in the wallet before any write (every signer refuses below it)."""
+
+    def ok(self, **bal):
+        with mock.patch.object(rebalancer, 'save', lambda s: None), \
+                mock.patch.object(rebalancer, 'notify', lambda *a, **k: None), \
+                mock.patch.object(rebalancer.db, 'event', lambda *a: None), \
+                mock.patch.object(config, 'GAS_RESERVE_SOL', 0.05):
+            return rebalancer.gas_for_open({}, bal)
+
+    def test_the_wallets_sol_decides_when_it_is_read(self):
+        self.assertFalse(self.ok(nativeSide='A', sol=0.01, balanceA=5.0, balanceB=100.0))
+        self.assertTrue(self.ok(nativeSide='A', sol=0.05, balanceA=0.0, balanceB=100.0))
+
+    def test_without_it_the_native_side_of_the_pool(self):
+        self.assertTrue(self.ok(nativeSide='B', balanceA=0.0, balanceB=1.0))
+        self.assertFalse(self.ok(nativeSide='B', balanceA=1.0, balanceB=0.0))
+        self.assertTrue(self.ok(nativeSide='A', balanceA=1.0, balanceB=0.0))
+        self.assertFalse(self.ok(nativeSide='A', balanceA=0.0, balanceB=1.0))

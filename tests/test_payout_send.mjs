@@ -100,7 +100,7 @@ test('expired and unknown to the chain: NeverLanded, after the send, with the si
     assert.ok(e instanceof NeverLanded);
     assert.strictEqual(e.afterSend, true);
     assert.strictEqual(e.signature, 'SIG');
-    assert.match(e.message, /nothing was sent, it is owed again/);
+    assert.match(e.message, /; nothing was sent$/);
     assert.doesNotMatch(e.message, /timed out|timeout|confirm/i);    // never 'uncertain' in rebalancer.distribute
     return true;
   });
@@ -154,4 +154,59 @@ test('importing payout.mjs runs nothing', async () => {
   const before = process.exitCode;
   await import('../payout.mjs');
   assert.strictEqual(process.exitCode, before);
+});
+
+test('payout.mjs says an expired payout is owed again; the shared loop does not', async () => {
+  const fs = await import('node:fs');
+  const src = fs.readFileSync(new URL('../payout.mjs', import.meta.url), 'utf8');
+  assert.match(src, /throw new NeverLanded\(`payout \$\{e\.message\}, it is owed again`\)/);
+  const shared = fs.readFileSync(new URL('../tx_send.mjs', import.meta.url), 'utf8');
+  assert.doesNotMatch(shared, /owed|payout expired/);
+});
+
+// --- swap_jupiter.sendSwap: what the loop hears ---------------------------------------
+const { sendSwap } = await import('../swap_jupiter.mjs');
+const { AfterSignError } = await import('../rpc_policy.mjs');
+
+test('a swap that never landed: a plain error, no signature, nothing logged', async () => {
+  const logged = [];
+  await assert.rejects(sendSwap(chain({ landsAfter: null, start: 200 }), 'RAW', 100, { a: 1 },
+                                { sleep: async () => {}, log: x => logged.push(x) }), e => {
+    assert.strictEqual(e.constructor, Error);
+    assert.match(e.message, /^swap expired: .*nothing was sent$/);
+    assert.doesNotMatch(e.message, /could not confirm/);
+    assert.strictEqual(e.signature, undefined);                     // no signature: no pending write to wait on
+    return true;
+  });
+  assert.deepStrictEqual(logged, []);
+});
+
+test('a swap whose first send fails is AfterSignError, never retried', async () => {
+  await assert.rejects(sendSwap(chain({ firstSendThrows: true }), 'RAW', 100, {}, { sleep: async () => {} }),
+                       e => e instanceof AfterSignError && /not retried/.test(e.message));
+});
+
+test('a swap that fails after the send is partial, with the signature', async () => {
+  const logged = [];
+  const c = chain({ landsAfter: 0, err: { InstructionError: [1, 'x'] } });
+  await assert.rejects(sendSwap(c, 'RAW', 1_000, { mint: 'M' }, { sleep: async () => {}, log: x => logged.push(x) }),
+                       e => /^sent SIG but could not confirm it: transaction failed on chain/.test(e.message));
+  const r = JSON.parse(logged[0]);
+  assert.deepStrictEqual([r.mint, r.signature, r.sent, r.partial], ['M', 'SIG', true, true]);
+  assert.match(r.error, /failed on chain/);
+});
+
+test('a swap that lands returns its signature', async () => {
+  assert.strictEqual(await sendSwap(chain({ landsAfter: 1 }), 'RAW', 1_000, {}, { sleep: async () => {} }), 'SIG');
+});
+
+test('processed is not landed; finalized is', async () => {
+  for (const [seq, sends] of [[['processed', 'processed', 'confirmed'], 3], [['finalized'], 1], [['processed', 'finalized'], 2]]) {
+    const c = { sends: 0, reads: 0 };
+    c.sendRawTransaction = async () => { c.sends += 1; return 'SIG'; };
+    c.getSignatureStatuses = async () => ({ value: [{ confirmationStatus: seq[Math.min(c.reads++, seq.length - 1)], err: null }] });
+    c.getBlockHeight = async () => 1;
+    assert.strictEqual(await sendUntilLanded(c, 'RAW', 1_000, { sleep: async () => {} }), 'SIG');
+    assert.strictEqual(c.sends, sends, seq.join(','));
+  }
 });
