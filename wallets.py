@@ -19,6 +19,11 @@ rules (MULTI_DESIGN.md, "Shared tokens in one wallet"):
     mint: no mint is anyone's alone while it is unknown (fail closed).
   * Every profile of the wallet counts, disabled ones too: a disabled
     profile's claim and mints stay its own until an operator moves them.
+  * A profile whose pool holds no native token pays rent and fees from the
+    native owner's sleeve. Its writes measure the native balance too, and
+    the change is booked as internal_in / internal_out capital flows between
+    the two (native_giver, internal_flows), so neither book shows the other's
+    rent as a loss or a gain. The sleeves themselves still follow the wallet.
   * Balances are read at `confirmed` commitment, the commitment the signers
     confirm at, and a read counts only from the slot of the write it
     measures on (wallet_settle): a lagging node never books a stale figure.
@@ -140,6 +145,49 @@ def claimed_mints(name, mints, profiles):
     return out
 
 
+def native_giver(name, mints, profiles, native_mint):
+    """The profile whose native token `name`'s writes spend, or None. A
+    profile whose pool holds no native token pays its rent and fees from the
+    native owner's sleeve (sole owner, else holder), and a close refunds that
+    rent there; each write's native change is booked between the two as
+    internal flows (internal_flows). None when `name` is that owner, when its
+    own pool holds the native token (its sleeve or its claim moves), or when
+    no owner is known. Pure."""
+    if norm(native_mint) in {norm(m) for m in mints}:
+        return None
+    giver = sole_owner(native_mint, profiles) or holder(native_mint, profiles)
+    return giver if giver not in (None, name) else None
+
+
+def internal_flows(taker, giver, delta, price, profiles, native_mint, detail):
+    """The two capital_flows rows for a write of `taker` that moved `delta`
+    (after - before, human units) of `giver`'s native token, priced at
+    `price` USD per native unit. Spent (delta < 0): `giver` has an
+    'internal_out', `taker` an 'internal_in'. Refunded (delta > 0): the
+    reverse. Both carry the same positive amount. Each row's amounts name its
+    profile's token A too (0 when it is not the native token), so since_start
+    never reads the native amount as token A. An unknown price books 0 USD
+    and says so in `detail`. [] for no movement. Pure."""
+    x = abs(float(delta or 0.0))
+    if x <= DUST:
+        return []
+    out_p, in_p = (giver, taker) if delta < 0 else (taker, giver)
+    usd = round(x * float(price), 6) if price is not None else 0.0
+    if price is None:
+        detail = f'{detail}; price unknown, booked at 0 USD'
+    nm = norm(native_mint)
+    rows = []
+    for kind, who in (('internal_out', out_p), ('internal_in', in_p)):
+        row = next((p for p in profiles if p['name'] == who), {})
+        mint_a = norm((row.get('mints') or [None])[0])
+        amounts = {nm: x}
+        if mint_a and mint_a != nm:
+            amounts[mint_a] = 0.0
+        rows.append({'kind': kind, 'profile': who, 'sol': x if mint_a == nm else 0.0, 'usd': usd,
+                     'price': price, 'amounts': amounts, 'detail': detail})
+    return rows
+
+
 def with_self(profiles, me):
     """The wallet's profiles with this process's own row (its live mints)
     in place of the stored one: the process knows its pool's mints before
@@ -253,12 +301,18 @@ def set_pending(wallet_id, pending):
                     (wallet_id, json.dumps(pending) if pending is not None else None))
 
 
-def book(wallet_id, profile, deltas, slot):
+def book(wallet_id, profile, deltas, slot, flows=()):
     """Book a measured write in one transaction: its deltas to `profile`'s
-    claims, the wallet's settled slot, the pending write cleared. Returns
-    adjust()'s {mint: (new claim, overdraw)}."""
+    claims, its internal native flows (internal_flows rows), the wallet's
+    settled slot, the pending write cleared. A crash books all of it or none.
+    Returns adjust()'s {mint: (new claim, overdraw)}."""
     with db.cursor(commit=True) as cur:
         out = _adjust(cur, wallet_id, profile, deltas)
+        for f in flows:
+            cur.execute('insert into capital_flows (ts, kind, sol, usdc, usd, price, signature, detail, amounts, '
+                        'wallet_id, profile) values (now(), %s, %s, 0, %s, %s, null, %s, %s, %s, %s)',
+                        (f['kind'], f['sol'], f['usd'], f['price'], f['detail'], json.dumps(f['amounts']),
+                         wallet_id, f['profile']))
         cur.execute('insert into wallet_settle (wallet_id, slot) values (%s, %s) on conflict (wallet_id) '
                     'do update set slot = greatest(wallet_settle.slot, excluded.slot), pending = null, '
                     'updated_at = now()', (wallet_id, slot))

@@ -147,6 +147,17 @@ TARGETS = {
                                       'is_stable_mint', 'quote_known', 'dormant', 'halted', 'route', 'housekeeper',
                                       'wallet_mints', 'wallet_book', 'portfolio_report', 'record_baseline'],
                     PY_TESTS('test_multi_loop', 'test_claims_units')),
+    # 2026-10-02: rent and fees one profile pays from another's native token, and rent priced as $0
+    'shared_books': ('wallets.py', ['native_giver', 'internal_flows', 'book'],
+                     PY_TESTS('test_shared_wallet_books', 'test_wallets', 'test_claims_units')),
+    'shared_books_loop': ('rebalancer.py', ['native_giver', 'native_flows', 'settle_pending', 'locked_chain',
+                                            'note_native_px', 'native_usd', 'rent_usd', 'position_usd',
+                                            'record_baseline'],
+                          PY_TESTS('test_shared_wallet_books', 'test_claims_units', 'test_multi_loop')),
+    'shared_books_db': ('db.py', ['since_start', 'native_price'],
+                        PY_TESTS('test_shared_wallet_books', 'test_since_start_scope', 'test_audit.SinceStart',
+                                 'test_audit_more.SinceStartEdges', 'test_db', 'test_scaled')),
+    'tape_prune': ('db.py', ['config_pools', 'tape_prune_other_pools'], PY_TESTS('test_tape_prune')),
     'stock_loop': ('rebalancer.py', ['ui_price', 'open_headroom', 'native_reserve', 'deployable_usd', 'deposit_caps',
                                      'position_usd', 'note_scale', 'native_bars', 'mint_refusal', 'note_mint_refusal',
                                      'gas_for_open'],
@@ -185,6 +196,12 @@ SQL_TARGETS = {'band_profile', 'daily', 'capital_db', 'book_scope', 'book_sums',
 # The report prints each survivor's key: copy it here with a reason. The line
 # number is not in the key, so an edit above a mutant keeps its entry valid.
 EQUIVALENT = {
+    ('shared_books_loop', 'settle_pending', 'const 0.0->1.0', 'def settle_pending(wait_s=0.0):', 0):
+        'as claims_loop: tries_in(1.0) == tries_in(0.0) == 1 (1.0 // CLAIM_POLL_S is 0): one read either way',
+    ('shared_books_loop', 'settle_pending', 'const 0->1', "if at is None and time.time() - float(p.get('sent_at') or 0) <= PENDING_EXPIRE_S:", 0):
+        'as claims_loop: a missing sent_at at 0 or 1 is decades older than PENDING_EXPIRE_S either way',
+    ('shared_books', 'internal_flows', 'swap Lt->LtE', 'out_p, in_p = (giver, taker) if delta < 0 else (taker, giver)', 0):
+        'delta == 0 never reaches this line: |delta| <= DUST returns [] first',
     ('audit_run', 'run', 'drop operand 0', "if a['mint'] in px and a['mint'] != NATIVE:", 0):
         'a mint without a price adds nothing: idle_sleeves_usd values it at prices.get(m) or 0.0, and px holds no price for it',
     ('audit_run', 'run', 'drop operand 1', "if a['mint'] in px and a['mint'] != NATIVE:", 0):

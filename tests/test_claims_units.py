@@ -122,7 +122,8 @@ class Settle(unittest.TestCase):
             return slots.pop(0) if slots else None
         def read_balances(*a, **k):
             return reads.pop(0) if reads else None
-        def book(wallet_id, profile, deltas, slot):
+        def book(wallet_id, profile, deltas, slot, flows=()):
+            assert list(flows) == [] or pending.get('native'), flows       # flows only for a native write
             books.append((profile, deltas, slot))
             return booked or {m: (0.0, 0.0) for m in deltas}
         patches = [mock.patch.object(config, 'WALLET_ID', 'w'),

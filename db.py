@@ -409,6 +409,13 @@ def tape_store(pool, bars, keep_from_ts):
     return len(rows)
 
 
+def config_pools():
+    """Every profile's pool, enabled or not: tapes that some process reads."""
+    with cursor() as cur:
+        cur.execute('select distinct pool from config')
+        return {r['pool'] for r in cur.fetchall()}
+
+
 def tape_prune_other_pools(keep_pools, older_than_ts):
     """Drop tapes of pools no longer held once they are stale."""
     with cursor(commit=True) as cur:
@@ -718,6 +725,21 @@ def snapshot(mint, price, in_range, liquidity, accrued_a, accrued_b,
               f.get('p_exit_24h_regime', f.get('p_exit_24h')),
               f.get('p_exit_72h_regime', f.get('p_exit_72h')),
               f.get('position')))
+
+
+def native_price(native_mint, stable_mints, max_age_s):
+    """USD per native token from the newest snapshot, under `max_age_s` old,
+    of a pool whose token A is `native_mint` and token B a stablecoin (its
+    UI price is then dollars per native unit), or None."""
+    with cursor() as cur:
+        cur.execute("""select s.price from snapshots s
+                         join positions p on p.mint = s.mint
+                         join config c on c.name = p.config_name
+                        where c.mints[1] = %s and c.mints[2] = any(%s) and s.price > 0
+                          and s.ts > now() - make_interval(secs => %s)
+                        order by s.ts desc limit 1""", (native_mint, list(stable_mints), float(max_age_s)))
+        r = cur.fetchone()
+    return float(r['price']) if r else None
 
 
 def last_fees(mint):
@@ -1048,11 +1070,22 @@ def since_start(extra_usd=0.0, profile=None, wallet_id=None):
         last = cur.fetchone()
         if not base or not last:
             return None
-        cur.execute(f"""select coalesce(sum(case when kind = 'deposit' then usd else -usd end), 0) net_usd,
-                               coalesce(sum(case when kind = 'deposit' then coalesce((amounts->>%(mint)s::text)::numeric, sol)
-                                                 else -coalesce((amounts->>%(mint)s::text)::numeric, sol) end), 0) net_sol,
-                               coalesce(sum(case when kind = 'deposit' then usdc else -usdc end), 0) net_usdc
-                        from capital_flows where kind in ('deposit', 'withdrawal') and {PROFILE_IN}""", a)
+        # Only flows after the baseline: the baseline is the sleeve as funded,
+        # so a deposit that landed before it is in it already (2026-10-02:
+        # mu-usdc's deposit and baseline were the same MU, and its P&L read
+        # -$208 on $207 of equity). Internal flows move native rent and fees
+        # between two books of one wallet; one with no token A amount (the
+        # native token is not this pool's) counts in the hold benchmark at
+        # its dollar value, as `fixed`.
+        cur.execute(f"""select coalesce(sum(sgn * usd), 0) net_usd,
+                               coalesce(sum(sgn * coalesce((amounts->>%(mint)s::text)::numeric, sol)), 0) net_sol,
+                               coalesce(sum(sgn * usdc), 0) net_usdc,
+                               coalesce(sum(sgn * usd) filter (where kind like 'internal%%'
+                                   and coalesce((amounts->>%(mint)s::text)::numeric, sol) = 0), 0) net_fixed_usd
+                        from (select *, case when kind in ('deposit', 'internal_in') then 1 else -1 end sgn
+                              from capital_flows
+                              where kind in ('deposit', 'withdrawal', 'internal_in', 'internal_out')
+                                and ts > %(since)s and {PROFILE_IN}) f""", dict(a, since=base['ts']))
         fl = cur.fetchone()
         cur.execute("select coalesce(sum(usd), 0) u from payouts where kind in ('paid', 'uncertain') "
                     f"and ts >= %(since)s and {PAYOUT_IN}", dict(a, since=base['ts']))
@@ -1060,7 +1093,8 @@ def since_start(extra_usd=0.0, profile=None, wallet_id=None):
     p0, p1 = float(base['price']), float(last['price'])
     start = float(base['usd']) + float(fl['net_usd'])
     value = float(last['equity_usd']) + float(extra_usd or 0.0) + paid
-    hold = (float(base['sol']) + float(fl['net_sol'])) * p1 + float(base['usdc']) + float(fl['net_usdc'])
+    hold = ((float(base['sol']) + float(fl['net_sol'])) * p1 + float(base['usdc']) + float(fl['net_usdc'])
+            + float(fl['net_fixed_usd']))
     hold_50 = float(base['usd']) * (0.5 + 0.5 * p1 / p0) + float(fl['net_usd'])
     days = (last['ts'] - base['ts']).total_seconds() / 86400
     return {'since': base['ts'].isoformat(), 'days': round(days, 2),

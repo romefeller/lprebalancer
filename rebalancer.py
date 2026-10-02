@@ -498,6 +498,20 @@ def claim_mints():
         return None, f'mints unknown: {type(e).__name__}: {tidy(e)}', True
 
 
+def native_giver():
+    """The profile whose native token this profile's writes spend
+    (wallets.native_giver), or None: the owner itself, a pool that holds the
+    native token, a wallet nobody shares. An unknown answer is None: the
+    write's claims are still measured, only its native flows are not."""
+    try:
+        profiles = wallets.wallet_profiles(config.WALLET_ID)
+        (ma, _), (mb, _) = pool_tokens()
+        return wallets.native_giver(config.PROFILE, [ma, mb], wallets.with_self(profiles, me_row(ma, mb)),
+                                    config.CAPS['native_mint'])
+    except Exception:
+        return None
+
+
 def tries_in(wait_s):
     """How many reads fit in `wait_s` at one every CLAIM_POLL_S. Pure."""
     return 1 + max(int(wait_s // CLAIM_POLL_S), 0)
@@ -545,15 +559,18 @@ def settle_pending(wait_s=0.0):
         if at is None and time.time() - float(p.get('sent_at') or 0) <= PENDING_EXPIRE_S:
             return False
         need = max(need, at or 0)
-    if not p['mints']:
+    nat = p.get('native')
+    read = list(p['mints']) + ([nat['mint']] if nat else [])     # never a claimed mint (native_giver)
+    if not read:
         wallets.book(config.WALLET_ID, p['profile'], {}, need)        # nothing claimed: the slot moves on
         return True
-    got = measure(p['mints'], need, wait_s)
+    got = measure(read, need, wait_s)
     if got is None:
         return False
     after, slot = got
     deltas = {m: after[m] - p['before'][m] for m in p['mints'] if abs(after[m] - p['before'][m]) > wallets.DUST}
-    res = wallets.book(config.WALLET_ID, p['profile'], deltas, slot)
+    flows = native_flows(p, after[nat['mint']] - nat['before']) if nat else []
+    res = wallets.book(config.WALLET_ID, p['profile'], deltas, slot, flows)
     for m, (new, over) in res.items():
         if over > wallets.DUST:
             # new - over is claim + delta (wallets.claim_after)
@@ -561,6 +578,19 @@ def settle_pending(wait_s=0.0):
                           command=p['command'], mint=m, claim=round(new - over - deltas[m], 9),
                           delta=round(deltas[m], 9), overdraw=round(over, 9))
     return True
+
+
+def native_flows(p, delta):
+    """The internal flows (wallets.internal_flows) of pending write `p`,
+    whose native balance moved by `delta`: its rent and fees out of the
+    giver's sleeve, or a refund back into it. Priced by native_usd()."""
+    try:
+        profiles = wallets.wallet_profiles(config.WALLET_ID)
+    except Exception:
+        profiles = []
+    sigs = ' '.join(p.get('signatures') or []) or 'no signature'
+    return wallets.internal_flows(p['profile'], p['native']['giver'], delta, native_usd(), profiles,
+                                  p['native']['mint'], f"{p['command']} by {p['profile']}: {sigs}")
 
 
 UNMEASURABLE = {}                 # the last 'claims unmeasurable' reason said, so it is said once
@@ -595,11 +625,16 @@ def locked_chain(*args, dex, timeout, extra_env):
                 # Even a write that books no claim (the holder's) moves the
                 # wallet's settled slot: the next before-read starts after it.
                 settled, _ = wallets.settle_state(config.WALLET_ID)
-                got = measure(mints, settled, CLAIM_SETTLE_S) if mints else ({}, settled)
+                giver = native_giver()
+                nat = wallets.norm(config.CAPS['native_mint']) if giver else None
+                read = list(mints) + ([nat] if nat else [])      # never a claimed mint (native_giver)
+                got = measure(read, settled, CLAIM_SETTLE_S) if read else ({}, settled)
                 if got is None:
                     return unmeasurable(command, 'balance before the write unreadable')
-                pending = {'profile': config.PROFILE, 'command': command, 'mints': mints, 'before': got[0],
-                           'before_slot': got[1], 'signatures': []}
+                pending = {'profile': config.PROFILE, 'command': command, 'mints': mints,
+                           'before': {m: got[0][m] for m in mints}, 'before_slot': got[1], 'signatures': []}
+                if giver:
+                    pending['native'] = {'mint': nat, 'giver': giver, 'before': got[0][nat]}
                 wallets.set_pending(config.WALLET_ID, pending)
             UNMEASURABLE.pop('why', None)
             out, err = _chain(*args, dex=dex, timeout=timeout, extra_env=extra_env)
@@ -955,13 +990,67 @@ def position_usd(status):
     0.2 SOL of it, and a book that ignored it reported the first move to
     Meteora as a $27 loss that never happened.
     """
-    rent = status.get('rentUsd') or 0.0
+    rent = rent_usd(status)
     if status.get('positionUsd') is not None:
         return status['positionUsd'] + rent
     a, b, q = status.get('closeEstA'), status.get('closeEstB'), status.get('quoteUsd')
     if a is None or b is None or q is None:
         return None                                  # an unknown quote price is no dollar
     return (a * ui_price(status) + b) * q + rent
+
+
+# The native token's last known USD price (rent is native): {'px', 'at'}.
+NATIVE_PX = {}
+NATIVE_PX_MAX_AGE_S = 3600        # a cached price this old still prices rent
+NATIVE_SNAPSHOT_MAX_AGE_S = 900   # a native/stable pool's snapshot this old prices it
+
+
+def note_native_px(px):
+    """Remember a good native price (USD per native unit)."""
+    if px is not None and px > 0:
+        NATIVE_PX.update(px=float(px), at=time.time())
+
+
+def native_usd():
+    """USD per native token (SOL): the latest snapshot of a native/stable
+    pool on this database (sol-usdc's pool) when it is fresh, else the last
+    good price seen in this process when it is under an hour old, else None."""
+    try:
+        px = db.native_price(config.CAPS['native_mint'], sorted(engine.STABLE_MINTS), NATIVE_SNAPSHOT_MAX_AGE_S)
+    except Exception:
+        px = None
+    if px:
+        note_native_px(px)
+        return px
+    if NATIVE_PX and time.time() - NATIVE_PX['at'] <= NATIVE_PX_MAX_AGE_S:
+        return NATIVE_PX['px']
+    return None
+
+
+def rent_usd(status):
+    """The rent in the position accounts, in USD. The signer prices it when
+    it can; a pool with no native side asks Jupiter, and one failed request
+    gave null, which counted as $0 (2026-10-02: mu-usdc's equity jumped by
+    the $8.26 rent on one poll in four). A null is priced here
+    (native_usd); only with no price at all is it 0, said once."""
+    usd, sol = status.get('rentUsd'), status.get('rentSol')
+    if usd is not None:
+        if sol:
+            note_native_px(float(usd) / float(sol))
+        return float(usd)
+    if not sol:
+        return 0.0
+    px = native_usd()
+    if px is None:
+        if not RENT_UNPRICED.get('told'):
+            RENT_UNPRICED['told'] = True
+            notify('rent_unpriced', reason=f'{sol} native rent has no price; counted as $0 this poll')
+        return 0.0
+    RENT_UNPRICED.pop('told', None)
+    return float(sol) * px
+
+
+RENT_UNPRICED = {}                # 'told' while an unpriced rent has been said
 
 
 def quote_price(rec):
@@ -1440,7 +1529,11 @@ def tape5(pool, price, pair=None):
     if fresh is not None:
         try:
             db.tape_store(pool, merged, merged[0][-1] - window_s)
-            db.tape_prune_other_pools([pool], time.time() - 86400)   # pools left a day ago
+            # Pools left a day ago. Every profile's pool stays: each process
+            # prunes, and keeping only its own cut the others' tapes to a day
+            # (2026-10-02: mu-usdc's prune left sol-usdc 287 of 8640 bars,
+            # so a restart would decide on a one-day tape).
+            db.tape_prune_other_pools(db.config_pools() | {pool}, time.time() - 86400)
         except Exception:
             pass
         # memory: this pool, and at most one other
@@ -2665,14 +2758,15 @@ def gas_for_open(state, bal):
     return False
 
 
-def record_baseline(bal):
+def record_baseline(bal, at=None):
     """The capital a profile started with, once: its sleeve when its first
     open went in (capital_flows kind 'baseline', one per wallet and profile;
     db.since_start measures profit and the hold benchmarks against it). Token
     A in amounts[<mint A>] and, when it is native SOL, in `sol`; the stablecoin
     side in `usdc`; the price in UI units, B per A, as the snapshots'. A profile
     without a wallet (pre-020) has its baseline already. Never blocks the
-    open that just landed."""
+    open that just landed. `at` is when `bal` was read: the baseline's time,
+    so db.since_start counts every flow after the read and none before it."""
     if not config.WALLET_ID:
         return False
     try:
@@ -2684,7 +2778,7 @@ def record_baseline(bal):
             cur.execute("insert into capital_flows (ts, kind, sol, usdc, usd, price, signature, detail, amounts, "
                         "wallet_id, profile) values (%s, 'baseline', %s, %s, %s, %s, null, %s, %s, %s, %s) "
                         "on conflict do nothing",
-                        (db.now(), a if ma == config.CAPS['native_mint'] else 0.0, usdc, (a * px + b) * q, px,
+                        (at or db.now(), a if ma == config.CAPS['native_mint'] else 0.0, usdc, (a * px + b) * q, px,
                          'the sleeve at the first open', json.dumps({ma: a, mb: b}), config.WALLET_ID,
                          config.PROFILE))
             return cur.rowcount == 1
@@ -2711,6 +2805,7 @@ def reopen(state, reason, band=None, recovering=False):
     if not best:
         notify('idle', reason='could not price the pool; opening nothing')
         return False
+    read_at = db.now()                                   # before the read: the baseline's time
     bal = wallet(pool)
     if 'balanceA' not in bal:
         notify('idle', reason='could not read the wallet; opening nothing')
@@ -2808,7 +2903,7 @@ def reopen(state, reason, band=None, recovering=False):
     db.open_position(mint, pool, config.PAIR_LABEL, lower, upper,
                      (k - 1) * 100, (out or {}).get('signature'),
                      deposit_usd, reason, config_name=config.PROFILE, dex=config.DEX)
-    record_baseline(funded)
+    record_baseline(funded, read_at)
     state.pop('pending_reopen', None)
     save(state)
     notify_book('OPEN', pair=config.PAIR_LABEL, pool=pool, dex=config.DEX, lp_now_usd=deposit_usd,
