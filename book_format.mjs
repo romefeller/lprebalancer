@@ -79,13 +79,26 @@ export function healthLine(h) {
     + (x.wait_s > 0 ? ` retry ${Math.ceil(x.wait_s / 60)}m` : ' probing')).join(' · ');
 }
 
+// A wallet's name in every line that names one: its id and the first 10
+// characters of its address (db.wallet_tag), e.g. "sol-lp 83HxMUUC7c"; the id
+// alone when the row carries no address.
+export function walletName(w) {
+  const id = w?.wallet_id ?? '—';
+  const tag = w?.wallet_tag || (w?.address ? String(w.address).slice(0, 10) : '');
+  return tag ? `${id} ${tag}` : `${id}`;
+}
+
 // The prefix of a message: the pool it is about, from the row's pair (or its
-// profile), e.g. "[MU/USDC]". Empty for a row that names no pool (pre-020).
+// profile), e.g. "[MU/USDC]", and the wallet's address tag when the row has
+// one, e.g. "[SOL/USDC · FogqBWLC4y]": two wallets can run one pair. Empty
+// for a row that names no pool (pre-020).
 export function poolLabel(row) {
   const raw = row?.pair || row?.profile;      // an empty pair names no pool
   if (raw == null) return '';
   const clean = String(raw).replace(/[^\w/.\- ]/g, '').slice(0, 32).trim();
-  return clean ? `[${clean}]` : '';
+  if (!clean) return '';
+  const tag = row?.wallet_tag == null ? '' : String(row.wallet_tag).replace(/[^\w]/g, '').slice(0, 10);
+  return tag ? `[${clean} · ${tag}]` : `[${clean}]`;
 }
 
 // Secret-shaped strings never reach Telegram: an api-key in a URL (the keyed
@@ -102,9 +115,10 @@ export function redact(text) {
   return SECRETS.reduce((t, [re, to]) => t.replace(re, to), String(text));
 }
 
-// The daily PORTFOLIO (stats.portfolio()): every active pool by wallet, the
-// wallet subtotals, the TOTAL in dollars (token amounts never add across
-// pools), and the dormant and disabled profiles by name.
+// The daily PORTFOLIO (stats.portfolio()): every active pool by wallet (named
+// by id and address tag), the wallet subtotals, the TOTAL in dollars (token
+// amounts never add across pools), and the dormant and disabled profiles by
+// name. A profile that held several pools (sol-swing) lists each one's fees.
 export function portfolioText(p) {
   const d = (x, k = 2) => (x == null ? '—' : `$${n(x, k)}`);
   const pct = (x) => (x == null ? '—' : `${n(x, 0)}%`);
@@ -118,12 +132,19 @@ export function portfolioText(p) {
   const lines = [`PORTFOLIO · ${pools.length} active pool${pools.length === 1 ? '' : 's'} · `
     + `${wallets.length} wallet${wallets.length === 1 ? '' : 's'}`];
   for (const w of wallets) {
-    lines.push(`▸ ${w.wallet_id} (${w.chain || '—'})`);
+    lines.push(`▸ ${walletName(w)} (${w.chain || '—'})`);
     for (const name of w.pools || []) {
       const r = byName[name] || {};
       lines.push(`  ${r.pair || name}  equity ${d(r.equity_usd)} · fees ${d(r.fees_total_usd, 4)}`
         + ` (24h ${d(r.fees_per_day_24h_usd, 4)}/d) · APR 24h ${pct(r.apr_24h_pct)} · P&L ${sign(r.profit_usd)}`
         + ` · in range ${pct(r.in_range_pct)}`);
+      const held = Array.isArray(r.by_pool) ? r.by_pool : [];
+      if (held.length > 1) {
+        for (const x of held) {
+          lines.push(`    ${x.open_now ? '▸' : '·'} ${x.pair_label || '—'} ${x.dex || '—'}`
+            + ` ${String(x.pool || '—').slice(0, 10)}  fees ${d(x.fees_usd, 4)} · in range ${pct(x.in_range_pct)}`);
+        }
+      }
     }
     if (wallets.length > 1 && w.subtotal) lines.push(`  subtotal  ${sum(w.subtotal).join(' · ')}`);
   }

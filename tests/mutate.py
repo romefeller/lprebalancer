@@ -64,7 +64,7 @@ TARGETS = {
     'rate_limit': ('engine.py', ['rate_limited', 'curl'], PY_TESTS('test_rate_limit')),
     'band_profile': ('db.py', ['record_band_profile'], PY_TESTS('test_band_profile')),
     'band_hooks': ('rebalancer.py', ['band_profile'], PY_TESTS('test_band_profile.Hooks')),
-    'daily': ('db.py', ['daily_line', 'daily_lines', '_daily_or_none'], PY_TESTS('test_daily')),
+    'daily': ('db.py', ['daily_line', 'daily_lines', '_daily_or_none'], PY_TESTS('test_daily', 'test_stats.TwoSolanaWallets')),
     'health': ('health.py', ['cooldown', 'after_failure', 'after_success', 'verdict', 'load', 'record_failure',
                              'record_success', 'allowed', 'summary'], PY_TESTS('test_health', 'test_edges_0930')),
     'jupgate': ('jupgate.py', ['_take', 'reserve', 'wait_turn'], PY_TESTS('test_jupiter_gate.Gate')),
@@ -113,7 +113,8 @@ TARGETS = {
                                                   'test_multi_loop', 'test_scaled', 'test_audit_wallet')),
     'capital_db': ('db.py', ['since_start', 'record_flow', 'audit_value', 'set_audit_value', 'record_audit',
                              '_since_start_or_none'], PY_TESTS('test_audit.SinceStart', 'test_audit.Runner', 'test_audit_more.SinceStartEdges',
-                                                      'test_db', 'test_multi_loop', 'test_scaled', 'test_since_start_scope')),
+                                                      'test_db', 'test_multi_loop', 'test_scaled', 'test_since_start_scope',
+                                                      'test_stats.TwoSolanaWallets', 'test_shared_wallet_books.Replay')),
     'deploy_all': ('rebalancer.py', ['deployable_usd', 'capital', 'side_target_fraction', 'deposit_caps', 'balance_wallet'],
                    PY_TESTS('test_deploy_all', 'test_audit_more.QuoteFallbacks', 'test_rebalancer.DepositCaps', 'test_payout.SwapGate',
                             'test_payout.SwapRetry', 'test_multi_loop', 'test_scaled', 'test_review_edges', 'test_jupiter_gate', 'test_health',
@@ -128,15 +129,29 @@ TARGETS = {
     'orca_fees': ('orca_fees.mjs', ['growthInside', 'ownFees', 'checkOrca', 'transferFeeOf', 'feesFromOrcaSnapshot',
                                     'snapshotAddresses', 'consistentOrcaFees'], NODE_TESTS('test_orca_fees.mjs')),
     'book_scope': ('db.py', ['book_profiles', 'book_scope', 'open_by_profile', 'flow_totals', '_uncounted_usd'],
-                   PY_TESTS('test_stats.Scope', 'test_stats.Attribution', 'test_stats.Portfolio', 'test_stats.OtherWallet')),
+                   PY_TESTS('test_stats.Scope', 'test_stats.Attribution', 'test_stats.Portfolio', 'test_stats.OtherWallet',
+                            'test_stats.TwoSolanaWallets')),
     'book_sums': ('db.py', ['_sum_known', '_same', 'combine_days', 'combine_since', 'combine_books'],
-                  PY_TESTS('test_stats.CombineBooks', 'test_stats.CombineExact', 'test_stats.Attribution')),
+                  PY_TESTS('test_stats.CombineBooks', 'test_stats.CombineExact', 'test_stats.Attribution',
+                           'test_stats.WalletNames')),
     'stats_sum': ('stats.py', ['record', 'total', 'classify', 'portfolio'],
                   PY_TESTS('test_stats.Total', 'test_stats.Classify', 'test_stats.Record', 'test_stats.Portfolio',
-                           'test_stats.OtherWallet')),
+                           'test_stats.OtherWallet', 'test_stats.WalletNames', 'test_stats.TwoSolanaWallets')),
+    # 2026-10-02: a wallet named by its address's first 10 characters, the --wallet filter that
+    # takes them, a profile across pools and pairs (sol-swing), two wallets on one chain
+    'wallet_names': ('db.py', ['wallet_tag', '_address_starts', 'resolve_wallet', 'mixed_sides', '_pairs_held',
+                               'by_pool', '_scope_args'],
+                     PY_TESTS('test_stats.WalletNames', 'test_stats.TwoSolanaWallets', 'test_stats.Attribution',
+                              'test_stats.Portfolio', 'test_stats.OtherWallet', 'test_stats.ByPoolExact', 'test_db')),
+    'db_stats': ('db.py', ['stats'], PY_TESTS('test_stats.StatsExact', 'test_stats', 'test_db', 'test_move_books',
+                                              'test_daily', 'test_audit.SinceStart', 'test_stats_equality')),
+    'stats_text': ('stats.py', ['wallet_name', '_held_lines', 'render', 'main'],
+                   PY_TESTS('test_stats.WalletNames', 'test_stats.Portfolio', 'test_stats.OtherWallet',
+                            'test_stats.TwoSolanaWallets')),
     'bridge_tail': ('telegram_bridge.mjs', ['feedFiles', 'migrateState', 'readNew', 'tailAll', 'message'],
                     NODE_TESTS('test_telegram_bridge.mjs')),
-    'bridge_lines': ('book_format.mjs', ['poolLabel', 'redact', 'portfolioText'], NODE_TESTS('test_telegram_bridge.mjs')),
+    'bridge_lines': ('book_format.mjs', ['poolLabel', 'redact', 'portfolioText', 'walletName'],
+                     NODE_TESTS('test_telegram_bridge.mjs')),
     'wallets': ('wallets.py', ['norm', 'users', 'holder', 'sole_owner', 'split', 'claim_after', 'claimed_mints',
                                'with_self', 'sleeve', 'sleeve_caps'], PY_TESTS('test_wallets')),
     'wallets_db': ('wallets.py', ['wallet_profiles', 'register_mints', 'claims', '_adjust', 'adjust', 'settle_state',
@@ -157,7 +172,7 @@ TARGETS = {
                           PY_TESTS('test_shared_wallet_books', 'test_claims_units', 'test_multi_loop')),
     'shared_books_db': ('db.py', ['since_start', 'native_price'],
                         PY_TESTS('test_shared_wallet_books', 'test_since_start_scope', 'test_audit.SinceStart',
-                                 'test_audit_more.SinceStartEdges', 'test_db', 'test_scaled')),
+                                 'test_audit_more.SinceStartEdges', 'test_db', 'test_scaled', 'test_stats.TwoSolanaWallets')),
     'quiet_pool': ('calm.py', ['quiet_tail_ok', 'quiet_fill'], PY_TESTS('test_quiet_pool')),
     'quiet_overlay': ('rebalancer.py', ['quiet_ref_ts', 'with_surrogate', '_surrogate_ts', '_merge_all', 'tape_source'],
                       PY_TESTS('test_quiet_pool', 'test_tape_surrogate')),
@@ -213,7 +228,7 @@ TARGETS = {
     'evm_key': ('evm/keyfile.mjs', ['validKey', 'writeNewKey', 'readKey'], NODE_TESTS('test_evm_wallet.mjs')),
 }
 
-SQL_TARGETS = {'band_profile', 'daily', 'capital_db', 'book_scope', 'book_sums', 'stats_sum', 'wallets_db'}
+SQL_TARGETS = {'band_profile', 'daily', 'capital_db', 'book_scope', 'book_sums', 'stats_sum', 'wallets_db', 'wallet_names', 'db_stats'}
 
 # Mutants that cannot change behaviour, with the reason. Keyed by the mutant's
 # identity (see "identity" below):
@@ -626,6 +641,40 @@ EQUIVALENT = {
         'an Error always has a non-empty name: never falsy where it is not nullish',
     ('deploy_idle', 'idle_to_deploy', 'const 0.0->1.0', 'return deployable_usd > max(audit.IDLE_ABS_USD, audit.IDLE_SHARE * (equity_usd or 0.0))', 0):
         'with no equity, IDLE_SHARE x 1.0 is $0.02, under the $2 IDLE_ABS_USD floor: max() gives the floor either way',
+    # 2026-10-02: wallet names, a profile across pools (wallet_names, stats_text)
+    ('wallet_names', 'mixed_sides', 'drop operand 1', "a, sep, b = str(label or '').partition('/')", 0):
+        "str(None) is 'None' and str('') is '': neither has a '/', so neither names a token either way",
+    ('wallet_names', 'by_pool', 'drop operand 1', "unpriced=int(d['unpriced'] or 0))", 0):
+        'unpriced is a count(*): never NULL, so `or 0` never applies',
+    ('wallet_names', 'by_pool', 'swap GtE->Gt', 'rate = (total / days) if days >= MIN_RATE_DAYS else None', 0):
+        'only a pool held exactly MIN_RATE_DAYS (to the microsecond of a float epoch) differs',
+    # db.stats, mutation-tested from 2026-10-02 (StatsExact)
+    ('db_stats', 'stats', 'and<->or', 'if equity is None and latest:', 0):
+        'with no snapshot the fallback query finds none and equity stays None; with one, as before',
+    ('db_stats', 'stats', 'drop operand 0', 'if equity is None and latest:', 0):
+        'with a priced latest snapshot the fallback query (newest priced, same scope) returns that same snapshot',
+    ('db_stats', 'stats', 'drop operand 1', 'if equity is None and latest:', 0):
+        'with no snapshot the fallback query finds none: equity stays None',
+    ('db_stats', 'stats', 'drop operand 1', "if latest and span and span['t0']:", 0):
+        'span is an aggregate: always one row, so it is never falsy',
+    ('db_stats', 'stats', 'drop operand 2', "if latest and span and span['t0']:", 0):
+        "a latest snapshot is a snapshot of the scope, so least(min snapshot ts, ...) is never NULL",
+    ('db_stats', 'stats', 'drop operand 0', "if span and span['ir'] is not None else None),", 0):
+        'span is an aggregate: always one row, so it is never falsy',
+    ('db_stats', 'stats', 'const 1e-09->1.5000000000000002e-09', "days = max((latest['ts'] - span['t0']).total_seconds() / 86400, 1e-9)", 0):
+        'the floor only keeps days non-zero: any tiny value rounds to tracked_days 0.0 and is under MIN_RATE_DAYS',
+    ('db_stats', 'stats', 'const 1e-09->5e-10', "days = max((latest['ts'] - span['t0']).total_seconds() / 86400, 1e-9)", 0):
+        'the floor only keeps days non-zero: any tiny value rounds to tracked_days 0.0 and is under MIN_RATE_DAYS',
+    ('db_stats', 'stats', 'swap GtE->Gt', 'rate = total_usd / days if (days and days >= MIN_RATE_DAYS) else None', 0):
+        'only a book tracked exactly MIN_RATE_DAYS (to the microsecond of a float epoch) differs',
+    ('db_stats', 'stats', 'const 0->1', 'today = fees_between(now().replace(hour=0, minute=0, second=0, microsecond=0), None, name)', 3):
+        "midnight plus one microsecond: only a fee point in that microsecond differs",
+    ('db_stats', 'stats', "sql ' desc' -> ' asc'", '# The latest snapshot, and whether the position it describes still', 0):
+        "a comment: ' desc' is in 'describes'",
+    ('db_stats', 'stats', "sql ' desc' -> ' asc'", '# describes money that is now in the wallet and already counted as', 0):
+        "a comment: ' desc' is in 'describes'",
+    ('daily', 'daily_line', 'swap GtE->Gt', "return {'day': day.isoformat(), 'complete': now() >= end,", 0):
+        'only the exact instant of midnight differs; now() is never that instant in a test or a poll',
 }
 
 
@@ -695,8 +744,6 @@ EQUIVALENT_OLD = {
     ('risk', 'risk_metrics', 'swap Gt->GtE @L392'):
         'exact float equality with the tolerance; on a flat tape the other operand still refuses',
     # no older copy has this line. Candidates now: "return {'day': day.isoformat(), 'complete': now() >= end,"
-    ('daily', 'daily_line', 'swap GtE->Gt @L804'):
-        'only the exact instant of midnight differs; now() is never that instant in a test or a poll',
     # no older copy has this line. Candidates now: 'if \'"signature\' not in line:' / "if r.get('signature'):"
     # no older copy has this line. Candidates now: "keep |= set(st.get('reward_mints_seen') or []) | set(st.get(" / "keep |= set(st.get('reward_mints_seen') or []) | set(st.get(" #1 / "keep |= {m for m in (bot.pool_record().get('reward_mints') o"
     # in an older copy, 2+ mutants shared this key on the line. Candidates now: 7 lines

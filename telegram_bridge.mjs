@@ -14,7 +14,7 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { equityLine, lpLine, sinceStartLine, splitMessage, emojiFor, healthLine, poolLabel, redact,
-  portfolioText } from './book_format.mjs';
+  portfolioText, walletName } from './book_format.mjs';
 
 const SELF = fileURLToPath(import.meta.url);
 const DIR = path.dirname(SELF);
@@ -365,8 +365,10 @@ export function render(row) {
     case 'DAILY':
       return `DAILY ${row.day} · ${row.recentres} re-centres${row.idle_redeploys ? ` (${row.idle_redeploys} idle redeploys)` : ''}`
         + ` · fees earned $${n(row.fees_earned_usd ?? row.fees_usd)}${row.fees_earned_usd != null ? ` (harvested $${n(row.fees_usd)})` : ''}`
-        + ` · vs 50/50 hold ${sign(row.vs_hold_usd)}`
-        + ` · ${baseSymbol(row)} ${n(row.price_open)} → ${n(row.price_close)}`;
+        // a day across pairs (sol-swing) has no hold benchmark and no one price
+        + ` · vs 50/50 hold ${row.vs_hold_usd == null ? '—' : sign(row.vs_hold_usd)}`
+        + (row.price_open == null && row.price_close == null ? ''
+          : ` · ${baseSymbol(row)} ${n(row.price_open)} → ${n(row.price_close)}`);
     case 'HARVEST':
       return `HARVESTED $${n(row.collected_usd, 4)}\n${row.signature ?? ''}`;
     case 'harvest_skipped':
@@ -436,11 +438,11 @@ export function render(row) {
         + `${row.overdraw != null ? ` · over by ${row.overdraw}` : ''} → floored at 0`
         + `${row.command ? ` (${row.command})` : ''}${row.reason ? `\n${row.reason}` : ''}`;
     case 'wallet_lock_timeout':
-      return `WALLET LOCK TIMEOUT · ${row.wallet_id ?? 'wallet'} busy${row.waited_s != null ? ` for ${n(row.waited_s, 0)}s` : ''}`
+      return `WALLET LOCK TIMEOUT · ${row.wallet_id != null ? walletName(row) : 'wallet'} busy${row.waited_s != null ? ` for ${n(row.waited_s, 0)}s` : ''}`
         + ` · ${row.action ?? 'nothing sent; retried at the next poll'}`;
     // the pool's label is the prefix: the row's own copy of it is not repeated
     default: {
-      const { profile, wallet_id, chain, pair, ...rest } = row;
+      const { profile, wallet_id, wallet_tag, chain, pair, ...rest } = row;
       return `${event} · ${JSON.stringify(rest)}`;
     }
   }

@@ -686,9 +686,17 @@ See MULTI_DESIGN.md.
 python3 stats.py                    # every active pool, per wallet, and the total
 python3 stats.py --pool mu-usdc     # one pool
 python3 stats.py --wallet sol-lp    # one wallet
+python3 stats.py --wallet 83HxMUUC7c   # the same wallet, by its address's first 10 characters
 python3 stats.py --all --json       # dormant and disabled profiles too, as JSON
 python3 db.py --pool sol-usdc       # the full book of one pool
 ```
+
+Every report names a wallet by its id and the first 10 characters of its
+address (`WALLET sol-lp 83HxMUUC7c`, Telegram's `[SOL/USDC · 83HxMUUC7c]`): two
+wallets can run the same pair. A profile that moves between pools (sol-swing)
+lists each pool it held under it (`db.by_pool`, keyed on each position's
+pool); its token amounts and hold benchmarks are blank on a side whose token
+changed, its dollars add as for any pool.
 
 ---
 

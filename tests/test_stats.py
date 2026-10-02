@@ -19,7 +19,7 @@ MU_POOL = '13MEx6gjRadJNUdmToaGSzgeWHLH7FzScUQS9Mc5nYF5'
 SOL_MINT = 'So11111111111111111111111111111111111111112'
 MU_MINT = 'MUmint1111111111111111111111111111111111111'
 DJT_MINT = 'DJTmint111111111111111111111111111111111111'
-EXTRA = ('mu-usdc', 'djt-usdc', 'base-weth-usdc')
+EXTRA = ('mu-usdc', 'djt-usdc', 'base-weth-usdc', 'sol-swing')
 
 
 def T(hours_ago):
@@ -172,12 +172,24 @@ class Total(unittest.TestCase):
         self.assertEqual(t['pools'], len(recs))
         for k in stats.USD_KEYS:
             known = [r[k] for r in recs if r[k] is not None]
-            if not known:
+            if k in stats.HOLD_KEYS and any(r['profit_usd'] is not None and r[k] is None for r in recs):
+                self.assertIsNone(t[k], k)                         # a pool with a baseline and no benchmark
+            elif not known:
                 self.assertIsNone(t[k], k)
             else:
                 self.assertAlmostEqual(t[k], sum(known), delta=1e-3 + 1e-9 * sum(abs(x) for x in known), msg=k)
         for k in stats.COUNT_KEYS:
             self.assertEqual(t[k], sum(r[k] for r in recs))
+
+    def test_a_hold_benchmark_sums_only_over_every_pool_with_a_baseline(self):
+        base = lambda profit, vs: dict({k: None for k in stats.USD_KEYS}, profit_usd=profit, vs_hold_usd=vs,
+                                       vs_hold_50_50_usd=vs)
+        t = stats.total([base(1.0, 2.0), base(None, None), base(3.0, -0.5)])   # no baseline: left out
+        self.assertEqual((t['vs_hold_usd'], t['vs_hold_50_50_usd'], t['profit_usd']), (1.5, 1.5, 4.0))
+        t = stats.total([base(1.0, 2.0), base(3.0, None)])                     # a swing: no benchmark
+        self.assertEqual((t['vs_hold_usd'], t['vs_hold_50_50_usd'], t['profit_usd']), (None, None, 4.0))
+        self.assertIsNone(stats.total([base(None, None)])['vs_hold_usd'])
+        self.assertEqual(stats.total([base(None, 2.0)])['vs_hold_usd'], 2.0)    # a figure with no profit adds
 
     @settings(max_examples=200, deadline=None)
     @given(st.lists(pool_record(), max_size=8))
@@ -506,7 +518,10 @@ class Portfolio(unittest.TestCase):
         with contextlib.redirect_stdout(out):
             stats.main([])
         text = out.getvalue()
-        self.assertIn('WALLET sol-lp (solana, LP wallet)', text)
+        tag = db.wallet_tag(db.wallet_row('sol-lp')['address'])
+        self.assertEqual(len(tag), 10)
+        self.assertIn(f'WALLET sol-lp {tag} (solana, LP wallet)', text)
+        self.assertNotIn('subtotal', text)                           # one wallet: its subtotal is the TOTAL
         self.assertIn('MU/USDC  (mu-usdc, meteora-dlmm)', text)
         self.assertIn('TOTAL  2 pools', text)
         self.assertIn('dormant 1 (djt-usdc) · disabled 1 (other)', text)
@@ -518,6 +533,7 @@ class Portfolio(unittest.TestCase):
         with contextlib.redirect_stdout(out):
             stats.main(['--json', '--pool', 'sol-usdc'])
         self.assertEqual([r['profile'] for r in json.loads(out.getvalue())['pools']], ['sol-usdc'])
+        self.assertTrue(out.getvalue().startswith('{\n "ts": '), out.getvalue()[:20])   # indent=1
 
     def test_no_active_pool(self):
         reset_ledger()
@@ -713,7 +729,14 @@ class OtherWallet(unittest.TestCase):
                          [('base-lp', 'base', None, ['base-weth-usdc']), ('sol-lp', 'solana', 'LP wallet', ['sol-usdc'])])
         self.assertEqual(p['total']['equity_usd'], 150.0)
         self.assertEqual(p['wallets'][0]['subtotal']['equity_usd'], 50.0)
-        self.assertIn('subtotal sol-lp', stats.render(p))
+        self.assertIn('subtotal sol-lp ', stats.render(p))
+        self.assertEqual([w['wallet_tag'] for w in p['wallets']],
+                         ['0x2b359488', db.wallet_tag(db.wallet_row('sol-lp')['address'])])
+        self.assertIn('WALLET base-lp 0x2b359488 (base)', stats.render(p))
+        self.assertEqual([r['wallet_tag'] for r in p['pools']], [w['wallet_tag'] for w in p['wallets']])
+        # the EVM tag in any case, the id, the whole address: one wallet
+        for key in ('0x2B359488', 'base-lp', '0x2b35948898e1b4897E7FC5a70e39b213dcfd0142'):
+            self.assertEqual([r['profile'] for r in stats.portfolio(key)['pools']], ['base-weth-usdc'], key)
 
     def test_a_wallet_not_yet_registered_is_on_solana(self):
         drop_extra()
@@ -725,6 +748,15 @@ class OtherWallet(unittest.TestCase):
         with context():
             w = stats.portfolio()['wallets']
         self.assertEqual([(x['wallet_id'], x['chain'], x['label']) for x in w], [('sol-lp', 'solana', None)])
+        self.assertEqual((w[0]['wallet_tag'], w[0]['address']), (None, None))     # no address: the id alone
+        self.assertIn('WALLET sol-lp (solana)', stats.render(stats.portfolio()))
+        # its only profile disabled, no wallets row: --wallet still knows the id from the profile
+        with db.cursor(commit=True) as cur:
+            cur.execute("update config set active = false, enabled = false")
+        out = io.StringIO()
+        with context(), contextlib.redirect_stdout(out):
+            stats.main(['--wallet', 'sol-lp', '--all'])
+        self.assertIn('WALLET sol-lp (solana)', out.getvalue())
 
     def test_the_wallets_dust_belongs_to_its_residual_owner(self):
         self.assertEqual(db._uncounted_usd('base-weth-usdc'), 0.0)                      # nothing kept yet
@@ -741,6 +773,591 @@ class OtherWallet(unittest.TestCase):
         got = db._uncounted_usd('mu-usdc')                                                # not the residual owner
         self.assertIsInstance(got, float)
         self.assertEqual(got, 0.0)
+
+
+
+# --- a wallet's name: its id and its address's first 10 characters (2026-10-02) ------
+
+SOL_ADDR = '83HxMUUC7cn5oWKgNvUYCv52MVLUWmaUPFdCrgC4tV2f'
+SWING_ADDR = 'FogqBWLC4y94csrniURTbGrx7ff7jFa4e2qp1GsgyAmM'
+EVM_ADDR = '0x2b35948898e1b4897E7FC5a70e39b213dcfd0142'
+ROWS = [{'id': 'sol-lp', 'address': SOL_ADDR}, {'id': 'sol-lp2', 'address': SWING_ADDR},
+        {'id': 'base-lp', 'address': EVM_ADDR}]
+B58 = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz'
+
+
+class WalletNames(unittest.TestCase):
+    """db.wallet_tag, db.resolve_wallet, db.mixed_sides, stats.wallet_name. Pure."""
+
+    def test_the_tag_is_the_first_ten_characters(self):
+        self.assertEqual([db.wallet_tag(r['address']) for r in ROWS], ['83HxMUUC7c', 'FogqBWLC4y', '0x2b359488'])
+        self.assertEqual(db.WALLET_TAG_LEN, 10)
+        self.assertEqual(db.wallet_tag('  abc  '), 'abc')              # a short address is all of it
+        for none in (None, '', '   '):
+            self.assertIsNone(db.wallet_tag(none))
+
+    @settings(max_examples=300, deadline=None)
+    @given(st.text(B58, min_size=0, max_size=50))
+    def test_the_tag_is_a_prefix_and_names_its_wallet(self, address):
+        tag = db.wallet_tag(address)
+        if not address:
+            self.assertIsNone(tag)
+            return
+        self.assertEqual(tag, address[:10])
+        self.assertTrue(address.startswith(tag))
+        if len(address) >= 10:
+            rows = [{'id': 'w', 'address': address}, {'id': 'v', 'address': 'z' + address}]
+            self.assertEqual(db.resolve_wallet(tag, rows), 'w')
+            self.assertEqual(db.resolve_wallet(address, rows), 'w')
+
+    def test_an_id_a_tag_or_the_address_names_the_wallet(self):
+        for key, want in (('sol-lp', 'sol-lp'), ('sol-lp2', 'sol-lp2'), ('83HxMUUC7c', 'sol-lp'),
+                          ('FogqBWLC4y', 'sol-lp2'), (SWING_ADDR, 'sol-lp2'), ('FogqBWLC4y94', 'sol-lp2'),
+                          ('0x2b359488', 'base-lp'), ('0X2B359488', 'base-lp'), (EVM_ADDR.upper(), 'base-lp')):
+            self.assertEqual(db.resolve_wallet(key, ROWS), want, key)
+
+    def test_a_key_that_names_no_wallet_is_returned_as_it_is(self):
+        self.assertIsNone(db.resolve_wallet(None, ROWS))
+        for key in ('Fogq', 'FogqBWLC4', 'fogqbwlc4y', 'FogqBWLC4z', 'nobody-here', ''):  # short, base58 case, other
+            self.assertEqual(db.resolve_wallet(key, ROWS), key, key)
+        self.assertEqual(db.resolve_wallet('FogqBWLC4y', []), 'FogqBWLC4y')
+        self.assertEqual(db.resolve_wallet('FogqBWLC4y', [{'id': 'x', 'address': None}]), 'FogqBWLC4y')
+
+    def test_an_id_wins_over_an_address(self):
+        rows = ROWS + [{'id': 'FogqBWLC4y', 'address': 'zzzzzzzzzzzzzzzz'}]
+        self.assertEqual(db.resolve_wallet('FogqBWLC4y', rows), 'FogqBWLC4y')
+
+    def test_a_prefix_of_two_wallets_is_refused(self):
+        rows = [{'id': 'a', 'address': 'FogqBWLC4yAAAA'}, {'id': 'b', 'address': 'FogqBWLC4yBBBB'}]
+        with self.assertRaises(ValueError) as e:
+            db.resolve_wallet('FogqBWLC4y', rows)
+        self.assertIn('a, b', str(e.exception))
+        self.assertEqual(db.resolve_wallet('FogqBWLC4yA', rows), 'a')
+        evm = [{'id': 'a', 'address': '0xABCDEF0123aa'}, {'id': 'b', 'address': '0xabcdef0123bb'}]
+        with self.assertRaises(ValueError):
+            db.resolve_wallet('0xabcdef01', evm)                    # one EVM address in two cases
+        self.assertEqual(db.resolve_wallet('0xABCDEF0123B', evm), 'b')
+        same = [{'id': 'a', 'address': 'FogqBWLC4yAAAA'}, {'id': 'a', 'address': 'FogqBWLC4yAAAA'}]
+        self.assertEqual(db.resolve_wallet('FogqBWLC4y', same), 'a')  # one id twice is one wallet
+
+    def test_only_an_evm_address_ignores_case(self):
+        self.assertTrue(db._address_starts('0xAbC', '0XaB'))
+        self.assertTrue(db._address_starts('0XAbC', '0xab'))
+        self.assertFalse(db._address_starts('FogqB', 'fogq'))
+        self.assertTrue(db._address_starts('FogqB', 'Fogq'))
+        self.assertFalse(db._address_starts(None, 'x'))
+        self.assertFalse(db._address_starts(None, 'None'))            # no address is not the text 'None'
+        self.assertFalse(db._address_starts('ab', 'abc'))
+
+    def test_the_wallet_name(self):
+        self.assertEqual(stats.wallet_name('sol-lp2', 'FogqBWLC4y'), 'sol-lp2 FogqBWLC4y')
+        self.assertEqual(stats.wallet_name('sol-lp', None), 'sol-lp')
+        self.assertEqual(stats.wallet_name('sol-lp', ''), 'sol-lp')
+
+    def test_mixed_sides(self):
+        self.assertEqual(db.mixed_sides(['SOL/USDC', 'DJT/USDC']), {'a': True, 'b': False})
+        self.assertEqual(db.mixed_sides(['SOL/USDC', 'SOL/USDC']), {'a': False, 'b': False})
+        self.assertEqual(db.mixed_sides(['SOL/USDC', 'SOL/USDT']), {'a': False, 'b': True})
+        self.assertEqual(db.mixed_sides(['SOL/USDC', None, '', 'nopair']), {'a': False, 'b': False})
+        self.assertEqual(db.mixed_sides([]), {'a': False, 'b': False})
+        self.assertEqual(db.mixed_sides(['SOL/USDC', ' SOL / USDC ']), {'a': False, 'b': False})
+
+    @settings(max_examples=300, deadline=None)
+    @given(st.lists(st.tuples(st.sampled_from(['SOL', 'DJT', 'MU']), st.sampled_from(['USDC', 'USDT'])), max_size=6))
+    def test_mixed_is_more_than_one_token_on_the_side(self, pairs):
+        got = db.mixed_sides([f'{a}/{b}' for a, b in pairs])
+        self.assertEqual(got, {'a': len({a for a, _ in pairs}) > 1, 'b': len({b for _, b in pairs}) > 1})
+
+    def test_the_held_pools_lines(self):
+        one = {'by_pool': [{'dex': 'orca', 'pair_label': 'DJT/USDC', 'pool': 'P' * 44}]}
+        self.assertEqual(stats._held_lines(one), [])                  # one pool: the record says it all
+        self.assertEqual(stats._held_lines({}), [])
+        two = {'by_pool': [{'dex': 'raydium-clmm', 'pair_label': 'SOL/USDC', 'pool': 'RAYPOOL123456', 'open_now': 1,
+                            'positions': 2, 'days': 1.5, 'fees_a': 0.011, 'fees_b': 1.2, 'fees_usd': 2.3,
+                            'fees_per_day_usd': 1.5333, 'in_range_pct': 90.0},
+                           {'dex': 'orca', 'pair_label': 'DJT/USDC', 'pool': 'ORCAPOOL9876', 'open_now': 0,
+                            'positions': 1, 'days': 0.5, 'fees_a': 2.0, 'fees_b': 0.3, 'fees_usd': 0.5,
+                            'fees_per_day_usd': None, 'in_range_pct': None}]}
+        self.assertEqual(stats._held_lines(two), [
+            '    > pool  raydium-clmm SOL/USDC RAYPOOL123 · 2 pos over 1.50d · fees 0.011 SOL 1.2 USDC $2.3000'
+            ' · $1.5333/d · in range 90%',
+            '      pool  orca DJT/USDC ORCAPOOL98 · 1 pos over 0.50d · fees 2 DJT 0.3 USDC $0.5000 · -/d · in range -'])
+        bare = stats._held_lines({'by_pool': [{}, {'pair_label': 'X'}]})
+        self.assertEqual(bare[0], '      pool  - - - · 0 pos over 0.00d · fees - A - B - · -/d · in range -')
+        self.assertIn('fees - X - B -', bare[1])
+
+    def test_a_record_carries_its_wallet_tag_and_its_pools(self):
+        pools = [{'dex': 'orca', 'pool': 'P1', 'pair_label': 'DJT/USDC', 'fees_a': 2.0, 'extra': 1},
+                 {'dex': 'raydium-clmm', 'pool': 'P2', 'pair_label': 'SOL/USDC'}]
+        r = stats.record({'name': 'sol-swing', 'wallet': 'sol-lp2'}, {}, {}, {}, pools, 'FogqBWLC4y')
+        self.assertEqual((r['wallet_id'], r['wallet_tag']), ('sol-lp2', 'FogqBWLC4y'))
+        self.assertEqual([p['pool'] for p in r['by_pool']], ['P1', 'P2'])
+        self.assertEqual(set(r['by_pool'][0]), set(stats.POOL_KEYS))     # only the shown figures
+        self.assertEqual(r['by_pool'][0]['fees_a'], 2.0)
+        self.assertIsNone(r['by_pool'][1]['fees_a'])
+        r = stats.record({'name': 'x', 'wallet': 'w'}, {}, {}, {})
+        self.assertEqual((r['wallet_tag'], r['by_pool']), (None, []))
+
+    def test_since_start_benchmarks_add_only_when_every_book_has_one(self):
+        s = lambda hold: dict({k: 1.0 for k in db.SINCE_USD}, since='a', days=1.0,
+                              **({k: None for k in db.SINCE_HOLD} if hold is None else {}))
+        c = db.combine_since([s(1.0), s(None)])
+        self.assertTrue(all(c[k] is None for k in db.SINCE_HOLD), c)
+        self.assertEqual((c['start_usd'], c['profit_usd']), (2.0, 2.0))   # the dollars still add
+        c = db.combine_since([s(1.0), s(1.0)])
+        self.assertTrue(all(c[k] == 2.0 for k in db.SINCE_HOLD), c)
+
+
+SWING_POOL_SOL = 'RAYsol1111111111111111111111111111111111111'
+SWING_POOL_DJT = 'ORCAdjt111111111111111111111111111111111111'
+
+
+class TwoSolanaWallets(unittest.TestCase):
+    """sol-lp (sol-usdc, mu-usdc, djt-usdc) and sol-lp2, a second Solana
+    wallet whose one profile sol-swing held DJT/USDC on Orca and now SOL/USDC
+    on Raydium: the same Raydium pool sol-usdc holds."""
+
+    def setUp(self):
+        reset_ledger()
+        multi_wallet()
+        with db.cursor(commit=True) as cur:
+            cur.execute("delete from config where name = 'sol-swing'")
+            cur.execute("delete from wallets where id = 'sol-lp2'")
+            cur.execute("insert into wallets (id, chain, address, secret_env, label) values ('sol-lp2', 'solana', "
+                        "%s, 'LPBOT_SOL_LP2_KEY', 'swing wallet')", (SWING_ADDR,))
+            cur.execute("insert into config (name, pool, pair_label, token_a, token_b, capital_usd, max_usd, dex, "
+                        "wallet_id, enabled, residual_owner, deposit_mint, mints) values ('sol-swing', %s, "
+                        "'SOL/USDC', 'SOL', 'USDC', 100, 200, 'raydium-clmm', 'sol-lp2', true, true, %s, %s)",
+                        (SWING_POOL_SOL, SOL_MINT, [SOL_MINT, USDC_MINT]))
+        self.sol_tag = db.wallet_tag(db.wallet_row('sol-lp')['address'])
+        # sol-usdc on sol-lp: open on the Raydium pool
+        pos('S1', 'sol-usdc', SWING_POOL_SOL, 'SOL/USDC', 'raydium-clmm', hours=30)
+        snap('S1', 2, 0.4, 240.0, lp=220.0, accrued=(0.002, 0.2))
+        harvest('S1', 3, 0.01, 1.0, 2.0)
+        # mu-usdc on sol-lp
+        pos('MU1', 'mu-usdc', MU_POOL, 'MU/USDC', 'meteora-dlmm', hours=30)
+        snap('MU1', 2, 0.1, 100.0, lp=95.0, accrued=(0.01, 0.05))
+        harvest('MU1', 3, 0.2, 0.4, 1.0)
+        # sol-swing on sol-lp2: DJT/USDC first (closed), then SOL/USDC (open)
+        pos('SW1', 'sol-swing', SWING_POOL_DJT, 'DJT/USDC', 'orca', hours=30, closed_hours=20)
+        snap('SW1', 25, 0.2, 150.0, lp=140.0, accrued=(1.0, 0.1))
+        harvest('SW1', 21, 2.0, 0.3, 0.5)
+        pos('SW2', 'sol-swing', SWING_POOL_SOL, 'SOL/USDC', 'raydium-clmm', hours=19)
+        snap('SW2', 3, 0.1, 151.0, lp=140.0, accrued=(0.0005, 0.05))
+        snap('SW2', 1, 0.3, 152.0, lp=140.0, accrued=(0.001, 0.2))
+        harvest('SW2', 2, 0.01, 1.0, 2.0)
+        payout('sol-usdc', 1.0)
+        payout('sol-swing', 0.4)
+        flow('baseline', 230.0, 'sol-usdc', 'sol-lp', sol=1.0, usdc=110.0)
+        flow('baseline', 145.0, 'sol-swing', 'sol-lp2', amounts={DJT_MINT: 10.0, USDC_MINT: 70.0}, hours_ago=29)
+        flow('deposit', 9.0, None, 'sol-lp2')                     # no profile, on sol-lp2: not sol-usdc's
+        flow('deposit', 7.0, None, None)                          # no profile, no wallet: pre-020, sol-usdc's
+
+    def tearDown(self):
+        reset_ledger()
+        drop_extra()
+        with db.cursor(commit=True) as cur:
+            cur.execute("delete from wallets where id = 'sol-lp2'")
+        ensure_profile()
+
+    def test_each_wallet_by_id_and_tag_and_the_sums(self):
+        with context():
+            p = stats.portfolio()
+        self.assertEqual([(w['wallet_id'], w['wallet_tag'], w['chain'], w['pools']) for w in p['wallets']],
+                         [('sol-lp', self.sol_tag, 'solana', ['mu-usdc', 'sol-usdc']),
+                          ('sol-lp2', 'FogqBWLC4y', 'solana', ['sol-swing'])])
+        self.assertEqual(p['wallets'][1]['address'], SWING_ADDR)
+        by = {r['profile']: r for r in p['pools']}
+        self.assertEqual({k: r['wallet_tag'] for k, r in by.items()},
+                         {'mu-usdc': self.sol_tag, 'sol-usdc': self.sol_tag, 'sol-swing': 'FogqBWLC4y'})
+        sub = {w['wallet_id']: w['subtotal'] for w in p['wallets']}
+        self.assertEqual((sub['sol-lp']['equity_usd'], sub['sol-lp2']['equity_usd'], p['total']['equity_usd']),
+                         (340.0, 152.0, 492.0))
+        for k in stats.USD_KEYS:
+            for wid, names in (('sol-lp', ('mu-usdc', 'sol-usdc')), ('sol-lp2', ('sol-swing',))):
+                known = [by[n][k] for n in names if by[n][k] is not None]
+                want = round(sum(known), 4) if known else None
+                if k in stats.HOLD_KEYS and any(by[n]['profit_usd'] is not None and by[n][k] is None for n in names):
+                    want = None
+                self.assertEqual(sub[wid][k], want, (wid, k))
+        for k in stats.USD_KEYS:
+            if k in stats.HOLD_KEYS:
+                continue
+            known = [s[k] for s in sub.values() if s[k] is not None]
+            self.assertAlmostEqual(p['total'][k] or 0.0, sum(known), places=4, msg=k)
+        for k in stats.COUNT_KEYS:
+            self.assertEqual(p['total'][k], sum(s[k] for s in sub.values()), k)
+        self.assertEqual(p['total']['pools'], 3)
+        self.assertEqual((p['total']['harvests'], p['total']['recentres']), (4, 4))
+        self.assertEqual((sub['sol-lp']['paid_usd'], sub['sol-lp2']['paid_usd'], p['total']['paid_usd']),
+                         (1.0, 0.4, 1.4))
+        # the swing has a baseline and no benchmark (two base tokens): no hold benchmark in its sums
+        self.assertIsNotNone(by['sol-swing']['profit_usd'])
+        self.assertIsNone(by['sol-swing']['vs_hold_usd'])
+        self.assertIsNone(sub['sol-lp2']['vs_hold_usd'])
+        self.assertIsNone(p['total']['vs_hold_usd'])
+        self.assertIsNotNone(by['sol-usdc']['vs_hold_usd'])
+        self.assertEqual(sub['sol-lp']['vs_hold_usd'], by['sol-usdc']['vs_hold_usd'])   # mu-usdc: no baseline
+
+    def test_the_swing_is_reported_per_pool_and_in_its_subtotal(self):
+        with context():
+            p = stats.portfolio()
+        sw = next(r for r in p['pools'] if r['profile'] == 'sol-swing')
+        self.assertEqual((sw['pair'], sw['dex'], sw['token_a'], sw['token_b']),
+                         ('SOL/USDC', 'raydium-clmm', 'SOL', 'USDC'))
+        pools = {x['pool']: x for x in sw['by_pool']}
+        self.assertEqual(set(pools), {SWING_POOL_SOL, SWING_POOL_DJT})          # keyed on the position's pool
+        djt, sol = pools[SWING_POOL_DJT], pools[SWING_POOL_SOL]
+        self.assertEqual((djt['pair_label'], djt['dex'], djt['positions'], djt['open_now']), ('DJT/USDC', 'orca', 1, 0))
+        self.assertEqual((djt['fees_a'], djt['fees_b'], djt['fees_usd'], djt['unrealised_usd']), (2.0, 0.3, 0.5, 0.0))
+        self.assertEqual((sol['pair_label'], sol['open_now']), ('SOL/USDC', 1))
+        self.assertEqual((sol['fees_a'], sol['fees_b'], sol['fees_usd']), (0.011, 1.2, 2.3))
+        self.assertEqual((sol['realised_usd'], sol['unrealised_usd']), (2.0, 0.3))
+        # the profile's book is the sum of its pools, in dollars; SOL and DJT do not add
+        self.assertAlmostEqual(sw['fees_total_usd'], djt['fees_usd'] + sol['fees_usd'], places=4)
+        self.assertEqual((sw['fees_realised_usd'], sw['fees_unrealised_usd']), (2.5, 0.3))
+        self.assertEqual([sw[k] for k in ('fees_realised_a', 'fees_unrealised_a', 'fees_total_a')], [None] * 3)
+        self.assertEqual((sw['fees_realised_b'], sw['fees_unrealised_b'], sw['fees_total_b']), (1.3, 0.2, 1.5))
+        self.assertEqual((sw['recentres'], sw['harvests'], sw['positions_open_now']), (2, 2, 1))
+        self.assertEqual(p['wallets'][1]['subtotal']['fees_total_usd'], sw['fees_total_usd'])
+        # sol-usdc on the same Raydium pool is its own row in its own wallet
+        su = next(r for r in p['pools'] if r['profile'] == 'sol-usdc')
+        self.assertEqual([(x['pool'], x['fees_usd']) for x in su['by_pool']], [(SWING_POOL_SOL, 2.4)])
+        self.assertEqual((su['fees_realised_a'], su['fees_total_a']), (0.01, 0.012))   # one token: amounts stand
+        with context():
+            rows = db.by_pool()
+        both = sorted((r['profile'], r['positions'], r['fees_usd']) for r in rows if r['pool'] == SWING_POOL_SOL)
+        self.assertEqual(both, [('sol-swing', 1, 2.3), ('sol-usdc', 1, 2.4)])            # never merged
+        with context():
+            book = db.stats()                                                   # every profile, summed
+        self.assertEqual(sorted((x['profile'], x['pool'], x['fees_usd']) for x in book['by_pool']),
+                         [('mu-usdc', MU_POOL, 1.1), ('sol-swing', SWING_POOL_DJT, 0.5),
+                          ('sol-swing', SWING_POOL_SOL, 2.3), ('sol-usdc', SWING_POOL_SOL, 2.4)])
+        self.assertIsNone(book['fees_total_a'])                                 # SOL, MU and DJT
+        self.assertEqual(book['fees_total_b'], round(1.5 + 0.45 + 1.2, 6))      # USDC everywhere
+
+    def test_the_wallet_filter_takes_an_id_or_a_tag(self):
+        for key in ('sol-lp2', 'FogqBWLC4y', SWING_ADDR):
+            p = stats.portfolio(key)
+            self.assertEqual([r['profile'] for r in p['pools']], ['sol-swing'], key)
+            self.assertEqual(p['total']['equity_usd'], 152.0)
+        for key in ('sol-lp', self.sol_tag):
+            self.assertEqual([r['profile'] for r in stats.portfolio(key)['pools']], ['mu-usdc', 'sol-usdc'], key)
+        self.assertEqual(stats.portfolio('Fogq')['pools'], [])               # too short: names no wallet
+        self.assertEqual(db.stats(wallet_id='sol-lp2')['equity_usd'], 152.0)
+        self.assertEqual(db.book_scope(wallet_id='sol-lp2'), ['sol-swing'])
+        self.assertEqual(db.book_scope('sol-swing', 'sol-lp'), [])
+
+    def test_the_text_names_each_wallet_and_each_pool_of_the_swing(self):
+        out = io.StringIO()
+        with context(), contextlib.redirect_stdout(out):
+            stats.main([])
+        text = out.getvalue()
+        self.assertIn(f'WALLET sol-lp {self.sol_tag} (solana, LP wallet)', text)
+        self.assertIn('WALLET sol-lp2 FogqBWLC4y (solana, swing wallet)', text)
+        self.assertIn(f'  subtotal sol-lp {self.sol_tag}  2 pools', text)
+        self.assertIn('  subtotal sol-lp2 FogqBWLC4y  1 pool', text)
+        self.assertIn('TOTAL  3 pools', text)
+        self.assertIn('  SOL/USDC  (sol-swing, raydium-clmm)', text)
+        self.assertIn(f'    > pool  raydium-clmm SOL/USDC {SWING_POOL_SOL[:10]} · 1 pos over', text)
+        self.assertIn(f'      pool  orca DJT/USDC {SWING_POOL_DJT[:10]} · 1 pos over', text)
+        self.assertIn('fees 2 DJT 0.3 USDC $0.5000', text)
+        self.assertIn('realised - SOL 1.3 USDC $2.5000', text)                 # no SOL+DJT sum
+        swing = text[text.index('WALLET sol-lp2'):text.index('TOTAL')]
+        self.assertNotIn('sol-usdc', swing)
+        self.assertEqual(text.count(' pool  '), 2)                            # one-pool profiles: no pool lines
+        out = io.StringIO()
+        with context(), contextlib.redirect_stdout(out):
+            stats.main(['--json', '--wallet', 'FogqBWLC4y'])
+        j = json.loads(out.getvalue())
+        self.assertEqual([(w['wallet_id'], w['wallet_tag']) for w in j['wallets']], [('sol-lp2', 'FogqBWLC4y')])
+
+    def test_a_wallet_flag_that_names_no_wallet_or_two_stops(self):
+        err = io.StringIO()
+        for bad in (['--wallet', 'Fogq'], ['--wallet', 'ZZZZZZZZZZZZ'], ['--wallet', 'no-such-wallet']):
+            with context(), contextlib.redirect_stderr(err), self.assertRaises(SystemExit) as e:
+                stats.main(bad)
+            self.assertEqual(e.exception.code, 2, bad)
+        self.assertIn("no wallet 'Fogq'", err.getvalue())
+        with db.cursor(commit=True) as cur:
+            cur.execute("insert into wallets (id, chain, address, secret_env) values ('sol-lp3', 'solana', "
+                        "'FogqBWLC4yZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ', 'LPBOT_SOL_LP3_KEY')")
+        try:
+            err = io.StringIO()
+            with context(), contextlib.redirect_stderr(err), self.assertRaises(SystemExit):
+                stats.main(['--wallet', 'FogqBWLC4y'])
+            self.assertIn('matches several wallets: sol-lp2, sol-lp3', err.getvalue())
+        finally:
+            with db.cursor(commit=True) as cur:
+                cur.execute("delete from wallets where id = 'sol-lp3'")
+        out = io.StringIO()
+        with context(), contextlib.redirect_stdout(out):
+            stats.main(['--wallet', 'sol-lp'])                                 # a profile's wallet, by id
+        self.assertIn('WALLET sol-lp ', out.getvalue())
+
+    def test_db_cli_takes_the_tag(self):
+        import os
+        import subprocess
+        import sys
+        here = os.path.dirname(os.path.abspath(__file__))
+        got = subprocess.run([sys.executable, os.path.join(here, '..', 'db.py'), 'json', '--wallet', 'FogqBWLC4y'],
+                             capture_output=True, text=True, timeout=120, env=dict(os.environ))
+        self.assertEqual(got.returncode, 0, got.stderr)
+        self.assertEqual(json.loads(got.stdout)['equity_usd'], 152.0)
+
+    def test_a_flow_with_no_profile_is_its_wallets_not_the_legacy_book(self):
+        self.assertEqual(db.flow_totals('sol-usdc')['deposits_usd'], 7.0)          # not 16: the 9 is sol-lp2's
+        self.assertEqual(db.flow_totals('sol-swing')['deposits_usd'], 0.0)        # no profile: no book's
+        with db.cursor(commit=True) as cur:
+            cur.execute("insert into capital_flows (ts, kind, sol, usdc, usd, price, signature, detail, wallet_id, "
+                        "profile) values (%s, 'deposit', 0, 0, 5, 10, 'f-legacy-wallet', 't', 'sol-lp', null)", (T(10),))
+        self.assertEqual(db.flow_totals('sol-usdc')['deposits_usd'], 12.0)         # the legacy wallet's: sol-usdc's
+        self.assertEqual(db.since_start(0.0, 'sol-usdc')['start_usd'], 230.0 + 7.0 + 5.0)   # not + 9
+
+    def test_the_swings_since_start_has_dollars_and_no_hold(self):
+        s = db.since_start(0.0, 'sol-swing')
+        self.assertEqual((s['start_usd'], s['equity_usd'], s['paid_out_usd']), (145.0, 152.0, 0.4))
+        self.assertAlmostEqual(s['profit_usd'], 152.0 + 0.4 - 145.0, places=4)
+        for k in ('start_sol', 'price_start', 'price_now') + db.SINCE_HOLD:
+            self.assertIsNone(s[k], k)
+        one = db.since_start(0.0, 'sol-usdc')
+        self.assertTrue(all(one[k] is not None for k in ('start_sol', 'price_start', 'price_now') + db.SINCE_HOLD))
+        with context():
+            both = db.since_start(wallet_id=None)
+        self.assertTrue(all(both[k] is None for k in db.SINCE_HOLD))
+        self.assertIsNotNone(db.since_start(wallet_id='sol-lp')['vs_hold_50_50_usd'])     # mu-usdc: no baseline
+
+    def test_a_day_across_two_pairs_has_no_price_and_no_hold(self):
+        # three days ago the swing held DJT then SOL; sol-usdc held SOL all day
+        day = (db.now() - dt.timedelta(days=3)).date()
+        noon = dt.datetime.combine(day, dt.time(12), tzinfo=dt.timezone.utc)
+        with db.cursor(commit=True) as cur:
+            for mint, h, px in (('SW1', 2, 1.5), ('SW2', 8, 150.0), ('S1', 1, 150.0), ('S1', 9, 152.0)):
+                cur.execute("insert into snapshots (ts, mint, price, in_range, liquidity, equity_usd) "
+                            "values (%s, %s, %s, true, '1', 100)", (noon - dt.timedelta(hours=10 - h), mint, px))
+        sw = db.daily_line(day, 'sol-swing')
+        self.assertEqual([sw[k] for k in ('price_open', 'price_close', 'hold_50_50_usd', 'vs_hold_usd')], [None] * 4)
+        self.assertEqual(sw['equity_open'], 100.0)
+        su = db.daily_line(day, 'sol-usdc')
+        self.assertEqual((su['price_open'], su['price_close']), (150.0, 152.0))
+        self.assertIsNotNone(su['vs_hold_usd'])
+        with context():
+            every = db.daily_line(day)                                          # every profile, one line each, added
+        self.assertEqual((every['equity_open'], every['price_open'], every['vs_hold_usd']), (200.0, None, None))
+
+    def test_the_native_price_is_of_the_profiles_pool_now(self):
+        # the swing just left DJT: its last DJT snapshot is newer than its first SOL one
+        with db.cursor(commit=True) as cur:
+            cur.execute("delete from snapshots where mint in ('S1', 'MU1')")
+            cur.execute("insert into snapshots (ts, mint, price, in_range, liquidity, equity_usd) "
+                        "values (now() - interval '2 minutes', 'SW2', 151.25, true, '1', 150)")
+            cur.execute("insert into snapshots (ts, mint, price, in_range, liquidity, equity_usd) "
+                        "values (now() - interval '1 minute', 'SW1', 0.42, true, '1', 150)")
+        self.assertEqual(db.native_price(SOL_MINT, [USDC_MINT], 900), 151.25)       # not DJT's 0.42
+
+    def test_notify_names_the_wallet_by_its_tag(self):
+        import rebalancer
+        from unittest import mock
+        with mock.patch.object(rebalancer.config, 'WALLET_ADDRESS', SWING_ADDR):
+            rebalancer.notify('zzz_test', a=1)
+        row = json.loads(rebalancer.FEED.read_text().splitlines()[-1])
+        self.assertEqual((row['event'], row['wallet_tag']), ('zzz_test', 'FogqBWLC4y'))
+        with mock.patch.object(rebalancer.config, 'WALLET_ADDRESS', None):
+            rebalancer.notify('zzz_test', wallet_tag='given')
+        self.assertEqual(json.loads(rebalancer.FEED.read_text().splitlines()[-1])['wallet_tag'], 'given')
+
+
+USDC_MINT = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'
+
+
+def pos(mint, profile, pool, pair, dex, hours=30, closed_hours=None):
+    """A position of `profile` on `pool`, opened `hours` ago (closed
+    `closed_hours` ago)."""
+    db.open_position(mint, pool, pair, 9.5, 10.5, 2.0, f'sig-{mint}', 100.0, 'test', profile, dex)
+    with db.cursor(commit=True) as cur:
+        cur.execute('update positions set opened_at = %s, closed_at = %s where mint = %s',
+                    (T(hours), T(closed_hours) if closed_hours is not None else None, mint))
+
+
+
+class ByPoolExact(unittest.TestCase):
+    """db.by_pool on figures worked by hand: one row per profile and pool."""
+
+    def setUp(self):
+        reset_ledger()
+        multi_wallet()
+        # P1: A closed (in range half the time), B and B2 open
+        pos('A', 'sol-usdc', 'P1', 'SOL/USDC', 'orca', hours=48, closed_hours=24)
+        with db.cursor(commit=True) as cur:
+            cur.execute("update positions set deposit_usd = 100, withdraw_usd = 103 where mint = 'A'")
+        snap('A', 40, 0.0, 100.0, lp=99.0, in_range=True)
+        snap('A', 30, 0.0, 100.0, lp=99.0, in_range=False)
+        harvest('A', 25, 0.01, 1.0, 1.0)
+        pos('B', 'sol-usdc', 'P1', 'SOL/USDC', 'orca', hours=24)
+        with db.cursor(commit=True) as cur:
+            cur.execute("update positions set deposit_usd = 300 where mint = 'B'")
+        snap('B', 20, 0.2, 310.0, lp=298.0)
+        snap('B', 10, 0.3, 311.0, lp=299.0)
+        harvest('B', 15, 0.002, 0.5, 0.5)
+        pos('B2', 'sol-usdc', 'P1', 'SOL/USDC', 'orca', hours=12)
+        with db.cursor(commit=True) as cur:
+            cur.execute("update positions set deposit_usd = 50 where mint = 'B2'")
+        snap('B2', 5, 0.1, 60.0, lp=51.0)
+        # P2: no deposit on record
+        pos('C', 'sol-usdc', 'P2', 'SOL/USDC', 'orca', hours=20)
+        with db.cursor(commit=True) as cur:
+            cur.execute("update positions set deposit_usd = null where mint = 'C'")
+        snap('C', 6, 0.0, 20.0, lp=20.0)
+        # P3: a deposit under a dollar
+        pos('E', 'sol-usdc', 'P3', 'SOL/USDC', 'orca', hours=6)
+        with db.cursor(commit=True) as cur:
+            cur.execute("update positions set deposit_usd = 0.5 where mint = 'E'")
+        snap('E', 1, 0.01, 0.6, lp=0.5)
+        # P4: half an hour, closed: too short for a rate, no equity
+        pos('D', 'sol-usdc', 'P4', 'SOL/USDC', 'orca', hours=0.5, closed_hours=0.2)
+        with db.cursor(commit=True) as cur:
+            cur.execute("update positions set deposit_usd = 10, withdraw_usd = 10 where mint = 'D'")
+
+    def tearDown(self):
+        reset_ledger()
+        drop_extra()
+        ensure_profile()
+
+    def test_every_figure_of_every_pool(self):
+        rows = db.by_pool('sol-usdc')
+        self.assertEqual([r['pool'] for r in rows], ['P4', 'P3', 'P1', 'P2'])    # newest position first
+        p4, p3, p1, p2 = rows
+        self.assertEqual((p1['positions'], p1['open_now'], p1['profile']), (3, 2, 'sol-usdc'))
+        self.assertAlmostEqual(p1['days'], 2.5, places=2)
+        self.assertEqual((p1['realised_usd'], p1['unrealised_usd'], p1['fees_usd']), (1.5, 0.4, 1.9))
+        self.assertEqual((p1['realised_a'], p1['realised_b'], p1['unrealised_a'], p1['unrealised_b']),
+                         (0.012, 1.5, 0.0, 0.0))
+        self.assertAlmostEqual(p1['fees_per_day_usd'], 1.9 / 2.5, places=3)
+        self.assertAlmostEqual(p1['apr_pct'], 1.9 / 2.5 / 170.0 * 365 * 100, delta=0.2)   # on the days-weighted deposit
+        self.assertEqual(p1['in_range_pct'], 83.3)                              # mean of 50%, 100%, 100%
+        self.assertEqual(p1['equity_usd'], 311.0)                               # the open ones' latest, highest
+        self.assertEqual(p1['deposit_usd'], 450.0)
+        self.assertEqual(p1['position_pnl_usd'], 3.0)                           # 103-100 + 299-300 + 51-50
+        self.assertEqual(p1['pnl_usd'], 4.9)
+        self.assertEqual(p1['unpriced'], 0)
+        self.assertLess(abs((p1['last_seen'] - db.now()).total_seconds()), 120)  # open now
+        self.assertLess(abs((p1['first_opened'] - T(48)).total_seconds()), 120)
+        self.assertEqual((p2['position_pnl_usd'], p2['pnl_usd'], p2['unpriced'], p2['apr_pct']), (None, None, 1, None))
+        self.assertEqual((p2['fees_per_day_usd'], p2['deposit_usd'], p2['equity_usd']), (0.0, 0.0, 20.0))
+        self.assertAlmostEqual(p3['apr_pct'], 0.01 / 0.25 / 0.5 * 365 * 100, delta=20)
+        self.assertEqual((p4['fees_per_day_usd'], p4['apr_pct'], p4['equity_usd'], p4['in_range_pct']),
+                         (None, None, None, None))
+        self.assertEqual((p4['position_pnl_usd'], p4['pnl_usd']), (0.0, 0.0))
+        self.assertLess(abs((p4['last_seen'] - T(0.2)).total_seconds()), 120)    # closed: when it closed
+
+
+
+def ssnap(mint, hours_ago, price, equity, accrued=(0.0, 0.0, 0.0), lp=None, wallet=None, in_range=True,
+          band=None, p_exit=(None, None, None)):
+    """A snapshot with every column given (db.snapshot prices nothing by itself)."""
+    with db.cursor(commit=True) as cur:
+        cur.execute('insert into snapshots (ts, mint, price, in_range, liquidity, accrued_a, accrued_b, accrued_usd, '
+                    'wallet_usd, position_usd, equity_usd, band_position, p_exit_6h, p_exit_24h, p_exit_72h) '
+                    "values (%s,%s,%s,%s,'1',%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                    (T(hours_ago), mint, price, in_range, *accrued, wallet, lp, equity, band, *p_exit))
+
+
+class StatsExact(unittest.TestCase):
+    """db.stats of one profile on figures worked by hand."""
+
+    def setUp(self):
+        reset_ledger()
+        multi_wallet()
+        # long-lived, so a 1-in-86400 (or 1-in-3600) slip in a day (an hour) shows in the rounding
+        pos('Z', 'sol-usdc', 'PZ', 'SOL/USDC', 'byreal', hours=2400)                 # open, never snapshotted
+        pos('Y', 'sol-usdc', 'P', 'SOL/USDC', 'orca', hours=720, closed_hours=50)
+        pos('X', 'sol-usdc', 'P', 'SOL/USDC', 'orca', hours=480)
+        for i in range(9):                                                           # nine more pools, newest
+            pos(f'Q{i}', 'sol-usdc', f'PQ{i}', 'SOL/USDC', 'orca', hours=2, closed_hours=1.5)
+        ssnap('Y', 70, 9.0, None)                                                    # unpriced: not the start
+        ssnap('Y', 60, 9.5, 201.0, in_range=False)
+        ssnap('X', 30, 139.0, 204.0, (0.03, 0.05, 0.1), lp=190.0)
+        ssnap('X', 24.5, 140.0, 205.0, (0.05, 0.1, 0.2), lp=190.0)
+        ssnap('X', 10, 144.0, 207.0, (0.07, 0.2, 0.4), lp=190.0)
+        ssnap('X', 6.5, 145.0, 208.0, (0.08, 0.3, 0.6), lp=190.0)
+        ssnap('X', 5, 150.0, 210.0, (0.1, 0.5, 1.25), lp=190.0)
+        ssnap('X', 1, 151.0, 212.0, (0.2000004, 0.6, 1.5), lp=195.0, wallet=15.5, in_range=False,
+              band=0.25, p_exit=(0.1, 0.3, 0.6))
+        harvest('Y', 55, 0.0101, 1.0, 2.5)
+        harvest('X', 3, 0.01, 0.5, 2.0)
+
+    def tearDown(self):
+        reset_ledger()
+        drop_extra()
+        ensure_profile()
+
+    def book(self, **kw):
+        from unittest import mock
+        with context(), mock.patch.object(db, 'season', return_value=[2.0] * 24):
+            return db.stats(profile=kw.pop('profile', 'sol-usdc'), **kw)
+
+    def test_every_figure(self):
+        s = self.book()
+        self.assertEqual((s['harvests'], s['fees_realised_usd'], s['fees_realised_a'], s['fees_realised_b']),
+                         (2, 4.5, 0.0201, 1.5))
+        self.assertEqual((s['fees_unrealised_usd'], s['fees_unrealised_a'], s['fees_unrealised_b']), (1.5, 0.2, 0.6))
+        self.assertEqual((s['fees_total_usd'], s['fees_total_a'], s['fees_total_b']), (6.0, 0.2201, 2.1))
+        self.assertEqual(s['tracked_days'], round(2399 / 24, 3))                  # from the first open to the last poll
+        self.assertAlmostEqual(s['fees_per_day_usd'], 6.0 / (2399 / 24), places=4)
+        self.assertAlmostEqual(s['apr_pct'], 6.0 / (2399 / 24) / 212.0 * 365 * 100, delta=0.02)
+        self.assertEqual((s['equity_usd'], s['equity_start_usd']), (212.0, 201.0))
+        self.assertEqual((s['lp_usd'], s['wallet_usd'], s['deployed_pct']), (195.0, 15.5, 92.0))
+        self.assertEqual((s['pnl_usd'], s['pnl_basis']), (11.0, 'first snapshot'))
+        self.assertEqual(s['in_range_pct'], 75.0)                                   # 6 of 8 snapshots
+        self.assertEqual((s['positions_opened'], s['positions_open_now']), (12, 2))
+        self.assertEqual((s['position_dex'], s['position_pair'], s['position_pool']), ('orca', 'SOL/USDC', 'P'))
+        self.assertEqual(s['dexes_held'], ['byreal', 'orca'])
+        self.assertEqual(len(s['by_pool']), 8)                                      # of 11 pools
+        self.assertEqual((s['pnl_all_pools_usd'], s['position_pnl_all_pools_usd']), (101.0, 95.0))
+        self.assertEqual(s['last_price'], 151.0)
+        self.assertEqual(s['last_seen'][:16], T(1).isoformat()[:16])
+        self.assertEqual(s['band'], {'in_range': False, 'position': 0.25, 'p_exit_6h': 0.1, 'p_exit_24h': 0.3,
+                                     'p_exit_72h': 0.6, 'hours_alive': 479.0})
+        self.assertEqual((s['token_a'], s['token_b']), ('SOL', 'USDC'))
+        self.assertEqual(self.book(token_a='XSOL', token_b='XUSD')['token_a'], 'XSOL')
+        self.assertEqual(self.book(token_a='XSOL', token_b='XUSD')['token_b'], 'XUSD')
+        rate = {h: db.trailing_rate(h, 'sol-usdc')['fees_per_day_usd'] for h in (6, 7, 12, 24, 25, 48)}
+        self.assertEqual(len({rate[6], rate[7], rate[12]}), 3, rate)                 # the windows tell apart
+        self.assertEqual(len({rate[24], rate[25], rate[48]}), 3, rate)
+        self.assertEqual((s['fees_per_day_6h_usd'], s['fees_per_day_24h_usd']), (rate[6], rate[24]))
+        self.assertEqual(s['apr_6h_pct'], round(rate[6] / 212.0 * 365 * 100, 2))
+        self.assertEqual(s['apr_24h_pct'], round(rate[24] / 212.0 * 365 * 100, 2))
+        self.assertEqual(s['expected_next_hours_fees_per_day_usd'], round(rate[24] * 2.0, 4))
+
+    def test_a_failed_wallet_read_keeps_the_last_priced_equity(self):
+        ssnap('X', 0.5, 152.0, None, (0.3, 0.7, 1.6))
+        s = self.book()
+        self.assertEqual((s['equity_usd'], s['fees_unrealised_usd'], s['last_price']), (212.0, 1.6, 152.0))
+
+    def test_a_closed_position_has_no_unrealised_and_no_band(self):
+        with db.cursor(commit=True) as cur:
+            cur.execute("update positions set closed_at = %s where mint in ('X', 'Z')", (T(0.2),))
+        s = self.book()
+        self.assertEqual((s['fees_unrealised_usd'], s['fees_unrealised_a'], s['fees_unrealised_b']), (0.0, 0.0, 0.0))
+        self.assertEqual((s['fees_total_usd'], s['band'], s['lp_usd']), (4.5, None, 0.0))
+
+    def test_an_empty_book(self):
+        s = self.book(profile='nobody')                                             # no config row, no rows
+        self.assertEqual((s['token_a'], s['token_b'], s['pair']), ('A', 'B', None))
+        self.assertEqual([s[k] for k in ('last_price', 'in_range_pct', 'tracked_days', 'equity_usd', 'band',
+                                         'fees_per_day_usd', 'last_seen')], [None] * 7)
+        pos('G', 'djt-usdc', 'PG', 'DJT/USDC', 'orca', hours=5)                    # a position, no snapshot
+        s = self.book(profile='djt-usdc')
+        self.assertEqual((s['tracked_days'], s['last_price'], s['in_range_pct'], s['positions_open_now']),
+                         (None, None, None, 1))
+
+    def test_a_book_seen_once_at_its_open(self):
+        pos('M', 'mu-usdc', MU_POOL, 'MU/USDC', 'meteora-dlmm', hours=3)
+        with db.cursor(commit=True) as cur:
+            cur.execute("insert into snapshots (ts, mint, price, in_range, liquidity, equity_usd) "
+                        "select opened_at, 'M', 10, true, '1', 50 from positions where mint = 'M'")
+        s = self.book(profile='mu-usdc')
+        self.assertEqual((s['tracked_days'], s['fees_per_day_usd'], s['apr_pct']), (0.0, None, None))
 
 
 if __name__ == '__main__':

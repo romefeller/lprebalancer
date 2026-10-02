@@ -8,7 +8,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { feedFiles, migrateState, readNew, tailAll, message, render, MOVED_FEED, LEGACY_FEED }
   from '../telegram_bridge.mjs';
-import { poolLabel, redact, portfolioText, equityLine, sinceStartLine } from '../book_format.mjs';
+import { poolLabel, redact, portfolioText, equityLine, sinceStartLine, walletName } from '../book_format.mjs';
 
 const HERE = path.dirname(new URL(import.meta.url).pathname);
 // The live bot's directory: its feeds are real rows to render (read only).
@@ -338,6 +338,89 @@ test('the portfolio: pools by wallet, subtotals, the total in dollars, dormant n
     + '  b  equity — · fees — (24h —/d) · APR 24h — · P&L — · in range —\ndormant 0 · disabled 0');
   assert.ok(portfolioText({ pools: [], wallets: [{ wallet_id: 'w' }] }).includes('▸ w (—)'));
   assert.ok(!message(PORTFOLIO).includes('undefined'));
+});
+
+// --- a wallet's name: its id and its address's first 10 characters (2026-10-02) -------------
+
+test('a wallet is named by its id and its address tag', () => {
+  assert.equal(walletName({ wallet_id: 'sol-lp2', wallet_tag: 'FogqBWLC4y' }), 'sol-lp2 FogqBWLC4y');
+  assert.equal(walletName({ wallet_id: 'sol-lp2', address: 'FogqBWLC4y94csrniURTbGrx7ff7jFa4e2qp1GsgyAmM' }),
+    'sol-lp2 FogqBWLC4y');                                                  // no tag: the address's first 10
+  assert.equal(walletName({ wallet_id: 'b', wallet_tag: 'TAG', address: 'ADDRESS12345' }), 'b TAG');   // the tag first
+  assert.equal(walletName({ wallet_id: 'sol-lp' }), 'sol-lp');
+  assert.equal(walletName({ wallet_id: 'sol-lp', wallet_tag: '', address: '' }), 'sol-lp');
+  assert.equal(walletName({ wallet_tag: 'FogqBWLC4y' }), '— FogqBWLC4y');
+  assert.equal(walletName(null), '—');
+  assert.equal(walletName({ wallet_id: '' }), '');                         // an empty id is shown as it is
+  assert.equal(walletName({ wallet_id: 'x', address: 12345678901234 }), 'x 1234567890');
+});
+
+test('the pool label carries the wallet tag: two wallets can run one pair', () => {
+  assert.equal(poolLabel({ pair: 'SOL/USDC', wallet_tag: 'FogqBWLC4y' }), '[SOL/USDC · FogqBWLC4y]');
+  assert.equal(poolLabel({ pair: 'SOL/USDC', wallet_tag: '83HxMUUC7c' }), '[SOL/USDC · 83HxMUUC7c]');
+  assert.equal(poolLabel({ pair: 'SOL/USDC', wallet_tag: null }), '[SOL/USDC]');
+  assert.equal(poolLabel({ pair: 'SOL/USDC', wallet_tag: '' }), '[SOL/USDC]');
+  assert.equal(poolLabel({ pair: 'SOL/USDC', wallet_tag: '<b>‮0x2b35948898e1' }), '[SOL/USDC · b0x2b35948]');
+  assert.equal(poolLabel({ wallet_tag: 'FogqBWLC4y' }), '');                 // no pool: no label
+  assert.equal(poolLabel({ pair: '‮', wallet_tag: 'FogqBWLC4y' }), '');
+  assert.equal(poolLabel({ profile: 'sol-swing', wallet_tag: 'FogqBWLC4y' }), '[sol-swing · FogqBWLC4y]');
+  assert.ok(message({ event: 'HARVEST', pair: 'SOL/USDC', wallet_tag: 'FogqBWLC4y', collected_usd: 1 })
+    .startsWith('[SOL/USDC · FogqBWLC4y] 🌾 HARVESTED $1.0000'));
+  assert.equal(render({ event: 'wallet_lock_timeout', wallet_id: 'sol-lp2', wallet_tag: 'FogqBWLC4y', waited_s: 30 }),
+    'WALLET LOCK TIMEOUT · sol-lp2 FogqBWLC4y busy for 30s · nothing sent; retried at the next poll');
+  assert.equal(render({ event: 'wallet_lock_timeout', waited_s: 30, wallet_tag: 'FogqBWLC4y' }),
+    'WALLET LOCK TIMEOUT · wallet busy for 30s · nothing sent; retried at the next poll');
+  assert.equal(render({ event: 'zzz', a: 1, wallet_id: 'sol-lp2', wallet_tag: 'FogqBWLC4y', pair: 'SOL/USDC' }),
+    'zzz · {"event":"zzz","a":1}');                                        // the label shows the tag
+});
+
+test('a DAILY line across two pairs has no hold and no price', () => {
+  const d = { event: 'DAILY', day: '2026-10-01', recentres: 3, fees_usd: 1, fees_earned_usd: 2, vs_hold_usd: null,
+              price_open: null, price_close: null };
+  assert.equal(render(d), 'DAILY 2026-10-01 · 3 re-centres · fees earned $2.00 (harvested $1.00) · vs 50/50 hold —');
+  assert.ok(render({ ...d, vs_hold_usd: -0.25, price_open: 10 }).endsWith('vs 50/50 hold -0.25 · SOL 10.00 → —'));
+  assert.ok(render({ ...d, price_close: 11 }).endsWith('vs 50/50 hold — · SOL — → 11.00'));
+  assert.ok(render({ ...d, vs_hold_usd: 0 }).includes('vs 50/50 hold +0.00'));
+});
+
+const TWO_SOL = {
+  event: 'PORTFOLIO', ts: '2026-10-02T00:00:00+00:00',
+  pools: [
+    { profile: 'sol-usdc', wallet_id: 'sol-lp', wallet_tag: '83HxMUUC7c', pair: 'SOL/USDC', equity_usd: 240,
+      fees_total_usd: 2.4, by_pool: [{ pool: '8sLbNZoA1cfnvMJLPfp98ZLAnFSYCFApfJKMbiXNLwxj', pair_label: 'SOL/USDC',
+        dex: 'raydium-clmm', open_now: 1, fees_usd: 2.4, in_range_pct: 100 }] },
+    { profile: 'sol-swing', wallet_id: 'sol-lp2', wallet_tag: 'FogqBWLC4y', pair: 'SOL/USDC', equity_usd: 152,
+      fees_total_usd: 2.8, by_pool: [
+        { pool: '8sLbNZoA1cfnvMJLPfp98ZLAnFSYCFApfJKMbiXNLwxj', pair_label: 'SOL/USDC', dex: 'raydium-clmm', open_now: 1,
+          fees_usd: 2.3, in_range_pct: 90 },
+        { pool: '7gkB2D1SqhUYgKrSpDU5cma4tK9efijHouYituABdJcG', pair_label: 'DJT/USDC', dex: 'orca', open_now: 0,
+          fees_usd: 0.5, in_range_pct: null }] },
+  ],
+  wallets: [
+    { wallet_id: 'sol-lp', wallet_tag: '83HxMUUC7c', chain: 'solana', pools: ['sol-usdc'],
+      subtotal: { equity_usd: 240, fees_total_usd: 2.4 } },
+    { wallet_id: 'sol-lp2', wallet_tag: 'FogqBWLC4y', chain: 'solana', pools: ['sol-swing'],
+      subtotal: { equity_usd: 152, fees_total_usd: 2.8 } },
+  ],
+  total: { pools: 2, equity_usd: 392, fees_total_usd: 5.2 },
+  dormant: [], disabled: [], disabled_holding: [],
+};
+
+test('the portfolio: two Solana wallets by tag, and the swing per pool', () => {
+  const t = portfolioText(TWO_SOL);
+  assert.ok(t.includes('▸ sol-lp 83HxMUUC7c (solana)\n  SOL/USDC  equity $240.00'), t);
+  assert.ok(t.includes('▸ sol-lp2 FogqBWLC4y (solana)\n  SOL/USDC  equity $152.00 · fees $2.8000'), t);
+  assert.ok(t.includes('\n    ▸ SOL/USDC raydium-clmm 8sLbNZoA1c  fees $2.3000 · in range 90%'
+    + '\n    · DJT/USDC orca 7gkB2D1Sqh  fees $0.5000 · in range —\n  subtotal  equity $152.00'), t);
+  assert.equal(t.split('\n').filter(l => l.startsWith('    ')).length, 2);   // one pool: no pool lines
+  assert.ok(t.includes('  subtotal  equity $240.00'), t);
+  assert.ok(t.includes('TOTAL\n  equity $392.00'), t);
+  // a pool row with nothing in it says so, no 'undefined'
+  const bare = portfolioText({ pools: [{ profile: 'p', by_pool: [{}, {}] }], wallets: [{ wallet_id: 'w', pools: ['p'] }] });
+  assert.ok(bare.includes('\n    · — — —  fees — · in range —\n    · — — —  fees — · in range —'), bare);
+  assert.ok(!bare.includes('undefined'));
+  assert.ok(!portfolioText({ pools: [{ profile: 'p', by_pool: 'x' }], wallets: [{ wallet_id: 'w', pools: ['p'] }] })
+    .includes('    '));                                                     // not a list: no pool lines
 });
 
 // --- the existing events render as they did, with the prefix ---------------------------

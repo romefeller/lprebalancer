@@ -243,7 +243,9 @@ def housekeeper(kind):
 def notify(event, **payload):
     # Every row says whose it is: the bridge tails every profile's feed.
     row = {'t': stamp(), 'event': event, **payload}
-    for k, v in (('profile', config.PROFILE), ('wallet_id', config.WALLET_ID), ('chain', config.CHAIN),
+    # wallet_tag: the address's first 10 characters, how every report names a wallet
+    for k, v in (('profile', config.PROFILE), ('wallet_id', config.WALLET_ID),
+                 ('wallet_tag', db.wallet_tag(config.WALLET_ADDRESS)), ('chain', config.CHAIN),
                  ('pair', config.PAIR_LABEL)):
         row.setdefault(k, v)
     line = redact(json.dumps(row, default=str))
@@ -2146,8 +2148,9 @@ def daily_report(state):
         if not line:
             return None
         notify('DAILY', **line)
+        vs = line['vs_hold_usd']                # None on a day across pairs (sol-swing)
         db.event('DAILY', f"{line['day']}: {line['recentres']} re-centres, fees ${line['fees_usd']:.2f}, "
-                          f"vs 50/50 hold {line['vs_hold_usd']:+.2f}")
+                          f"vs 50/50 hold {'-' if vs is None else f'{vs:+.2f}'}")
         return line
     except Exception as e:
         notify('daily_report_failed', reason=f'{type(e).__name__}: {tidy(e)}')
