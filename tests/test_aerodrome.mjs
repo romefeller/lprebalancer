@@ -14,7 +14,7 @@ import * as M from '../evm/clmath.mjs';
 import { baseEndpoints, evmErrorKind, overBase, isLoopback } from '../evm/rpc.mjs';
 import { AfterSignError } from '../rpc_policy.mjs';
 import * as S from '../signer_aerodrome.mjs';
-import { WETH, USDC, NPM } from '../evm/addresses.mjs';
+import { WETH, USDC, DEPLOYMENTS, ETH_USD_FEED } from '../evm/addresses.mjs';
 
 const dir = path.dirname(new URL(import.meta.url).pathname);
 const script = path.join(dir, '..', 'signer_aerodrome.mjs');
@@ -22,6 +22,15 @@ const POOL = '0xb2cc224c1c9feE385f8ad6a55b4d94E92359DC59';
 const PIN = '0x2b35948898e1b4897E7FC5a70e39b213dcfd0142';
 const OTHER = '0x70997970C51812dc3A010C7d01b50e0d17dc79C8';
 const E18 = 10n ** 18n;
+const [INITIAL, V3] = DEPLOYMENTS;
+const NPM = INITIAL.npm;
+const POOL_V3 = '0x3FE04A59Ebd38cF06080a6F60a98D124eb59392A';
+// Real addresses that are NOT in the registry: the "Gauge Caps" deployment's factory and NPM,
+// and the initial factory's own WETH/USDC tickSpacing-50 pool (the pool the initial router
+// would swap through if it were paired with tickSpacing 50).
+const CAPS_FACTORY = '0xaDe65c38CD4849aDBA595a4323a8C7DdfE89716a';
+const CAPS_NPM = '0xa990C6a764b73BF43cee5Bb40339c3322FB9D55F';
+const INITIAL_TS50_POOL = '0xAaD23a67F2AC693ABBe543489aeB3F24F561D517';
 
 const made = [];
 test.after(() => { for (const x of made) fs.rmSync(x, { recursive: true, force: true }); });
@@ -55,6 +64,164 @@ function poolInfo(price = 2700, extra = {}) {
 const CFG = { maxUsd: 260, slippageBps: 100, gasReserve: M.toRaw('0.002', 18), maxImpact: 0.01, maxOracleDev: 0.02,
   maxFeeWei: M.toRaw('2', 9), pin: PIN, profit: '', sleeve: '' };
 const rich = { eth: 1n * E18, rawA: 0n, rawB: 1000n * 10n ** 6n };
+
+// --- deployment registry (failure paths first) ------------------------------------------
+// A stand-in for the public client: answers describe()'s two multicalls from `chain` and
+// records every contract call. `chain` describes a pool of deployment `dep`.
+function fakeChain(over = {}) {
+  const dep = over.dep ?? V3;
+  const c = {
+    pool: POOL_V3, factory: dep.factory, nft: dep.npm, spacing: 50, mapsTo: over.pool ?? POOL_V3,
+    npmFactory: dep.factory, routerFactory: dep.factory, quoterFactory: dep.factory,
+    t0: WETH, t1: USDC, liquidity: 4n * E18, staked: 3n * E18, feeModule: OTHER, ethAnswer: 270000000000n, ...over,
+  };
+  const tick = M.tickAtPrice(2700, 18, 6);
+  const asked = [];
+  const now = BigInt(Math.floor(Date.now() / 1000));
+  const answer = ({ address, functionName, args }) => {
+    asked.push({ address, functionName, args });
+    const at = a => address.toLowerCase() === a.toLowerCase();
+    if (at(c.pool)) {
+      return { factory: c.factory, token0: c.t0, token1: c.t1, tickSpacing: c.spacing, fee: 500, unstakedFee: 50000,
+        liquidity: c.liquidity, stakedLiquidity: c.staked, gauge: OTHER, nft: c.nft,
+        slot0: [M.sqrtRatioAtTick(tick), tick, 0, 1, 1, true] }[functionName];
+    }
+    if (functionName === 'getPool') return c.mapsTo;
+    if (functionName === 'factory') {
+      if (at(dep.npm)) return c.npmFactory;
+      if (at(dep.router)) return c.routerFactory;
+      if (at(dep.quoter)) return c.quoterFactory;
+    }
+    if (at(ETH_USD_FEED)) return functionName === 'decimals' ? 8 : [1n, c.ethAnswer, now, now, 1n];
+    if (functionName === 'decimals') return at(USDC) ? 6 : 18;
+    if (functionName === 'symbol') return at(WETH) ? 'WETH' : at(USDC) ? 'USDC' : 'OTH';
+    if (functionName === 'swapFeeModule') return c.feeModule;
+    if (functionName === 'tickSpacingToFee') return 500;
+    throw new Error(`fakeChain: unexpected ${functionName} on ${address}`);
+  };
+  return { asked, pub: { multicall: async ({ contracts }) => contracts.map(answer) } };
+}
+
+test('registry: a pool of an unknown factory is refused before anything is asked of that factory', async () => {
+  const { pub, asked } = fakeChain({ factory: CAPS_FACTORY, nft: CAPS_NPM });
+  await assert.rejects(S.describe(pub, POOL_V3), /belongs to factory 0xaDe65c38.*not a known Slipstream deployment/);
+  assert.ok(asked.every(a => a.address === POOL_V3), 'a call reached a contract of the unknown deployment');
+  assert.throws(() => S.deploymentOf(POOL_V3, CAPS_FACTORY, CAPS_NPM), /not a known Slipstream deployment/);
+});
+
+test('registry: a pool naming another deployment\'s NPM is refused', async () => {
+  for (const [factory, nft] of [[V3.factory, INITIAL.npm], [INITIAL.factory, V3.npm], [V3.factory, CAPS_NPM]]) {
+    const { pub } = fakeChain({ factory, nft });
+    await assert.rejects(S.describe(pub, POOL_V3), /names position manager .* not 0x.* of factory/, `${factory} ${nft}`);
+    assert.throws(() => S.deploymentOf(POOL_V3, factory, nft), /names position manager/);
+  }
+});
+
+test('registry: a pool the factory does not map back to is refused', async () => {
+  // a contract that answers like a pool of V3, but V3's getPool returns another pool or none
+  for (const mapsTo of [INITIAL_TS50_POOL, '0x0000000000000000000000000000000000000000']) {
+    const { pub } = fakeChain({ mapsTo });
+    await assert.rejects(S.describe(pub, POOL_V3), /factory 0xf8f2eB49.* maps .* to 0x.*, not 0x3FE04A59/);
+  }
+});
+
+test('registry: an NPM, router or quoter naming another factory is refused', async () => {
+  for (const k of ['npmFactory', 'routerFactory', 'quoterFactory']) {
+    const { pub } = fakeChain({ [k]: INITIAL.factory });
+    await assert.rejects(S.describe(pub, POOL_V3), /names factory 0x5e7BB104.*, not 0xf8f2eB49/, k);
+  }
+});
+
+test('registry: getPool is asked of the pool\'s own factory, with the pool\'s tokens and spacing', async () => {
+  const { pub, asked } = fakeChain();
+  const info = await S.describe(pub, POOL_V3);
+  const get = asked.filter(a => a.functionName === 'getPool');
+  assert.deepStrictEqual(get.map(a => [a.address, ...a.args]), [[V3.factory, WETH, USDC, 50]]);
+  assert.deepStrictEqual([info.deployment, info.npm, info.router, info.quoter, info.tickSpacing], ['gauges-v3', V3.npm, V3.router, V3.quoter, 50]);
+  const fac = asked.filter(a => a.functionName === 'factory' && a.address !== POOL_V3).map(a => a.address);
+  assert.deepStrictEqual(fac, [V3.npm, V3.router, V3.quoter]);
+  assert.ok(asked.filter(a => ['swapFeeModule', 'tickSpacingToFee'].includes(a.functionName)).every(a => a.address === V3.factory));
+  const old = fakeChain({ dep: INITIAL, pool: POOL, spacing: 100 });
+  const oi = await S.describe(old.pub, POOL);
+  assert.deepStrictEqual([oi.deployment, oi.npm, oi.router, oi.quoter, oi.tickSpacing], ['initial', INITIAL.npm, INITIAL.router, INITIAL.quoter, 100]);
+});
+
+test('describe: quote, native side, oracle check and shares follow the token order', async () => {
+  const d = async over => S.describe(fakeChain(over).pub, POOL_V3);
+  const wu = await d({});
+  assert.deepStrictEqual([wu.quoteUsd, wu.quoteUsdSource, wu.nativeSide, wu.poolEthUsd, wu.stakedShare, wu.dynamicFee],
+    [1, 'stable', 'A', wu.price, 0.75, true]);
+  assert.ok(Math.abs(wu.oracleDeviation - Math.abs(wu.price / 2700 - 1)) < 1e-12);
+  const uw = await d({ t0: USDC, t1: WETH });
+  assert.deepStrictEqual([uw.quoteUsd, uw.quoteUsdSource, uw.nativeSide, uw.poolEthUsd], [2700, 'chainlink', 'B', 1 / uw.price]);
+  for (const [t0, t1, side] of [[WETH, OTHER, 'A'], [OTHER, WETH, 'B'], [OTHER, USDC, null]]) {
+    const x = await d({ t0, t1 });
+    assert.deepStrictEqual([x.poolEthUsd, x.oracleDeviation, x.nativeSide], [null, null, side], `${t0}/${t1}`);
+    assert.deepStrictEqual([x.quoteUsd, x.quoteUsdSource], t1 === USDC ? [1, 'stable'] : t1 === WETH ? [2700, 'chainlink'] : [null, 'unknown']);
+  }
+  const dead = await d({ ethAnswer: 0n, liquidity: 0n, staked: 0n, feeModule: '0x0000000000000000000000000000000000000000' });
+  assert.deepStrictEqual([dead.oracleDeviation, dead.stakedShare, dead.dynamicFee, dead.ethUsd], [null, null, false, 0]);
+});
+
+test('registry: entries are distinct, checksummed, and each part belongs to one deployment', () => {
+  const all = DEPLOYMENTS.flatMap(d => [d.factory, d.npm, d.router, d.quoter]);
+  assert.strictEqual(new Set(all.map(a => a.toLowerCase())).size, all.length);
+  for (const a of all) assert.match(a, /^0x[0-9a-fA-F]{40}$/);
+  for (const d of DEPLOYMENTS) assert.strictEqual(S.deploymentOf(POOL, d.factory.toLowerCase(), d.npm.toUpperCase().replace('0X', '0x')), d);
+  assert.ok(Object.isFrozen(DEPLOYMENTS) && DEPLOYMENTS.every(Object.isFrozen));
+});
+
+test('ownPositions: reads the pool\'s own NPM only; keeps this pool\'s live NFTs, sorted', async () => {
+  const info = { ...poolInfo(2700, { tickSpacing: 50 }), npm: V3.npm };
+  const pos = (t0, t1, ts, lo, hi, L, o0 = 0n, o1 = 0n) => [0n, OTHER, t0, t1, ts, lo, hi, L, 0n, 0n, o0, o1];
+  const book = {
+    9n: pos(WETH, USDC, 50, -200, 100, 5n),
+    3n: pos(WETH, USDC, 50, -100, 50, 0n, 0n, 7n),        // empty but owed fees: kept
+    4n: pos(WETH, USDC, 50, -100, 50, 0n),                // spent: dropped
+    5n: pos(WETH, USDC, 100, -100, 100, 5n),              // another spacing: another pool
+    6n: pos(USDC, WETH, 50, -100, 50, 5n),                // tokens swapped: another pool
+    7n: pos(WETH, OTHER, 50, -100, 50, 5n),               // another token: another pool
+    8n: pos(OTHER, USDC, 50, -100, 50, 5n),
+    2n: pos(WETH, USDC, 50, -50, 50, 0n, 1n, 0n),         // owed A only: kept
+  };
+  const ids = [9n, 3n, 4n, 5n, 6n, 7n, 8n, 2n];          // the NPM's order: not sorted
+  const asked = [];
+  const pub = {
+    readContract: async ({ address, functionName }) => { asked.push(address); assert.strictEqual(functionName, 'balanceOf'); return BigInt(ids.length); },
+    multicall: async ({ contracts }) => contracts.map(({ address, functionName, args }) => {
+      asked.push(address);
+      return functionName === 'tokenOfOwnerByIndex' ? ids[Number(args[1])] : book[args[0]];
+    }),
+  };
+  const got = await S.ownPositions(pub, OTHER, info);
+  assert.deepStrictEqual(got.map(x => x.tokenId), [2n, 3n, 9n]);
+  assert.deepStrictEqual(got[2], { tokenId: 9n, tickLower: -200, tickUpper: 100, liquidity: 5n, owed0: 0n, owed1: 0n });
+  assert.ok(asked.length > 0 && asked.every(a => a === V3.npm), `read another NPM: ${asked}`);
+  const none = { readContract: async () => 0n, multicall: async () => assert.fail('no NFTs: nothing to list') };
+  assert.deepStrictEqual(await S.ownPositions(none, OTHER, info), []);
+  const many = { readContract: async () => 201n };
+  await assert.rejects(S.ownPositions(many, OTHER, info), /holds 201 position NFTs; refusing to scan more than 200/);
+  const at200 = { readContract: async () => 200n, multicall: async ({ contracts }) =>
+    contracts.map(c => (c.functionName === 'positions' ? pos(WETH, USDC, 50, 0, 50, 1n) : c.args[1] + 1n)) };
+  assert.strictEqual((await S.ownPositions(at200, OTHER, info)).length, 200, 'exactly the limit is scanned');
+});
+
+test('tickSpacing 50: the open snaps its band to multiples of 50, not 100', () => {
+  const info = poolInfo(2700, { tickSpacing: 50 });
+  let off100 = 0;
+  for (let k = 0; k < 40; k++) {
+    const lo = 2600 + k * 1.37, hi = 2800 + k * 0.91;
+    const p = S.planOpen(info, rich, CFG, new Map(), lo, hi, 0.02, 60);
+    assert.ok(p.tickLower % 50 === 0 && p.tickUpper % 50 === 0, `${p.tickLower} ${p.tickUpper}`);
+    assert.ok(M.priceAtTick(p.tickLower, 18, 6) <= lo * (1 + 1e-9) && M.priceAtTick(p.tickUpper, 18, 6) >= hi * (1 - 1e-9));
+    // snapped outward by less than one spacing: tighter than a spacing-100 band can be
+    assert.ok(M.priceAtTick(p.tickLower + 50, 18, 6) > lo && M.priceAtTick(p.tickUpper - 50, 18, 6) < hi);
+    if (p.tickLower % 100 || p.tickUpper % 100) off100++;
+    const wide = S.planOpen(poolInfo(2700), rich, CFG, new Map(), lo, hi, 0.02, 60);
+    assert.ok(wide.tickLower <= p.tickLower && wide.tickUpper >= p.tickUpper);
+  }
+  assert.ok(off100 > 0, 'every band landed on a multiple of 100: spacing 50 never used');
+});
 
 // --- refusals (failure paths first) ----------------------------------------------------
 test('open refuses a price outside the band', () => {

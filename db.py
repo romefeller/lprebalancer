@@ -116,18 +116,6 @@ def profiles(wallet_id=None, enabled_only=True):
         return [dict(r) for r in cur.fetchall()]
 
 
-def add_wallet(wallet_id, chain, address, secret_env, label=None):
-    """Register a wallet. The table checks the address shape per chain."""
-    with cursor(commit=True) as cur:
-        cur.execute('insert into wallets (id, chain, address, secret_env, label) values (%s,%s,%s,%s,%s) '
-                    'on conflict (id) do nothing returning id', (wallet_id, chain, address, secret_env, label))
-        if cur.fetchone() is None:
-            cur.execute('select chain, address from wallets where id = %s', (wallet_id,))
-            r = cur.fetchone()
-            if (r['chain'], r['address']) != (chain, address):
-                raise ValueError(f'wallet {wallet_id} exists with a different chain or address')
-
-
 # --- whose book: the scope of a report ------------------------------------------
 # Every report reads the rows of a set of profiles. Money rows find their
 # profile through the position they belong to (positions.config_name); payouts

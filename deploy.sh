@@ -111,7 +111,7 @@ NEW = {
     'mu-usdc': ('sol-lp', 'meteora-dlmm', '13MEx6gjRadJNUdmToaGSzgeWHLH7FzScUQS9Mc5nYF5'),
     'djt-usdc': ('sol-lp', 'orca', '7gkB2D1SqhUYgKrSpDU5cma4tK9efijHouYituABdJcG'),
     'msftx-usdc': ('sol-lp', 'raydium-clmm', 'D6bRhQUcR9B7bPbbqgxpE17MjyUjBtr8hHQCcJoHrrv1'),
-    'base-weth-usdc': ('base-lp', 'aerodrome-slipstream', '0xb2cc224c1c9fee385f8ad6a55b4d94e92359dc59'),
+    'base-weth-usdc': ('base-lp', 'aerodrome-slipstream', '0x3fe04a59ebd38cf06080a6f60a98d124eb59392a'),
 }
 assert sorted(NEW) == sorted(os.environ['DEPLOY_NEW_PROFILES'].split())
 # Never copied from sol-usdc: identity, the pool, the wallet and the settings

@@ -162,14 +162,16 @@ TARGETS = {
     'fee_snapshot': ('fee_snapshot.mjs', ['wrappingSubU128', 'checkFees', 'feesFromSnapshot', 'snapshotKeys',
                                           'decodeSnapshot', 'consistentFees'],
                      NODE_TESTS('test_fee_snapshot.mjs')),
-    # Base / Aerodrome Slipstream (EVM): the deposit arithmetic, the refusals, the endpoint
-    # policy and the key file. The fork test is not run per mutant (it needs anvil and a fork).
+    # Base / Aerodrome Slipstream (EVM): the deposit arithmetic, the refusals, the deployment
+    # registry (which factory, NPM, router and quoter a pool may use), the endpoint policy and
+    # the key file. The fork test is not run per mutant (it needs anvil and a fork).
     'evm_math': ('evm/clmath.mjs', ['sqrtRatioAtTick', 'amount0Delta', 'amount1Delta', 'amountsForLiquidity',
                                     'liquidityForAmount0', 'liquidityForAmount1', 'liquidityForAmounts', 'depositFor',
                                     'minWithSlippage', 'tickAtPrice', 'bandTicks', 'wrapPlan', 'toRaw', 'rawFromFloat',
                                     'parseSleeve', 'sleeveCap', 'capped'], NODE_TESTS('test_aerodrome.mjs')),
     'evm_signer': ('signer_aerodrome.mjs', ['guard', 'marketRefusals', 'spendable', 'positionView', 'simulateSequence',
-                                            'runSteps', 'planOpen', 'closeCalls', 'checkRecipient', 'isNative'],
+                                            'runSteps', 'planOpen', 'closeCalls', 'checkRecipient', 'isNative',
+                                            'deploymentOf', 'describe', 'ownPositions'],
                    NODE_TESTS('test_aerodrome.mjs')),
     'evm_rpc': ('evm/rpc.mjs', ['baseEndpoints', 'isLoopback', 'evmErrorKind', 'overBase'], NODE_TESTS('test_aerodrome.mjs')),
     'evm_key': ('evm/keyfile.mjs', ['validKey', 'writeNewKey', 'readKey'], NODE_TESTS('test_evm_wallet.mjs')),
@@ -505,6 +507,8 @@ EQUIVALENT = {
         'gasUsed?.toString() is a non-empty digit string or undefined: never falsy but nullish',
     ('evm_signer', 'checkRecipient', '\\?\\? -> ||', "if (!isAddress(String(to ?? ''), { strict: false })) throw new Error(`refused: destination ${to} is not an address`);", 0):
         "every falsy `to` ('' , 0, false, null) fails isAddress either way",
+    ('evm_signer', 'ownPositions', '(?<![<>=!])<(?![<=]) -> <=', '.sort((x, y) => (x.tokenId < y.tokenId ? -1 : 1));', 0):
+        'token ids of one NPM are distinct: the comparator never sees two equal ids',
     ('evm_rpc', 'evmErrorKind', '(?<![<>=!])<(?![<=]) -> <=', 'for (let x = e, depth = 0; x && depth < 8; x = x.cause, depth++) {', 0):
         'the bound only stops a cyclic cause chain; viem chains are at most 4 deep, so 8 or 9 links walk the same errors',
     ('evm_rpc', 'evmErrorKind', '\\?\\? -> ||', 'const name = x.name ?? x.constructor?.name;', 0):

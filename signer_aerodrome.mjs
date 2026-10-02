@@ -4,17 +4,21 @@
 // shape, swapping through the pool's own router) and `send` / `balance <token>` (the
 // payout.mjs shape, to the pinned profit wallet only).
 //
-// A Slipstream position is an ERC-721 from the NonfungiblePositionManager (NPM). The
-// signer reads, opens, harvests and closes only NFTs of THIS wallet on THIS pool, and
-// only unstaked ones: a position staked in the gauge earns AERO instead of fees and is
-// out of scope. Unstaked liquidity pays the pool's `unstakedFee` (50000 pips = 5% of its
-// swap fees on 2026-10-01) to the gauge; `pool` and `status` report it.
+// A Slipstream position is an ERC-721 from the NonfungiblePositionManager (NPM). Aerodrome
+// runs several Slipstream deployments; the pool names its own (factory, NPM), and every
+// call goes to the NPM, router and quoter of that deployment in evm/addresses.mjs
+// (DEPLOYMENTS). A pool of an unknown deployment is refused. The signer reads, opens,
+// harvests and closes only NFTs of THIS wallet on THIS pool, and only unstaked ones: a
+// position staked in the gauge earns AERO instead of fees and is out of scope. Unstaked
+// liquidity pays the pool's `unstakedFee` (50000 pips = 5% of its swap fees on 2026-10-01)
+// to the gauge; `pool` and `status` report it.
 //
 // Native ETH counts as WETH (`nativeSide`). An open or a swap wraps exactly the WETH it
 // lacks, never taking ETH below LPBOT_GAS_RESERVE_NATIVE. Approvals are exact (the amount
 // the next call pulls), never infinite.
 //
-// Every write: HALT check, pool genuineness (factory, NPM, getPool), the Chainlink ETH/USD
+// Every write: HALT check, pool genuineness (a known deployment's factory and NPM, getPool,
+// its NPM, router and quoter naming the same factory), the Chainlink ETH/USD
 // cross-check of the pool price, a refusal list, the whole sequence simulated in one
 // eth_simulateV1 call, then per transaction: HALT check, eth_call, estimateGas, sign, send,
 // wait for the receipt, check its status. A nonce comes from the chain once per command; a
@@ -105,8 +109,18 @@ export async function withRpc(fn, deps = {}) {
 }
 
 // --- the pool describes itself --------------------------------------------------------
-// Refuses a pool that is not a genuine Slipstream pool of the verified factory, or whose
-// positions the verified NPM does not mint.
+// The deployment a pool belongs to: the registry entry whose factory is the pool's
+// factory() AND whose NPM is the pool's nft(). Anything else is refused.
+export function deploymentOf(pool, factory, nft, registry = A.DEPLOYMENTS) {
+  const d = registry.find(x => same(x.factory, factory));
+  if (!d) throw new Error(`refused: pool ${pool} belongs to factory ${factory}, not a known Slipstream deployment (${registry.map(x => x.factory).join(', ')})`);
+  if (!same(nft, d.npm)) throw new Error(`refused: pool ${pool} names position manager ${nft}, not ${d.npm} of factory ${d.factory}`);
+  return d;
+}
+
+// Refuses a pool that is not a genuine Slipstream pool of a known deployment: the factory
+// must map (token0, token1, tickSpacing) back to the pool, and the deployment's NPM, router
+// and quoter must each name that factory.
 export async function describe(pub, pool) {
   const c = (functionName, args = []) => ({ address: pool, abi: A.POOL_ABI, functionName, args });
   const [factory, t0, t1, ts, fee, unstakedFee, liquidity, staked, gauge, nft, slot0] = await pub.multicall({
@@ -114,21 +128,26 @@ export async function describe(pub, pool) {
     contracts: [c('factory'), c('token0'), c('token1'), c('tickSpacing'), c('fee'), c('unstakedFee'),
       c('liquidity'), c('stakedLiquidity'), c('gauge'), c('nft'), c('slot0')],
   });
-  if (!same(factory, A.CL_FACTORY)) throw new Error(`refused: pool ${pool} belongs to factory ${factory}, not Slipstream ${A.CL_FACTORY}`);
-  if (!same(nft, A.NPM)) throw new Error(`refused: pool ${pool} names position manager ${nft}, not ${A.NPM}`);
+  const dep = deploymentOf(pool, factory, nft);
   const e = (address, functionName, args = []) => ({ address, abi: A.ERC20_ABI, functionName, args });
-  const [real, d0, d1, s0, s1, feeModule, baseFee, round, feedDec] = await pub.multicall({
+  const [real, npmFactory, routerFactory, quoterFactory, d0, d1, s0, s1, feeModule, baseFee, round, feedDec] = await pub.multicall({
     allowFailure: false,
     contracts: [
-      { address: A.CL_FACTORY, abi: A.FACTORY_ABI, functionName: 'getPool', args: [t0, t1, ts] },
+      { address: dep.factory, abi: A.FACTORY_ABI, functionName: 'getPool', args: [t0, t1, ts] },
+      { address: dep.npm, abi: A.NPM_ABI, functionName: 'factory' },
+      { address: dep.router, abi: A.ROUTER_ABI, functionName: 'factory' },
+      { address: dep.quoter, abi: A.QUOTER_ABI, functionName: 'factory' },
       e(t0, 'decimals'), e(t1, 'decimals'), e(t0, 'symbol'), e(t1, 'symbol'),
-      { address: A.CL_FACTORY, abi: A.FACTORY_ABI, functionName: 'swapFeeModule' },
-      { address: A.CL_FACTORY, abi: A.FACTORY_ABI, functionName: 'tickSpacingToFee', args: [ts] },
+      { address: dep.factory, abi: A.FACTORY_ABI, functionName: 'swapFeeModule' },
+      { address: dep.factory, abi: A.FACTORY_ABI, functionName: 'tickSpacingToFee', args: [ts] },
       { address: A.ETH_USD_FEED, abi: A.FEED_ABI, functionName: 'latestRoundData' },
       { address: A.ETH_USD_FEED, abi: A.FEED_ABI, functionName: 'decimals' },
     ],
   });
-  if (!same(real, pool)) throw new Error(`refused: factory maps (${t0}, ${t1}, ${ts}) to ${real}, not ${pool}`);
+  if (!same(real, pool)) throw new Error(`refused: factory ${dep.factory} maps (${t0}, ${t1}, ${ts}) to ${real}, not ${pool}`);
+  for (const [what, addr, f] of [['position manager', dep.npm, npmFactory], ['router', dep.router, routerFactory], ['quoter', dep.quoter, quoterFactory]]) {
+    if (!same(f, dep.factory)) throw new Error(`refused: ${what} ${addr} names factory ${f}, not ${dep.factory}`);
+  }
   const decA = Number(d0), decB = Number(d1);
   const price = M.priceFromSqrtX96(slot0[0], decA, decB);
   const ethUsd = Number(round[1]) / 10 ** Number(feedDec);
@@ -139,6 +158,7 @@ export async function describe(pub, pool) {
   const poolEthUsd = same(t0, A.WETH) && stableB ? price : same(t1, A.WETH) && stableA ? 1 / price : null;
   return {
     pool, dex: DEX, chain: 'base', factory, nft, gauge,
+    deployment: dep.name, npm: dep.npm, router: dep.router, quoter: dep.quoter,
     mintA: t0, mintB: t1, symbolA: s0, symbolB: s1, decimalsA: decA, decimalsB: decB,
     tickSpacing: Number(ts), tick: Number(slot0[1]), sqrtPriceX96: slot0[0].toString(), price,
     // SIGNER_CONTRACT's Token-2022 fields: ERC-20 amounts carry no UI multiplier
@@ -222,11 +242,11 @@ async function balance(poolExplicit) {
 // This wallet's NFTs on this pool: same tokens and tick spacing (the NPM keys pools by
 // exactly that triple). NFTs with no liquidity and nothing owed are spent; they are left out.
 export async function ownPositions(pub, me, info) {
-  const n = Number(await pub.readContract({ address: A.NPM, abi: A.NPM_ABI, functionName: 'balanceOf', args: [me] }));
+  const n = Number(await pub.readContract({ address: info.npm, abi: A.NPM_ABI, functionName: 'balanceOf', args: [me] }));
   if (n > MAX_POSITIONS_SCANNED) throw new Error(`wallet holds ${n} position NFTs; refusing to scan more than ${MAX_POSITIONS_SCANNED}`);
   if (!n) return [];
-  const ids = await pub.multicall({ allowFailure: false, contracts: Array.from({ length: n }, (_, i) => ({ address: A.NPM, abi: A.NPM_ABI, functionName: 'tokenOfOwnerByIndex', args: [me, BigInt(i)] })) });
-  const ps = await pub.multicall({ allowFailure: false, contracts: ids.map(id => ({ address: A.NPM, abi: A.NPM_ABI, functionName: 'positions', args: [id] })) });
+  const ids = await pub.multicall({ allowFailure: false, contracts: Array.from({ length: n }, (_, i) => ({ address: info.npm, abi: A.NPM_ABI, functionName: 'tokenOfOwnerByIndex', args: [me, BigInt(i)] })) });
+  const ps = await pub.multicall({ allowFailure: false, contracts: ids.map(id => ({ address: info.npm, abi: A.NPM_ABI, functionName: 'positions', args: [id] })) });
   return ids.map((id, i) => ({ id, p: ps[i] }))
     .filter(({ p }) => same(p[2], info.mintA) && same(p[3], info.mintB) && Number(p[4]) === info.tickSpacing)
     .filter(({ p }) => p[7] > 0n || p[10] > 0n || p[11] > 0n)
@@ -253,9 +273,9 @@ async function positions() {
 
 // Fees a collect would pay now: an eth_call of collect from the owner. The NPM pokes the
 // pool (burn of 0) first when the position has liquidity, so this is exact, not an estimate.
-async function feesOwed(pub, me, tokenId) {
+async function feesOwed(pub, me, info, tokenId) {
   const { result } = await pub.simulateContract({
-    account: me, address: A.NPM, abi: A.NPM_ABI, functionName: 'collect',
+    account: me, address: info.npm, abi: A.NPM_ABI, functionName: 'collect',
     args: [{ tokenId, recipient: me, amount0Max: M.MAX_UINT128, amount1Max: M.MAX_UINT128 }],
   });
   return result;
@@ -303,7 +323,7 @@ async function status(positionArg) {
       console.log(JSON.stringify(none, null, 1));
       return none;
     }
-    const out = positionView(pick, info, await feesOwed(pub, me, pick.tokenId));
+    const out = positionView(pick, info, await feesOwed(pub, me, info, pick.tokenId));
     if (list.length > 1) out.positions = list.map(x => x.tokenId.toString());
     console.log(JSON.stringify(out, null, 1));
     return out;
@@ -502,9 +522,9 @@ async function open(poolIn, lower, upper, maxA, maxB, execute) {
     const plan = planOpen(info, h, cfg, sleeve, lower, upper, maxA, maxB);
     const dl = await deadline(pub);
     const steps = [
-      ...(await fundSteps(pub, me, info.mintA, plan.dep.amountA, A.NPM, plan.wrapA)),
-      ...(await fundSteps(pub, me, info.mintB, plan.dep.amountB, A.NPM, plan.wrapB)),
-      { label: 'mint', to: A.NPM, data: encodeFunctionData({ abi: A.NPM_ABI, functionName: 'mint', args: [{
+      ...(await fundSteps(pub, me, info.mintA, plan.dep.amountA, info.npm, plan.wrapA)),
+      ...(await fundSteps(pub, me, info.mintB, plan.dep.amountB, info.npm, plan.wrapB)),
+      { label: 'mint', to: info.npm, data: encodeFunctionData({ abi: A.NPM_ABI, functionName: 'mint', args: [{
         token0: info.mintA, token1: info.mintB, tickSpacing: info.tickSpacing,
         tickLower: plan.tickLower, tickUpper: plan.tickUpper,
         amount0Desired: plan.dep.amountA, amount1Desired: plan.dep.amountB,
@@ -539,7 +559,7 @@ async function open(poolIn, lower, upper, maxA, maxB, execute) {
     const extra = {};
     if (minted) {
       for (const log of minted.receipt.logs) {
-        if (!same(log.address, A.NPM)) continue;
+        if (!same(log.address, info.npm)) continue;
         let ev;
         try { ev = decodeEventLog({ abi: A.NPM_ABI, data: log.data, topics: log.topics }); } catch { continue; }
         if (ev.eventName === 'Transfer' && same(ev.args.to, me) && BigInt(ev.args.from) === 0n) extra.positionMint = ev.args.tokenId.toString();
@@ -561,7 +581,7 @@ function collectData(tokenId, me) {
 
 function collected(receipt, info) {
   for (const log of receipt?.logs ?? []) {
-    if (!same(log.address, A.NPM)) continue;
+    if (!same(log.address, info.npm)) continue;
     try {
       const ev = decodeEventLog({ abi: A.NPM_ABI, data: log.data, topics: log.topics });
       if (ev.eventName === 'Collect') return { amountA: M.toHuman(ev.args.amount0, info.decimalsA), amountB: M.toHuman(ev.args.amount1, info.decimalsB) };
@@ -578,8 +598,8 @@ async function harvest(tokenArg, execute) {
     const { pub, me } = ctx;
     const info = await describe(pub, pool);
     const x = await ownedPosition(pub, me, info, tokenArg);
-    const [f0, f1] = await feesOwed(pub, me, x.tokenId);
-    const steps = [{ label: 'collect', to: A.NPM, data: collectData(x.tokenId, me) }];
+    const [f0, f1] = await feesOwed(pub, me, info, x.tokenId);
+    const steps = [{ label: 'collect', to: info.npm, data: collectData(x.tokenId, me) }];
     const report = { mint: x.tokenId.toString(), pool, dex: DEX,
       feesA: M.toHuman(f0, info.decimalsA), feesB: M.toHuman(f1, info.decimalsB), transactions: 1 };
     if (!execute) return reportUnsent(report, [], await simulateSequence(pub, me, steps), 'DRY RUN — pass --execute to collect fees.');
@@ -619,9 +639,9 @@ async function close(tokenArg, execute) {
     const { pub, me } = ctx;
     const info = await describe(pub, pool);
     const x = await ownedPosition(pub, me, info, tokenArg);
-    const [f0, f1] = await feesOwed(pub, me, x.tokenId);
+    const [f0, f1] = await feesOwed(pub, me, info, x.tokenId);
     const { calls, estA, estB } = closeCalls(x, info, me, cfg, await deadline(pub));
-    const steps = [{ label: 'decrease+collect+burn', to: A.NPM, data: encodeFunctionData({ abi: A.NPM_ABI, functionName: 'multicall', args: [calls] }) }];
+    const steps = [{ label: 'decrease+collect+burn', to: info.npm, data: encodeFunctionData({ abi: A.NPM_ABI, functionName: 'multicall', args: [calls] }) }];
     const report = { mint: x.tokenId.toString(), pool, dex: DEX, transactions: 1, instructions: calls.length,
       quote: { tokenEstA: estA.toString(), tokenEstB: estB.toString() },
       feesQuote: { feeOwedA: f0.toString(), feeOwedB: f1.toString() }, slippageBps: cfg.slippageBps };
@@ -680,7 +700,7 @@ async function rebalance(mintA, mintB, targetA, targetB, execute) {
     const amountIn = M.toHuman(rawIn, decIn);
     const sellUsd = amountIn * pxIn;
     if (sellUsd > cfg.maxUsd) throw new Error(`refused: swap of $${sellUsd.toFixed(2)} exceeds cap $${cfg.maxUsd}`);
-    const { result: q } = await pub.simulateContract({ account: me, address: A.QUOTER_V2, abi: A.QUOTER_ABI, functionName: 'quoteExactInputSingle',
+    const { result: q } = await pub.simulateContract({ account: me, address: info.quoter, abi: A.QUOTER_ABI, functionName: 'quoteExactInputSingle',
       args: [{ tokenIn: tokIn, tokenOut: tokOut, amountIn: rawIn, tickSpacing: info.tickSpacing, sqrtPriceLimitX96: 0n }] });
     const quoteOut = M.toHuman(q[0], decOut);
     // Impact against the pool's spot price, fee included: what the swap costs beyond mid.
@@ -690,8 +710,8 @@ async function rebalance(mintA, mintB, targetA, targetB, execute) {
     const side = sellA ? 'A' : 'B';
     const wrap = wrapFor(side, info, rawIn, h, cfg);
     const steps = [
-      ...(await fundSteps(pub, me, tokIn, rawIn, A.SWAP_ROUTER, wrap)),
-      { label: 'swap', to: A.SWAP_ROUTER, data: encodeFunctionData({ abi: A.ROUTER_ABI, functionName: 'exactInputSingle', args: [{
+      ...(await fundSteps(pub, me, tokIn, rawIn, info.router, wrap)),
+      { label: 'swap', to: info.router, data: encodeFunctionData({ abi: A.ROUTER_ABI, functionName: 'exactInputSingle', args: [{
         tokenIn: tokIn, tokenOut: tokOut, tickSpacing: info.tickSpacing, recipient: me,
         deadline: await deadline(pub), amountIn: rawIn, amountOutMinimum: minOut, sqrtPriceLimitX96: 0n,
       }] }) },

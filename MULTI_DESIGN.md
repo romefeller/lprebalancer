@@ -7,7 +7,8 @@ Owner's goals, in order:
    MSFTx → MSFTx/USDC (Raydium CLMM `D6bRhQUcR9B7bPbbqgxpE17MjyUjBtr8hHQCcJoHrrv1`).
    A deposit is split ~50/50 against USDC and deployed.
 3. Many wallets. Database and code carry wallet and profile everywhere. Generalise always.
-4. Base chain: WETH/USDC on Aerodrome Slipstream (`0xb2cc224c1c9fee385f8ad6a55b4d94e92359dc59`), new EVM
+4. Base chain: WETH/USDC on Aerodrome Slipstream (first `0xb2cc224c1c9fee385f8ad6a55b4d94e92359dc59`, tickSpacing
+   100; from 2026-10-02 `0x3fe04a59ebd38cf06080a6f60a98d124eb59392a`, tickSpacing 50, another deployment), new EVM
    wallet, key on disk outside the repo (mode 0600), never printed. ETH deposit → keep gas, split, open.
    EVM profit wallet `0x2b35948898e1b4897E7FC5a70e39b213dcfd0142`. Solana profit wallet unchanged.
 5. Stats per wallet and per pool, plus one shared listing with the sums. Active pools only.
@@ -59,7 +60,12 @@ wallet, disabled ones included. Audits reconcile the wallet against the sum of i
   `LPBOT_POOL`, `LPBOT_MAX_USD`, `LPBOT_SLIPPAGE_BPS`, `LPBOT_GAS_RESERVE_NATIVE`, `LPBOT_SLEEVE`,
   `LPBOT_EVM_PROFIT_WALLET_PIN` (send refuses any other recipient). Every signer refuses writes on
   `HALT` in its directory and on `LPBOT_RUN_DIR/HALT` (`halt_guard.mjs`).
-- `dexes.pool('aerodrome-slipstream', addr)` returns the usual record shape.
+- EVM deployments: `evm/addresses.mjs` `DEPLOYMENTS` lists each trusted Slipstream deployment
+  (factory, NPM, router, quoter). The signer takes the pool's `factory()` and `nft()`, accepts the
+  pool only if both match one entry and that factory's `getPool(token0, token1, tickSpacing)` is
+  the pool, and then calls only that entry's NPM, router and quoter. Evidence: `evm/ADDRESSES.md`.
+- `dexes.pool('aerodrome-slipstream', addr)` returns the usual record shape, for a pool of any
+  deployment in `dexes.SLIPSTREAM_DEPLOYMENTS` (the same table).
 - Routing: `SIGNERS['aerodrome-slipstream']`; on Base the swap goes to the venue signer instead of
   Jupiter, and payout calls go to the venue signer instead of `payout.mjs`.
 

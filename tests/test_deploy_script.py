@@ -36,7 +36,7 @@ RECORDS = {
                                                      'token_b': {'address': USDC, 'symbol': 'USDC'}},
     'D6bRhQUcR9B7bPbbqgxpE17MjyUjBtr8hHQCcJoHrrv1': {'token_a': {'address': USDC, 'symbol': 'USDC'},
                                                      'token_b': {'address': MSFTX, 'symbol': 'MSFTx'}},
-    '0xb2cc224c1c9fee385f8ad6a55b4d94e92359dc59': {'token_a': {'address': WETH, 'symbol': 'WETH'},
+    '0x3fe04a59ebd38cf06080a6f60a98d124eb59392a': {'token_a': {'address': WETH, 'symbol': 'WETH'},
                                                    'token_b': {'address': BUSDC.upper().replace('0X', '0x'),
                                                                'symbol': 'USDC'}},
 }
