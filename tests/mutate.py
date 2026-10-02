@@ -162,6 +162,8 @@ TARGETS = {
     'quiet_overlay': ('rebalancer.py', ['quiet_ref_ts', 'with_surrogate', '_surrogate_ts', '_merge_all', 'tape_source'],
                       PY_TESTS('test_quiet_pool', 'test_tape_surrogate')),
     'quiet_db': ('db.py', ['tape_ref_pool'], PY_TESTS('test_quiet_pool')),
+    # 2026-10-02: a payout's priority fee, and the send loop that proves an expired one never landed
+    'payout_send': ('payout.mjs', ['payoutCuPrice', 'sendUntilLanded'], NODE_TESTS('test_payout_send.mjs')),
     'tape_prune': ('db.py', ['config_pools', 'tape_prune_other_pools'], PY_TESTS('test_tape_prune')),
     'stock_loop': ('rebalancer.py', ['ui_price', 'open_headroom', 'native_reserve', 'deployable_usd', 'deposit_caps',
                                      'position_usd', 'note_scale', 'native_bars', 'mint_refusal', 'note_mint_refusal',
@@ -201,6 +203,10 @@ SQL_TARGETS = {'band_profile', 'daily', 'capital_db', 'book_scope', 'book_sums',
 # The report prints each survivor's key: copy it here with a reason. The line
 # number is not in the key, so an edit above a mutant keeps its entry valid.
 EQUIVALENT = {
+    ('payout_send', 'payoutCuPrice', '\\?\\? -> ||', 'const fees = (recent ?? []).map(r => Number(r?.prioritizationFee ?? r)).filter(f => f > 0).sort((a, b) => a - b);', 0):
+        'recent is an array, null or undefined (a failed read gives []): || and ?? agree on all three',
+    ('payout_send', 'payoutCuPrice', '\\?\\? -> ||', 'const fees = (recent ?? []).map(r => Number(r?.prioritizationFee ?? r)).filter(f => f > 0).sort((a, b) => a - b);', 1):
+        'they differ only for a fee of 0, where || gives the row object; Number(object) is NaN and f > 0 drops it as it drops 0',
     # the surrogate overlay's body, renamed _with_surrogate on 2026-10-02 (reasons as before)
     ('surrogate_overlay', '_with_surrogate', 'skip if body', 'if bars is None:', 0):
         'None[0] raises inside the try, which returns bars (None) either way',

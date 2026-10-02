@@ -22,9 +22,10 @@ import { assertNotHalted } from './halt_guard.mjs';
 import { createRequire } from 'node:module';
 
 import { readMints, rawToUi, uiToRaw, writeRefusal } from './token2022.mjs';
+import { isEntry } from './rpc_policy.mjs';
 
 const require = createRequire(import.meta.url);
-const { Connection, Keypair, PublicKey, SystemProgram, Transaction, sendAndConfirmTransaction } = require('@solana/web3.js');
+const { ComputeBudgetProgram, Connection, Keypair, PublicKey, SystemProgram, Transaction } = require('@solana/web3.js');
 const spl = require('@solana/spl-token');
 
 const DIR = path.dirname(new URL(import.meta.url).pathname);
@@ -35,6 +36,58 @@ const PROFIT = process.env.LPBOT_PROFIT_WALLET ?? '';
 const PIN = process.env.LPBOT_PROFIT_WALLET_PIN ?? '';
 const GAS_RESERVE_SOL = Number(process.env.LPBOT_GAS_RESERVE_SOL ?? 0.05);
 const NATIVE_MINT = 'So11111111111111111111111111111111111111112';
+
+// The priority fee. 2026-10-02: two payouts sent with none, and sent once,
+// expired unconfirmed ("block height exceeded") while the swaps beside them,
+// which pay one, landed. A payout is two small instructions (an idempotent
+// ATA create and a transfer), well under CU_LIMIT; its price is the 75th
+// percentile of the recent fees on its own writable accounts, at least
+// CU_PRICE_FLOOR, and never more than PRIORITY_MAX_LAMPORTS in all.
+export const CU_LIMIT = 60_000;
+export const CU_PRICE_FLOOR = 10_000;                       // micro-lamports per unit: 600 lamports in all
+export const PRIORITY_MAX_LAMPORTS = Number(process.env.LPBOT_PAYOUT_PRIORITY_MAX_LAMPORTS ?? 50_000);
+export const REBROADCAST_MS = 2_000;
+
+// Compute-unit price (micro-lamports) from recent prioritization fees. Pure.
+export function payoutCuPrice(recent, units = CU_LIMIT, cap = PRIORITY_MAX_LAMPORTS) {
+  const fees = (recent ?? []).map(r => Number(r?.prioritizationFee ?? r)).filter(f => f > 0).sort((a, b) => a - b);
+  const p75 = fees.length ? fees[Math.min(fees.length - 1, Math.floor(fees.length * 0.75))] : 0;
+  const ceiling = Math.floor(Number(cap) * 1_000_000 / Math.max(1, units));
+  return Math.max(0, Math.min(Math.max(p75, CU_PRICE_FLOOR), ceiling));
+}
+
+// Thrown when a sent payout's blockhash expired and the chain does not know
+// its signature: it never landed and never can, so the loop owes it again.
+export class NeverLanded extends Error {}
+
+// Send `raw` and send it again every REBROADCAST_MS until it is confirmed or
+// its blockhash expires. Returns the signature once confirmed. An error of
+// the first send is thrown as it is: nothing proves the payout went out.
+// Every later error carries `afterSend` and the signature, so the caller
+// reports it as partial and never pays it twice; NeverLanded (the block
+// height passed lastValidBlockHeight and a history search does not find the
+// signature) is the one later error that proves nothing went out.
+export async function sendUntilLanded(connection, raw, lastValidBlockHeight, { sleep = ms => new Promise(r => setTimeout(r, ms)) } = {}) {
+  const signature = await connection.sendRawTransaction(raw, { skipPreflight: false, maxRetries: 0 });
+  try {
+    for (;;) {
+      const st = (await connection.getSignatureStatuses([signature])).value?.[0];
+      if (st?.err) throw new Error(`transaction failed on chain: ${JSON.stringify(st.err)}`);
+      if (st && (st.confirmationStatus === 'confirmed' || st.confirmationStatus === 'finalized')) return signature;
+      if ((await connection.getBlockHeight('confirmed')) > lastValidBlockHeight) {
+        const last = (await connection.getSignatureStatuses([signature], { searchTransactionHistory: true })).value?.[0];
+        if (last?.err) throw new Error(`transaction failed on chain: ${JSON.stringify(last.err)}`);
+        if (last) return signature;                         // it landed after all
+        throw new NeverLanded(`payout expired: block height passed and the chain has no record of ${signature}; `
+                              + 'nothing was sent, it is owed again');
+      }
+      await sleep(REBROADCAST_MS);
+      try { await connection.sendRawTransaction(raw, { skipPreflight: true, maxRetries: 0 }); } catch { /* the next status read decides */ }
+    }
+  } catch (e) {
+    throw Object.assign(e, { afterSend: true, signature });
+  }
+}
 
 function guard() {
   assertNotHalted(DIR);                     // the global HALT and this profile's (halt_guard.mjs)
@@ -76,6 +129,7 @@ async function send(mintArg, amountArg, toArg, execute) {
   if (payer.publicKey.equals(to)) throw new Error('profit wallet equals the LP wallet; nothing to do');
   const mint = key(mintArg, 'mint');
   const tx = new Transaction();
+  const writable = [payer.publicKey];
   let report;
   if (mint.toBase58() === NATIVE_MINT) {
     const lamports = Math.floor(amount * 1e9);
@@ -100,12 +154,19 @@ async function send(mintArg, amountArg, toArg, execute) {
     const acct = await spl.getAccount(connection, src, 'confirmed', programId);
     if (acct.amount < raw) throw new Error(`LP wallet holds ${rawToUi(acct.amount, m.decimals, f.multiplier)}, less than ${amount}`);
     const dstExists = !!(await connection.getAccountInfo(dst));
+    writable.push(src, dst);
     tx.add(spl.createAssociatedTokenAccountIdempotentInstruction(payer.publicKey, dst, to, mint, programId));
     tx.add(spl.createTransferCheckedInstruction(src, mint, dst, payer.publicKey, raw, m.decimals, [], programId));
     report = { mint: mint.toBase58(), amount: rawToUi(raw, m.decimals, f.multiplier), raw: raw.toString(),
                decimals: m.decimals, multiplier: f.multiplier, recipientAccountExisted: dstExists };
   }
-  report = { ...report, from: payer.publicKey.toBase58(), to: to.toBase58() };
+  let recent = [];
+  try { recent = await connection.getRecentPrioritizationFees({ lockedWritableAccounts: writable }); } catch { recent = []; }
+  const cuPrice = payoutCuPrice(recent);
+  tx.instructions.unshift(ComputeBudgetProgram.setComputeUnitLimit({ units: CU_LIMIT }),
+                          ComputeBudgetProgram.setComputeUnitPrice({ microLamports: cuPrice }));
+  report = { ...report, from: payer.publicKey.toBase58(), to: to.toBase58(),
+             priorityMicroLamports: cuPrice, priorityLamports: Math.ceil(cuPrice * CU_LIMIT / 1e6) };
   if (!execute) {
     tx.feePayer = payer.publicKey;
     tx.recentBlockhash = (await connection.getLatestBlockhash()).blockhash;
@@ -116,20 +177,20 @@ async function send(mintArg, amountArg, toArg, execute) {
     return;
   }
   guard();
-  // Send, then confirm. A confirmation that fails after the send is not a
-  // failed transfer: report the signature as partial so the loop never pays
-  // it twice (review, 2026-09-26).
+  // Send, re-send until confirmed or expired (sendUntilLanded). A failure
+  // after the send is not a failed transfer: report the signature as partial
+  // so the loop never pays it twice (review, 2026-09-26). An expired payout
+  // the chain has no record of never landed: an error, so the loop owes it.
   const bh = await connection.getLatestBlockhash('confirmed');
   tx.feePayer = payer.publicKey; tx.recentBlockhash = bh.blockhash;
   tx.sign(payer);
-  let signature = null;
+  let signature;
   try {
-    signature = await connection.sendRawTransaction(tx.serialize(), { skipPreflight: false, maxRetries: 3 });
-    const conf = await connection.confirmTransaction({ signature, ...bh }, 'confirmed');
-    if (conf.value?.err) throw new Error(`transaction failed on chain: ${JSON.stringify(conf.value.err)}`);
+    signature = await sendUntilLanded(connection, tx.serialize(), bh.lastValidBlockHeight);
   } catch (e) {
-    if (!signature) throw e;
-    console.log(JSON.stringify({ ...report, signature, sent: true, partial: true, error: String(e.message ?? e) }, null, 1));
+    if (e instanceof NeverLanded || !e.afterSend) throw e;     // nothing went out: the loop owes it
+    console.log(JSON.stringify({ ...report, signature: e.signature, sent: true, partial: true,
+                                 error: String(e.message ?? e) }, null, 1));
     process.exitCode = 1;
     return;
   }
@@ -166,7 +227,9 @@ async function main() {
   console.log('commands: send <mint> <amount> <to> [--execute] | balance <mint>   (amounts in human units)');
 }
 
-main().catch(e => {
-  console.error('ERROR:', String(e?.message ?? e).replace(/[{}]/g, ' '));
-  process.exitCode = 1;
-});
+if (isEntry(import.meta.url)) {
+  main().catch(e => {
+    console.error('ERROR:', String(e?.message ?? e).replace(/[{}]/g, ' '));
+    process.exitCode = 1;
+  });
+}

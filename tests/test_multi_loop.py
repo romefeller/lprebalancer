@@ -690,6 +690,21 @@ class Loop(Fixture):
         self.assertAlmostEqual(self.claim('e2e-mu'), gained)
         self.assertIsNone(wallets.settle_state(WALLET)[1])
 
+    def test_a_payout_that_never_landed_leaves_nothing_pending(self):
+        """No signature in the answer: the write is booked at once, so the
+        wallet's next write does not wait PENDING_EXPIRE_S (2026-10-02: two
+        expired payouts held every write of the wallet five minutes each)."""
+        self.chain.wallet.update({SOL: 1.0, USDC: 5.0})
+        def never(*a, **k):
+            if a and a[0] == 'send':
+                return None, 'payout expired: block height passed and the chain has no record of SIG; nothing was sent'
+            return self.chain(*a, **k)
+        with self.as_profile('e2e-sol'), mock.patch.object(rebalancer, '_chain', never):
+            out, err = rebalancer.chain('send', USDC, '1', 'x', '--execute', dex='payout')
+        self.assertIsNone(out); self.assertRegex(err, 'nothing was sent')
+        self.assertIsNone(wallets.settle_state(WALLET)[1])
+        self.assertNotIn('claim_unsettled', self.events('e2e-sol'))
+
     def test_a_pending_write_blocks_every_write_of_the_wallet_until_booked(self):
         wallets.set_pending(WALLET, {'profile': 'e2e-mu', 'command': 'open', 'mints': [USDC], 'before': {USDC: 0.0},
                                      'before_slot': self.chain.slot + 50, 'signatures': [], 'sent_at': time.time()})

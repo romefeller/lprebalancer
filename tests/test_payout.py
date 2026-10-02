@@ -1,5 +1,7 @@
 """The fee split: the owner's rule, the transfer wiring, the sizing base."""
 import os
+import re
+import pathlib
 import unittest
 from unittest import mock
 
@@ -95,6 +97,28 @@ class Distribute(unittest.TestCase):
         _, calls, _, state = self.run_it(sol=0.07, state=state)
         self.assertAlmostEqual(float(calls[0][0][2]), 0.6)          # owed + new
         self.assertNotIn(USDC, state['payout_owed'])
+
+    def test_a_payout_that_never_landed_is_owed_not_uncertain(self):
+        """2026-10-02: two expired payouts were booked 'uncertain' (counted
+        paid, never re-sent). payout.mjs now proves an expired one never
+        landed (NeverLanded): the loop owes it and the next harvest pays it."""
+        src = (pathlib.Path(rebalancer.__file__).parent / 'payout.mjs').read_text()
+        msg = re.search(r"new NeverLanded\(`([^`]*)`", src).group(1).replace('${signature}', 'SIG')
+        msg += re.search(r"\+ '([^']*)'\);", src[src.index('new NeverLanded('):]).group(1)
+        self.assertIn('owed again', msg)
+        rows, _, sent, state = self.run_it(sol=0.07, chain_result=(None, msg))
+        self.assertEqual(sorted(rows), ['owed', 'reinvested'])
+        self.assertIn('payout_failed', sent); self.assertNotIn('payout_uncertain', sent)
+        self.assertAlmostEqual(state['payout_owed'][USDC], 0.3)
+        _, calls, _, state = self.run_it(sol=0.07, state=state)
+        self.assertAlmostEqual(float(calls[0][0][2]), 0.6)          # paid with the next harvest
+        self.assertNotIn(USDC, state['payout_owed'])
+
+    def test_a_partial_send_with_a_signature_stays_uncertain(self):
+        rows, _, sent, state = self.run_it(sol=0.07, chain_result=(
+            {'signature': 'SIG', 'sent': True, 'partial': True, 'error': 'rpc reset'}, 'exit 1'))
+        self.assertIn('uncertain', rows); self.assertIn('payout_uncertain', sent)
+        self.assertEqual(state.get('payout_owed', {}), {})          # never sent twice
 
     def test_off_does_nothing(self):
         with mock.patch.object(rebalancer.config, 'PAYOUT_ENABLED', False), \
