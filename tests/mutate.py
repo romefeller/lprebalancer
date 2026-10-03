@@ -106,6 +106,8 @@ TARGETS = {
     'daily_report': ('rebalancer.py', ['daily_report'], PY_TESTS('test_daily.Report')),
     'edge_watch': ('calm.py', ['near_edge', 'watch_verdict'], PY_TESTS('test_edge_watch')),
     'edge_sleep': ('rebalancer.py', ['edge_sleep', 'pool_price_now'], PY_TESTS('test_edge_watch')),
+    'reopen_shape': ('calm.py', ['offset_band', 'band_share_a', 'p_touch_width', 'touch_state'], PY_TESTS('test_reopen_shape', 'test_regime', 'test_calm')),
+    'reopen_shape_loop': ('rebalancer.py', ['reopen_width'], PY_TESTS('test_reopen_shape')),
     'unsettled_guard': ('rebalancer.py', ['unsettled_guard', 'settle_mark', 'wallet'], PY_TESTS('test_unsettled_guard')),
     'priority_fee': ('swap_jupiter.mjs', ['swapRequestBody', 'priorityFeeLamports', 'verifyPriorityFee'],
                      NODE_TESTS('test_priority_fee.mjs', 'test_security.mjs')),
@@ -119,7 +121,7 @@ TARGETS = {
                                                       'test_db', 'test_multi_loop', 'test_scaled', 'test_since_start_scope',
                                                       'test_stats.TwoSolanaWallets', 'test_shared_wallet_books.Replay')),
     'deploy_all': ('rebalancer.py', ['deployable_usd', 'capital', 'side_target_fraction', 'deposit_caps', 'balance_wallet'],
-                   PY_TESTS('test_deploy_all', 'test_audit_more.QuoteFallbacks', 'test_rebalancer.DepositCaps', 'test_payout.SwapGate',
+                   PY_TESTS('test_reopen_shape', 'test_deploy_all', 'test_audit_more.QuoteFallbacks', 'test_rebalancer.DepositCaps', 'test_payout.SwapGate',
                             'test_payout.SwapRetry', 'test_multi_loop', 'test_scaled', 'test_review_edges', 'test_jupiter_gate', 'test_health',
                             'test_deploy_idle')),
     'loop_hooks': ('rebalancer.py', ['janitor', 'run_audits'], PY_TESTS('test_audit.Hooks', 'test_audit_more.Hooks', 'test_audit_more.JanitorKeepsWhatComesBack', 'test_audit_more.JanitorReplan', 'test_audit_more.JanitorUnsignedClose')),
@@ -239,6 +241,8 @@ SQL_TARGETS = {'band_profile', 'daily', 'capital_db', 'book_scope', 'book_sums',
 # The report prints each survivor's key: copy it here with a reason. The line
 # number is not in the key, so an edit above a mutant keeps its entry valid.
 EQUIVALENT = {
+    ('reopen_shape', 'p_touch_width', 'const 0->1', "if bars is None or not len(bars[0]):", 0):
+        'every column of a tape has the same length: bars[0] and bars[1] are empty together',
     ('swap_send', 'sendSwap', '\\?\\? -> ||', 'if (!e.afterSend) throw new AfterSignError(`send failed after signing (not retried): ${e.message ?? e}`);', 0):
         'they differ only for an empty message, in the text of the error; the error kind is the same',
     ('swap_send', 'sendSwap', '\\?\\? -> ||', '(deps.log ?? console.log)(JSON.stringify({ ...report, signature: e.signature, sent: true, partial: true,', 0):

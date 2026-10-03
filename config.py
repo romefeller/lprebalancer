@@ -221,6 +221,12 @@ REGIME_LIQ_MAX = _env('LPBOT_REGIME_LIQ_MAX', float, float(_CFG.get('regime_liq_
 # band edge, read the pool's price every EDGE_WATCH_S between polls; 0 is off.
 EDGE_WATCH_PCT = float(_CFG.get('edge_watch_pct') or 0.0)
 EDGE_WATCH_S = int(_CFG.get('edge_watch_seconds') or 15)
+# The band reopened after an exit (sql/026): its centre offset against the
+# exit, and one band one rung wider when a touch soon is likely; 0 is off.
+REOPEN_OFFSET = float(_CFG.get('reopen_offset_frac') or 0.0)
+REOPEN_WIDEN_P = float(_CFG.get('reopen_widen_p') or 0.0)
+REOPEN_WIDEN_BAND = float(_CFG.get('reopen_widen_band') or 1.015)
+REOPEN_WIDEN_MIN = int(_CFG.get('reopen_widen_minutes') or 30)
 # Venues are ranked by what their on-chain fee counters say liquidity at the
 # active price earned: sampled every VENUE_SAMPLE_S, and a move needs at least
 # VENUE_MIN_HOURS of evidence on both the held pool and the target.
@@ -337,6 +343,10 @@ def summary():
         'regime_steps': REGIME_STEPS,
         'edge_watch_pct': EDGE_WATCH_PCT,
         'edge_watch_seconds': EDGE_WATCH_S,
+        'reopen_offset_frac': REOPEN_OFFSET,
+        'reopen_widen_p': REOPEN_WIDEN_P,
+        'reopen_widen_band': REOPEN_WIDEN_BAND,
+        'reopen_widen_minutes': REOPEN_WIDEN_MIN,
         'payout_enabled': PAYOUT_ENABLED,
         'profit_wallet': PROFIT_WALLET or None,
         'payout_mint': PAYOUT_MINT or None,

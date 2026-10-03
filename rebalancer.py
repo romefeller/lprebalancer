@@ -989,7 +989,7 @@ def side_target_fraction():
     return 0.5 if config.DEPLOY_ALL else config.SIDE_CAP_FRACTION
 
 
-def deposit_caps(bal):
+def deposit_caps(bal, share_a=None):
     """Per-token deposit caps for an open, from what the wallet actually holds.
 
     Each side is capped at `side_cap_fraction` of the capital, in that token's
@@ -1007,8 +1007,17 @@ def deposit_caps(bal):
     reserve = native_reserve(bal)
     avail_a = bal['balanceA'] - (reserve if bal.get('nativeSide') == 'A' else 0)
     avail_b = bal['balanceB'] - (reserve if bal.get('nativeSide') == 'B' else 0)
-    cap_a = min(max(avail_a, 0), capital_quote * config.SIDE_CAP_FRACTION / price)
-    cap_b = min(max(avail_b, 0), capital_quote * config.SIDE_CAP_FRACTION)
+    # An off-centre band (share_a) takes more of one side than the side cap
+    # allows a centred one: that side's cap is its share plus the same margin.
+    frac_a = frac_b = config.SIDE_CAP_FRACTION
+    if share_a is not None:
+        margin = config.SIDE_CAP_FRACTION - 0.5
+        # each side at most the whole capital: the two caps never pass the
+        # open guard's 2x capital (property test, 2026-10-03)
+        frac_a = max(frac_a, min(1.0, share_a + margin))
+        frac_b = max(frac_b, min(1.0, 1 - share_a + margin))
+    cap_a = min(max(avail_a, 0), capital_quote * frac_a / price)
+    cap_b = min(max(avail_b, 0), capital_quote * frac_b)
     return cap_a, cap_b
 
 
@@ -2340,6 +2349,30 @@ def edge_sleep(total_s, status, read=None, sleep=None, clock=None):
             return 'slept'
 
 
+def reopen_width(k, pool, price):
+    """The width an exit reopens at: `k`, or reopen_widen_band for this one
+    band when `k` is the narrowest width and P(touch it within
+    reopen_widen_minutes) is at least reopen_widen_p on a fresh tape
+    (sql/026; a +/-1% band reopened into a likely touch is a re-centre
+    paid for nothing). Regime mode only: calm mode would hand a 1.5% band to
+    the hourly rules (audit 2026-10-03). Any failure keeps `k`."""
+    if not (config.REGIME_ENABLED and config.REOPEN_WIDEN_P) or k != min(config.REGIME_WIDTHS):
+        return k
+    try:
+        bars = tape5(pool, price)
+        if bars is None or not calm.tape_fresh(bars[0], time.time()):
+            return k
+        p = calm.p_touch_width(bars, k, config.REOPEN_WIDEN_MIN)
+    except Exception as e:
+        notify('reopen_widen_failed', reason=f'{type(e).__name__}: {tidy(e)}')
+        return k
+    if p is None or p < config.REOPEN_WIDEN_P:
+        return k
+    notify('REOPEN_WIDE', band_pct=round((config.REOPEN_WIDEN_BAND - 1) * 100, 2), p_touch=round(p, 3),
+           horizon_minutes=config.REOPEN_WIDEN_MIN)
+    return config.REOPEN_WIDEN_BAND
+
+
 def regime_choice_now(pool, price, pair=None):
     """The regime's width for a fresh band at `price` on `pool`, or None."""
     if not config.REGIME_ENABLED:
@@ -2417,7 +2450,7 @@ SWAP_RATE_LIMIT_PAUSES = (30, 60)
 SWAP_FALLBACK = os.environ.get('LPBOT_SWAP_FALLBACK', 'orca-swap')
 
 
-def balance_wallet(state, bal, rec):
+def balance_wallet(state, bal, rec, share_a=None):
     """Swap the wallet to about 50/50 through Jupiter before an open, when
     either side holds less than half the capital, which is what a centred
     band needs of each. Returns the wallet as it is after, or None when a
@@ -2446,10 +2479,17 @@ def balance_wallet(state, bal, rec):
     # target share, less 3% for price movement), not merely short of half: a
     # side at 51% capped a deposit at $195 while $45 sat idle (2026-09-26).
     # The swap script itself does nothing within 2% of target.
-    need = C * side_target_fraction() * 0.97
-    balanced = abs(usd_a - usd_b) <= 0.04 * (usd_a + usd_b)
-    if min(usd_a, usd_b) >= need or balanced:
-        return bal
+    # An off-centre band (share_a, sql/026) wants share_a of the capital in
+    # token A and the rest in token B; a centred one each side's target.
+    if share_a is None:
+        frac_a = frac_b = side_target_fraction()
+        if min(usd_a, usd_b) >= C * frac_a * 0.97 or abs(usd_a - usd_b) <= 0.04 * (usd_a + usd_b):
+            return bal
+    else:
+        # within 2 points of the band's share: the swap script's own tolerance
+        frac_a, frac_b = share_a, 1 - share_a
+        if abs(usd_a - share_a * (usd_a + usd_b)) <= 0.02 * (usd_a + usd_b):
+            return bal
     mint_a = (rec.get('token_a') or {}).get('address')
     mint_b = (rec.get('token_b') or {}).get('address')
     if not (chains.is_address(config.CHAIN, mint_a) and chains.is_address(config.CHAIN, mint_b)):
@@ -2462,9 +2502,8 @@ def balance_wallet(state, bal, rec):
     head = res - config.GAS_RESERVE_SOL
     head_usd = head * ui_price(bal) * q if bal.get('nativeSide') == 'A' else \
         (head * q if bal.get('nativeSide') == 'B' else 0.0)
-    share = C * side_target_fraction()
-    target_a = f"{share + (head_usd if bal.get('nativeSide') == 'A' else 0.0):.2f}"
-    target_b = f"{share + (head_usd if bal.get('nativeSide') == 'B' else 0.0):.2f}"
+    target_a = f"{C * frac_a + (head_usd if bal.get('nativeSide') == 'A' else 0.0):.2f}"
+    target_b = f"{C * frac_b + (head_usd if bal.get('nativeSide') == 'B' else 0.0):.2f}"
     # Prices and decimals the loop already has, so the swap needs no call to
     # Jupiter's rate-limited price API for the pool's own tokens.
     hints = {}
@@ -3033,7 +3072,7 @@ def record_baseline(bal, at=None):
         return False
 
 
-def reopen(state, reason, band=None, recovering=False):
+def reopen(state, reason, band=None, recovering=False, exit_side=0):
     """Open a fresh position at the best band, or at `band` when calm mode
     asks for the tight one, sized to what the wallet holds (after a swap to
     50/50 when `rebalance_swap` is on and the wallet is lopsided)."""
@@ -3080,14 +3119,18 @@ def reopen(state, reason, band=None, recovering=False):
     if not gas_for_open(state, bal):
         return False                                     # before the swap: no swap for an open that cannot run
     funded = bal                                         # the sleeve as funded: a first open's baseline
-    bal = balance_wallet(state, bal, best.get('record'))
+    # After an exit the band may sit off centre, against the exit (sql/026):
+    # the swap aims at that band's share of token A, not at one half.
+    frac = config.REOPEN_OFFSET if (band and exit_side and not recovering) else 0.0
+    share_a = calm.band_share_a(bal['price'], *calm.offset_band(bal['price'], k, exit_side, frac)) if frac else None
+    bal = balance_wallet(state, bal, best.get('record'), share_a=share_a)
     if bal is None or not quote_known(state, bal, 'the open'):
         return False
     # A tight band is centred on the LIVE price: the ladder's price can be
     # minutes old, and on a +/-1% band that is a large part of the width.
     price = bal['price'] if band else best['price']
-    lower, upper = price / k, price * k
-    cap_a, cap_b = deposit_caps(bal)
+    lower, upper = calm.offset_band(price, k, exit_side, frac) if frac else (price / k, price * k)
+    cap_a, cap_b = deposit_caps(bal, share_a=share_a)
     if cap_a * ui_price(bal) + cap_b < capital(bal) * 0.1 / bal['quoteUsd']:
         notify('idle', reason=f'wallet holds too little {bal["tokenA"]} and '
                               f'{bal["tokenB"]} to open; nothing to do',
@@ -3167,7 +3210,7 @@ def reopen(state, reason, band=None, recovering=False):
 
 
 def rebalance(state, status, reason, target=None, band=None, calm_move=False, exit_move=False, close_only=False,
-              operator=False):
+              operator=False, exit_side=0):
     """Harvest, close, and reopen: on the same pool, or on `target` (a board
     row) after repointing the profile. The close runs on the DEX the position
     is on, whatever the profile says by then.
@@ -3316,7 +3359,7 @@ def rebalance(state, status, reason, target=None, band=None, calm_move=False, ex
     if target:
         repoint_with_leftovers(state, target)
         sell_left_behind(state, force=True)
-    reopen(state, reason, band=band)
+    reopen(state, reason, band=band, exit_side=0 if target else exit_side)
 
 
 def profile_enabled():
@@ -3536,11 +3579,13 @@ def main():
                 k = rv['choice'] if rv else config.REGIME_WIDTHS[-1]
             else:
                 k = calm_reopen_band(cv, state) if tight else None
+            k = reopen_width(k, status.get('whirlpool') or config.POOL, price)
             notify('OUT_OF_BAND', side=side, price=price,
                    lower=status['lowerPrice'], upper=status['upperPrice'],
                    action=('harvest, close, reopen tight' if k else 'harvest, close, re-optimise, reopen'),
                    forecast=fc, calm=cv)
-            rebalance(state, status, f'price went {side}', band=k, calm_move=tight, exit_move=True)
+            rebalance(state, status, f'price went {side}', band=k, calm_move=tight, exit_move=True,
+                      exit_side=1 if side == 'above' else -1)
             time.sleep(config.POLL_SECONDS)
             continue
 

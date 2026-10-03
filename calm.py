@@ -497,12 +497,8 @@ def regime_view(bars, price, lower, upper, *, widths=WIDTHS, horizon_minutes=120
     if bars is None:
         return None
     ts, _o, high, low, close, vol = bars
-    sigma = ewma_sigma(close)
-    vel = velocity(sigma)
+    table, sigma, s_now, v_now = touch_state(bars, horizon_minutes)
     inst = instability(sigma)
-    H = max(1, round(horizon_minutes * 60 / BAR_SECONDS))
-    table = touch_table(high, low, close, sigma, H, vel)
-    s_now, v_now = float(sigma[-1]), float(vel[-1])
     probs = []
     for k in widths:
         probs.append(p_touch_cond(table, math.log(k), math.log(k), s_now, v_now))
@@ -546,6 +542,49 @@ def watch_verdict(price, lower, upper, near_pct):
     if price < lower or price > upper:
         return 'exit'
     return 'near' if near_edge(price, lower, upper, near_pct) else 'away'
+
+
+def offset_band(price, k, side, frac):
+    """(lower, upper) of a band of half-width k around `price`, its centre
+    moved `frac` of the half-width (in log) against `side`: +1 for a band
+    left above (the new one sits a little below the price), -1 for below,
+    0 centred. The price stays inside for frac < 1. Pure."""
+    if side not in (-1, 0, 1) or not 0 <= frac < 1 or not k > 1 or not price > 0:
+        raise ValueError(f'offset_band({price}, {k}, {side}, {frac})')
+    c = price * k ** (-frac * side)
+    return c / k, c * k
+
+
+def band_share_a(price, lower, upper):
+    """The share of a concentrated position's value held in token A at
+    `price` inside [lower, upper]: x*P / (x*P + y) with x = 1/sqrt(P) -
+    1/sqrt(upper), y = sqrt(P) - sqrt(lower). 0.5 for a centred band. Pure."""
+    if not 0 < lower <= price <= upper or lower == upper:
+        raise ValueError(f'band_share_a({price}, {lower}, {upper})')
+    sp = math.sqrt(price)
+    x, y = 1 / sp - 1 / math.sqrt(upper), sp - math.sqrt(lower)
+    return x * price / (x * price + y)
+
+
+def touch_state(bars, horizon_minutes):
+    """(touch table, sigma, sigma now, velocity now) of the five-minute tape
+    for a horizon: what regime_view and p_touch_width read touches from."""
+    _ts, _o, high, low, close, _v = bars
+    sigma = ewma_sigma(close)
+    vel = velocity(sigma)
+    H = max(1, round(horizon_minutes * 60 / BAR_SECONDS))
+    return touch_table(high, low, close, sigma, H, vel), sigma, float(sigma[-1]), float(vel[-1])
+
+
+def p_touch_width(bars, k, horizon_minutes):
+    """P(the price touches a band of half-width k centred now within
+    `horizon_minutes`), as regime_view reports it for that width (rounded to
+    0.001). None without enough tape. Pure."""
+    if bars is None or not len(bars[0]):
+        return None
+    table, _sigma, s_now, v_now = touch_state(bars, horizon_minutes)
+    p = p_touch_cond(table, math.log(k), math.log(k), s_now, v_now)
+    return None if p is None else round(p, 3)
 
 
 def regime_decide(v, *, widths=WIDTHS, steps=2):
