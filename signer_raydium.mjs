@@ -37,6 +37,7 @@
 //   node signer_raydium.mjs open <pool> <lowerPrice> <upperPrice> <maxA> <maxB> [--execute]
 //   node signer_raydium.mjs harvest <position> [--execute]
 //   node signer_raydium.mjs close <position> [--execute]
+//   node signer_raydium.mjs increase <position> <maxA> <maxB> [--execute]   (add to an open position in range)
 import fs from 'node:fs';
 import { positionRent } from './position_rent.mjs';
 import { PRICE_SLIPPAGE_BPS, SLIPPAGE_REFUSAL, openToleranceBps, safeBase } from './slippage.mjs';
@@ -681,6 +682,96 @@ async function close(address, execute) {
   });
 }
 
+// Add to an open position in range, instead of a close and a reopen (owner,
+// 2026-10-03: idle cash beside the band cost a full close, swap and open,
+// ~$0.04 each, twice a day). maxA and maxB are UI amounts; the deposit is
+// sized like an open's (safeBase: one side exact, the other up to its cap
+// anywhere in the price tolerance) against the position's own ticks. Refused,
+// before anything is signed: a position out of range, gas under the reserve,
+// a deposit that would leave gas under it, a position that would pass
+// LPBOT_MAX_USD, nothing to add.
+export async function increase(address, uiMaxA, uiMaxB, execute) {
+  [uiMaxA, uiMaxB] = [uiMaxA, uiMaxB].map(Number);
+  if (![uiMaxA, uiMaxB].every(x => Number.isFinite(x) && x >= 0) || !(uiMaxA > 0 || uiMaxB > 0)) {
+    throw new Error('increase needs <positionMint> <maxA> <maxB>, both >= 0 and one > 0');
+  }
+  const pool = poolArg();
+  return withRpc(async ({ connection, payer, raydium }) => {
+    const r = await loadPool(raydium, pool);
+    const info = await describe(pool, r, connection);
+    assertWritable(info.mints);
+    const ps = await findPositions(raydium, pool, address);
+    const p = ps.find(x => x.nftMint.toBase58() === address);
+    const { decimalsA: da, decimalsB: db } = info;
+    const lowerP = tickPrice(p.tickLower, da, db), upperP = tickPrice(p.tickUpper, da, db);
+    const price = info.price;
+    if (!(price > lowerP && price < upperP)) {
+      throw new Error(`price ${price.toFixed(6)} is outside the position ${lowerP.toFixed(6)}-${upperP.toFixed(6)}: nothing to add`);
+    }
+    const lamports = await connection.getBalance(payer.publicKey);
+    const sol = lamports / 1e9;
+    if (sol < GAS_RESERVE_SOL) {
+      throw new Error(`SOL below the ${GAS_RESERVE_SOL} gas reserve; a wallet that cannot pay fees cannot close its own position`);
+    }
+    const maxA = uiToNative(uiMaxA, info.multiplierA), maxB = uiToNative(uiMaxB, info.multiplierB);
+    const quote = depositQuote(price, lowerP, upperP, maxA, maxB);
+    if (!quote) throw new Error('nothing to add: the caps are empty');
+    const estA = quote.estA * info.multiplierA, estB = quote.estB * info.multiplierB;
+    const addUsd = (estA * info.uiPrice + estB) * (info.quoteUsd ?? 1);
+    const sqrtP = r.rpcPoolInfo.sqrtPriceX64;
+    const sqrtLo = TickUtil.getSqrtPriceAtTick(p.tickLower), sqrtHi = TickUtil.getSqrtPriceAtTick(p.tickUpper);
+    const held = LiquidityMathUtil.getAmountsForLiquidity(sqrtP, sqrtLo, sqrtHi, p.liquidity, false);
+    const heldUsd = (rawToUi(held.amountA, da, info.multiplierA) * info.uiPrice
+                     + rawToUi(held.amountB, db, info.multiplierB)) * (info.quoteUsd ?? 1);
+    if (heldUsd + addUsd > MAX_USD) {
+      throw new Error(`position about $${(heldUsd + addUsd).toFixed(0)} after the add exceeds cap $${MAX_USD}`);
+    }
+    // The SDK wraps the whole cap of the other side, not the estimate: the
+    // reserve is checked against the native side's cap (audit 2026-10-03).
+    const nativeIn = info.nativeSide === 'A' ? uiMaxA : info.nativeSide === 'B' ? uiMaxB : 0;
+    if (sol - nativeIn < GAS_RESERVE_SOL) {
+      throw new Error(`adding up to ${nativeIn.toFixed(4)} SOL would leave ${(sol - nativeIn).toFixed(4)}, below the ${GAS_RESERVE_SOL} gas reserve`);
+    }
+    const sb_ = safeBase(price, lowerP, upperP, maxA, maxB, openToleranceBps(lowerP, upperP));
+    if (!sb_) throw new Error('nothing to add inside the price range');
+    const base = sb_.base === 'A' ? 'MintA' : 'MintB';
+    const baseAmount = base === 'MintA' ? toRaw(sb_.amount, da) : toRaw(sb_.amount, db);
+    const otherAmountMax = base === 'MintA' ? toRaw(maxB, db) : toRaw(maxA, da);
+    if (baseAmount.isZero()) throw new Error('nothing to add: the binding side rounds to zero');
+    const liquidity = base === 'MintA'
+      ? LiquidityMathUtil.getLiquidityFromAmountA(sqrtP.gt(sqrtLo) ? sqrtP : sqrtLo, sqrtHi, baseAmount)
+      : LiquidityMathUtil.getLiquidityFromAmountB(sqrtLo, sqrtP.lt(sqrtHi) ? sqrtP : sqrtHi, baseAmount);
+    const chain = LiquidityMathUtil.getAmountsForLiquidity(sqrtP, sqrtLo, sqrtHi, liquidity, true);
+    const chainA = rawToUi(chain.amountA, da, info.multiplierA), chainB = rawToUi(chain.amountB, db, info.multiplierB);
+    // what the program takes for this liquidity, not the quote before the price tolerance (audit: 4.4% high)
+    const chainUsd = (chainA * info.uiPrice + chainB) * (info.quoteUsd ?? 1);
+    const built = await raydium.clmm.increasePositionFromBase({
+      poolInfo: r.poolInfo, ownerPosition: p, ownerInfo: { useSOLBalance: true },
+      base, baseAmount, otherAmountMax, txVersion: TX_VERSION,
+    });
+    const report = {
+      positionMint: address, pool, dex: DEX, pair: `${info.symbolA}/${info.symbolB}`,
+      lowerPrice: Number(lowerP.toFixed(6)), upperPrice: Number(upperP.toFixed(6)),
+      price: Number(price.toFixed(6)), uiPrice: info.uiPrice,
+      tokenMaxA: uiMaxA, tokenMaxB: uiMaxB, tokenA: info.symbolA, tokenB: info.symbolB,
+      depositEstA: estA, depositEstB: estB, binding: quote.binding,
+      chainEstA: chainA, chainEstB: chainB,
+      liquidityAdded: liquidity.toString(), liquidityBefore: p.liquidity.toString(),
+      heldUsd: Number(heldUsd.toFixed(2)), quoteUsdEstimate: Number(addUsd.toFixed(4)),
+      depositUsd: info.quoteUsd != null ? Number(chainUsd.toFixed(4)) : null,
+      instructions: built.transaction.instructions.length, transactions: 1,
+    };
+    if (!execute) {
+      const simulation = await simulate(connection, built);
+      console.log(JSON.stringify({ ...report, simulation, sent: false }, null, 1));
+      console.log('DRY RUN — increase built. Pass --execute to sign and send.');
+      return;
+    }
+    const sig = await sendBuilt(built);
+    console.log(JSON.stringify({ ...report, sent: true, signature: sig, signatures: [sig] }, null, 1));
+  });
+}
+
 // Up to three builds on fresh pool state when the chain refuses on slippage.
 // Only a single-transaction open or close is rebuilt: a refused transaction
 // reverted whole. A partial multi-transaction send is never retried.
@@ -708,6 +799,7 @@ async function main() {
   if (cmd === 'status') return status(rest[0]);
   if (cmd === 'harvest') return harvest(rest[0], execute);
   if (cmd === 'close') return rebuildOnSlippage(() => close(rest[0], execute), execute);
+  if (cmd === 'increase') return rebuildOnSlippage(() => increase(rest[0], rest[1], rest[2], execute), execute);
   if (cmd === 'open') return rebuildOnSlippage(() => open(rest[0], rest[1], rest[2], rest[3], rest[4], execute), execute);
   if (cmd === 'pool') {
     // Read-only: no key is loaded.

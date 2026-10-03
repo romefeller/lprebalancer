@@ -268,8 +268,7 @@ class ShareProperty(Patched):
 class MainLoopExit(unittest.TestCase):
     """The loop's exit hands rebalance the right side and the widened band."""
     def test_side_and_width(self):
-        import inspect
-        src = inspect.getsource(rebalancer.main)
+        src = open(rebalancer.__file__, encoding='utf-8').read()      # the file: other tests patch main
         i = src.index("if not status.get('inRange'):")
         block = src[i:i + 1600]
         self.assertIn("k = reopen_width(k, status.get('whirlpool') or config.POOL, price)", block)

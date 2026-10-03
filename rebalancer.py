@@ -353,7 +353,7 @@ def notify_book(event, **payload):
     return notify(event, **{**payload, **book})
 
 
-WRITE_COMMANDS = {'open', 'close', 'harvest'}      # a venue's own transactions
+WRITE_COMMANDS = {'open', 'close', 'harvest', 'increase'}      # a venue's own transactions
 
 
 def health_key(args, dex):
@@ -1779,11 +1779,91 @@ def deploy_idle(state, status, wbal, rv, price):
             db.event('deploy_idle_deferred', f'${idle:.2f} idle: {why}')
         return False
     state['idle_deploys'] = [t for t in (state.get('idle_deploys') or []) if now - t < 86400] + [now]; save(state)
+    if config.DEX in INCREASE_DEXES:
+        return add_idle(state, status, wbal, idle, price)
     k = rv['choice'] if rv else math.sqrt(status['upperPrice'] / status['lowerPrice'])
     notify_book('DEPLOY_IDLE', idle_usd=round(idle, 2), price=price, lower=status['lowerPrice'],
                 upper=status['upperPrice'])
     db.event('DEPLOY_IDLE', f'${idle:.2f} idle beside the band: re-centre to deploy it')
     rebalance(state, status, f'deploy ${idle:.2f} idle', band=k, calm_move=True)
+    return True
+
+
+INCREASE_DEXES = {'raydium-clmm'}  # signers with `increase`: idle cash goes into the open position
+INCREASE_RECHECKS, INCREASE_RECHECK_S = 6, 15  # after an errored add: re-reads for ~90 s (blockhash expiry)
+
+
+def added_usd(before_l, after_status):
+    """The dollars an increase put in, from the chain: the position's mark
+    after it times the share of its liquidity that is new. None when the
+    read has no position, no liquidity or no growth. Pure."""
+    try:
+        l0, l1 = int(before_l), int(after_status['liquidity'])
+    except (TypeError, ValueError, KeyError):
+        return None
+    mark = position_usd(after_status)
+    if l1 <= l0 or l0 < 0 or mark is None:
+        return None
+    # tokens only: the rent in the mark is not part of what the add put in
+    return (mark - rent_usd(after_status)) * (l1 - l0) / l1
+
+
+def add_idle(state, status, wbal, idle, price):
+    """Idle cash into the open position (signer `increase`), not a close, swap
+    and reopen (2026-10-03 audit: 10 such re-centres in 6.5 days, ~$0.04
+    each). The idle cash alone is swapped to the band's share of token A at
+    the live price (balance_wallet), then added at the position's own ticks.
+    What went in is measured on chain after the send (added_usd), so an add
+    that landed is booked even when its send reported an error, and the
+    booked deposit is the program's, not the quote's. The add never feeds the
+    venue breaker (record=False): its refusals say nothing about the venue,
+    and three of them must not move the position (audit 2026-10-03). A
+    failure moves nothing and is retried at the next allowed deploy. True
+    when liquidity was added."""
+    mint, lo, hi = status['positionMint'], status['lowerPrice'], status['upperPrice']
+    try:
+        share_a = calm.band_share_a(wbal['price'], lo, hi)
+    except ValueError:
+        return False                                     # the price left the band: the exit handles it
+    bal = balance_wallet(state, wbal, pool_record(), share_a=share_a)
+    if bal is None or not quote_known(state, bal, 'the add'):
+        return False
+    cap_a, cap_b = deposit_caps(bal, share_a=share_a)
+    if cap_a <= 0 or cap_b <= 0:
+        return False                                     # in range an add takes both tokens: the signer refuses one
+    out, err = chain('increase', mint, f'{cap_a:.9f}', f'{cap_b:.9f}', '--execute', record=False)
+    if held(err):
+        return False
+    after, _ = read_status(mint)
+    added = added_usd(status.get('liquidity'), after)
+    # After an error the add may still land until its blockhash expires: look
+    # again for about 90 s before calling it failed (audit 2026-10-03).
+    for _ in range(INCREASE_RECHECKS if err and added is None else 0):
+        time.sleep(INCREASE_RECHECK_S)
+        after, _ = read_status(mint)
+        added = added_usd(status.get('liquidity'), after)
+        if added is not None:
+            break
+    sent = bool((out or {}).get('signature'))
+    if added is None and sent and not err:
+        added = float(out.get('depositUsd') or 0.0)      # the read failed: the signer's chain amounts
+    if added is None:
+        notify('increase_failed', reason=err or 'no signature', idle_usd=round(idle, 2))
+        db.event('increase_failed', f'${idle:.2f} idle: {err or "no signature"}')
+        return False
+    if err:
+        notify('increase_recovered', detail='the add reported an error but the position grew', added_usd=round(added, 4))
+    db.add_deposit(mint, added)
+    wl = wallet(status.get('whirlpool') or config.POOL)
+    left = deployable_usd(wl) if 'balanceA' in wl else None
+    # what this add leaves out is its price tolerance, as after an open: excused;
+    # nothing is excused after a swap that did not land (open_unbalanced)
+    excused = 0.0 if state.get('open_unbalanced') else (left or 0.0)
+    state['idle_baseline'] = {'mint': mint, 'usd': round(excused, 4)}; save(state)
+    sig = (out or {}).get('signature')
+    notify_book('INCREASE', positionMint=mint, added_usd=round(added, 4), idle_usd=round(idle, 2),
+                left_usd=None if left is None else round(left, 2), price=price, lower=lo, upper=hi, signature=sig)
+    db.event('INCREASE', f'${added:.2f} of ${idle:.2f} idle added to {mint[:8]}: {sig}')
     return True
 
 

@@ -724,6 +724,18 @@ def open_position(mint, pool, pair, lower, upper, band_pct, sig,
               deposit_usd, reason, dex))
 
 
+def add_deposit(mint, usd):
+    """Liquidity added to an open position (increase, 2026-10-03): its
+    deposit grows by `usd`, so the position's P&L (withdraw - deposit) stays
+    the price path's, not the added cash."""
+    with cursor(commit=True) as cur:
+        # an unpriced deposit (null) stays unpriced: null + x is null, so no
+        # position books a P&L against the add alone (audit 2026-10-03)
+        cur.execute('update positions set deposit_usd = deposit_usd + %s '
+                    'where mint = %s and closed_at is null', (usd, mint))
+        return cur.rowcount
+
+
 def close_position(mint, sig, withdraw_usd):
     with cursor(commit=True) as cur:
         cur.execute('update positions set closed_at = coalesce(closed_at, %s), '

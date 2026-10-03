@@ -366,6 +366,11 @@ export function render(row) {
       return `idle $${n(row.idle_usd)} waits · ${row.reason}`;
     case 'DEPLOY_IDLE':
       return `DEPLOYING IDLE $${n(row.idle_usd)} · re-centre at ${n(row.price, 4)} to put it in the LP\n` + book(row);
+    case 'INCREASE':
+      return `ADDED $${n(row.added_usd)} of $${n(row.idle_usd)} idle to the position at ${n(row.price, 4)}, no re-centre`
+        + `${row.left_usd != null ? ` · $${n(row.left_usd)} left beside it` : ''}\n${row.signature ?? ''}\n` + book(row);
+    case 'increase_failed':
+      return `add to the position failed · ${row.reason} ($${n(row.idle_usd)} idle stays in the wallet)`;
     case 'SWEEP':
       return `SWEPT $${n(row.total_usd)} of other tokens into the pool · `
         + (row.swept || []).map(x => `${x.symbol ?? String(x.mint).slice(0, 6)} $${n(x.usd)}`).join(' · ');

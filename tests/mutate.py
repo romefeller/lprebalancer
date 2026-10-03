@@ -109,6 +109,8 @@ TARGETS = {
     'edge_sleep': ('rebalancer.py', ['edge_sleep', 'pool_price_now'], PY_TESTS('test_edge_watch')),
     'reopen_shape': ('calm.py', ['offset_band', 'band_share_a', 'p_touch_width', 'touch_state'], PY_TESTS('test_reopen_shape', 'test_regime', 'test_calm')),
     'reopen_shape_loop': ('rebalancer.py', ['reopen_width'], PY_TESTS('test_reopen_shape')),
+    'add_idle': ('rebalancer.py', ['add_idle', 'added_usd'], PY_TESTS('test_increase_idle')),
+    'add_deposit': ('db.py', ['add_deposit'], PY_TESTS('test_increase_idle.AddDeposit')),
     'unsettled_guard': ('rebalancer.py', ['unsettled_guard', 'settle_mark', 'wallet'], PY_TESTS('test_unsettled_guard')),
     'priority_fee': ('swap_jupiter.mjs', ['swapRequestBody', 'priorityFeeLamports', 'verifyPriorityFee'],
                      NODE_TESTS('test_priority_fee.mjs', 'test_security.mjs')),
