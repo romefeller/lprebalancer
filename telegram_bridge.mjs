@@ -367,6 +367,8 @@ export function render(row) {
         + ` · fees earned $${n(row.fees_earned_usd ?? row.fees_usd)}${row.fees_earned_usd != null ? ` (harvested $${n(row.fees_usd)})` : ''}`
         // a day across pairs (sol-swing) has no hold benchmark and no one price
         + ` · vs 50/50 hold ${row.vs_hold_usd == null ? '—' : sign(row.vs_hold_usd)}`
+        // deposits, withdrawals and rent moved to other profiles: capital, not P&L
+        + (Number(row.net_flows_usd) ? ` · capital moved ${sign(row.net_flows_usd)}` : '')
         + (row.price_open == null && row.price_close == null ? ''
           : ` · ${baseSymbol(row)} ${n(row.price_open)} → ${n(row.price_close)}`);
     case 'HARVEST':

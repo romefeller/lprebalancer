@@ -825,6 +825,7 @@ def wallet(pool):
     the wallet; counting SOL alone would drop it from equity and report a loss
     on every rebalance that never happened.
     """
+    before = settle_mark()
     out, _ = chain('balance', pool)
     note_scale(out)
     if not out or 'balanceA' not in out:
@@ -834,7 +835,37 @@ def wallet(pool):
         time.sleep(10)
         out, _ = chain('balance', pool)
         note_scale(out)
-    return sleeve_of(out or {})
+    return unsettled_guard(sleeve_of(out or {}), before, settle_mark())
+
+
+def settle_mark():
+    """The wallet's (settled slot, pending write) now, to bracket a balance
+    read and the claims read after it; None without a wallet, UNREADABLE
+    (a pending write that is never booked) when the database cannot say."""
+    if not config.WALLET_ID:
+        return None
+    try:
+        return wallets.settle_state(config.WALLET_ID)
+    except Exception:
+        return UNREADABLE
+
+
+UNREADABLE = (None, 'settle state unreadable')
+
+
+def unsettled_guard(view, before, after):
+    """`view` with walletUsd None when a write of the wallet was pending, or
+    was booked, between the balance read (`before`) and the claims read
+    (`after`): the balances and the claims then describe two different
+    moments, and the residual holder's sleeve is off by the write (2026-10-02
+    20:15Z: djt-usdc's open landed, its claim was not yet cut, and sol-usdc
+    read $0 of USDC: equity -$5.84 for one snapshot). The snapshot then
+    records equity unknown, not a loss. Pure."""
+    if before is None or 'walletUsd' not in view:
+        return view
+    if before == after and not before[1]:
+        return view
+    return dict(view, walletUsd=None, unsettled=True)
 
 
 _MINTS_SEEN = {}                  # profile -> the mints last written to config.mints

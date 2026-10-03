@@ -1056,9 +1056,12 @@ def daily_line(day, profile=None, wallet_id=None):
     """One UTC day of the book: re-centres (bands opened), fees harvested, and
     the value of the book (equity plus what was paid out) against a 50/50
     SOL/USDC hold of the day's opening equity. `day` is a date. None when the
-    day has no snapshot with equity. Assumes no deposits or withdrawals other
-    than the payouts: the ledger does not record them. Several profiles: one
-    line per profile, added up (combine_days)."""
+    day has no snapshot with equity. A deposit, withdrawal or internal flow
+    (capital_flows) between the day's first and last snapshot moves the
+    opening capital and the hold by its dollar value, as in since_start: a
+    withdrawal is not a loss (2026-10-03: the 0.07 SOL sent to the swing
+    wallet read as -$8.06 against holding). Several profiles: one line per
+    profile, added up (combine_days)."""
     names = book_scope(profile, wallet_id)
     if len(names) != 1:
         return combine_days([x for x in (daily_line(day, n) for n in names) if x])
@@ -1069,7 +1072,8 @@ def daily_line(day, profile=None, wallet_id=None):
         cur.execute(f"""select (array_agg(equity_usd order by ts asc, id asc))[1] e0,
                                (array_agg(price order by ts asc, id asc))[1] p0,
                                (array_agg(equity_usd order by ts desc, id desc))[1] e1,
-                               (array_agg(price order by ts desc, id desc))[1] p1
+                               (array_agg(price order by ts desc, id desc))[1] p1,
+                               min(ts) t0, max(ts) t1
                         from snapshots where ts >= %(s)s and ts < %(e)s and equity_usd is not null
                           and {mint_in('snapshots.mint')}""", w)
         a = cur.fetchone()                    # an aggregate: always one row
@@ -1085,6 +1089,10 @@ def daily_line(day, profile=None, wallet_id=None):
         cur.execute("select coalesce(sum(usd), 0) u from payouts where kind in ('paid', 'uncertain') "
                     f"and ts >= %(s)s and ts < %(e)s and {PAYOUT_IN}", w)
         paid = float(cur.fetchone()['u'])
+        cur.execute("select coalesce(sum(case when kind in ('deposit', 'internal_in') then usd else -usd end), 0) n "
+                    "from capital_flows where kind in ('deposit', 'withdrawal', 'internal_in', 'internal_out') "
+                    f"and ts > %(t0)s and ts <= %(t1)s and {FLOW_IN}", dict(w, t0=a['t0'], t1=a['t1']))
+        net = float(cur.fetchone()['n'])
         mixed = mixed_sides(_pairs_held(cur, w, start, end))['a']
     e0, p0, e1, p1 = float(a['e0']), float(a['p0']), float(a['e1']), float(a['p1'])
     # Earned is accrual, the same basis as the book's "today" (fees_between);
@@ -1094,14 +1102,15 @@ def daily_line(day, profile=None, wallet_id=None):
     value = e1 + paid
     # a day across pairs of different base tokens (sol-swing) opens on one
     # token's price and closes on another's: no price and no hold benchmark
-    hold = e0 * (0.5 + 0.5 * p1 / p0) if p0 > 0 and not mixed else None
+    hold = e0 * (0.5 + 0.5 * p1 / p0) + net if p0 > 0 and not mixed else None
     return {'day': day.isoformat(), 'complete': now() >= end,
             'recentres': int(n), 'idle_redeploys': int(idle), 'fees_usd': round(f, 4),
             'fees_earned_usd': round(earned, 4),
             'fees_per_recentre_usd': round(f / n, 4) if n else None,
             'price_open': None if mixed else round(p0, 4), 'price_close': None if mixed else round(p1, 4),
             'equity_open': round(e0, 4), 'equity_close': round(e1, 4), 'paid_out_usd': round(paid, 4),
-            'value_change_usd': round(value - e0, 4),
+            'net_flows_usd': round(net, 4),
+            'value_change_usd': round(value - e0 - net, 4),
             'hold_50_50_usd': round(hold, 4) if hold is not None else None,
             'vs_hold_usd': round(value - hold, 4) if hold is not None else None}
 
@@ -1551,7 +1560,8 @@ BOOK_COUNTS = ('harvests', 'positions_opened', 'positions_open_now', 'rebands', 
 BOOK_TOKENS = {'token_a': ('fees_today_a', 'fees_realised_a', 'fees_unrealised_a', 'fees_total_a'),
                'token_b': ('fees_today_b', 'fees_realised_b', 'fees_unrealised_b', 'fees_total_b')}
 BOOK_SAME = ('pair', 'dex', 'position_dex', 'position_pair', 'position_pool', 'pnl_basis')
-DAY_USD = ('fees_usd', 'fees_earned_usd', 'equity_open', 'equity_close', 'paid_out_usd', 'value_change_usd')
+DAY_USD = ('fees_usd', 'fees_earned_usd', 'equity_open', 'equity_close', 'paid_out_usd', 'net_flows_usd',
+           'value_change_usd')
 SINCE_HOLD = ('hold_start_assets_usd', 'vs_hold_start_assets_usd', 'hold_50_50_usd', 'vs_hold_50_50_usd')
 SINCE_USD = ('start_usd', 'equity_usd', 'uncounted_usd', 'paid_out_usd', 'value_usd', 'profit_usd') + SINCE_HOLD
 
@@ -1581,7 +1591,7 @@ def combine_days(lines):
     out = {'day': days.pop(), 'complete': all(x['complete'] for x in lines),
            'recentres': sum(x['recentres'] for x in lines), 'idle_redeploys': sum(x['idle_redeploys'] for x in lines)}
     for k in DAY_USD:
-        out[k] = round(sum(_f(x[k]) for x in lines), 4)
+        out[k] = round(sum(_f(x.get(k)) for x in lines), 4)
     out['fees_per_recentre_usd'] = round(out['fees_usd'] / out['recentres'], 4) if out['recentres'] else None
     out['price_open'] = out['price_close'] = None
     for k in ('hold_50_50_usd', 'vs_hold_usd'):

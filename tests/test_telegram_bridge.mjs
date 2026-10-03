@@ -501,3 +501,12 @@ globalThis.fetch = async (url, init) => { fs.appendFileSync(${JSON.stringify(sen
   assert.equal(st.files[MOVED_FEED].pos, fs.statSync(path.join(dir, MOVED_FEED)).size);
   assert.equal(st.files[run('mu-usdc')].pos, row('dormant', { n: 4, pair: 'MU/USDC', reason: 'nothing to deploy' }).length);
 });
+
+test('a DAILY line names the capital moved, and only when some moved', () => {
+  const d = { event: 'DAILY', day: '2026-10-03', recentres: 1, fees_usd: 1, fees_earned_usd: 2, vs_hold_usd: 0.29,
+              price_open: null, price_close: null };
+  assert.equal(render({ ...d, net_flows_usd: -8.34 }),
+    'DAILY 2026-10-03 · 1 re-centres · fees earned $2.00 (harvested $1.00) · vs 50/50 hold +0.29 · capital moved -8.34');
+  assert.ok(!render({ ...d, net_flows_usd: 0 }).includes('capital moved'));
+  assert.ok(!render(d).includes('capital moved'));                     // a line from before the field
+});

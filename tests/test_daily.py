@@ -245,3 +245,75 @@ class Report(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+def flow(ts, kind, usd, sig=None):
+    with db.cursor(commit=True) as cur:
+        cur.execute('insert into capital_flows (ts, kind, sol, usdc, usd, price, signature) values (%s,%s,0,0,%s,100,%s)',
+                    (ts, kind, usd, sig or f'f{ts.isoformat()}{kind}{usd}'))
+
+
+class Flows(unittest.TestCase):
+    """A deposit, withdrawal or internal flow moves capital, not P&L: the
+    2026-10-03 DAILY line read -$8.06 against holding for 0.07 SOL sent to the
+    swing wallet."""
+    def setUp(self):
+        reset()
+        snap(T(1), 236.0, 119.0)
+        snap(T(23), 228.0, 119.0)
+
+    def test_a_withdrawal_at_a_constant_price_is_no_loss(self):
+        flow(T(2), 'withdrawal', 8.0)
+        l = db.daily_line(DAY)
+        self.assertAlmostEqual(l['net_flows_usd'], -8.0)
+        self.assertAlmostEqual(l['value_change_usd'], 0.0)
+        self.assertAlmostEqual(l['vs_hold_usd'], 0.0)
+        self.assertAlmostEqual(l['hold_50_50_usd'], 228.0)
+
+    def test_signs_of_every_kind(self):
+        flow(T(2), 'deposit', 10.0); flow(T(3), 'internal_in', 1.0)
+        flow(T(4), 'withdrawal', 4.0); flow(T(5), 'internal_out', 2.0)
+        self.assertAlmostEqual(db.daily_line(DAY)['net_flows_usd'], 5.0)
+
+    def test_a_baseline_is_not_a_flow(self):
+        flow(T(2), 'baseline', 500.0)
+        self.assertEqual(db.daily_line(DAY)['net_flows_usd'], 0.0)
+
+    def test_only_flows_between_the_first_and_the_last_snapshot(self):
+        # before the opening equity it is in it; after the closing one it is not
+        flow(T(0.5), 'withdrawal', 3.0); flow(T(1), 'withdrawal', 5.0)
+        flow(T(23.5), 'withdrawal', 7.0); flow(T(-2), 'deposit', 9.0)
+        flow(T(23), 'withdrawal', 8.0)                        # at the closing snapshot: in it
+        self.assertAlmostEqual(db.daily_line(DAY)['net_flows_usd'], -8.0)
+
+    def test_another_book_s_flow_is_not_counted(self):
+        with db.cursor(commit=True) as cur:
+            cur.execute("insert into capital_flows (ts, kind, sol, usdc, usd, price, signature, profile, wallet_id) "
+                        "values (%s,'withdrawal',0,0,8,100,'other','someone-else','w2')", (T(2),))
+        self.assertEqual(db.daily_line(DAY)['net_flows_usd'], 0.0)
+
+    def test_combined_lines_add_the_flows(self):
+        a = dict(db.daily_line(DAY), net_flows_usd=-8.0, value_change_usd=1.0)
+        b = dict(a, net_flows_usd=2.0, value_change_usd=-0.5)
+        c = db.combine_days([a, b])
+        self.assertAlmostEqual(c['net_flows_usd'], -6.0)
+        self.assertAlmostEqual(c['value_change_usd'], 0.5)
+
+
+class FlowProperty(unittest.TestCase):
+    @settings(max_examples=30, deadline=None, suppress_health_check=[HealthCheck.too_slow])
+    @given(st.floats(100, 400), st.floats(50, 200), st.floats(50, 200),
+           st.lists(st.tuples(st.sampled_from(['deposit', 'withdrawal', 'internal_in', 'internal_out']),
+                              st.floats(0.01, 50), st.floats(1.1, 22.9)), max_size=5))
+    def test_value_and_hold_both_move_by_the_flows(self, e0, p0, p1, flows):
+        reset()
+        snap(T(1), e0, p0)
+        net = sum(u if k in ('deposit', 'internal_in') else -u for k, u, _ in flows)
+        e1 = e0 + net                                        # nothing earned, nothing lost: only capital moved
+        snap(T(23), e1, p1)
+        for i, (k, u, h) in enumerate(flows):
+            flow(T(h), k, u, f's{i}')
+        l = db.daily_line(DAY)
+        self.assertAlmostEqual(l['net_flows_usd'], round(net, 4), places=3)
+        self.assertAlmostEqual(l['value_change_usd'], 0.0, places=3)
+        self.assertAlmostEqual(l['vs_hold_usd'], round(e1 - e0 * (0.5 + 0.5 * p1 / p0) - net, 4), places=3)
