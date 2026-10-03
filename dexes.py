@@ -283,6 +283,22 @@ def band_income(first, last, seconds, band, usd_a, usd_b, reward_usd=None):
             'reward_pct_day': (rw_usd / value) / seconds * 86400 * 100}
 
 
+def fee_yield(first, last, usd_a, usd_b):
+    """The fees a unit of in-range liquidity earned between two samples of a
+    pool's counters, per dollar of its full-range equivalent (2 L sqrt p):
+    the fee side of the fee / in-band-loss ratio (calm.fee_loss_ratio).
+    None if unusable."""
+    if not usd_a or not usd_b:
+        return None
+    dg0 = (int(last['g0']) - int(first['g0'])) % U128
+    dg1 = (int(last['g1']) - int(first['g1'])) % U128
+    fee_usd = dg0 / Q64 / 10 ** last['dec_a'] * usd_a + dg1 / Q64 / 10 ** last['dec_b'] * usd_b
+    full = 2 * int(last['sqrt_price']) / Q64 / 10 ** last['dec_b'] * usd_b
+    if full <= 0:
+        return None
+    return fee_usd / full
+
+
 def attach_chain_rewards(records, accounts):
     """reward_usd_day and reward_mints from the pool accounts, for records
     whose API reports none. The chain is the authority: PancakeSwap has no

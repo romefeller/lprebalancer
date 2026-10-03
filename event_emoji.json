@@ -56,5 +56,8 @@
  "dormant": "😴",
  "deposit_seen": "📩",
  "claim_overdraw": "🧮",
- "wallet_lock_timeout": "🔒"
+ "wallet_lock_timeout": "🔒",
+ "HOT_PAUSE": "⏸️",
+ "HOT_RESUME": "▶️",
+ "hot_paused": "⏸️"
 }

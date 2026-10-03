@@ -2487,6 +2487,148 @@ def regime_choice_now(pool, price, pair=None):
     return v['choice']
 
 
+HOT_PAUSE_TELL_S = 1800          # a waiting pause says so at most this often
+
+
+def hot_pause_view(pool, usd_a, usd_b, choice):
+    """The bad-moment signal (sql/029): the width choice above
+    +/-HOT_PAUSE_HOT_PCT and the pool's fees over the last HOT_PAUSE_FG_HOURS
+    under HOT_PAUSE_FG_THRESHOLD x the in-band loss of the same hours. Prices
+    are pool-native (the counters count raw units). A reading that cannot be
+    made is not bad: no data never pauses."""
+    out = {'hot': None, 'ratio': None, 'bad': False}
+    if choice is None:
+        return out
+    out['hot'] = choice > 1 + config.HOT_PAUSE_HOT_PCT / 100
+    if not out['hot']:
+        return out
+    hours = config.HOT_PAUSE_FG_HOURS
+    try:
+        span = db.fee_state_span(pool, hours=max(int(round(hours)), 1))
+        if not span or span[2] < 0.8 * hours * 3600:
+            return out
+        first, last, _ = span
+        t0, t1 = first['ts'].timestamp(), last['ts'].timestamp()
+        bars = db.tape_load(pool, t0)
+        if bars is None:
+            return out
+        out['ratio'] = calm.fee_loss_ratio(dexes.fee_yield(first, last, usd_a, usd_b), bars[0], bars[4], t0, t1)
+    except Exception as e:
+        notify('hot_pause_unread', reason=f'{type(e).__name__}: {tidy(e)}')
+        return out
+    if out['ratio'] is not None:
+        out['ratio'] = round(out['ratio'], 3)
+        out['bad'] = out['ratio'] < config.HOT_PAUSE_FG_THRESHOLD
+    return out
+
+
+def hot_pause_swap(state, p):
+    """The paused capital to 50/50, once per pause, whatever the outcome:
+    a failed swap counts its failure and the pause waits as it is."""
+    p['swapped'] = True
+    save(state)
+    bal = wallet(config.POOL)
+    if 'balanceA' not in bal:
+        return
+    try:
+        rec = pool_record()
+    except Exception:
+        rec = None
+    balance_wallet(state, bal, rec, share_a=0.5)     # wait as a holder: half in each token
+
+
+def hot_pause(state, status, rv):
+    """A held band in a bad HOT moment: harvest, close, and wait 50/50.
+    True when it closed (or tried to), so the poll ends here."""
+    state.pop('hot_pause', None)                     # a held band is never paused
+    q = status.get('quoteUsd')
+    if q is None or not rv or rv.get('stale'):
+        return False
+    now = time.time()
+    if now - state.get('hot_pause_resumed', 0) < config.HOT_PAUSE_COOLDOWN_S:
+        return False                                 # just resumed: no pause straight back
+    pool = status.get('whirlpool') or config.POOL
+    v = hot_pause_view(pool, status['price'] * q, q, rv.get('choice'))
+    if calm.hot_pause_step(None, v['bad'], now, resume_s=config.HOT_PAUSE_RESUME_S,
+                           max_s=config.HOT_PAUSE_MAX_S) != 'pause':
+        return False
+    if calm_budget_left(state) <= 0 or not voluntary_move_allowed(state):
+        return False
+    why = (f"hot pause: +/-{rv.get('choice_pct')}% chosen and fees {v['ratio']}x the in-band loss "
+           f"over {config.HOT_PAUSE_FG_HOURS:g}h (< {config.HOT_PAUSE_FG_THRESHOLD:g})")
+    notify_book('HOT_PAUSE', price=status['price'], lower=status['lowerPrice'], upper=status['upperPrice'],
+                ratio=v['ratio'], threshold=config.HOT_PAUSE_FG_THRESHOLD, hours=config.HOT_PAUSE_FG_HOURS,
+                resume_minutes=config.HOT_PAUSE_RESUME_S // 60, regime=rv)
+    db.event('HOT_PAUSE', why)
+    mint = status['positionMint']
+    # Recorded before the close: a restart after it lands keeps waiting, and
+    # books the close itself if this process stopped before rebalance did.
+    state['hot_pause'] = {'since': now, 'last_bad': now, 'pool': config.POOL, 'ratio': v['ratio'], 'told': now,
+                          'mint': mint, 'withdraw_usd': position_usd(status), 'reason': why,
+                          'booked': False, 'swapped': False}
+    save(state)
+    rebalance(state, status, why, calm_move=True, exit_move=True, close_only=True)
+    # The ledger says whether the close landed: rebalance books it only then
+    # (or when a reported failure proved to have landed). A fresh chain read
+    # could lag behind the close.
+    if not db.position_closed(mint):
+        state.pop('hot_pause', None); save(state)    # the close did not land: nothing waits
+        return True
+    p = state['hot_pause']
+    p['booked'] = True
+    hot_pause_swap(state, p)
+    return True
+
+
+def hot_paused(state):
+    """Paused: True to keep waiting this poll; False when the pause is over
+    (the signal clear for HOT_PAUSE_RESUME_S, HOT_PAUSE_MAX_S reached, the
+    switch off, or the pool changed) and the loop reopens as usual."""
+    p = state['hot_pause']
+    now = time.time()
+    if not p.get('booked'):
+        # The process stopped between the close and its bookkeeping: the chain
+        # holds no position (this is the no-position path), so book the close.
+        if p.get('mint') and db.position_closed(p['mint']) is False:
+            db.close_position(p['mint'], None, p.get('withdraw_usd'))
+            band_profile(p['mint'], 'rebalance', p.get('reason'))
+            state['calm_times'] = state.get('calm_times', []) + [p['since']]
+        p['booked'] = True
+        save(state)
+    if not config.HOT_PAUSE_ENABLED or p.get('pool') != config.POOL:
+        state.pop('hot_pause', None); state['hot_pause_resumed'] = now; save(state)
+        notify('HOT_RESUME', reason='the pause is switched off or the pool changed',
+               paused_minutes=round((now - p.get('since', now)) / 60))
+        return False
+    if not p.get('swapped'):
+        hot_pause_swap(state, p)
+    sample_fee_growth(state)
+    daily_report(state)
+    run_audits(state)
+    bal = wallet(config.POOL)
+    q, price = bal.get('quoteUsd'), bal.get('price')
+    v = {'hot': None, 'ratio': None, 'bad': False}
+    if q is not None and price:
+        v = hot_pause_view(config.POOL, price * q, q, regime_choice_now(config.POOL, price))
+    if v['bad']:
+        p['last_bad'] = now
+    step = calm.hot_pause_step(p, v['bad'], now, resume_s=config.HOT_PAUSE_RESUME_S, max_s=config.HOT_PAUSE_MAX_S)
+    if step == 'resume':
+        state.pop('hot_pause', None); state['hot_pause_resumed'] = now; save(state)
+        why = 'the pause reached its limit' if now - p['since'] >= config.HOT_PAUSE_MAX_S else \
+            f'clear for {config.HOT_PAUSE_RESUME_S // 60} min'
+        notify('HOT_RESUME', reason=why, paused_minutes=round((now - p['since']) / 60),
+               ratio=v['ratio'], hot=v['hot'])
+        db.event('HOT_RESUME', f"{why}; paused {round((now - p['since']) / 60)} min")
+        return False
+    if now - p.get('told', 0) >= HOT_PAUSE_TELL_S:
+        p['told'] = now
+        notify('hot_paused', paused_minutes=round((now - p['since']) / 60), ratio=v['ratio'], hot=v['hot'],
+               clear_minutes=round((now - p['last_bad']) / 60))
+    save(state)
+    return True
+
+
 def calm_reopen_band(v, state):
     """The band to reopen at after a tight band exits: tight again while calm,
     budget left and a fresh tight band is unlikely to be touched soon;
@@ -3371,7 +3513,7 @@ def rebalance(state, status, reason, target=None, band=None, calm_move=False, ex
         # of range until the bot halted.
         notify('harvest_skipped', reason=err or (out or {}).get('note') or 'no signature returned')
 
-    if calm_move and target is None:
+    if calm_move and target is None and not close_only:
         state['pending_reopen'] = {'mint': mint, 'pool': config.POOL, 'dex': config.DEX,
                                    'band': band, 'reason': reason, 'started_at': now,
                                    'withdraw_usd': position_usd(status), 'closed': False}
@@ -3582,6 +3724,9 @@ def main():
                     repoint_with_leftovers(state, target)
                     sell_left_behind(state, force=True)
             sell_left_behind(state)
+            if state.get('hot_pause') and hot_paused(state):
+                time.sleep(config.POLL_SECONDS)
+                continue
             b0 = wallet(config.POOL)
             if dormant(state, b0):
                 time.sleep(max(DORMANT_POLL_S, config.POLL_SECONDS))
@@ -3666,6 +3811,11 @@ def main():
         if fo:
             time.sleep(config.CALM_POLL_SECONDS)
             continue
+
+        if config.HOT_PAUSE_ENABLED and hot_pause(state, status, rv):
+            time.sleep(config.POLL_SECONDS)
+            continue
+        state.pop('hot_pause', None)
 
         if not status.get('inRange'):
             side = 'above' if price > status['upperPrice'] else 'below'

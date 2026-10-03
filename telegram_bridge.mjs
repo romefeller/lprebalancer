@@ -312,6 +312,15 @@ export function render(row) {
     case 'REGIME_WIDEN':
       return `HEATING · widening ±${n(row.regime?.held_pct, 2)}% → ±${n(row.regime?.choice_pct, 2)}% (${row.regime?.mode})\n`
         + `σ ${n(row.regime?.sigma_5m_pct, 4)}% · velocity ${sign(row.regime?.velocity)}/h\n` + book(row);
+    case 'HOT_PAUSE':
+      return `PAUSED · bad hot moment: fees ${n(row.ratio, 2)}x the in-band loss over ${n(row.hours, 0)}h`
+        + ` (< ${n(row.threshold, 2)}) · ±${n(row.regime?.choice_pct, 2)}% chosen\n`
+        + `price ${n(row.price, 4)} · closing, waiting 50/50 · reopens ${row.resume_minutes} min after it clears\n` + book(row);
+    case 'HOT_RESUME':
+      return `RESUMING · ${row.reason} · paused ${row.paused_minutes} min`;
+    case 'hot_paused':
+      return `paused ${row.paused_minutes} min · fees/loss ${row.ratio == null ? '—' : n(row.ratio, 2)}`
+        + ` · hot ${row.hot ? 'yes' : 'no'} · clear ${row.clear_minutes} min`;
     case 'REGIME_NARROW':
       return `COOLING · narrowing ±${n(row.regime?.held_pct, 2)}% → ±${n(row.regime?.choice_pct, 2)}% (${row.regime?.mode})\n`
         + `σ ${n(row.regime?.sigma_5m_pct, 4)}% · velocity ${sign(row.regime?.velocity)}/h\n` + book(row);

@@ -587,6 +587,38 @@ def p_touch_width(bars, k, horizon_minutes):
     return None if p is None else round(p, 3)
 
 
+def fee_loss_ratio(fee_yield, ts, close, t0, t1, min_cover=0.8):
+    """Fees over in-band loss for any centred band in [t0, t1]: the fee yield
+    per full-range dollar (dexes.fee_yield) over the sum of r^2/8 of the
+    five-minute closes of the bars inside the window. Below 1 the band lost
+    more to the price path than it earned. None when the fees are unknown, the
+    bars cover less than `min_cover` of the window, or nothing moved."""
+    if fee_yield is None:
+        return None
+    ts = np.asarray(ts, dtype=float); close = np.asarray(close, dtype=float)
+    m = (ts >= t0) & (ts + BAR_SECONDS <= t1)
+    c = close[m]
+    if len(c) < max(2, min_cover * (t1 - t0) / BAR_SECONDS):
+        return None
+    g = float(np.sum(np.diff(np.log(c)) ** 2)) / 8
+    if g <= 0:
+        return None
+    return fee_yield / g
+
+
+def hot_pause_step(paused, bad, now, *, resume_s, max_s):
+    """The pause's next step: 'pause' (a held band in a bad moment), 'resume'
+    (paused, and the signal has been clear for `resume_s`, or the pause is
+    `max_s` old), or None. `paused` is None or {'since', 'last_bad'}."""
+    if paused is None:
+        return 'pause' if bad else None
+    if now - paused['since'] >= max_s:
+        return 'resume'
+    if not bad and now - paused['last_bad'] >= resume_s:
+        return 'resume'
+    return None
+
+
 def regime_decide(v, *, widths=WIDTHS, steps=2):
     """'widen' / 'narrow' / None for a held band that is still inside. An
     exit is the loop's: it reopens at v['choice']."""

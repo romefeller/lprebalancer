@@ -222,6 +222,17 @@ REGIME_LIQ_MAX = _env('LPBOT_REGIME_LIQ_MAX', float, float(_CFG.get('regime_liq_
 # (sql/028). 0 is the newest reading alone.
 REGIME_LIQ_SMOOTH_H = _env('LPBOT_REGIME_LIQ_SMOOTH_H', float, float(_CFG.get('regime_liq_smooth_hours')
                           if _CFG.get('regime_liq_smooth_hours') is not None else 2))
+# Pause in bad HOT moments (sql/029): close the band and wait 50/50 while the
+# width choice is above +/-HOT_PAUSE_HOT_PCT and the pool's fees over the last
+# HOT_PAUSE_FG_HOURS paid under HOT_PAUSE_FG_THRESHOLD x the in-band loss.
+HOT_PAUSE_ENABLED = _env('LPBOT_HOT_PAUSE', lambda s: s.lower() in ('1', 'true', 'yes'),
+                         bool(_CFG.get('hot_pause_enabled')))
+HOT_PAUSE_HOT_PCT = float(_CFG.get('hot_pause_hot_pct') or 2.0)
+HOT_PAUSE_FG_THRESHOLD = float(_CFG.get('hot_pause_fg_threshold') or 0.8)
+HOT_PAUSE_FG_HOURS = float(_CFG.get('hot_pause_fg_hours') or 6)
+HOT_PAUSE_RESUME_S = int(_CFG.get('hot_pause_resume_minutes') or 30) * 60
+HOT_PAUSE_MAX_S = float(_CFG.get('hot_pause_max_hours') or 12) * 3600
+HOT_PAUSE_COOLDOWN_S = int(_CFG.get('hot_pause_cooldown_minutes') or 60) * 60
 # The edge watch (sql/025): within EDGE_WATCH_PCT percent of the price of a
 # band edge, read the pool's price every EDGE_WATCH_S between polls; 0 is off.
 EDGE_WATCH_PCT = float(_CFG.get('edge_watch_pct') or 0.0)

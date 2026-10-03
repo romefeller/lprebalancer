@@ -237,10 +237,14 @@ TARGETS = {
                    PY_TESTS('test_hardening.Liquidity', 'test_hardening.LiquiditySmoothed',
                             'test_hardening.LiquidityViewExact')),
     'liq_window': ('db.py', ['pool_stats_summary'], PY_TESTS('test_db.PoolStatsWindow', 'test_hardening.LiquiditySmoothed')),
+    'pause_math': ('calm.py', ['fee_loss_ratio', 'hot_pause_step'], PY_TESTS('test_hot_pause')),
+    'pause_yield': ('dexes.py', ['fee_yield'], PY_TESTS('test_hot_pause')),
+    'pause_loop': ('rebalancer.py', ['hot_pause_view', 'hot_pause_swap', 'hot_pause', 'hot_paused'], PY_TESTS('test_hot_pause')),
+    'pause_db': ('db.py', ['position_closed'], PY_TESTS('test_hot_pause')),
     'evm_key': ('evm/keyfile.mjs', ['validKey', 'writeNewKey', 'readKey'], NODE_TESTS('test_evm_wallet.mjs')),
 }
 
-SQL_TARGETS = {'band_profile', 'daily', 'capital_db', 'book_scope', 'book_sums', 'stats_sum', 'wallets_db', 'wallet_names', 'db_stats', 'liq_window'}
+SQL_TARGETS = {'band_profile', 'daily', 'capital_db', 'book_scope', 'book_sums', 'stats_sum', 'wallets_db', 'wallet_names', 'db_stats', 'liq_window', 'pause_db'}
 
 # Mutants that cannot change behaviour, with the reason. Keyed by the mutant's
 # identity (see "identity" below):
@@ -248,6 +252,10 @@ SQL_TARGETS = {'band_profile', 'daily', 'capital_db', 'book_scope', 'book_sums',
 # The report prints each survivor's key: copy it here with a reason. The line
 # number is not in the key, so an edit above a mutant keeps its entry valid.
 EQUIVALENT = {
+    ('pause_loop', 'hot_pause', 'const 0->1', "if now - state.get('hot_pause_resumed', 0) < config.HOT_PAUSE_COOLDOWN_S:", 0):
+        'never resumed: the clock is decades past both 0 and 1, far beyond any cooldown',
+    ('pause_loop', 'hot_paused', 'const 0->1', "if now - p.get('told', 0) >= HOT_PAUSE_TELL_S:", 0):
+        'a pause without its told time is told at once either way: the clock is decades past 0 and 1',
     ('liq_factor', 'liquidity_view', 'const 0->1', 't, rec = _LIQ.get(pool, (0, None))', 0):
         'an absent cache entry has rec None, which reads the pool whatever its time',
     ('reopen_shape', 'p_touch_width', 'const 0->1', "if bars is None or not len(bars[0]):", 0):

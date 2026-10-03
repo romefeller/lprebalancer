@@ -752,6 +752,15 @@ def close_position(mint, sig, withdraw_usd):
                     (now(), sig, withdraw_usd, mint))
 
 
+def position_closed(mint):
+    """Whether the ledger has the position closed: True, False (still open),
+    or None (no such position)."""
+    with cursor() as cur:
+        cur.execute('select closed_at from positions where mint = %s', (mint,))
+        r = cur.fetchone()
+    return None if r is None else r['closed_at'] is not None
+
+
 def position_opened(mint):
     with cursor() as cur:
         cur.execute('select opened_at from positions where mint = %s', (mint,))
