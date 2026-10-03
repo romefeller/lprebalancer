@@ -2020,7 +2020,7 @@ def regime_view(state, status):
     theta = min(max(config.REGIME_THRESHOLD * lq['factor'], 0.05), 0.40)
     v = calm.regime_view(bars, status['price'], status['lowerPrice'], status['upperPrice'],
                          widths=config.REGIME_WIDTHS, horizon_minutes=config.REGIME_HORIZON,
-                         threshold=theta)
+                         threshold=theta, guard=guard_config(pool, LAST_SURROGATE.get(pool)))
     raw_fresh = fresh = calm.tape_fresh(bars[0], time.time())
     hold_left = 0
     if fresh:
@@ -2293,6 +2293,21 @@ def janitor(state):
         return None
 
 
+def guard_config(pool, src=None):
+    """The fee/variance guard's settings for `pool` (calm.regime_view's
+    `guard`), or None when it is off. fee_c is None, so there is no ratio
+    and the touch rule's width stands, for a pool with no fee constant
+    (sol-swing's DJT pool is not the SOL pool the constant was fitted on)
+    and while the tape (`src`, LAST_SURROGATE's record) holds slots filled
+    from the surrogate in the last day: their volume is another venue's."""
+    if config.REGIME_GUARD == 'off':
+        return None
+    filled = (src or {}).get('filled_24h') or 0
+    return {'mode': config.REGIME_GUARD, 'window_bars': config.REGIME_GUARD_WINDOW,
+            'threshold': config.REGIME_GUARD_THRESHOLD,
+            'fee_c': None if filled else config.REGIME_GUARD_FEE_C.get(pool)}
+
+
 def regime_choice_now(pool, price, pair=None):
     """The regime's width for a fresh band at `price` on `pool`, or None."""
     if not config.REGIME_ENABLED:
@@ -2307,7 +2322,7 @@ def regime_choice_now(pool, price, pair=None):
         f = 1.0
     theta = min(max(config.REGIME_THRESHOLD * f, 0.05), 0.40)
     v = calm.regime_view(bars, price, price / 1.01, price * 1.01, widths=config.REGIME_WIDTHS,
-                         horizon_minutes=config.REGIME_HORIZON, threshold=theta)
+                         horizon_minutes=config.REGIME_HORIZON, threshold=theta, guard=guard_config(pool, LAST_SURROGATE.get(pool)))
     if not v or not calm.tape_fresh(bars[0], time.time()):
         return None
     return v['choice']

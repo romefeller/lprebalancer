@@ -492,8 +492,10 @@ def p_touch_cond(table, d_up, d_down, sigma_now, vel_now=None, min_origins=150):
     return float(((u > d_up / sigma_now) | (d > d_down / sigma_now)).mean())
 
 
-def regime_view(bars, price, lower, upper, *, widths=WIDTHS, horizon_minutes=120, threshold=0.25):
-    """The market's width, from the five-minute tape. Pure."""
+def regime_view(bars, price, lower, upper, *, widths=WIDTHS, horizon_minutes=120, threshold=0.25, guard=None):
+    """The market's width, from the five-minute tape. `guard`, when given,
+    is {'mode', 'window_bars', 'threshold', 'fee_c'}: the touch rule's width
+    then passes through guard_width (fee_c None: no ratio, no change). Pure."""
     if bars is None:
         return None
     ts, _o, high, low, close, vol = bars
@@ -507,6 +509,13 @@ def regime_view(bars, price, lower, upper, *, widths=WIDTHS, horizon_minutes=120
     for k in widths:
         probs.append(p_touch_cond(table, math.log(k), math.log(k), s_now, v_now))
     choice = next((k for k, p in zip(widths, probs) if p is not None and p <= threshold), widths[-1])
+    touch_choice, g = choice, None
+    if guard and guard.get('mode', 'off') != 'off':
+        ratio = fee_variance_ratio(close, vol, guard['window_bars'], guard.get('fee_c'))
+        choice = guard_width(choice, ratio, widths=widths, threshold=guard['threshold'], mode=guard['mode'])
+        g = {'mode': guard['mode'], 'ratio': None if ratio is None else round(ratio, 3),
+             'threshold': guard['threshold'], 'window_bars': guard['window_bars'],
+             'touch_choice_pct': round((touch_choice - 1) * 100, 2), 'acting': choice != touch_choice}
     half = math.sqrt(upper / lower) if lower > 0 and upper > lower else None
     held = min(widths, key=lambda k: abs(k - half)) if half else None
     inside = bool(lower <= price <= upper)
@@ -521,8 +530,49 @@ def regime_view(bars, price, lower, upper, *, widths=WIDTHS, horizon_minutes=120
             'probs': [[round((k - 1) * 100, 2), None if p is None else round(p, 3)] for k, p in zip(widths, probs)],
             'sigma_5m_pct': round(s_now * 100, 4), 'velocity': round(v_now, 3),
             'instability': round(float(inst[-1]), 4),
-            'horizon_minutes': horizon_minutes, 'threshold': threshold,
+            'horizon_minutes': horizon_minutes, 'threshold': threshold, 'guard': g,
             'bar_age_s': int(time.time() - ts[-1]) if len(ts) else None}
+
+
+GUARD_MODES = ('off', 'live', 'narrow')
+
+
+def fee_variance_ratio(close, volume, window_bars, fee_c):
+    """Trailing fee yield over gamma loss, both per dollar of full-range
+    liquidity, over the last `window_bars` five-minute bars: fee_c x the
+    bars' volume against the sum of squared log returns / 8. In range, a
+    narrower band multiplies both by the same concentration, so this ratio,
+    not the width, decides whether liquidity earns more than the price path
+    takes (2026-10-03 study: the trailing 3-6 h ratio predicts the next 1-2 h).
+    None when the tape is too short, the inputs are not finite or the
+    returns are flat. Pure."""
+    n = int(window_bars)
+    if n < 1 or fee_c is None or not fee_c > 0:
+        return None
+    close = np.asarray(close, dtype=float); volume = np.asarray(volume, dtype=float)
+    if len(close) < n + 1 or len(volume) < n:
+        return None
+    c, v = close[-(n + 1):], volume[-n:]
+    if not (np.all(np.isfinite(c)) and np.all(c > 0) and np.all(np.isfinite(v)) and np.all(v >= 0)):
+        return None
+    g = float(np.sum(np.diff(np.log(c)) ** 2) / 8)
+    if g <= 0:
+        return None
+    return float(fee_c * np.sum(v) / g)
+
+
+def guard_width(choice, ratio, *, widths, threshold, mode):
+    """The width after the fee/variance guard. 'live': the touch rule's
+    choice, or the widest width while the ratio is under `threshold`.
+    'narrow': the narrowest width while the ratio is at or over it, else the
+    widest. 'off', or no ratio: the choice as it is. Pure."""
+    if mode not in GUARD_MODES:
+        raise ValueError(f'unknown guard mode {mode!r}')
+    if mode == 'off' or ratio is None:
+        return choice
+    if ratio < threshold:
+        return widths[-1]
+    return widths[0] if mode == 'narrow' else choice
 
 
 def regime_decide(v, *, widths=WIDTHS, steps=2):

@@ -194,6 +194,9 @@ export function render(row) {
       `vol 5m      σ ${n(g.sigma_5m_pct, 4)}% · velocity ${sign(g.velocity)}/h · instability ${n(g.instability, 3)}`,
       `P(touch ≤${g.horizon_minutes}m)  ${probs}`,
       `held band   P(touch) ${pct(g.p_held)} · rule: narrowest width ≤ ${pct(g.threshold)}, move at ${g.steps ?? 2} steps, exits re-centre`,
+      ...(g.guard ? [`fee guard   ${g.guard.mode} · fees/variance ${g.guard.ratio == null ? '— (no ratio: the touch rule stands)' : n(g.guard.ratio, 2)}`
+        + ` · concentrate at ≥ ${n(g.guard.threshold, 2)} over ${Math.round(g.guard.window_bars * 5 / 60 * 10) / 10}h`
+        + (g.guard.acting ? ` · ACTING (touch rule said ±${n(g.guard.touch_choice_pct, 2)}%)` : '')] : []),
       ...(g.p_exit ? [`P(exit)     6h ${pct(g.p_exit[6] ?? g.p_exit['6'])}   24h ${pct(g.p_exit[24] ?? g.p_exit['24'])}`
         + `   72h ${pct(g.p_exit[72] ?? g.p_exit['72'])}   7d ${pct(g.p_exit[168] ?? g.p_exit['168'])}`
         + ` · median life ${g.median_life_hours != null ? n(g.median_life_hours, 0) + 'h' : '> 7d'} (hourly tape)`] : []),

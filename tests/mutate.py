@@ -104,6 +104,8 @@ TARGETS = {
                           PY_TESTS('test_tape_surrogate', 'test_regime', 'test_hardening.StaleTape',
                                    'test_quiet_pool')),
     'daily_report': ('rebalancer.py', ['daily_report'], PY_TESTS('test_daily.Report')),
+    'fee_guard': ('calm.py', ['fee_variance_ratio', 'guard_width', 'regime_view'], PY_TESTS('test_fee_guard', 'test_regime')),
+    'fee_guard_cfg': ('rebalancer.py', ['guard_config'], PY_TESTS('test_fee_guard')),
     'unsettled_guard': ('rebalancer.py', ['unsettled_guard', 'settle_mark', 'wallet'], PY_TESTS('test_unsettled_guard')),
     'priority_fee': ('swap_jupiter.mjs', ['swapRequestBody', 'priorityFeeLamports', 'verifyPriorityFee'],
                      NODE_TESTS('test_priority_fee.mjs', 'test_security.mjs')),

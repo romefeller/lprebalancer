@@ -517,3 +517,12 @@ test('the REGIME block names the configured steps, 2 for a feed from before the 
   assert.match(text({ ...regime, steps: 3 }), /narrowest width ≤ 25%, move at 3 steps, exits re-centre/);
   assert.match(text(regime), /move at 2 steps/);
 });
+
+test('the REGIME block shows the fee/variance guard when it is on', () => {
+  const regime = { mode: 'HOT', held_pct: 5, choice_pct: 5, probs: [[1, 0.1]], threshold: 0.25, horizon_minutes: 120, steps: 3 };
+  const text = (g) => render({ event: 'in_band', regime: g });
+  const guard = { mode: 'live', ratio: 0.73, threshold: 1, window_bars: 72, touch_choice_pct: 1.25, acting: true };
+  assert.match(text({ ...regime, guard }), /fee guard {3}live · fees\/variance 0\.73 · concentrate at ≥ 1\.00 over 6h · ACTING \(touch rule said ±1\.25%\)/);
+  assert.match(text({ ...regime, guard: { ...guard, ratio: null, acting: false } }), /fees\/variance — \(no ratio: the touch rule stands\) · concentrate at ≥ 1\.00 over 6h$/m);
+  assert.doesNotMatch(text(regime), /^fee guard/m);
+});
