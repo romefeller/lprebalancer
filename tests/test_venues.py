@@ -115,14 +115,19 @@ class Sampling(unittest.TestCase):
 
 
 class Ledger(unittest.TestCase):
-    def test_samples_span_and_two_day_window(self):
+    def test_samples_span_and_fourteen_day_window(self):
         with rebalancer.db.cursor(commit=True) as cur:
             cur.execute('truncate fee_growth')
-            cur.execute("insert into fee_growth (ts, dex, pool, sqrt_price, g0, g1, dec_a, dec_b, mint_a, mint_b) "
-                        "values (now() - interval '3 days', 'orca', 'P', 1, 0, 0, 9, 6, 'a', 'b')")
+            for age in ('3 days', '13 days 23 hours', '14 days 1 hour', '20 days'):
+                cur.execute("insert into fee_growth (ts, dex, pool, sqrt_price, g0, g1, dec_a, dec_b, mint_a, mint_b) "
+                            f"values (now() - interval '{age}', 'orca', 'OLD', 1, 0, 0, 9, 6, 'a', 'b')")
         st = {'sqrt_price': SQRT, 'g0': 1, 'g1': 2, 'dec_a': 9, 'dec_b': 6, 'mint_a': SOL, 'mint_b': USDC, 'rewards': []}
         rebalancer.db.record_fee_state('orca', 'P', st)
-        self.assertIsNone(rebalancer.db.fee_state_span('P'))            # the old row is gone, one sample left
+        with rebalancer.db.cursor() as cur:
+            cur.execute("select count(*) n from fee_growth where pool = 'OLD'")
+            self.assertEqual(cur.fetchone()['n'], 2)                    # kept 14 days: 3 d and 13 d 23 h stay
+        self.assertEqual(rebalancer.db.FEE_GROWTH_KEEP_DAYS, 14)
+        self.assertIsNone(rebalancer.db.fee_state_span('P'))            # one sample of P: no span yet
         rebalancer.db.record_fee_state('orca', 'P', dict(st, g0=5))
         first, last, secs = rebalancer.db.fee_state_span('P')
         self.assertEqual((int(first['g0']), int(last['g0'])), (1, 5)); self.assertGreaterEqual(secs, 0)
