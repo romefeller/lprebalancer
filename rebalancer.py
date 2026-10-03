@@ -2188,6 +2188,11 @@ def daily_report(state):
         state['last_daily'] = day.isoformat(); save(state)
         if not line:
             return None
+        if config.DAILY_COMPARE:
+            try:
+                line = dict(line, compare=db.day_average(*config.DAILY_COMPARE))
+            except Exception as e:
+                notify('daily_compare_failed', reason=f'{type(e).__name__}: {tidy(e)}')
         notify('DAILY', **line)
         vs = line['vs_hold_usd']                # None on a day across pairs (sol-swing)
         db.event('DAILY', f"{line['day']}: {line['recentres']} re-centres, fees ${line['fees_usd']:.2f}, "

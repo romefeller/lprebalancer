@@ -519,3 +519,14 @@ test('the REGIME block names the configured steps, 2 for a feed from before the 
   assert.match(text({ ...regime, steps: 3 }), /narrowest width ≤ 25%, move at 3 steps, exits re-centre/);
   assert.match(text(regime), /move at 2 steps/);
 });
+
+test('a DAILY line names the reference period average under it', () => {
+  const d = { event: 'DAILY', day: '2026-10-04', recentres: 6, fees_usd: 3, fees_earned_usd: 3.9, vs_hold_usd: 0.8,
+              value_change_usd: 1.2, price_open: null, price_close: null,
+              compare: { days: 6, from: '2026-09-27', to: '2026-10-02', fees_earned_usd: 3.5602, recentres: 10.3333,
+                         value_change_usd: 0.1546, vs_hold_usd: 0.5748 } };
+  assert.ok(render(d).endsWith('\nvs 09-27→10-02 (6d): fees $3.90 (avg $3.56) · value +1.20 (avg +0.15)'
+    + ' · vs hold +0.80 (avg +0.57) · re-centres 6.0 (avg 10.3)'));
+  assert.ok(!render({ ...d, compare: null }).includes('\nvs '));
+  assert.ok(render({ ...d, vs_hold_usd: null, compare: { ...d.compare, vs_hold_usd: null } }).includes('vs hold — (avg —)'));
+});

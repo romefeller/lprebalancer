@@ -123,6 +123,20 @@ export function message(row) {
 // The pool's base token: the row's token_a, else the first half of its pair.
 const baseSymbol = (row) => row.token_a ?? (typeof row.pair === 'string' && row.pair.includes('/') ? row.pair.split('/')[0] : 'SOL');
 
+// The DAILY line next to the reference period's per-day average (sql/027).
+export function compareLine(row) {
+  const n = (x, d = 2) => Number(x).toFixed(d);
+  const sign = (x) => (Number(x) >= 0 ? '+' : '') + n(x);
+  const c = row.compare;
+  if (!c || !c.days) return '';
+  const pair = (x, avg, f) => `${x == null ? '—' : f(x)} (avg ${avg == null ? '—' : f(avg)})`;
+  return `\nvs ${String(c.from).slice(5)}→${String(c.to).slice(5)} (${c.days}d): `
+    + `fees ${pair(row.fees_earned_usd, c.fees_earned_usd, v => '$' + n(v))}`
+    + ` · value ${pair(row.value_change_usd, c.value_change_usd, sign)}`
+    + ` · vs hold ${pair(row.vs_hold_usd, c.vs_hold_usd, sign)}`
+    + ` · re-centres ${pair(row.recentres, c.recentres, v => n(v, 1))}`;
+}
+
 export function render(row) {
   const { event } = row;
   const n = (x, d = 2) => (x === undefined || x === null ? '—' : Number(x).toFixed(d));
@@ -369,6 +383,7 @@ export function render(row) {
         + ` · vs 50/50 hold ${row.vs_hold_usd == null ? '—' : sign(row.vs_hold_usd)}`
         // deposits, withdrawals and rent moved to other profiles: capital, not P&L
         + (Number(row.net_flows_usd) ? ` · capital moved ${sign(row.net_flows_usd)}` : '')
+        + compareLine(row)
         + (row.price_open == null && row.price_close == null ? ''
           : ` · ${baseSymbol(row)} ${n(row.price_open)} → ${n(row.price_close)}`);
     case 'HARVEST':

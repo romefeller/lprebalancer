@@ -227,6 +227,9 @@ REOPEN_OFFSET = float(_CFG.get('reopen_offset_frac') or 0.0)
 REOPEN_WIDEN_P = float(_CFG.get('reopen_widen_p') or 0.0)
 REOPEN_WIDEN_BAND = float(_CFG.get('reopen_widen_band') or 1.015)
 REOPEN_WIDEN_MIN = int(_CFG.get('reopen_widen_minutes') or 30)
+# The DAILY line's reference period (sql/027): dates, or None for none.
+DAILY_COMPARE = ((_CFG.get('daily_compare_from'), _CFG.get('daily_compare_to'))
+                 if _CFG.get('daily_compare_from') and _CFG.get('daily_compare_to') else None)
 # Venues are ranked by what their on-chain fee counters say liquidity at the
 # active price earned: sampled every VENUE_SAMPLE_S, and a move needs at least
 # VENUE_MIN_HOURS of evidence on both the held pool and the target.

@@ -1583,6 +1583,30 @@ def _same(values):
     return s.pop() if len(s) == 1 else None
 
 
+DAY_COMPARE = ('fees_earned_usd', 'recentres', 'value_change_usd', 'vs_hold_usd')
+
+
+def day_average(first, last, profile=None, wallet_id=None):
+    """The per-day average of daily_line over the complete UTC days `first`
+    .. `last` (dates, inclusive) that have a line: fees earned, re-centres,
+    value change and against the hold (that one over the days that have
+    it). {'days': n, 'from', 'to', ...}, or None when no day has a line."""
+    lines = []
+    d = first
+    while d <= last:
+        x = daily_line(d, profile, wallet_id)
+        if x and x['complete']:
+            lines.append(x)
+        d += dt.timedelta(days=1)
+    if not lines:
+        return None
+    out = {'days': len(lines), 'from': first.isoformat(), 'to': last.isoformat()}
+    for k in DAY_COMPARE:
+        vals = [float(x[k]) for x in lines if x.get(k) is not None]
+        out[k] = round(sum(vals) / len(vals), 4) if vals else None
+    return out
+
+
 def combine_days(lines):
     """One UTC day's lines (daily_line) of several profiles as one line.
     Counts and dollars add; the prices are one pool's and are dropped; the

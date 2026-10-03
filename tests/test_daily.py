@@ -317,3 +317,61 @@ class FlowProperty(unittest.TestCase):
         self.assertAlmostEqual(l['net_flows_usd'], round(net, 4), places=3)
         self.assertAlmostEqual(l['value_change_usd'], 0.0, places=3)
         self.assertAlmostEqual(l['vs_hold_usd'], round(e1 - e0 * (0.5 + 0.5 * p1 / p0) - net, 4), places=3)
+
+
+class Average(unittest.TestCase):
+    """day_average: the per-day mean of the complete days of a period (sql/027)."""
+    def setUp(self):
+        reset()
+        for d, (e0, e1, n) in enumerate(((100.0, 101.0, 2), (100.0, 98.0, 4), (100.0, 100.5, 0))):
+            start = T(24 * d)
+            snap(start + dt.timedelta(hours=1), e0, 100.0)
+            snap(start + dt.timedelta(hours=23), e1, 100.0)
+            for i in range(n):
+                opened(start + dt.timedelta(hours=2 + i), f'A{d}{i}')
+
+    def test_the_mean_of_each_figure(self):
+        a = db.day_average(DAY, DAY + dt.timedelta(days=2))
+        self.assertEqual((a['days'], a['from'], a['to']), (3, '2026-09-27', '2026-09-29'))
+        self.assertAlmostEqual(a['recentres'], 2.0)
+        self.assertAlmostEqual(a['value_change_usd'], (1.0 - 2.0 + 0.5) / 3, places=4)
+        self.assertAlmostEqual(a['vs_hold_usd'], (1.0 - 2.0 + 0.5) / 3, places=4)
+        self.assertIn('fees_earned_usd', a)
+
+    def test_days_without_a_line_are_left_out_and_none_is_none(self):
+        a = db.day_average(DAY - dt.timedelta(days=3), DAY)
+        self.assertEqual((a['days'], a['recentres']), (1, 2.0))
+        self.assertIsNone(db.day_average(DAY - dt.timedelta(days=9), DAY - dt.timedelta(days=5)))
+
+    def test_a_running_day_is_left_out(self):
+        reset()
+        today = db.now().date()
+        snap(dt.datetime.combine(today, dt.time(0), tzinfo=dt.timezone.utc) + dt.timedelta(minutes=1), 100.0, 100.0)
+        self.assertIsNone(db.day_average(today, today))
+
+    def test_a_figure_none_on_every_day_is_none(self):
+        with mock.patch.object(db, 'daily_line', lambda d, *s: {'complete': True, 'fees_earned_usd': 1.0, 'recentres': 1,
+                                                                  'value_change_usd': 0.5, 'vs_hold_usd': None}):
+            a = db.day_average(DAY, DAY + dt.timedelta(days=1))
+        self.assertEqual((a['days'], a['vs_hold_usd'], a['value_change_usd']), (2, None, 0.5))
+
+
+class ReportCompare(Report):
+    def test_the_line_carries_the_period_average_when_configured(self):
+        avg = {'days': 6, 'from': '2026-09-27', 'to': '2026-10-02', 'fees_earned_usd': 3.56}
+        with mock.patch.object(rebalancer.config, 'DAILY_COMPARE', (dt.date(2026, 9, 27), dt.date(2026, 10, 2))), \
+             mock.patch.object(rebalancer.db, 'day_average', lambda a, b: avg if (a, b) == (dt.date(2026, 9, 27), dt.date(2026, 10, 2)) else None):
+            out, seen, _, _ = self.run_it({}, dict(self.LINE))
+        self.assertEqual(seen[1][1]['compare'], avg)
+        self.assertEqual(out['compare'], avg)
+
+    def test_off_or_a_failure_sends_the_line_without_it(self):
+        with mock.patch.object(rebalancer.config, 'DAILY_COMPARE', None):
+            out, seen, _, _ = self.run_it({}, dict(self.LINE))
+        self.assertNotIn('compare', seen[1][1])
+        with mock.patch.object(rebalancer.config, 'DAILY_COMPARE', (DAY, DAY)), \
+             mock.patch.object(rebalancer.db, 'day_average', side_effect=RuntimeError('db')):
+            out, seen, _, _ = self.run_it({}, dict(self.LINE))
+        evs = [e for e, _ in seen if e != 'asked']
+        self.assertEqual(evs, ['daily_compare_failed', 'DAILY'])
+        self.assertNotIn('compare', out)
