@@ -472,14 +472,19 @@ def tape_prune_other_pools(keep_pools, older_than_ts):
         cur.execute('delete from tape5 where pool <> all(%s) and ts < %s', (list(keep_pools), int(older_than_ts)))
 
 
+FEE_GROWTH_KEEP_DAYS = 14
+
+
 def record_fee_state(dex, pool, st):
-    """One sample of a pool's counters; samples older than two days go."""
+    """One sample of a pool's counters; samples older than FEE_GROWTH_KEEP_DAYS
+    go. Two weeks, not two days: the fee/variance guard's backtest needs on-chain
+    fees over many days, and two days of them could not decide it (2026-10-03)."""
     with cursor(commit=True) as cur:
         cur.execute('insert into fee_growth (ts, dex, pool, sqrt_price, g0, g1, rewards, dec_a, dec_b, mint_a, mint_b) '
                     'values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)',
                     (now(), dex, pool, st['sqrt_price'], st['g0'], st['g1'], json.dumps(st.get('rewards') or []),
                      st['dec_a'], st['dec_b'], st['mint_a'], st['mint_b']))
-        cur.execute("delete from fee_growth where ts < now() - interval '2 days'")
+        cur.execute('delete from fee_growth where ts < now() - make_interval(days => %s)', (FEE_GROWTH_KEEP_DAYS,))
 
 
 def fee_state_span(pool, hours=24):
