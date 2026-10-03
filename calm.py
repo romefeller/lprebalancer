@@ -525,6 +525,29 @@ def regime_view(bars, price, lower, upper, *, widths=WIDTHS, horizon_minutes=120
             'bar_age_s': int(time.time() - ts[-1]) if len(ts) else None}
 
 
+def near_edge(price, lower, upper, near_pct):
+    """True when `price` is inside [lower, upper] and within `near_pct`
+    percent of the price of either edge: the zone where the edge watch reads
+    the price between polls. False for near_pct <= 0 or a bad band. Pure."""
+    try:
+        if not (near_pct > 0 and 0 < lower <= price <= upper):
+            return False
+    except TypeError:                     # a missing figure
+        return False
+    return min(upper - price, price - lower) <= price * near_pct / 100
+
+
+def watch_verdict(price, lower, upper, near_pct):
+    """What one edge-watch read means: 'exit' (outside the band: poll now),
+    'near' (keep watching) or 'away' (back in the middle: sleep out the
+    poll). Pure."""
+    if price is None or price <= 0:
+        return 'away'
+    if price < lower or price > upper:
+        return 'exit'
+    return 'near' if near_edge(price, lower, upper, near_pct) else 'away'
+
+
 def regime_decide(v, *, widths=WIDTHS, steps=2):
     """'widen' / 'narrow' / None for a held band that is still inside. An
     exit is the loop's: it reopens at v['choice']."""

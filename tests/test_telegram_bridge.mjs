@@ -459,6 +459,8 @@ test('every row of the real feed renders as before, behind its pool label', { sk
         const { profile, wallet_id, chain, pair, ...rest } = r;
         want = oldMessage(rest);
       }
+      // the old bridge printed "move at 2 steps" whatever the configured steps (ab89dc0 shows them)
+      if (r.regime?.steps != null) want = want.replace('move at 2 steps', `move at ${r.regime.steps} steps`);
       assert.equal(message(r), (label ? label + ' ' : '') + want, `${f}: ${line.slice(0, 200)}`);
       n += 1;
     }

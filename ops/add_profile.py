@@ -181,7 +181,8 @@ def main(argv):
         print('DRY RUN: pass --apply to write')
         return 0
     keys = list(row)
-    vals = [psycopg2.extras.Json(row[k]) if k == 'signer_env' and row[k] is not None else row[k] for k in keys]
+    # jsonb columns (signer_env and any later one) go in as JSON; a dict is not a SQL value
+    vals = [psycopg2.extras.Json(row[k]) if isinstance(row[k], dict) else row[k] for k in keys]
     with db.cursor(commit=True) as cur:
         if new_wallet:
             cur.execute('insert into wallets (id, chain, address, secret_env, label) values (%s,%s,%s,%s,%s)',

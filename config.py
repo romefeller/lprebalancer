@@ -217,6 +217,10 @@ REGIME_TAPE_DAYS = _env('LPBOT_REGIME_TAPE_DAYS', int, int(_CFG.get('regime_tape
 # liquidity leaving loosens it. Bounded, because no history exists to fit it.
 REGIME_LIQ_MIN = _env('LPBOT_REGIME_LIQ_MIN', float, float(_CFG.get('regime_liq_min') or 0.6))
 REGIME_LIQ_MAX = _env('LPBOT_REGIME_LIQ_MAX', float, float(_CFG.get('regime_liq_max') or 1.25))
+# The edge watch (sql/025): within EDGE_WATCH_PCT percent of the price of a
+# band edge, read the pool's price every EDGE_WATCH_S between polls; 0 is off.
+EDGE_WATCH_PCT = float(_CFG.get('edge_watch_pct') or 0.0)
+EDGE_WATCH_S = int(_CFG.get('edge_watch_seconds') or 15)
 # Venues are ranked by what their on-chain fee counters say liquidity at the
 # active price earned: sampled every VENUE_SAMPLE_S, and a move needs at least
 # VENUE_MIN_HOURS of evidence on both the held pool and the target.
@@ -330,6 +334,9 @@ def summary():
         'regime_widths_pct': [round((k - 1) * 100, 2) for k in REGIME_WIDTHS],
         'regime_horizon_minutes': REGIME_HORIZON,
         'regime_threshold': REGIME_THRESHOLD,
+        'regime_steps': REGIME_STEPS,
+        'edge_watch_pct': EDGE_WATCH_PCT,
+        'edge_watch_seconds': EDGE_WATCH_S,
         'payout_enabled': PAYOUT_ENABLED,
         'profit_wallet': PROFIT_WALLET or None,
         'payout_mint': PAYOUT_MINT or None,

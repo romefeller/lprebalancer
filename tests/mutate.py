@@ -104,6 +104,8 @@ TARGETS = {
                           PY_TESTS('test_tape_surrogate', 'test_regime', 'test_hardening.StaleTape',
                                    'test_quiet_pool')),
     'daily_report': ('rebalancer.py', ['daily_report'], PY_TESTS('test_daily.Report')),
+    'edge_watch': ('calm.py', ['near_edge', 'watch_verdict'], PY_TESTS('test_edge_watch')),
+    'edge_sleep': ('rebalancer.py', ['edge_sleep', 'pool_price_now'], PY_TESTS('test_edge_watch')),
     'unsettled_guard': ('rebalancer.py', ['unsettled_guard', 'settle_mark', 'wallet'], PY_TESTS('test_unsettled_guard')),
     'priority_fee': ('swap_jupiter.mjs', ['swapRequestBody', 'priorityFeeLamports', 'verifyPriorityFee'],
                      NODE_TESTS('test_priority_fee.mjs', 'test_security.mjs')),

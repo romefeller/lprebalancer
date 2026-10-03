@@ -2293,6 +2293,53 @@ def janitor(state):
         return None
 
 
+def pool_price_now(dex, pool):
+    """The pool's price from its account (one RPC read, no signer), in the
+    pool's own units as the bands are, or None for a venue without the fee
+    layout (Meteora DLMM) or on any failure."""
+    try:
+        st = dexes.fee_states([(dex, pool)])[pool]           # a pool without the layout: KeyError, None
+        sp = int(st['sqrt_price']) / dexes.Q64
+        return sp * sp * 10.0 ** (int(st['dec_a']) - int(st['dec_b']))
+    except Exception:
+        return None
+
+
+EDGE_MATCH = 0.02                 # a watch read further than this from the poll's price is not the same price
+
+
+def edge_sleep(total_s, status, read=None, sleep=None, clock=None):
+    """Sleep out the poll, or, while the price sits within EDGE_WATCH_PCT of a
+    band edge, read the pool's price every EDGE_WATCH_S and return as soon as
+    it leaves the band, so the exit re-centres seconds after the crossing,
+    not up to a poll later (2026-10-03: exits were seen 0.15% past the edge
+    on average with a 120 s poll). A read that fails, or disagrees with the
+    poll's price by more than EDGE_MATCH (other units), ends the watch: the
+    rest of the poll is slept as before. Returns 'exit', 'slept' or 'off'."""
+    sleep, clock = sleep or time.sleep, clock or time.monotonic     # looked up now: tests patch time
+    lo, hi, p = status.get('lowerPrice'), status.get('upperPrice'), status.get('price')
+    if not calm.near_edge(p, lo, hi, config.EDGE_WATCH_PCT):
+        sleep(total_s)
+        return 'off'
+    read = read or (lambda: pool_price_now(config.DEX, status.get('whirlpool') or config.POOL))
+    end = clock() + total_s
+    while True:
+        sleep(min(config.EDGE_WATCH_S, end - clock()))
+        if clock() >= end:
+            return 'slept'
+        now_p = read()
+        if now_p is None or abs(now_p - p) > EDGE_MATCH * p:
+            sleep(max(0.0, end - clock()))
+            return 'slept'
+        verdict = calm.watch_verdict(now_p, lo, hi, config.EDGE_WATCH_PCT)
+        if verdict == 'exit':
+            notify('edge_watch', price=now_p, lower=lo, upper=hi, action='left the band: polling now')
+            return 'exit'
+        if verdict == 'away':
+            sleep(max(0.0, end - clock()))
+            return 'slept'
+
+
 def regime_choice_now(pool, price, pair=None):
     """The regime's width for a fresh band at `price` on `pool`, or None."""
     if not config.REGIME_ENABLED:
@@ -3671,7 +3718,7 @@ def main():
         # janitor closed the RAY account and the re-centre that followed
         # failed in simulation.
         janitor(state)
-        time.sleep(config.CALM_POLL_SECONDS if tight else config.POLL_SECONDS)
+        edge_sleep(config.CALM_POLL_SECONDS if tight else config.POLL_SECONDS, status)
 
 
 if __name__ == '__main__':
