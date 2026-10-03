@@ -226,7 +226,8 @@ class Liquidity(unittest.TestCase):
         rebalancer._LIQ.clear()
         with mock.patch.object(rebalancer.dexes, 'pool', lambda d, p: {'liquidity': liq_now, 'tvl_usd': 1e6}), \
                 mock.patch.object(rebalancer.db, 'record_pool_stats', lambda *a: None), \
-                mock.patch.object(rebalancer.db, 'pool_stats_summary', lambda p: {'median_liquidity': med, 'readings': 10, 'tvl_then': 1e6}), \
+                mock.patch.object(rebalancer.db, 'pool_stats_summary', lambda p, **k: {'median_liquidity': med, 'readings': 10, 'tvl_then': 1e6}), \
+                mock.patch.object(rebalancer.config, 'REGIME_LIQ_SMOOTH_H', 0), \
                 mock.patch.object(rebalancer.config, 'REGIME_LIQ_MIN', 0.6), \
                 mock.patch.object(rebalancer.config, 'REGIME_LIQ_MAX', 1.25):
             return rebalancer.liquidity_view('P', 'raydium-clmm', bars)
@@ -243,5 +244,164 @@ class Liquidity(unittest.TestCase):
     def test_missing_history_is_neutral(self):
         rebalancer._LIQ.clear()
         with mock.patch.object(rebalancer.dexes, 'pool', lambda d, p: None), \
-                mock.patch.object(rebalancer.db, 'pool_stats_summary', lambda p: None):
+                mock.patch.object(rebalancer.db, 'pool_stats_summary', lambda p, **k: None):
             self.assertEqual(rebalancer.liquidity_view('P', 'orca', None)['factor'], 1.0)
+
+
+class LiquidityViewExact(unittest.TestCase):
+    """liquidity_view's cache, reported figures and volume ratio, exactly."""
+
+    def setUp(self):
+        rebalancer._LIQ.clear(); self.reads = []; self.recorded = []
+
+    def call(self, rec, summ=False, bars=None, now=1000.0, smooth_h=0):
+        def pool(d, p):
+            self.reads.append(p); return rec
+        summ = summ if summ is not False else {'median_liquidity': 100.0, 'readings': 9, 'tvl_then': 800.0,
+                        'recent_liquidity': None, 'recent_readings': 0}
+        with mock.patch.object(rebalancer.dexes, 'pool', pool), \
+                mock.patch.object(rebalancer.db, 'record_pool_stats', lambda *a: self.recorded.append(a)), \
+                mock.patch.object(rebalancer.db, 'pool_stats_summary', lambda p, **k: summ), \
+                mock.patch.object(rebalancer.time, 'time', lambda: now), \
+                mock.patch.object(rebalancer.config, 'REGIME_LIQ_SMOOTH_H', smooth_h), \
+                mock.patch.object(rebalancer.config, 'REGIME_LIQ_MIN', 0.6), \
+                mock.patch.object(rebalancer.config, 'REGIME_LIQ_MAX', 1.25):
+            return rebalancer.liquidity_view('P', 'raydium-clmm', bars)
+
+    def test_reads_once_per_refresh_and_again_after(self):
+        rec = {'liquidity': 100.0, 'tvl_usd': 1000.0, 'volume_24h_usd': 5.0, 'price': 2.0}
+        self.call(rec, now=1000.0)
+        self.call(rec, now=1000.0 + rebalancer.LIQ_REFRESH)          # not yet stale
+        self.assertEqual(len(self.reads), 1)
+        out = self.call(rec, now=1000.0 + rebalancer.LIQ_REFRESH + 1)
+        self.assertEqual(len(self.reads), 2)
+        self.assertEqual(self.recorded[0], ('raydium-clmm', 'P', 100.0, 1000.0, 5.0, 2.0))
+        self.assertEqual(out['readings'], 9)
+
+    def test_first_call_reads_even_at_time_zero(self):
+        self.call({'liquidity': 100.0, 'tvl_usd': 1.0}, now=0.0)
+        self.assertEqual(len(self.reads), 1)
+
+    def test_a_failed_read_is_retried_next_poll(self):
+        self.call(None, now=1000.0); self.call({'liquidity': 100.0, 'tvl_usd': 1.0}, now=1001.0)
+        self.assertEqual(len(self.reads), 2)
+
+    def test_dlmm_reads_the_active_bin(self):
+        out = self.call({'liquidity': None, 'active_bin_usd': 50.0, 'tvl_usd': 1.0})
+        self.assertEqual(out['liquidity'], 50.0); self.assertEqual(self.recorded[0][2], 50.0)
+        self.assertAlmostEqual(out['inflow'], 0.5)
+        rebalancer._LIQ.clear(); self.recorded.clear()
+        out = self.call({'liquidity': 70.0, 'active_bin_usd': 50.0, 'tvl_usd': 1.0})
+        self.assertEqual(out['liquidity'], 70.0); self.assertEqual(self.recorded[0][2], 70.0)
+
+    def test_tvl_change_exact_and_absent_without_history(self):
+        out = self.call({'liquidity': 100.0, 'tvl_usd': 1000.0})
+        self.assertAlmostEqual(out['tvl_change_24h'], 0.25)
+        rebalancer._LIQ.clear()
+        out = self.call({'liquidity': 100.0, 'tvl_usd': 1000.0},
+                        summ={'median_liquidity': 100.0, 'readings': 9, 'tvl_then': None})
+        self.assertIsNone(out['tvl_change_24h'])
+        rebalancer._LIQ.clear()
+        out = self.call({'liquidity': 100.0, 'tvl_usd': None})
+        self.assertIsNone(out['tvl_change_24h'])
+
+    def test_no_reading_no_inflow(self):
+        out = self.call(None)
+        self.assertIsNone(out['inflow']); self.assertEqual(out['readings'], 0); self.assertEqual(out['factor'], 1.0)
+        self.assertIsNone(out['inflow_raw'])
+        rebalancer._LIQ.clear()
+        out = self.call({'liquidity': 100.0, 'tvl_usd': 1.0}, summ={'median_liquidity': 0.0, 'readings': 9, 'tvl_then': None})
+        self.assertIsNone(out['inflow_raw'])
+        rebalancer._LIQ.clear()
+        out = self.call({'liquidity': 50.0, 'tvl_usd': 1.0}, summ={'median_liquidity': 0.5, 'readings': 9, 'tvl_then': None})
+        self.assertAlmostEqual(out['inflow_raw'], 100.0)
+
+    def test_volume_ratio_needs_a_day_of_bars(self):
+        def bars(n, recent):
+            v = np.full(n, 10.0); v[-72:] = recent
+            return (np.zeros(n),) * 5 + (v,)
+        rec = {'liquidity': 100.0, 'tvl_usd': 1.0}
+        self.assertIsNone(self.call(rec, bars=bars(287, 30.0))['volume_x'])
+        rebalancer._LIQ.clear()
+        self.assertAlmostEqual(self.call(rec, bars=bars(288, 30.0))['volume_x'], 3.0)  # 2160 / median 720
+        rebalancer._LIQ.clear()
+        self.assertIsNone(self.call(rec, bars=(np.zeros(300),) * 6)['volume_x'])          # no volume: no ratio
+        rebalancer._LIQ.clear()
+        self.assertIsNone(self.call(rec, bars=None)['volume_x'])
+        rebalancer._LIQ.clear()
+        small = (np.zeros(288),) * 5 + (np.full(288, 0.001),)
+        self.assertAlmostEqual(self.call(rec, bars=small)['volume_x'], 1.0)   # a thin pool still has a ratio
+
+    def test_newest_reading_without_history_is_neutral(self):
+        out = self.call({'liquidity': 100.0, 'tvl_usd': 1.0}, summ=None, smooth_h=0)
+        self.assertEqual(out['factor'], 1.0); self.assertIsNone(out['inflow'])
+
+
+class LiquiditySmoothed(unittest.TestCase):
+    """sql/028: the factor reads the window's geometric mean, not one reading."""
+
+    def lv(self, liq_now, summ, smooth_h=2.0, fresh=True):
+        rebalancer._LIQ.clear(); asked = {}
+
+        def summary(p, **k):
+            asked.update(k); return summ
+        with mock.patch.object(rebalancer.dexes, 'pool', lambda d, p: {'liquidity': liq_now, 'tvl_usd': 1e6} if fresh else None), \
+                mock.patch.object(rebalancer.db, 'record_pool_stats', lambda *a: None), \
+                mock.patch.object(rebalancer.db, 'pool_stats_summary', summary), \
+                mock.patch.object(rebalancer.config, 'REGIME_LIQ_SMOOTH_H', smooth_h), \
+                mock.patch.object(rebalancer.config, 'REGIME_LIQ_MIN', 0.6), \
+                mock.patch.object(rebalancer.config, 'REGIME_LIQ_MAX', 1.25):
+            out = rebalancer.liquidity_view('P', 'raydium-clmm', None)
+        return out, asked
+
+    @staticmethod
+    def summ(med, recent, n=20):
+        return {'median_liquidity': med, 'readings': 200, 'tvl_then': 1e6,
+                'recent_liquidity': recent, 'recent_readings': n}
+
+    def test_one_tick_crossing_does_not_move_the_factor(self):
+        # 09-28 02:57: one reading at 0.24 of the median; the window still at 0.94
+        out, asked = self.lv(24.0, self.summ(100.0, 94.0))
+        self.assertEqual(asked, {'recent_hours': 2.0})
+        self.assertAlmostEqual(out['inflow'], 0.94)
+        self.assertAlmostEqual(out['factor'], 1.064, places=3)
+        self.assertEqual(out['liquidity'], 24.0)                 # the reading is still reported
+        self.assertEqual(out['liquidity_smoothed'], 94.0)
+        self.assertAlmostEqual(out['inflow_raw'], 0.24)          # the reading's own inflow, for the book
+
+    def test_window_mean_sets_inflow_and_bounds_hold(self):
+        self.assertAlmostEqual(self.lv(100, self.summ(100.0, 125.0))[0]['factor'], 0.8)
+        self.assertAlmostEqual(self.lv(100, self.summ(100.0, 90.0))[0]['factor'], 1.111, places=3)
+        self.assertAlmostEqual(self.lv(100, self.summ(100.0, 1000.0))[0]['factor'], 0.6)
+        self.assertAlmostEqual(self.lv(100, self.summ(100.0, 10.0))[0]['factor'], 1.25)
+
+    def test_thin_window_is_neutral(self):
+        out, _ = self.lv(50.0, self.summ(100.0, None, n=2))
+        self.assertEqual(out['factor'], 1.0); self.assertIsNone(out['inflow'])
+        self.assertAlmostEqual(out['inflow_raw'], 0.5)
+        self.assertIsNone(out['liquidity_smoothed'])
+
+    def test_failed_read_still_uses_the_stored_window(self):
+        out, _ = self.lv(None, self.summ(100.0, 80.0), fresh=False)
+        self.assertAlmostEqual(out['inflow'], 0.8); self.assertAlmostEqual(out['factor'], 1.25)
+
+    def test_zero_hours_is_the_newest_reading(self):
+        out, asked = self.lv(50.0, self.summ(100.0, 94.0), smooth_h=0)
+        self.assertEqual(asked, {'recent_hours': 0})
+        self.assertAlmostEqual(out['inflow'], 0.5); self.assertAlmostEqual(out['factor'], 1.25)
+        self.assertIsNone(out['liquidity_smoothed'])
+
+    def test_no_history_is_neutral(self):
+        self.assertEqual(self.lv(50.0, None)[0]['factor'], 1.0)
+        self.assertEqual(self.lv(50.0, self.summ(0.0, 94.0))[0]['factor'], 1.0)
+
+    def test_fractional_hours_and_small_median(self):
+        out, _ = self.lv(50.0, self.summ(0.5, 0.4), smooth_h=0.5)
+        self.assertAlmostEqual(out['inflow'], 0.8); self.assertEqual(out['liquidity_smoothed'], 0.4)
+
+    def test_property_factor_bounded_and_monotone_in_the_window(self):
+        rng = np.random.default_rng(28)
+        for _ in range(200):
+            med = float(rng.uniform(1, 1e6)); a, b = sorted(rng.uniform(0.01, 10, 2) * med)
+            fa = self.lv(1.0, self.summ(med, a))[0]['factor']; fb = self.lv(1.0, self.summ(med, b))[0]['factor']
+            self.assertTrue(0.6 <= fb <= fa <= 1.25)              # more liquidity never loosens

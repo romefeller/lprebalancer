@@ -720,6 +720,14 @@ class RiskRecord(unittest.TestCase):
         self.assertIsNone(row['liquidity_factor']); self.assertIsNone(row['probs']); self.assertEqual(row['p_exit_6h'], 0.4)
         self.assertEqual(db.risk_row({'probs': []}, {}, {})['probs'], '[]')
 
+    def test_raw_and_smoothed_inflow_are_both_stored(self):
+        lq = {'factor': 1.064, 'inflow': 0.94, 'inflow_raw': 0.24, 'volume_x': 1.1}
+        db.record_risk_profile('P', 'M', 1.0, {'mode': 'WARM', 'liquidity': lq}, {}, {})
+        with db.cursor() as cur:
+            cur.execute('select liquidity_factor, inflow, inflow_raw, volume_x from risk_profile')
+            r = cur.fetchone()
+        self.assertEqual((r['liquidity_factor'], r['inflow'], r['inflow_raw'], r['volume_x']), (1.064, 0.94, 0.24, 1.1))
+
     def test_row_from_nothing(self):
         row = db.risk_row(None, None, None)
         self.assertTrue(all(v is None for k, v in row.items() if k != 'stale')); self.assertFalse(row['stale'])

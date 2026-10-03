@@ -2162,8 +2162,12 @@ LIQ_REFRESH = 300
 def liquidity_view(pool, dex, bars):
     """Liquidity inflow against its norm, from the pool's own record:
 
-      inflow  = active liquidity now / its 24-hour median (our share of fees
-                falls when liquidity floods in; the risk of a touch does not)
+      inflow  = active liquidity / its 24-hour median (our share of fees
+                falls when liquidity floods in; the risk of a touch does not).
+                The active liquidity is the geometric mean of the readings of
+                the last REGIME_LIQ_SMOOTH_H hours: one reading jumps when the
+                price crosses a large position's edge (sql/028). Fewer than 3
+                readings in that window: neutral. 0 hours: the newest reading.
       factor  = clamp(1 / inflow, regime_liq_min, regime_liq_max)
       volume  = last 6 hours of 5-minute volume / the tape's median 6h, and
       tvl_change_24h, both reported for the book only
@@ -2172,7 +2176,7 @@ def liquidity_view(pool, dex, bars):
     when any input is missing, because no liquidity history exists to fit it.
     Records a reading at most every LIQ_REFRESH seconds."""
     out = {'factor': 1.0, 'inflow': None, 'volume_x': None, 'tvl_change_24h': None,
-           'liquidity': None, 'tvl_usd': None, 'readings': 0}
+           'inflow_raw': None, 'liquidity': None, 'liquidity_smoothed': None, 'tvl_usd': None, 'readings': 0}
     t, rec = _LIQ.get(pool, (0, None))
     if rec is None or time.time() - t > LIQ_REFRESH:
         try:
@@ -2191,12 +2195,17 @@ def liquidity_view(pool, dex, bars):
     if rec:
         out['liquidity'] = rec.get('liquidity') or rec.get('active_bin_usd')
         out['tvl_usd'] = rec.get('tvl_usd')
+    smooth_h = config.REGIME_LIQ_SMOOTH_H
     try:
-        summ = db.pool_stats_summary(pool)
+        summ = db.pool_stats_summary(pool, recent_hours=smooth_h)
     except Exception:
         summ = None
+    active = out['liquidity'] if smooth_h <= 0 else (summ or {}).get('recent_liquidity')
+    if summ and active and summ['median_liquidity'] > 0:
+        out['inflow'] = round(float(active) / summ['median_liquidity'], 3)
+        out['liquidity_smoothed'] = active if smooth_h > 0 else None
     if summ and out['liquidity'] and summ['median_liquidity'] > 0:
-        out['inflow'] = round(float(out['liquidity']) / summ['median_liquidity'], 3)
+        out['inflow_raw'] = round(float(out['liquidity']) / summ['median_liquidity'], 3)
         out['readings'] = summ['readings']
         if summ.get('tvl_then') and out['tvl_usd']:
             out['tvl_change_24h'] = round(float(out['tvl_usd']) / summ['tvl_then'] - 1, 4)
@@ -2205,7 +2214,7 @@ def liquidity_view(pool, dex, bars):
         w = 72                                   # six hours of five-minute bars
         recent = float(v[-w:].sum())
         sums = np.convolve(v, np.ones(w), mode='valid')
-        med = float(np.median(sums)) if len(sums) else 0.0
+        med = float(np.median(sums))            # 288 bars give 217 sums
         if med > 0:
             out['volume_x'] = round(recent / med, 3)
     if out['inflow']:

@@ -383,6 +383,79 @@ if __name__ == '__main__':
     unittest.main(verbosity=2)
 
 
+class PoolStatsWindow(unittest.TestCase):
+    """sql/028: the recent window's geometric mean next to the 24-hour median."""
+
+    def setUp(self):
+        with db.cursor(commit=True) as cur:
+            cur.execute("delete from pool_stats where pool = 'WIN'")
+
+    def put(self, minutes_ago, liq, tvl=1.0):
+        with db.cursor(commit=True) as cur:
+            cur.execute("insert into pool_stats (ts, dex, pool, liquidity, tvl_usd, volume_24h, price) "
+                        "values (now() - make_interval(secs => %s), 'raydium-clmm', 'WIN', %s, %s, 1, 1)",
+                        (minutes_ago * 60, liq, tvl))
+
+    def test_window_edge_to_the_second(self):
+        for sec, l in [(7201, 9.0), (7197, 1.0), (3000, 1.0), (60, 1.0)]:
+            self.put(sec / 60, l)
+        s = db.pool_stats_summary('WIN', recent_hours=2)
+        self.assertAlmostEqual(s['recent_liquidity'], 1.0); self.assertEqual(s['recent_readings'], 3)
+        s = db.pool_stats_summary('WIN', recent_hours=0.5)
+        self.assertIsNone(s['recent_liquidity']); self.assertEqual(s['recent_readings'], 1)
+
+    def test_day_window_median_count_and_tvl_then(self):
+        for m, l, tvl in [(48 * 60, 1e9, 7.0), (25 * 60, 1e9, 5.0), (24 * 60 + 5, 1e9, 6.0),
+                          (23 * 60, 10.0, 1.0), (600, 20.0, 1.0), (60, 30.0, 1.0)]:
+            self.put(m, l, tvl)
+        s = db.pool_stats_summary('WIN')
+        self.assertEqual(s['readings'], 3); self.assertAlmostEqual(s['median_liquidity'], 20.0)
+        self.assertEqual(s['tvl_then'], 6.0)                      # the newest reading at least 24 h old
+        self.assertEqual(db.pool_stats_summary('WIN', hours=48)['readings'], 5)
+
+    def test_fewer_than_three_in_the_day_is_none(self):
+        self.assertIsNone(db.pool_stats_summary('WIN'))
+        self.put(30, 1.0); self.put(20, 1.0)
+        self.assertIsNone(db.pool_stats_summary('WIN', recent_hours=2))
+        self.put(10, 1.0)
+        self.assertEqual(db.pool_stats_summary('WIN', recent_hours=2)['recent_readings'], 3)
+
+    def test_geometric_mean_of_the_window_only(self):
+        for m, l in [(600, 1000.0), (500, 1000.0), (300, 1000.0), (100, 100.0), (60, 400.0), (5, 1600.0), (1, 0.0)]:
+            self.put(m, l)
+        s = db.pool_stats_summary('WIN', recent_hours=2)
+        self.assertAlmostEqual(s['recent_liquidity'], 400.0)     # (100*400*1600)^(1/3); the 0 is skipped
+        self.assertEqual(s['recent_readings'], 3)
+        self.assertEqual(s['readings'], 6)
+        self.assertAlmostEqual(s['median_liquidity'], 1000.0)
+
+    def test_fewer_than_three_in_the_window_is_none(self):
+        for m, l in [(600, 1000.0), (500, 1000.0), (300, 1000.0), (100, 100.0), (60, 400.0)]:
+            self.put(m, l)
+        s = db.pool_stats_summary('WIN', recent_hours=2)
+        self.assertIsNone(s['recent_liquidity']); self.assertEqual(s['recent_readings'], 2)
+
+    def test_no_window_asked(self):
+        for m in (30, 20, 10):
+            self.put(m, 50.0)
+        s = db.pool_stats_summary('WIN')
+        self.assertIsNone(s['recent_liquidity']); self.assertEqual(s['recent_readings'], 0)
+
+    def test_window_boundary_uses_hours(self):
+        for m, l in [(130, 9.0), (110, 1.0), (50, 1.0), (10, 1.0)]:
+            self.put(m, l)
+        self.assertAlmostEqual(db.pool_stats_summary('WIN', recent_hours=2)['recent_liquidity'], 1.0)
+        s = db.pool_stats_summary('WIN', recent_hours=2.5)
+        self.assertAlmostEqual(s['recent_liquidity'], 9 ** 0.25); self.assertEqual(s['recent_readings'], 4)
+        self.assertEqual(db.pool_stats_summary('WIN', recent_hours=2)['recent_readings'], 3)
+
+    def test_sanity_constraint(self):
+        _fixtures.ensure_profile()
+        with self.assertRaises(Exception):
+            db.set_param('sol-usdc', 'regime_liq_smooth_hours', '13')
+        self.assertEqual(float(db.set_param('sol-usdc', 'regime_liq_smooth_hours', '2')['regime_liq_smooth_hours']), 2.0)
+
+
 class Forecasts(unittest.TestCase):
     """The survival record: forecasts are stored with the poll and checked
     against what the same position did next."""

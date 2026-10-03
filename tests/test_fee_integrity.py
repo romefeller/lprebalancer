@@ -544,7 +544,7 @@ class RiskProfileRecord(unittest.TestCase):
                 'p_held': 0.49, 'threshold': 0.25, 'threshold_base': 0.2, 'horizon_minutes': 120,
                 'bar_age_s': 600, 'probs': [[1.0, 0.4], [1.5, 0.18]], 'sigma_5m_pct': 0.1548,
                 'velocity': 0.353, 'instability': 0.0607,
-                'liquidity': {'factor': 1.25, 'inflow': 0.79, 'volume_x': 9.2}}
+                'liquidity': {'factor': 1.25, 'inflow': 0.79, 'inflow_raw': 0.5, 'volume_x': 9.2}}
 
     def test_every_column_is_written(self):
         m = calm.risk_metrics(tape(garch(400, 1)))

@@ -397,23 +397,30 @@ def record_pool_stats(dex, pool, liquidity, tvl_usd, volume_24h, price):
         cur.execute("delete from pool_stats where ts < now() - interval '2 days'")
 
 
-def pool_stats_summary(pool, hours=24):
+def pool_stats_summary(pool, hours=24, recent_hours=0):
     """Median liquidity and the TVL of `hours` ago for one pool, from its own
-    record, or None with fewer than 3 readings."""
+    record, or None with fewer than 3 readings. With `recent_hours` > 0, also
+    the geometric mean of the readings of the last `recent_hours`
+    (`recent_liquidity`, None with fewer than 3 of them) and their count."""
     with cursor() as cur:
         cur.execute("""
             select percentile_cont(0.5) within group (order by liquidity) med_liq, count(*) n,
                    (select tvl_usd from pool_stats p2 where p2.pool = %s and p2.ts <= now() - make_interval(hours => %s)
                     order by p2.ts desc limit 1) tvl_then,
-                   min(ts) first_ts
+                   min(ts) first_ts,
+                   exp(avg(ln(liquidity)) filter (where ts >= now() - make_interval(secs => %s))) recent_liq,
+                   count(*) filter (where ts >= now() - make_interval(secs => %s)) recent_n
             from pool_stats where pool = %s and ts >= now() - make_interval(hours => %s) and liquidity > 0
-        """, (pool, hours, pool, hours))
-        r = cur.fetchone()
-    if not r or not r['n'] or r['n'] < 3:
+        """, (pool, hours, recent_hours * 3600, recent_hours * 3600, pool, hours))
+        r = cur.fetchone()                    # an aggregate: always one row
+    if r['n'] < 3:
         return None
+    recent_n = int(r['recent_n'])
     return {'median_liquidity': float(r['med_liq']), 'readings': int(r['n']),
             'tvl_then': float(r['tvl_then']) if r['tvl_then'] is not None else None,
-            'since': r['first_ts']}
+            'since': r['first_ts'],
+            'recent_liquidity': float(r['recent_liq']) if recent_n >= 3 else None,
+            'recent_readings': recent_n}
 
 
 def tape_load(pool, since_ts):
@@ -509,7 +516,7 @@ RISK_COLUMNS = ('mode', 'choice_pct', 'held_pct', 'inside', 'p_held', 'threshold
                 'vol_ratio_1h_24h', 'park_1h_pct', 'vol_of_vol_24h', 'acf_r2_lag1_24h', 'arch_lm_24h',
                 'arch_lm_p_24h', 'kurtosis_24h', 'n_bars',
                 'sigma_24h_pct', 'vol_regime_x', 'p_exit_6h', 'p_exit_24h', 'p_exit_72h', 'p_exit_168h',
-                'band_position', 'liquidity_factor', 'inflow', 'volume_x')
+                'band_position', 'liquidity_factor', 'inflow', 'inflow_raw', 'volume_x')
 
 
 def risk_row(regime, metrics, forecast):
@@ -526,7 +533,8 @@ def risk_row(regime, metrics, forecast):
            'instability': v.get('instability'),
            'sigma_24h_pct': f.get('sigma_24h_pct'), 'vol_regime_x': f.get('vol_regime_x'),
            'band_position': f.get('position'),
-           'liquidity_factor': lq.get('factor'), 'inflow': lq.get('inflow'), 'volume_x': lq.get('volume_x')}
+           'liquidity_factor': lq.get('factor'), 'inflow': lq.get('inflow'), 'inflow_raw': lq.get('inflow_raw'),
+           'volume_x': lq.get('volume_x')}
     for h in (6, 24, 72, 168):
         row[f'p_exit_{h}h'] = f.get(f'p_exit_{h}h_regime', f.get(f'p_exit_{h}h'))
     for k in ('rms_1h_pct', 'rms_6h_pct', 'rms_24h_pct', 'vol_ratio_1h_24h', 'park_1h_pct', 'vol_of_vol_24h',

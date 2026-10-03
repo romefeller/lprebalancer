@@ -233,10 +233,14 @@ TARGETS = {
                                             'deploymentOf', 'describe', 'ownPositions'],
                    NODE_TESTS('test_aerodrome.mjs')),
     'evm_rpc': ('evm/rpc.mjs', ['baseEndpoints', 'isLoopback', 'evmErrorKind', 'overBase'], NODE_TESTS('test_aerodrome.mjs')),
+    'liq_factor': ('rebalancer.py', ['liquidity_view'],
+                   PY_TESTS('test_hardening.Liquidity', 'test_hardening.LiquiditySmoothed',
+                            'test_hardening.LiquidityViewExact')),
+    'liq_window': ('db.py', ['pool_stats_summary'], PY_TESTS('test_db.PoolStatsWindow', 'test_hardening.LiquiditySmoothed')),
     'evm_key': ('evm/keyfile.mjs', ['validKey', 'writeNewKey', 'readKey'], NODE_TESTS('test_evm_wallet.mjs')),
 }
 
-SQL_TARGETS = {'band_profile', 'daily', 'capital_db', 'book_scope', 'book_sums', 'stats_sum', 'wallets_db', 'wallet_names', 'db_stats'}
+SQL_TARGETS = {'band_profile', 'daily', 'capital_db', 'book_scope', 'book_sums', 'stats_sum', 'wallets_db', 'wallet_names', 'db_stats', 'liq_window'}
 
 # Mutants that cannot change behaviour, with the reason. Keyed by the mutant's
 # identity (see "identity" below):
@@ -244,6 +248,8 @@ SQL_TARGETS = {'band_profile', 'daily', 'capital_db', 'book_scope', 'book_sums',
 # The report prints each survivor's key: copy it here with a reason. The line
 # number is not in the key, so an edit above a mutant keeps its entry valid.
 EQUIVALENT = {
+    ('liq_factor', 'liquidity_view', 'const 0->1', 't, rec = _LIQ.get(pool, (0, None))', 0):
+        'an absent cache entry has rec None, which reads the pool whatever its time',
     ('reopen_shape', 'p_touch_width', 'const 0->1', "if bars is None or not len(bars[0]):", 0):
         'every column of a tape has the same length: bars[0] and bars[1] are empty together',
     ('swap_send', 'sendSwap', '\\?\\? -> ||', 'if (!e.afterSend) throw new AfterSignError(`send failed after signing (not retried): ${e.message ?? e}`);', 0):
