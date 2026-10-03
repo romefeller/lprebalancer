@@ -2048,6 +2048,7 @@ def regime_view(state, status):
                  unstale_in_s=hold_left if raw_fresh else None)
     if v:
         v['threshold_base'] = config.REGIME_THRESHOLD
+        v['steps'] = config.REGIME_STEPS
         v['liquidity'] = lq
         LAST_REGIME['risk'] = calm.risk_metrics(bars)
         v['moves_24h'] = config.CALM_MAX_MOVES - calm_budget_left(state)

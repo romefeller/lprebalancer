@@ -193,7 +193,7 @@ export function render(row) {
       `data        ${dataSource(g.data)}`,
       `vol 5m      σ ${n(g.sigma_5m_pct, 4)}% · velocity ${sign(g.velocity)}/h · instability ${n(g.instability, 3)}`,
       `P(touch ≤${g.horizon_minutes}m)  ${probs}`,
-      `held band   P(touch) ${pct(g.p_held)} · rule: narrowest width ≤ ${pct(g.threshold)}, move at 2 steps, exits re-centre`,
+      `held band   P(touch) ${pct(g.p_held)} · rule: narrowest width ≤ ${pct(g.threshold)}, move at ${g.steps ?? 2} steps, exits re-centre`,
       ...(g.p_exit ? [`P(exit)     6h ${pct(g.p_exit[6] ?? g.p_exit['6'])}   24h ${pct(g.p_exit[24] ?? g.p_exit['24'])}`
         + `   72h ${pct(g.p_exit[72] ?? g.p_exit['72'])}   7d ${pct(g.p_exit[168] ?? g.p_exit['168'])}`
         + ` · median life ${g.median_life_hours != null ? n(g.median_life_hours, 0) + 'h' : '> 7d'} (hourly tape)`] : []),

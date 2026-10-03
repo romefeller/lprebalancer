@@ -510,3 +510,10 @@ test('a DAILY line names the capital moved, and only when some moved', () => {
   assert.ok(!render({ ...d, net_flows_usd: 0 }).includes('capital moved'));
   assert.ok(!render(d).includes('capital moved'));                     // a line from before the field
 });
+
+test('the REGIME block names the configured steps, 2 for a feed from before the field', () => {
+  const regime = { mode: 'WARM', held_pct: 1.5, choice_pct: 1.5, probs: [[1.5, 0.2]], threshold: 0.25, horizon_minutes: 120 };
+  const text = (g) => render({ event: 'in_band', regime: g });
+  assert.match(text({ ...regime, steps: 3 }), /narrowest width ≤ 25%, move at 3 steps, exits re-centre/);
+  assert.match(text(regime), /move at 2 steps/);
+});
