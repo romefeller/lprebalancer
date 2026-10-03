@@ -220,8 +220,10 @@ REGIME_LIQ_MAX = _env('LPBOT_REGIME_LIQ_MAX', float, float(_CFG.get('regime_liq_
 # The fee/variance guard (sql/024): 'off', 'live' or 'narrow'; the trailing
 # window in five-minute bars; the ratio threshold; the fee constant per pool.
 REGIME_GUARD = str(_CFG.get('regime_guard') or 'off')
+REGIME_GUARD_SOURCE = str(_CFG.get('regime_guard_source') or 'real')
 REGIME_GUARD_WINDOW = int(_CFG.get('regime_guard_window_bars') or 72)
-REGIME_GUARD_THRESHOLD = float(_CFG.get('regime_guard_threshold') or 1.0)
+REGIME_GUARD_THRESHOLD = float(_CFG.get('regime_guard_threshold') or 1.2)
+REGIME_GUARD_POOLS = tuple(str(x) for x in (_CFG.get('regime_guard_pools') or ()))
 REGIME_GUARD_FEE_C = {str(k): float(v) for k, v in (_CFG.get('regime_guard_fee_c') or {}).items()}
 # Venues are ranked by what their on-chain fee counters say liquidity at the
 # active price earned: sampled every VENUE_SAMPLE_S, and a move needs at least
@@ -338,6 +340,8 @@ def summary():
         'regime_threshold': REGIME_THRESHOLD,
         'regime_steps': REGIME_STEPS,
         'regime_guard': REGIME_GUARD,
+        'regime_guard_source': REGIME_GUARD_SOURCE,
+        'regime_guard_pools': list(REGIME_GUARD_POOLS),
         'regime_guard_window_bars': REGIME_GUARD_WINDOW,
         'regime_guard_threshold': REGIME_GUARD_THRESHOLD,
         'payout_enabled': PAYOUT_ENABLED,

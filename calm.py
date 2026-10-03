@@ -494,8 +494,10 @@ def p_touch_cond(table, d_up, d_down, sigma_now, vel_now=None, min_origins=150):
 
 def regime_view(bars, price, lower, upper, *, widths=WIDTHS, horizon_minutes=120, threshold=0.25, guard=None):
     """The market's width, from the five-minute tape. `guard`, when given,
-    is {'mode', 'window_bars', 'threshold', 'fee_c'}: the touch rule's width
-    then passes through guard_width (fee_c None: no ratio, no change). Pure."""
+    is {'mode', 'window_bars', 'threshold', 'source', 'fee_c', 'fee_yield'}:
+    the touch rule's width then passes through guard_width, with the ratio
+    from real_fee_yield's (yield, covered seconds) when source is 'real', else
+    from volume and fee_c. No ratio: no change. Pure."""
     if bars is None:
         return None
     ts, _o, high, low, close, vol = bars
@@ -511,9 +513,14 @@ def regime_view(bars, price, lower, upper, *, widths=WIDTHS, horizon_minutes=120
     choice = next((k for k, p in zip(widths, probs) if p is not None and p <= threshold), widths[-1])
     touch_choice, g = choice, None
     if guard and guard.get('mode', 'off') != 'off':
-        ratio = fee_variance_ratio(close, vol, guard['window_bars'], guard.get('fee_c'))
+        if guard.get('source') == 'real':
+            fy, cov = guard.get('fee_yield') or (None, None)
+            ratio = real_variance_ratio(fy, cov, close, guard['window_bars'])
+        else:
+            ratio = fee_variance_ratio(close, vol, guard['window_bars'], guard.get('fee_c'))
         choice = guard_width(choice, ratio, widths=widths, threshold=guard['threshold'], mode=guard['mode'])
-        g = {'mode': guard['mode'], 'ratio': None if ratio is None else round(ratio, 3),
+        g = {'mode': guard['mode'], 'source': guard.get('source', 'volume'),
+             'ratio': None if ratio is None else round(ratio, 3),
              'threshold': guard['threshold'], 'window_bars': guard['window_bars'],
              'touch_choice_pct': round((touch_choice - 1) * 100, 2), 'acting': choice != touch_choice}
     half = math.sqrt(upper / lower) if lower > 0 and upper > lower else None
@@ -559,6 +566,62 @@ def fee_variance_ratio(close, volume, window_bars, fee_c):
     if g <= 0:
         return None
     return float(fee_c * np.sum(v) / g)
+
+
+def real_fee_yield(rows, harvests, dec_a, dec_b, max_gap_s=400):
+    """(yield, covered seconds) of the held pool from our own positions: per
+    pair of consecutive snapshots of one position, both in range, at most
+    `max_gap_s` apart and at one liquidity, the fees accrued between them
+    (plus any harvest between them, which reset the counter) over the
+    position's full-range-equivalent value 2*L*sqrt(P), P the raw price.
+    `rows`: (ts, mint, accrued_usd, liquidity, in_range, price) ordered by
+    mint then ts, price in UI units of a dollar quote; `harvests`: (ts, mint,
+    fee_usd). These are the fees the pool really paid per unit of liquidity:
+    the 2026-10-03 audit found the volume model 30-38% high in busy hours and
+    27-29% low in quiet ones, so a guard on volume concentrates at the wrong
+    times. A pair with a fall in fees not explained by a harvest is skipped.
+    Pure."""
+    by_mint = {}
+    for t, m, f in harvests:
+        by_mint.setdefault(m, []).append((float(t), float(f)))
+    total, covered = 0.0, 0.0
+    scale = 10.0 ** (dec_b - dec_a)
+    for a, b in zip(rows, rows[1:]):
+        t1, m1, f1, l1, in1, p1 = a
+        t2, m2, f2, l2, in2, p2 = b
+        if m1 != m2 or not (in1 and in2) or None in (f1, f2, l1, l2, p1, p2):
+            continue
+        t1, t2, l1, l2 = float(t1), float(t2), float(l1), float(l2)
+        if not (0 < t2 - t1 <= max_gap_s) or l1 != l2 or l1 <= 0 or p1 <= 0 or p2 <= 0:
+            continue
+        d = float(f2) - float(f1) + sum(f for t, f in by_mint.get(m1, ()) if t1 < t <= t2)
+        if d < 0:
+            continue
+        full_range_per_l = 2 * math.sqrt((float(p1) + float(p2)) / 2 * scale) / 10.0 ** dec_b
+        total += d / (l1 * full_range_per_l)
+        covered += t2 - t1
+    return total, covered
+
+
+def real_variance_ratio(fee_yield, covered_s, close, window_bars, min_cover=0.5):
+    """real_fee_yield's yield over the window, scaled up for the seconds it
+    does not cover, against the sum of squared log returns / 8 over the last
+    `window_bars` five-minute bars. None with under `min_cover` of the window
+    covered, a short tape or flat returns. Pure."""
+    n = int(window_bars)
+    window_s = n * BAR_SECONDS
+    if n < 1 or fee_yield is None or covered_s is None or covered_s < min_cover * window_s or fee_yield < 0:
+        return None
+    close = np.asarray(close, dtype=float)
+    if len(close) < n + 1:
+        return None
+    c = close[-(n + 1):]
+    if not (np.all(np.isfinite(c)) and np.all(c > 0)):
+        return None
+    g = float(np.sum(np.diff(np.log(c)) ** 2) / 8)
+    if g <= 0:
+        return None
+    return float(fee_yield * window_s / min(covered_s, window_s) / g)
 
 
 def guard_width(choice, ratio, *, widths, threshold, mode):

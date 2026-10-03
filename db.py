@@ -475,6 +475,25 @@ def tape_prune_other_pools(keep_pools, older_than_ts):
 FEE_GROWTH_KEEP_DAYS = 14
 
 
+def guard_fee_rows(profile, pool, since):
+    """The fee/variance guard's inputs since `since` (a datetime): this
+    profile's snapshots on `pool` as (epoch ts, mint, accrued_usd, liquidity,
+    in_range, price) ordered by mint then ts, and the harvests of those
+    positions as (epoch ts, mint, fee_usd)."""
+    with cursor() as cur:
+        cur.execute("""select extract(epoch from s.ts)::float t, s.mint, s.accrued_usd::float f,
+                              s.liquidity::float l, s.in_range, s.price::float p
+                       from snapshots s join positions x on x.mint = s.mint
+                       where x.config_name = %s and x.pool = %s and s.ts >= %s
+                       order by s.mint, s.ts, s.id""", (profile, pool, since))
+        rows = [(r['t'], r['mint'], r['f'], r['l'], r['in_range'], r['p']) for r in cur.fetchall()]
+        cur.execute("""select extract(epoch from h.ts)::float t, h.mint, h.fee_usd::float f
+                       from harvests h join positions x on x.mint = h.mint
+                       where x.config_name = %s and x.pool = %s and h.ts >= %s""", (profile, pool, since))
+        harv = [(r['t'], r['mint'], r['f']) for r in cur.fetchall()]
+    return rows, harv
+
+
 def record_fee_state(dex, pool, st):
     """One sample of a pool's counters; samples older than FEE_GROWTH_KEEP_DAYS
     go. Two weeks, not two days: the fee/variance guard's backtest needs on-chain

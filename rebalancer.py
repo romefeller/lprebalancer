@@ -2295,17 +2295,41 @@ def janitor(state):
 
 def guard_config(pool, src=None):
     """The fee/variance guard's settings for `pool` (calm.regime_view's
-    `guard`), or None when it is off. fee_c is None, so there is no ratio
-    and the touch rule's width stands, for a pool with no fee constant
-    (sol-swing's DJT pool is not the SOL pool the constant was fitted on)
-    and while the tape (`src`, LAST_SURROGATE's record) holds slots filled
-    from the surrogate in the last day: their volume is another venue's."""
-    if config.REGIME_GUARD == 'off':
+    `guard`), or None when it is off or `pool` is not one it was tested on
+    (regime_guard_pools: sol-swing's DJT pool is not). Source 'real': the
+    fees this profile's own positions accrued on `pool` over the window
+    (guard_fee_yield). Source 'volume': the pool's fee constant, None while
+    the tape (`src`, LAST_SURROGATE's record) holds slots filled from the
+    surrogate in the last day, whose volume is another venue's."""
+    if config.REGIME_GUARD == 'off' or pool not in config.REGIME_GUARD_POOLS:
         return None
-    filled = (src or {}).get('filled_24h') or 0
-    return {'mode': config.REGIME_GUARD, 'window_bars': config.REGIME_GUARD_WINDOW,
-            'threshold': config.REGIME_GUARD_THRESHOLD,
-            'fee_c': None if filled else config.REGIME_GUARD_FEE_C.get(pool)}
+    out = {'mode': config.REGIME_GUARD, 'source': config.REGIME_GUARD_SOURCE,
+           'window_bars': config.REGIME_GUARD_WINDOW, 'threshold': config.REGIME_GUARD_THRESHOLD}
+    if config.REGIME_GUARD_SOURCE == 'real':
+        out['fee_yield'] = guard_fee_yield(pool, config.REGIME_GUARD_WINDOW)
+    else:
+        filled = (src or {}).get('filled_24h') or 0
+        out['fee_c'] = None if filled else config.REGIME_GUARD_FEE_C.get(pool)
+    return out
+
+
+def guard_fee_yield(pool, window_bars):
+    """calm.real_fee_yield over the last `window_bars` five-minute bars of
+    this profile's positions on `pool`, or None for a pool other than the
+    held one, or when its decimals, a dollar quote or the database are not
+    there."""
+    if pool != config.POOL:
+        return None                          # pool_record() is the held pool's
+    try:
+        rec = pool_record()
+        if not is_stable_mint(rec['token_b']['address']):
+            return None
+        since = datetime.now(timezone.utc) - dt.timedelta(seconds=window_bars * calm.BAR_SECONDS)
+        rows, harv = db.guard_fee_rows(config.PROFILE, pool, since)
+        return calm.real_fee_yield(rows, harv, int(rec['token_a']['decimals']), int(rec['token_b']['decimals']))
+    except Exception as e:
+        print(f'guard fee yield unavailable: {type(e).__name__}: {e}', flush=True)
+        return None
 
 
 def regime_choice_now(pool, price, pair=None):

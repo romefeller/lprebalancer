@@ -124,37 +124,173 @@ class View(unittest.TestCase):
         self.assertEqual(calm.regime_decide(held, widths=W, steps=3), 'widen')
 
 
+def fr_per_l(p, da=9, db=6):
+    return 2 * math.sqrt(p * 10.0 ** (db - da)) / 10.0 ** db
+
+
+class RealYield(unittest.TestCase):
+    L = 6e10
+
+    def row(self, t, f, mint='A', l=None, inr=True, p=120.0):
+        return (t, mint, f, self.L if l is None else l, inr, p)
+
+    def test_the_hand_computation(self):
+        rows = [self.row(0, 0.0), self.row(120, 0.01), self.row(240, 0.03, p=121.0)]
+        y, cov = calm.real_fee_yield(rows, [], 9, 6)
+        want = 0.01 / (self.L * fr_per_l(120.0)) + 0.02 / (self.L * fr_per_l(120.5))
+        self.assertAlmostEqual(y / want, 1.0, places=9)
+        self.assertEqual(cov, 240.0)
+
+    def test_a_harvest_between_two_snapshots_is_added_back(self):
+        rows = [self.row(0, 0.05), self.row(120, 0.01)]
+        y, _ = calm.real_fee_yield(rows, [(60, 'A', 0.06), (60, 'B', 9.0), (0, 'A', 9.0), (121, 'A', 9.0)], 9, 6)
+        self.assertAlmostEqual(y * self.L * fr_per_l(120.0), 0.02)       # 0.01 - 0.05 + 0.06
+
+    def test_pairs_that_say_nothing_are_skipped(self):
+        for b in (self.row(120, 0.02, mint='B'), self.row(120, 0.02, inr=False), self.row(500, 0.02),
+                  self.row(120, 0.02, l=5e10), self.row(0, 0.02), self.row(120, 0.0005),
+                  self.row(120, None), self.row(120, 0.02, p=0.0), self.row(120, 0.02, l=0.0)):
+            a = self.row(0, 0.001)
+            if b[3] == 0.0:
+                a = self.row(0, 0.001, l=0.0)
+            self.assertEqual(calm.real_fee_yield([a, b], [], 9, 6), (0.0, 0.0), b)
+        self.assertEqual(calm.real_fee_yield([self.row(0, 0.0, inr=False), self.row(120, 0.01)], [], 9, 6), (0.0, 0.0))
+
+    def test_the_gap_limit_is_inclusive(self):
+        y, cov = calm.real_fee_yield([self.row(0, 0.0), self.row(400, 0.01)], [], 9, 6)
+        self.assertEqual(cov, 400.0); self.assertGreater(y, 0)
+
+    @settings(max_examples=60, deadline=None)
+    @given(st.lists(st.floats(0, 0.05), min_size=2, max_size=12), st.floats(1e9, 1e12), st.floats(10, 1000))
+    def test_it_adds_up_and_scales_with_fees_and_inverse_liquidity(self, steps, l, p):
+        acc = np.cumsum(steps)
+        rows = [(120 * k, 'A', float(a), l, True, p) for k, a in enumerate(acc)]
+        y, cov = calm.real_fee_yield(rows, [], 9, 6)
+        self.assertAlmostEqual(y * l * fr_per_l(p), float(acc[-1] - acc[0]), places=9)
+        self.assertEqual(cov, 120.0 * (len(acc) - 1))
+        y2, _ = calm.real_fee_yield([(t, m, 2 * f, 2 * ll, i, pp) for t, m, f, ll, i, pp in rows], [], 9, 6)
+        self.assertAlmostEqual(y2, y, places=15)
+
+
+class RealRatio(unittest.TestCase):
+    def setUp(self):
+        self.close = walk(100)[4]
+        self.g = float(np.sum(np.diff(np.log(self.close[-73:])) ** 2) / 8)
+
+    def test_full_cover_is_yield_over_gamma(self):
+        self.assertAlmostEqual(calm.real_variance_ratio(1e-5, 72 * 300, self.close, 72), 1e-5 / self.g)
+
+    def test_part_cover_is_scaled_up_and_over_cover_is_not(self):
+        self.assertAlmostEqual(calm.real_variance_ratio(1e-5, 36 * 300, self.close, 72), 2e-5 / self.g)
+        self.assertAlmostEqual(calm.real_variance_ratio(1e-5, 90 * 300, self.close, 72), 1e-5 / self.g)
+
+    def test_no_ratio_without_cover_tape_or_variance(self):
+        for fy, cov, close, n in ((1e-5, 36 * 300 - 1, self.close, 72), (None, 72 * 300, self.close, 72),
+                                  (1e-5, None, self.close, 72), (-1e-9, 72 * 300, self.close, 72),
+                                  (1e-5, 72 * 300, self.close[:72], 72), (1e-5, 0, self.close, 0),
+                                  (1e-5, 72 * 300, np.full(100, 120.0), 72),
+                                  (1e-5, 72 * 300, np.r_[self.close[:-1], np.nan], 72),
+                                  (1e-5, 72 * 300, np.r_[self.close[:-1], 0.0], 72)):
+            self.assertIsNone(calm.real_variance_ratio(fy, cov, close, n), (fy, cov, n))
+        self.assertIsNotNone(calm.real_variance_ratio(0.0, 36 * 300, self.close, 72))
+
+
+class RealView(unittest.TestCase):
+    def test_the_real_source_uses_the_fee_yield(self):
+        bars = walk(); p = float(bars[4][-1])
+        ratio = calm.real_variance_ratio(1e-5, 72 * 300, bars[4], 72)
+        for thr in (ratio / 2, ratio * 2):
+            v = calm.regime_view(bars, p, p / 1.01, p * 1.01, widths=W, threshold=0.25,
+                                 guard={'mode': 'narrow', 'source': 'real', 'window_bars': 72, 'threshold': thr,
+                                        'fee_yield': (1e-5, 72 * 300)})
+            self.assertEqual(v['choice'], W[0] if thr < ratio else W[-1])
+            self.assertEqual(v['guard']['source'], 'real')
+        v = calm.regime_view(bars, p, p / 1.01, p * 1.01, widths=W, threshold=0.25,
+                             guard={'mode': 'narrow', 'source': 'real', 'window_bars': 72, 'threshold': 1.0,
+                                    'fee_yield': None})
+        self.assertIsNone(v['guard']['ratio'])
+
+
 class Config(unittest.TestCase):
     def patch(self, **kw):
-        base = dict(REGIME_GUARD='live', REGIME_GUARD_WINDOW=36, REGIME_GUARD_THRESHOLD=1.2,
-                    REGIME_GUARD_FEE_C={'POOL': C})
+        base = dict(REGIME_GUARD='narrow', REGIME_GUARD_SOURCE='volume', REGIME_GUARD_WINDOW=36,
+                    REGIME_GUARD_THRESHOLD=1.2, REGIME_GUARD_POOLS=('POOL',), REGIME_GUARD_FEE_C={'POOL': C},
+                    POOL='POOL')
         base.update(kw)
         return mock.patch.multiple(config, **base)
 
-    def test_off_is_none(self):
+    def test_off_or_an_untested_pool_is_none(self):
         with self.patch(REGIME_GUARD='off'):
             self.assertIsNone(rebalancer.guard_config('POOL'))
+        with self.patch():
+            self.assertIsNone(rebalancer.guard_config('DJT'))
 
-    def test_the_settings_and_the_pool_s_constant(self):
+    def test_the_volume_source(self):
         with self.patch():
             self.assertEqual(rebalancer.guard_config('POOL', {'filled_24h': 0}),
-                             {'mode': 'live', 'window_bars': 36, 'threshold': 1.2, 'fee_c': C})
+                             {'mode': 'narrow', 'source': 'volume', 'window_bars': 36, 'threshold': 1.2, 'fee_c': C})
             self.assertEqual(rebalancer.guard_config('POOL')['fee_c'], C)
-
-    def test_another_pool_or_a_filled_tape_has_no_constant(self):
-        with self.patch():
-            self.assertIsNone(rebalancer.guard_config('DJT')['fee_c'])
             self.assertIsNone(rebalancer.guard_config('POOL', {'filled_24h': 3})['fee_c'])
+        with self.patch(REGIME_GUARD_FEE_C={}):
+            self.assertIsNone(rebalancer.guard_config('POOL')['fee_c'])
 
-    def test_the_config_row_is_read(self):
-        import importlib
-        row = dict(regime_guard='narrow', regime_guard_window_bars=72, regime_guard_threshold=1.0,
-                   regime_guard_fee_c={'P': 7.62e-11})
-        self.assertEqual(str(row['regime_guard']), 'narrow')
-        self.assertEqual({str(k): float(v) for k, v in row['regime_guard_fee_c'].items()}, {'P': 7.62e-11})
-        self.assertIn(config.REGIME_GUARD, calm.GUARD_MODES)
-        self.assertIn('regime_guard', config.summary())
-        importlib.reload(config)
+    def test_the_real_source_asks_for_the_fee_yield(self):
+        with self.patch(REGIME_GUARD_SOURCE='real'), \
+             mock.patch.object(rebalancer, 'guard_fee_yield', return_value=(1e-5, 900.0)) as fy:
+            self.assertEqual(rebalancer.guard_config('POOL', {'filled_24h': 5}),
+                             {'mode': 'narrow', 'source': 'real', 'window_bars': 36, 'threshold': 1.2,
+                              'fee_yield': (1e-5, 900.0)})
+            fy.assert_called_once_with('POOL', 36)
+
+    def test_the_summary_names_the_guard(self):
+        for k in ('regime_guard', 'regime_guard_source', 'regime_guard_pools', 'regime_steps'):
+            self.assertIn(k, config.summary())
+
+
+class FeeYieldFromTheBook(unittest.TestCase):
+    """guard_fee_yield reads this profile's snapshots and harvests (test DB)."""
+    POOL = 'GUARDPOOL'
+
+    def setUp(self):
+        import datetime as dt
+        import db
+        _fixtures.reset_ledger()
+        now = db.now()
+        self.rec = {'token_a': {'address': 'So11111111111111111111111111111111111111112', 'decimals': 9},
+                    'token_b': {'address': 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', 'decimals': 6}}
+        with db.cursor(commit=True) as cur:
+            cur.execute("insert into positions (mint, config_name, pool, opened_at) values "
+                        "('GA', 'sol-usdc', %s, %s), ('GB', 'other', %s, %s), ('GC', 'sol-usdc', 'ELSE', %s)",
+                        (self.POOL, now, self.POOL, now, now))
+            for k, f in enumerate((0.0, 0.01, 0.03)):
+                ts = now - dt.timedelta(seconds=240 - 120 * k)
+                for m in ('GA', 'GB', 'GC'):
+                    cur.execute("insert into snapshots (ts, mint, price, in_range, liquidity, accrued_usd) "
+                                "values (%s,%s,120,true,'60000000000',%s)", (ts, m, f))
+            old = now - dt.timedelta(hours=7)
+            cur.execute("insert into snapshots (ts, mint, price, in_range, liquidity, accrued_usd) "
+                        "values (%s,'GA',120,true,'60000000000',0)", (old,))
+
+    def run_with(self, **kw):
+        base = dict(PROFILE='sol-usdc', POOL=self.POOL)
+        base.update(kw)
+        with mock.patch.multiple(config, **base), mock.patch.object(rebalancer, 'pool_record', return_value=self.rec):
+            return rebalancer.guard_fee_yield(self.POOL, 72)
+
+    def test_only_this_profile_s_positions_on_the_pool_in_the_window(self):
+        y, cov = self.run_with()
+        self.assertAlmostEqual(y * 6e10 * fr_per_l(120.0), 0.03, places=6)
+        self.assertAlmostEqual(cov, 240.0, places=3)
+
+    def test_another_pool_a_non_dollar_quote_or_a_failure_is_none(self):
+        self.assertIsNone(self.run_with(POOL='HELD'))
+        rec = dict(self.rec, token_b={'address': 'So11111111111111111111111111111111111111112', 'decimals': 9})
+        with mock.patch.multiple(config, PROFILE='sol-usdc', POOL=self.POOL), \
+             mock.patch.object(rebalancer, 'pool_record', return_value=rec):
+            self.assertIsNone(rebalancer.guard_fee_yield(self.POOL, 72))
+        with mock.patch.multiple(config, PROFILE='sol-usdc', POOL=self.POOL), \
+             mock.patch.object(rebalancer, 'pool_record', side_effect=RuntimeError('rpc')):
+            self.assertIsNone(rebalancer.guard_fee_yield(self.POOL, 72))
 
 
 if __name__ == '__main__':
