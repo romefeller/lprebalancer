@@ -123,3 +123,12 @@ Every price the signer speaks is token B per token A in human units, where A
 and B are the pool's own token order (mint 0 and mint 1 on a Raydium-layout
 pool; tokenX and tokenY on DLMM). GeckoTerminal and DEX front ends may show the
 inverse; the loop and the engine never do.
+
+## A stablecoin as token A (Unichain USDC/HYPE, 2026-10-04)
+
+`quoteUsd` is USD per unit of token B, whatever B is. When token A is the
+stablecoin (USDC/HYPE: `price` is HYPE per USDC), `quoteUsd` = 1/price, and
+`positionUsd`, `feesAccrued_USD`, `walletUsd`, `depositUsd` and `approxUsd` are
+dollars, never token-B units. `nativeSide` is null when the gas token is not a
+pool token (ETH on Unichain); `sol` is then the native balance, and `walletUsd`
+may include it at its dollar price, as the Base signer does.

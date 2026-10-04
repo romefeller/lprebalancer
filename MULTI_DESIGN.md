@@ -85,3 +85,22 @@ checked before the stop; then one restart: stop `lp-bot.service`, backfill pre-0
 `runtime.json`/`events.jsonl` into `run/sol-usdc/`, start every `lp-bot@<profile>`, restart the bridge. A
 trap brings a bot back if any step after the stop fails. Idempotent. Rollback: `git revert` the merge, then
 `./deploy.sh rollback --apply`, which refuses while another profile holds a position or a claim.
+
+## Unichain (2026-10-04)
+
+Chain `unichain` (chain id 130): a row in chains.py like Base's (venue swaps and
+payouts, the same EVM profit-wallet pin, no sweep/janitor/audit/board/rewards/txfees),
+with its endpoint in the row (`public_rpc`, `rpc_env` = `LPBOT_UNICHAIN_RPC`;
+config.public_rpc). The wallet readers are the EVM ones. Venue `uniswap-v3-unichain`:
+`dexes.pool()` reads the pool on chain and accepts it only when its factory is Uniswap's
+v3 factory on Unichain (`0x1f98…0003`) and that factory maps (token0, token1, fee) back
+to it; the signer is `signer_uniswap.mjs`. First profile: `uni-hype-usdc`
+(ops/UNICHAIN_SETUP.md), wallet `uni-lp`, key path `LPBOT_UNICHAIN_KEY_PATH`.
+
+**Stablecoin as token A.** USDC/HYPE is the first profile whose stablecoin is token A.
+The price is HYPE per USDC, so token B's dollar price is 1/price: the signer reports
+`quoteUsd` = 1/price, and where it reports null the loop fills it from the mints
+(rebalancer.stable_quote_usd, engine.stable_quote). The book's hold benchmarks
+(db.daily_line, db.since_start) value the volatile half at its dollar price
+(db.volatile_usd: 1/price when db.stable_first(mints)), and the baseline's base token is
+token B. Every other money figure was already in token-B units times `quoteUsd`.

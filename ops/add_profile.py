@@ -33,6 +33,7 @@ import engine  # noqa: E402
 import guards  # noqa: E402
 import rebalancer  # noqa: E402
 import swing  # noqa: E402
+import wallets  # noqa: E402
 
 # What a new profile never takes from its template: identity, pool, wallet
 # and the switches set here (deploy.sh's SKIP, plus allow_swap).
@@ -44,8 +45,8 @@ VENUES = tuple(d for d in rebalancer.SIGNERS if d not in ('jupiter', 'orca-swap'
 WALLET_ID = re.compile(r'^[a-z0-9][a-z0-9-]{1,40}$')
 SECRET_ENV = re.compile(r'^[A-Z][A-Z0-9_]{2,63}$')
 # An address on each chain the wallets table allows (its wallets_check).
-ADDRESS = {'solana': guards.is_address,
-           'base': lambda s: isinstance(s, str) and re.fullmatch(r'0x[0-9a-fA-F]{40}', s) is not None}
+EVM_ADDRESS = lambda s: isinstance(s, str) and re.fullmatch(r'0x[0-9a-fA-F]{40}', s) is not None
+ADDRESS = {'solana': guards.is_address, 'base': EVM_ADDRESS, 'unichain': EVM_ADDRESS}
 
 
 class Refused(ValueError):
@@ -78,10 +79,16 @@ def build(args, template, rec, wallet, others):
     wallets row or None, `others` how many profiles the wallet holds
     already. Pure; raises Refused."""
     chain = (wallet or {}).get('chain') or args.chain
-    if template.get('chain') != chain:
-        raise Refused(f'template {template["name"]} is on {template.get("chain")}, the wallet on {chain}')
     if chain not in ADDRESS:
         raise Refused(f'unknown chain {chain!r}')
+    # A template on another chain (the first profile of a new chain) gives its
+    # tuning only: the payout token and the profit wallet must be valid here.
+    cross = template.get('chain') != chain
+    if cross and not getattr(args, 'cross_chain', False):
+        raise Refused(f'template {template["name"]} is on {template.get("chain")}, the wallet on {chain}'
+                      ' (pass --cross-chain to take its tuning only)')
+    if cross and not ADDRESS[chain](template.get('profit_wallet') or ''):
+        raise Refused(f'template profit wallet {template.get("profit_wallet")!r} is not a {chain} address')
     if not ADDRESS[chain](args.pool):
         raise Refused(f'--pool {args.pool!r} is not a {chain} address')
     new_wallet = None
@@ -93,7 +100,7 @@ def build(args, template, rec, wallet, others):
     elif args.address and args.address != wallet['address']:
         raise Refused(f'wallet {args.wallet} exists with address {wallet["address"]}, not {args.address}')
     a, b = rec['token_a'], rec['token_b']
-    norm = (lambda m: m.lower()) if chain == 'base' else (lambda m: m)
+    norm = wallets.norm                           # EVM addresses in lower case
     mints = [norm(a['address']), norm(b['address'])]
     stables = {norm(m) for m in engine.STABLE_MINTS}
     if not set(mints) & stables:
@@ -118,6 +125,17 @@ def build(args, template, rec, wallet, others):
         swing_row = {'profile': args.profile, 'open_dex': op[0], 'open_pool': op[1], 'closed_dex': cl[0],
                      'closed_pool': cl[1], 'calendar': args.calendar, 'lead_s': args.lead_s}
     row = {c: v for c, v in template.items() if c not in SKIP | {'chain'}}
+    if cross:
+        # the template's payout token is another chain's: pay in this pool's stablecoin
+        row['payout_mint'] = next(m for m in mints if m in stables)
+    if getattr(args, 'payout_mint', None):
+        row['payout_mint'] = by_symbol.get(args.payout_mint.upper()) or norm(args.payout_mint)
+        if row['payout_mint'] not in mints:
+            raise Refused(f'--payout-mint {args.payout_mint} is not one of the pool\'s tokens')
+    if getattr(args, 'max_usd', None) is not None:
+        if not args.max_usd > 0:
+            raise Refused(f'--max-usd must be positive, got {args.max_usd}')
+        row['max_usd'] = args.max_usd
     row.update(name=args.profile, active=False, pool=args.pool, dex=args.dex, dexes=execute, execute_dexes=execute,
                pair_label=f'{a["symbol"]}/{b["symbol"]}', token_a=a['symbol'], token_b=b['symbol'],
                wallet_id=args.wallet, enabled=True, deposit_mint=deposit, residual_owner=others == 0,
@@ -140,7 +158,10 @@ def parse(argv):
     p.add_argument('--profile', required=True)
     p.add_argument('--template', required=True, help='profile whose tuning is copied')
     p.add_argument('--wallet', required=True, help='wallet id (new or existing)')
-    p.add_argument('--chain', default='solana', choices=('solana', 'base'))
+    p.add_argument('--chain', default='solana', choices=tuple(ADDRESS))
+    p.add_argument('--cross-chain', action='store_true', help='take the tuning of a template on another chain')
+    p.add_argument('--payout-mint', help='mint or symbol; default: the template\'s (another chain: the stablecoin)')
+    p.add_argument('--max-usd', type=float, help='the signer\'s per-open ceiling; default: the template\'s')
     p.add_argument('--address'), p.add_argument('--secret-env'), p.add_argument('--label')
     p.add_argument('--dex', required=True), p.add_argument('--pool', required=True)
     p.add_argument('--execute-dexes', help='comma list; default: --dex')

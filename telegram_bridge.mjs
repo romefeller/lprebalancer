@@ -13,7 +13,7 @@
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { equityLine, lpLine, sinceStartLine, splitMessage, emojiFor, healthLine, poolLabel, redact,
+import { equityLine, pricedView, shownPrice, shownBand, shownMovePct, shownSide, lpLine, sinceStartLine, splitMessage, emojiFor, healthLine, poolLabel, redact,
   portfolioText, walletName } from './book_format.mjs';
 
 const SELF = fileURLToPath(import.meta.url);
@@ -121,7 +121,10 @@ export function message(row) {
 }
 
 // The pool's base token: the row's token_a, else the first half of its pair.
-const baseSymbol = (row) => row.token_a ?? (typeof row.pair === 'string' && row.pair.includes('/') ? row.pair.split('/')[0] : 'SOL');
+const baseSymbol = (row) => pricedView(row).symbol;
+// a pool price and a band as the owner reads them (book_format.mjs pricedView)
+const pxText = (row, p) => { const v = shownPrice(row, p); return v == null ? '—' : v.toFixed(4); };
+const bandText = (row) => shownBand(row, row.lower, row.upper).map(v => (v == null ? '—' : v.toFixed(4))).join(' — ');
 
 // The DAILY line next to the reference period's per-day average (sql/027).
 export function compareLine(row) {
@@ -252,7 +255,8 @@ export function render(row) {
     if (f) {
       const lines = [`━━ 🧭 BAND ━━`];
       if (f.inside) {
-        lines.push(`price       ${n(f.to_lower_pct, 1)}% above the floor · ${n(f.to_upper_pct, 1)}% below the ceiling`
+        const inv = pricedView(r).inverted;          // the shown price moves against the pool price
+        lines.push(`price       ${n(inv ? f.to_upper_pct : f.to_lower_pct, 1)}% above the floor · ${n(inv ? f.to_lower_pct : f.to_upper_pct, 1)}% below the ceiling`
           + `${f.hours_alive != null ? ` · alive ${n(f.hours_alive, 0)}h` : ''}`);
         lines.push(`P(exit)     6h ${pct(f.p_exit_6h_regime ?? f.p_exit_6h)}   24h ${pct(f.p_exit_24h_regime ?? f.p_exit_24h)}`
           + `   72h ${pct(f.p_exit_72h_regime ?? f.p_exit_72h)}   7d ${pct(f.p_exit_168h_regime ?? f.p_exit_168h)}`);
@@ -263,7 +267,7 @@ export function render(row) {
         lines.push(`OUT         ${n(f.beyond_half_widths, 2)} half-widths beyond the edge`);
       }
       if (f.il_now_pct != null) {
-        lines.push(`if closed   locks ${n(f.il_now_pct, 2)}% vs holding · price ${sign(f.since_open_pct)}% since open`);
+        lines.push(`if closed   locks ${n(f.il_now_pct, 2)}% vs holding · price ${sign(shownMovePct(r, f.since_open_pct))}% since open`);
       }
       lines.push(f.suspended
         ? `rule        hourly rule off · the ${r.regime ? 'REGIME' : 'CALM'} block below decides (hourly figures above are context only)`
@@ -288,17 +292,17 @@ export function render(row) {
         + `move @ +${((row.migrate_min_gain ?? 0) * 100).toFixed(0)}% · can open on ${(row.execute_dexes ?? []).join(', ')}\n`
         + book(row);
     case 'in_band':
-      return `IN RANGE · ${row.position_dex ?? row.dex ?? ''} ${row.position_pair ?? row.pair ?? ''} · ${n(row.price, 4)}\n`
-        + `band ${n(row.lower, 4)} — ${n(row.upper, 4)}\n`
+      return `IN RANGE · ${row.position_dex ?? row.dex ?? ''} ${row.position_pair ?? row.pair ?? ''} · ${pxText(row, row.price)}\n`
+        + `band ${bandText(row)}\n`
         + book(row);
     case 'OUT_OF_BAND':
-      return `OUT OF RANGE · went ${row.side}\n`
-        + `price ${n(row.price, 4)} · band ${n(row.lower, 4)} — ${n(row.upper, 4)}\n${row.action}`
+      return `OUT OF RANGE · went ${shownSide(row, row.side)}\n`
+        + `price ${pxText(row, row.price)} · band ${bandText(row)}\n${row.action}`
         + (row.forecast ? '\n' + band(row).join('\n') : '');
     case 'PROACTIVE':
       return `RE-CENTRING · P(exit within ${row.horizon_hours}h) ${Math.round(row.p_exit * 100)}%`
         + ` ≥ ${Math.round(row.threshold * 100)}%\n`
-        + `price ${n(row.price, 4)} · band ${n(row.lower, 4)} — ${n(row.upper, 4)}\n${row.action}\n` + book(row);
+        + `price ${pxText(row, row.price)} · band ${bandText(row)}\n${row.action}\n` + book(row);
     case 'recentre_deferred':
       return `re-centre deferred · P(exit within ${row.horizon_hours}h) ${Math.round(row.p_exit * 100)}%\n${row.reason}`;
     case 'FAILOVER':
@@ -315,11 +319,11 @@ export function render(row) {
     case 'HOT_PAUSE':
       return `PAUSED · bad hot moment: fees ${n(row.ratio, 2)}x the in-band loss over ${n(row.hours, 0)}h`
         + ` (< ${n(row.threshold, 2)}) · ±${n(row.regime?.choice_pct, 2)}% chosen\n`
-        + `price ${n(row.price, 4)} · closing, waiting 50/50 · reopens ${row.resume_minutes} min after it clears\n` + book(row);
+        + `price ${pxText(row, row.price)} · closing, waiting 50/50 · reopens ${row.resume_minutes} min after it clears\n` + book(row);
     case 'MACRO_PAUSE':
       return `PAUSED · ${row.kind} at ${row.event_at} UTC: ${row.held === false ? 'no band held' : 'closing'}, `
         + `waiting 50/50 · reopens in ${row.resume_minutes} min\n`
-        + (row.price == null ? '' : `price ${n(row.price, 4)}\n`) + book(row);
+        + (row.price == null ? '' : `price ${pxText(row, row.price)}\n`) + book(row);
     case 'macro_calendar_empty':
       return `CALENDAR · ${row.reason}`;
     case 'macro_blocked':
@@ -379,15 +383,15 @@ export function render(row) {
     case 'REOPT_REQUESTED':
       return `REVIEW REQUESTED by operator · ${row.action}`;
     case 'REBALANCE_REQUESTED':
-      return `REBALANCE REQUESTED by operator · price ${n(row.price, 4)}\n${row.action}`;
+      return `REBALANCE REQUESTED by operator · price ${pxText(row, row.price)}\n${row.action}`;
     case 'rebalance_deferred':
       return `rebalance deferred · ${row.seconds_remaining}s until the minimum gap`;
     case 'deploy_idle_deferred':
       return `idle $${n(row.idle_usd)} waits · ${row.reason}`;
     case 'DEPLOY_IDLE':
-      return `DEPLOYING IDLE $${n(row.idle_usd)} · re-centre at ${n(row.price, 4)} to put it in the LP\n` + book(row);
+      return `DEPLOYING IDLE $${n(row.idle_usd)} · re-centre at ${pxText(row, row.price)} to put it in the LP\n` + book(row);
     case 'INCREASE':
-      return `ADDED $${n(row.added_usd)} of $${n(row.idle_usd)} idle to the position at ${n(row.price, 4)}, no re-centre`
+      return `ADDED $${n(row.added_usd)} of $${n(row.idle_usd)} idle to the position at ${pxText(row, row.price)}, no re-centre`
         + `${row.left_usd != null ? ` · $${n(row.left_usd)} left beside it` : ''}\n${row.signature ?? ''}\n` + book(row);
     case 'increase_failed':
       return `add to the position failed · ${row.reason} ($${n(row.idle_usd)} idle stays in the wallet)`;
@@ -410,7 +414,7 @@ export function render(row) {
         + (Number(row.net_flows_usd) ? ` · capital moved ${sign(row.net_flows_usd)}` : '')
         + compareLine(row)
         + (row.price_open == null && row.price_close == null ? ''
-          : ` · ${baseSymbol(row)} ${n(row.price_open)} → ${n(row.price_close)}`);
+          : ` · ${baseSymbol(row)} ${n(shownPrice(row, row.price_open))} → ${n(shownPrice(row, row.price_close))}`);
     case 'HARVEST':
       return `HARVESTED $${n(row.collected_usd, 4)}\n${row.signature ?? ''}`;
     case 'harvest_skipped':
@@ -419,7 +423,7 @@ export function render(row) {
       return `CLOSED · ${row.reason}\n${row.signature ?? ''}\n` + book(row);
     case 'OPEN':
       return `OPENED · ${row.dex ? row.dex + ' ' : ''}${row.pair} ${row.opened_band ?? (typeof row.band === 'string' ? row.band : '')}\n`
-        + `range ${n(row.lower, 4)} — ${n(row.upper, 4)}\n`
+        + `range ${bandText(row)}\n`
         + `deposited $${n(row.deposit_usd)} · caps ${row.cap_a ?? '—'} · ${row.cap_b ?? '—'}\n`
         + (row.expected_net_day_pct != null && row.modelled_rebalances_per_day != null
           ? `modelled ${n(row.expected_net_day_pct, 3)}%/day at ${n(row.modelled_rebalances_per_day, 2)} rebalances/day\n` : '')

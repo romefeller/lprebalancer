@@ -3,10 +3,59 @@
 const n = (x, d = 2) => (x === undefined || x === null || Number.isNaN(Number(x)) ? '—' : Number(x).toFixed(d));
 const sign = (x) => (x === undefined || x === null ? '—' : (Number(x) >= 0 ? '+' : '') + n(x));
 
+// --- the price as the owner reads it ---------------------------------------------------
+// Every price the bot speaks is token B per token A. On USDC/HYPE (Unichain) token A is the
+// stable, so that price is HYPE per USDC (0.011): the book shows the volatile token in
+// dollars instead (HYPE $90.62), band edges and moves turned the same way. Pairs with the
+// stable as token B (SOL/USDC, WETH/USDC) are shown as before.
+const STABLE_SYMBOLS = new Set(['USDC', 'USDT', 'USDC.E', 'USDT0', 'USD₮0', 'DAI', 'USDS', 'PYUSD', 'USD1', 'FDUSD', 'USDG']);
+
+function pairOf(r) {
+  if (r.token_a && r.token_b) return [String(r.token_a), String(r.token_b)];
+  const p = r.position_pair ?? r.pair;
+  return typeof p === 'string' && p.includes('/') ? p.split('/').map(x => x.trim()) : [r.token_a ?? null, null];
+}
+
+// {symbol, inverted}: the token whose dollar price the book shows, and whether pool
+// prices must be inverted to show it. Pure.
+export function pricedView(r) {
+  const [a, b] = pairOf(r);
+  const inverted = !!(a && b && STABLE_SYMBOLS.has(a.toUpperCase()) && !STABLE_SYMBOLS.has(b.toUpperCase()));
+  return { symbol: inverted ? b : (a ?? 'SOL'), inverted };
+}
+
+// A pool price (B per A) as shown: inverted for a stable token A. Null when unknown, or
+// zero/negative where inverting would divide by it. Pure.
+export function shownPrice(r, p) {
+  if (p === undefined || p === null || Number.isNaN(Number(p))) return null;
+  if (!pricedView(r).inverted) return Number(p);
+  return Number(p) > 0 ? 1 / Number(p) : null;
+}
+
+// [low, high] of a band as shown: an inverted band swaps its edges. Pure.
+export function shownBand(r, lower, upper) {
+  return pricedView(r).inverted ? [shownPrice(r, upper), shownPrice(r, lower)] : [shownPrice(r, lower), shownPrice(r, upper)];
+}
+
+// A move of the pool price in percent, as a move of the shown price. Pure.
+export function shownMovePct(r, pct) {
+  if (pct === undefined || pct === null || Number.isNaN(Number(pct))) return null;
+  if (!pricedView(r).inverted) return Number(pct);
+  const x = Number(pct) / 100;
+  return x > -1 ? (1 / (1 + x) - 1) * 100 : null;
+}
+
+// 'above' / 'below' (or up / down) of the pool price, as said of the shown price. Pure.
+export function shownSide(r, side) {
+  if (!pricedView(r).inverted) return side;
+  return { above: 'below', below: 'above', up: 'down', down: 'up' }[side] ?? side;
+}
+
 // equity, with P&L against the capital the bot started with (capital_flows),
 // not the first snapshot; the old figure only when there is no baseline yet
 export function equityLine(r) {
-  const sol = r.last_price != null ? ` · ${r.token_a ?? 'SOL'} $${n(r.last_price)}` : '';
+  const v = pricedView(r), px = shownPrice(r, r.last_price);
+  const sol = r.last_price != null ? ` · ${v.symbol} $${n(px)}` : '';
   const s = r.since_start;
   if (s && s.profit_usd != null) {
     return `equity      $${n(r.equity_usd)}${sol}   P&L ${sign(s.profit_usd)} since start · includes pending fees`;
@@ -38,7 +87,8 @@ export function sinceStartLine(r) {
   const s = r.since_start;
   if (!s || s.start_usd == null) return null;
   // a sum over pools of different tokens has no token amount
-  const held = s.start_sol != null ? `${n(s.start_sol, 4)} ${r.token_a ?? 'SOL'}, ` : '';
+  // start_sol counts token A: for a stable token A that is dollars, not the token shown
+  const held = s.start_sol != null && !pricedView(r).inverted ? `${n(s.start_sol, 4)} ${r.token_a ?? 'SOL'}, ` : '';
   return `start       $${n(s.start_usd)} (${held}${String(s.since).slice(0, 10)}) · now $${n(s.value_usd)}`
     + ` · vs holding it ${sign(s.vs_hold_start_assets_usd)}`;
 }

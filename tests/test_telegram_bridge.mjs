@@ -546,3 +546,13 @@ test('a DAILY line names the reference period average under it', () => {
   assert.ok(!render({ ...d, compare: null }).includes('\nvs '));
   assert.ok(render({ ...d, vs_hold_usd: null, compare: { ...d.compare, vs_hold_usd: null } }).includes('vs hold — (avg —)'));
 });
+
+test('USDC/HYPE (stable token A): in-range and out-of-range lines show HYPE in dollars, band low to high', () => {
+  const m = render({ event: 'in_band', pair: 'USDC/HYPE', price: 1 / 90, lower: 1 / 92, upper: 1 / 88 });
+  assert.ok(m.includes('· 90.0000\n'), m);
+  assert.ok(m.includes('band 88.0000 — 92.0000'), m);
+  const o = render({ event: 'OUT_OF_BAND', pair: 'USDC/HYPE', side: 'above', price: 1 / 87, lower: 1 / 92, upper: 1 / 88, action: 'x' });
+  assert.ok(o.includes('went below') && o.includes('price 87.0000'), o);
+  const s = render({ event: 'OUT_OF_BAND', pair: 'SOL/USDC', side: 'above', price: 125, lower: 118, upper: 122, action: 'x' });
+  assert.ok(s.includes('went above') && s.includes('band 118.0000 — 122.0000'), s);
+});

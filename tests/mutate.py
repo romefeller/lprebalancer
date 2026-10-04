@@ -64,7 +64,8 @@ TARGETS = {
     'rate_limit': ('engine.py', ['rate_limited', 'curl'], PY_TESTS('test_rate_limit')),
     'band_profile': ('db.py', ['record_band_profile'], PY_TESTS('test_band_profile')),
     'band_hooks': ('rebalancer.py', ['band_profile'], PY_TESTS('test_band_profile.Hooks')),
-    'daily': ('db.py', ['daily_line', 'daily_lines', '_daily_or_none'], PY_TESTS('test_daily', 'test_stats.TwoSolanaWallets')),
+    'daily': ('db.py', ['daily_line', 'daily_lines', '_daily_or_none'],
+              PY_TESTS('test_daily', 'test_stats.TwoSolanaWallets', 'test_unichain_loop')),
     'health': ('health.py', ['cooldown', 'after_failure', 'after_success', 'verdict', 'load', 'record_failure',
                              'record_success', 'allowed', 'summary'], PY_TESTS('test_health', 'test_edges_0930')),
     'jupgate': ('jupgate.py', ['_take', 'reserve', 'wait_turn'], PY_TESTS('test_jupiter_gate.Gate')),
@@ -122,7 +123,8 @@ TARGETS = {
     'capital_db': ('db.py', ['since_start', 'record_flow', 'audit_value', 'set_audit_value', 'record_audit',
                              '_since_start_or_none'], PY_TESTS('test_audit.SinceStart', 'test_audit.Runner', 'test_audit_more.SinceStartEdges',
                                                       'test_db', 'test_multi_loop', 'test_scaled', 'test_since_start_scope',
-                                                      'test_stats.TwoSolanaWallets', 'test_shared_wallet_books.Replay')),
+                                                      'test_stats.TwoSolanaWallets', 'test_shared_wallet_books.Replay',
+                                                      'test_unichain_loop')),
     'deploy_all': ('rebalancer.py', ['deployable_usd', 'capital', 'side_target_fraction', 'deposit_caps', 'balance_wallet'],
                    PY_TESTS('test_reopen_shape', 'test_deploy_all', 'test_audit_more.QuoteFallbacks', 'test_rebalancer.DepositCaps', 'test_payout.SwapGate',
                             'test_payout.SwapRetry', 'test_multi_loop', 'test_scaled', 'test_review_edges', 'test_jupiter_gate', 'test_health',
@@ -170,7 +172,7 @@ TARGETS = {
                                       'unmeasurable', 'locked_chain', 'held', 'profile_enabled', 'disabled_hold', 'sleeve_of',
                                       'is_stable_mint', 'quote_known', 'dormant', 'halted', 'route', 'housekeeper',
                                       'wallet_mints', 'wallet_book', 'portfolio_report', 'record_baseline'],
-                    PY_TESTS('test_multi_loop', 'test_claims_units')),
+                    PY_TESTS('test_multi_loop', 'test_claims_units', 'test_unichain_loop')),
     # 2026-10-02: rent and fees one profile pays from another's native token, and rent priced as $0
     'shared_books': ('wallets.py', ['native_giver', 'internal_flows', 'book'],
                      PY_TESTS('test_shared_wallet_books', 'test_wallets', 'test_claims_units')),
@@ -203,7 +205,7 @@ TARGETS = {
                                  'test_fee_integrity', 'test_hardening', 'test_rewards', 'test_jupiter_gate',
                                  'test_rebalancer', 'test_money_paths', 'test_move_books', 'test_edges_0930')),
     'add_profile': ('ops/add_profile.py', ['pool_spec', 'signer_env', 'build', 'drop_in', 'main'],
-                    PY_TESTS('test_add_profile')),
+                    PY_TESTS('test_add_profile', 'test_unichain.AddProfile')),
     'tape_prune': ('db.py', ['config_pools', 'tape_prune_other_pools'], PY_TESTS('test_tape_prune')),
     'gas_open': ('rebalancer.py', ['gas_for_open'], PY_TESTS('test_swing.Loop', 'test_swing.GasForOpen', 'test_multi_loop', 'test_scaled')),
     'stock_loop': ('rebalancer.py', ['ui_price', 'open_headroom', 'native_reserve', 'deployable_usd', 'deposit_caps',
@@ -244,9 +246,31 @@ TARGETS = {
     'macro_db': ('db.py', ['macro_event_near', 'macro_next_ts'], PY_TESTS('test_hot_pause')),
     'pause_db': ('db.py', ['position_closed'], PY_TESTS('test_hot_pause')),
     'evm_key': ('evm/keyfile.mjs', ['validKey', 'writeNewKey', 'readKey'], NODE_TESTS('test_evm_wallet.mjs')),
+    # Unichain / Uniswap v3 (2026-10-04): the pool lookup, the endpoint, and the money
+    # figures of a pool whose stablecoin is token A (USDC/HYPE: quote 1/price, the hold
+    # benchmarks on the HYPE's dollar price).
+    'unichain_pool': ('dexes.py', ['_unichain_rpcs', 'uniswap_v3_state', 'from_uniswap_v3', 'uniswap_v3_pool'],
+                      PY_TESTS('test_unichain')),
+    'unichain_config': ('config.py', ['public_rpc'], PY_TESTS('test_unichain.ConfigEndpoint')),
+    'unichain_quote': ('rebalancer.py', ['stable_quote_usd', 'quote_price', 'sleeve_of'],
+                       PY_TESTS('test_unichain_loop', 'test_multi_loop', 'test_claims_units', 'test_money_paths',
+                                'test_audit_more.QuoteFallbacks', 'test_fee_integrity')),
+    'unichain_engine': ('engine.py', ['stable_quote', 'pool_quote_price'],
+                        PY_TESTS('test_unichain_loop.StableFirst', 'test_engine')),
+    'unichain_book': ('db.py', ['stable_first', 'volatile_usd', '_profile_mints'], PY_TESTS('test_unichain_loop')),
+    # The Unichain signer: every refusal, the deposit and close arithmetic, the v4 swap
+    # calldata, the simulation gate and the partial-send report (the fork test runs the
+    # same code on chain; it is not in the mutant loop: one run takes a minute).
+    'uniswap_signer': ('signer_uniswap.mjs', ['settings', 'marketRefusals', 'referencePrices', 'spendable', 'planOpen',
+                                              'positionView', 'closeCalls', 'v4PoolsFor', 'v4SwapCalldata', 'blockingFailure',
+                                              'simulateSequence', 'runSteps', 'checkRecipient', 'describe', 'parseArgs'],
+                       NODE_TESTS('test_uniswap.mjs')),
+    'unichain_registry': ('evm/unichain.mjs', ['unichainEndpoints', 'simulationEndpoints'], NODE_TESTS('test_uniswap.mjs')),
+    'book_inverted': ('book_format.mjs', ['pricedView', 'shownPrice', 'shownBand', 'shownMovePct', 'shownSide', 'equityLine', 'sinceStartLine'],
+                      NODE_TESTS('test_book_format.mjs', 'test_telegram_bridge.mjs')),
 }
 
-SQL_TARGETS = {'band_profile', 'daily', 'capital_db', 'book_scope', 'book_sums', 'stats_sum', 'wallets_db', 'wallet_names', 'db_stats', 'liq_window', 'pause_db', 'macro_db'}
+SQL_TARGETS = {'unichain_book', 'unichain_quote', 'band_profile', 'daily', 'capital_db', 'book_scope', 'book_sums', 'stats_sum', 'wallets_db', 'wallet_names', 'db_stats', 'liq_window', 'pause_db', 'macro_db'}
 
 # Mutants that cannot change behaviour, with the reason. Keyed by the mutant's
 # identity (see "identity" below):
@@ -254,6 +278,32 @@ SQL_TARGETS = {'band_profile', 'daily', 'capital_db', 'book_scope', 'book_sums',
 # The report prints each survivor's key: copy it here with a reason. The line
 # number is not in the key, so an edit above a mutant keeps its entry valid.
 EQUIVALENT = {
+    ('uniswap_signer', 'settings', '\\?\\? -> ||', "pin: env.LPBOT_EVM_PROFIT_WALLET_PIN ?? '',", 0):
+        "the only falsy string || would replace is '' itself",
+    ('uniswap_signer', 'settings', '\\?\\? -> ||', "profit: env.LPBOT_PROFIT_WALLET ?? '',", 0):
+        "the only falsy string || would replace is '' itself",
+    ('uniswap_signer', 'settings', '\\?\\? -> ||', "sleeve: env.LPBOT_SLEEVE ?? '',", 0):
+        "the only falsy string || would replace is '' itself",
+    ('uniswap_signer', 'referencePrices', '\\?\\? -> ||', "const list = U.REFERENCES[String(token).toLowerCase()] ?? [];", 0):
+        'a registry entry is a non-empty frozen array: truthy, so ?? and || pick the same',
+    ('uniswap_signer', 'simulateSequence', '\\?\\? -> ||', "const clients = deps.clients ?? [pub, ...U.simulationEndpoints().map(u => createPublicClient({ chain: unichain, transport: http(u, { retryCount: 0, timeout: 15_000 }) }))];", 0):
+        'deps.clients is an array or absent: an array is truthy, so ?? and || pick the same',
+    ('uniswap_signer', 'simulateSequence', '\\?\\? -> ||', "blocks: [{ calls: steps.map(s => ({ from: me, to: s.to, data: s.data, value: s.value ?? 0n })) }],", 0):
+        'value is a bigint or absent; || replaces 0n with 0n',
+    ('uniswap_signer', 'simulateSequence', '\\?\\? -> ||', "label: steps[i].label, ok: c.status === 'success', gasUsed: c.gasUsed?.toString() ?? null,", 0):
+        'a decimal string of a bigint is never empty: ?? and || pick the same',
+    ('uniswap_signer', 'simulateSequence', '\\?\\? -> ||', "await pub.call({ account: me, to: s.to, data: s.data, value: s.value ?? 0n });", 0):
+        'value is a bigint or absent; || replaces 0n with 0n',
+    ('uniswap_signer', 'runSteps', '\\?\\? -> ||', "const sign = deps.signStep ?? signStep;", 0):
+        'deps.signStep is a function or absent: ?? and || pick the same',
+    ('uniswap_signer', 'checkRecipient', '\\?\\? -> ||', "if (!isAddress(String(to ?? ''), { strict: false })) throw new Error(`refused: destination ${to} is not an address`);", 0):
+        'the falsy values || would also replace (0, false, NaN, empty) are no address either way',
+    ('book_inverted', 'pricedView', '\\?\\? -> ||', "return { symbol: inverted ? b : (a ?? 'SOL'), inverted };", 0):
+        'a token symbol is never an empty string: the loop fills token_a/pair from the pool record',
+    ('book_inverted', 'shownSide', '\\?\\? -> ||', "return { above: 'below', below: 'above', up: 'down', down: 'up' }[side] ?? side;", 0):
+        'every mapped value is a non-empty string: ?? and || pick the same',
+    ('book_inverted', 'sinceStartLine', '\\?\\? -> ||', "const held = s.start_sol != null && !pricedView(r).inverted ? `${n(s.start_sol, 4)} ${r.token_a ?? 'SOL'}, ` : '';", 0):
+        'token_a is never an empty string (same reason as pricedView)',
     ('pause_loop', 'macro_view', 'const 0->1', "if state is None or time.time() - state.get('macro_unread_told', 0) >= MACRO_UNREAD_TELL_S:", 0):
         'never told: the clock is decades past both 0 and 1, far beyond an hour',
     ('pause_loop', 'macro_view', 'const 0->1', "if state is not None and time.time() - state.get('macro_calendar_checked', 0) >= 86400:", 0):
@@ -417,8 +467,28 @@ EQUIVALENT = {
         'a monotonic clock equal to the deadline is one instant: the next poll decides either way',
     ('wallets', 'split', 'skip if body', 'if h is not None:', 0):
         "every view starts at 0.0: the holder's 0.0 after an overdraw is set already",
-    ('claims_loop', 'sleeve_of', 'drop operand 1', 'if bal.get(\'quoteUsd\') is None and mb and is_stable_mint(mb):', 0):
-        'is_stable_mint(None) is False: a missing mint fills nothing either way',
+    ('unichain_pool', 'uniswap_v3_state', 'const 24->25', "'tick_spacing': _signed(st['tickSpacing'][0], 24), 'tick': _signed(st['slot0'][1], 24),", 0):
+        'the ABI sign-extends an int24 to 256 bits: any width of 24 bits or more reads the same value',
+    ('unichain_pool', 'uniswap_v3_state', 'const 24->25', "'tick_spacing': _signed(st['tickSpacing'][0], 24), 'tick': _signed(st['slot0'][1], 24),", 1):
+        'the ABI sign-extends an int24 to 256 bits: any width of 24 bits or more reads the same value',
+    ('unichain_pool', 'uniswap_v3_state', 'const 24->48', "'tick_spacing': _signed(st['tickSpacing'][0], 24), 'tick': _signed(st['slot0'][1], 24),", 0):
+        'the ABI sign-extends an int24 to 256 bits: any width of 24 bits or more reads the same value',
+    ('unichain_pool', 'uniswap_v3_state', 'const 24->48', "'tick_spacing': _signed(st['tickSpacing'][0], 24), 'tick': _signed(st['slot0'][1], 24),", 1):
+        'the ABI sign-extends an int24 to 256 bits: any width of 24 bits or more reads the same value',
+    ('unichain_engine', 'pool_quote_price', 'drop operand 1', "p = float(((d or {}).get('data') or {}).get('attributes', {})", 0):
+        'without the fallback the next .get or float() raises, and the except returns None: the same answer',
+    ('unichain_engine', 'pool_quote_price', 'drop operand 1', "p = float(((d or {}).get('data') or {}).get('attributes', {})", 1):
+        'without the fallback the next .get or float() raises, and the except returns None: the same answer',
+    ('unichain_engine', 'pool_quote_price', 'drop operand 1', "p = float(((d or {}).get('data') or {}).get('attributes', {})", 2):
+        'without the fallback the next .get or float() raises, and the except returns None: the same answer',
+    ('unichain_quote', 'stable_quote_usd', 'drop operand 0', 'if mb and is_stable_mint(mb):', 0):
+        'is_stable_mint(None) is False: a missing mint gives no quote either way',
+    ('unichain_quote', 'stable_quote_usd', 'drop operand 0', 'return 1.0 / p if ma and is_stable_mint(ma) and p > 0 else None', 0):
+        'is_stable_mint(None) is False: a missing mint gives no quote either way',
+    ('unichain_quote', 'stable_quote_usd', 'drop operand 1', 'p = float(price or 0)', 0):
+        'float(None) raises TypeError, which returns None: the same answer as a price of 0',
+    ('add_profile', 'build', 'drop operand 1', "if cross and not ADDRESS[chain](template.get('profit_wallet') or ''):", 1):
+        'ADDRESS[chain] checks isinstance(str) first: None and empty are both refused',
     ('claims_loop', 'wallet_mints', 'skip if body', 'if not config.WALLET_ID:', 0):
         'a NULL wallet id matches no profile row: the query returns none, set() either way',
     ('claims_loop', 'portfolio_report', 'drop operand 0', "if not (config.WALLET_ID and config.RESIDUAL_OWNER) or state.get('last_portfolio') == today:", 1):

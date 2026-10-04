@@ -112,6 +112,7 @@ SIGNERS = {'orca': str(ROOT / 'signer2.mjs'),
            'byreal': str(ROOT / 'signer_byreal.mjs'),
            'pancakeswap-v3-solana': str(ROOT / 'signer_pancake.mjs'),
            'aerodrome-slipstream': str(ROOT / 'signer_aerodrome.mjs'),     # Base: positions, swaps, payouts
+           'uniswap-v3-unichain': str(ROOT / 'signer_uniswap.mjs'),       # Unichain: positions, swaps, payouts
            'jupiter': str(ROOT / 'swap_jupiter.mjs'),       # swaps, not positions
            'orca-swap': str(ROOT / 'swap_orca.mjs'),        # the fallback swap, direct on an Orca whirlpool
            'payout': str(ROOT / 'payout.mjs'),              # transfers to the profit wallet only
@@ -875,6 +876,20 @@ def is_stable_mint(mint):
     return wallets.norm(mint) in engine.STABLE_MINTS
 
 
+def stable_quote_usd(ma, mb, price):
+    """USD per token B from the mints alone: 1 for a stablecoin B, 1/price for
+    a stablecoin A (USDC/HYPE: price is B per A, so B costs 1/price dollars),
+    None otherwise. The signer's quoteUsd comes first; this fills a null.
+    Pure."""
+    if mb and is_stable_mint(mb):
+        return 1.0
+    try:
+        p = float(price or 0)
+    except (TypeError, ValueError):
+        return None
+    return 1.0 / p if ma and is_stable_mint(ma) and p > 0 else None
+
+
 def sleeve_of(bal):
     """`bal` as this profile sees it (wallets.sleeve): the wallet's figures
     stay under rawBalanceA/rawBalanceB/rawWalletUsd. A quote price the signer
@@ -888,8 +903,10 @@ def sleeve_of(bal):
         (ma, _), (mb, _) = pool_tokens()
     except Exception:
         ma = mb = None
-    if bal.get('quoteUsd') is None and mb and is_stable_mint(mb):
-        bal = dict(bal, quoteUsd=1.0, quoteUsdSource='stable mint')
+    if bal.get('quoteUsd') is None:
+        q = stable_quote_usd(ma, mb, bal.get('uiPrice') or bal.get('price'))
+        if q is not None:
+            bal = dict(bal, quoteUsd=q, quoteUsdSource='stable mint')
     if not config.WALLET_ID:
         return bal
     try:
@@ -929,9 +946,9 @@ def ui_price(rec):
 # Raydium layout: 0.0053 + two tick arrays of 0.0018. Meteora DLMM: a new bin
 # array is 0.0435 (the MU open, simulated 2026-10-01).
 OPEN_RENT_HEADROOM_SOL = 0.009       # every venue not listed below
-# Aerodrome (Base) keeps no rent: an NFT mint costs gas only, inside the gas
-# reserve; 0.009 of ETH there would leave ~$25 never deployed.
-OPEN_RENT_HEADROOM = {'meteora-dlmm': 0.05, 'aerodrome-slipstream': 0.0}
+# Aerodrome (Base) and Uniswap v3 (Unichain) keep no rent: an NFT mint costs gas
+# only, inside the gas reserve; 0.009 of ETH there would leave ~$25 never deployed.
+OPEN_RENT_HEADROOM = {'meteora-dlmm': 0.05, 'aerodrome-slipstream': 0.0, 'uniswap-v3-unichain': 0.0}
 
 
 def open_headroom(dex):
@@ -1098,15 +1115,16 @@ RENT_UNPRICED = {}                # 'told' while an unpriced rent has been said
 def quote_price(rec):
     """USD per unit of the quote token for a balance or status read, or None
     when unknown. A null from the signer is unknown, never a dollar, except
-    for a stablecoin quote by mint (the held pool's token B)."""
+    when one of the held pool's tokens is a stablecoin by mint
+    (stable_quote_usd)."""
     q = rec.get('quoteUsd')
     if q is not None:
         return float(q)
     try:
-        mb = pool_tokens()[1][0]
+        (ma, _), (mb, _) = pool_tokens()
     except Exception:
         return None
-    return 1.0 if is_stable_mint(mb) else None
+    return stable_quote_usd(ma, mb, rec.get('uiPrice') or rec.get('price'))
 
 
 def quote_known(state, bal, what):

@@ -126,3 +126,38 @@ test('a cooled breaker reads yellow and probing', () => {
     '🩺 health   🟡 swap 3x probing');
   assert.equal(healthLine([{ key: 'swap', state: 'probing', fails: 3, wait_s: 0 }]), '🩺 health   🟡 swap 3x probing');
 });
+
+// A pool whose token A is the stable (Unichain USDC/HYPE): prices are HYPE per USDC; the book
+// shows HYPE in dollars, band edges swapped, moves turned the same way. SOL/USDC unchanged.
+import { pricedView, shownPrice, shownBand, shownMovePct, shownSide } from '../book_format.mjs';
+const H = { ...R, token_a: 'USDC', token_b: 'HYPE', last_price: 1 / 90.5 };
+
+test('stable token A: the book shows the volatile token in dollars', () => {
+  assert.deepEqual(pricedView(H), { symbol: 'HYPE', inverted: true });
+  assert.deepEqual(pricedView({ pair: 'USDC/HYPE' }), { symbol: 'HYPE', inverted: true });
+  assert.deepEqual(pricedView({ position_pair: 'USDC / HYPE', pair: 'SOL/USDC' }), { symbol: 'HYPE', inverted: true }, 'the held pair wins');
+  assert.deepEqual(pricedView(R), { symbol: 'SOL', inverted: false });
+  assert.deepEqual(pricedView({ token_a: 'MU' }), { symbol: 'MU', inverted: false });
+  assert.deepEqual(pricedView({ pair: 'SOL/USDC' }), { symbol: 'SOL', inverted: false });
+  assert.deepEqual(pricedView({ pair: 'USDC/USDT' }), { symbol: 'USDC', inverted: false }, 'two stables: nothing to invert');
+  assert.equal(equityLine(H), 'equity      $240.00 · HYPE $90.50   P&L -5.67 since start · includes pending fees');
+  assert.equal(sinceStartLine(H), 'start       $248.10 (2026-09-22) · now $242.42 · vs holding it -5.99', 'no token count in the stable token');
+  assert.ok(sinceStartLine(R).includes('2.1029 SOL, '));
+});
+
+test('stable token A: prices invert, band edges swap, moves and sides turn; zero and junk are unknown', () => {
+  assert.equal(shownPrice(H, 0.01), 100); assert.equal(shownPrice(H, 0), null); assert.equal(shownPrice(H, null), null);
+  assert.equal(shownPrice(H, undefined), null); assert.equal(shownPrice(H, 'x'), null); assert.equal(shownPrice(H, -1), null);
+  assert.equal(shownPrice(R, 0), 0, 'a non-inverted zero stays a zero'); assert.equal(shownPrice(R, '120'), 120);
+  assert.deepEqual(shownBand(H, 0.01, 0.0125), [80, 100]);
+  assert.deepEqual(shownBand(R, 100, 120), [100, 120]);
+  assert.ok(Math.abs(shownMovePct(H, 25) - -20) < 1e-12);
+  assert.ok(Math.abs(shownMovePct(H, -20) - 25) < 1e-12);
+  assert.equal(shownMovePct(R, 25), 25); assert.equal(shownMovePct(R, 0), 0);
+  assert.equal(shownMovePct(H, -100), null); assert.equal(shownMovePct(H, -150), null);
+  assert.equal(shownMovePct(H, null), null); assert.equal(shownMovePct(H, undefined), null); assert.equal(shownMovePct(H, 'x'), null);
+  assert.equal(shownMovePct(R, null), null);
+  assert.equal(shownSide(H, 'above'), 'below'); assert.equal(shownSide(H, 'below'), 'above');
+  assert.equal(shownSide(H, 'up'), 'down'); assert.equal(shownSide(H, 'sideways'), 'sideways');
+  assert.equal(shownSide(R, 'above'), 'above');
+});

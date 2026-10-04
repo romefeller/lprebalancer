@@ -48,6 +48,26 @@ CHAINS = {
         'probe': 'eth_blockNumber',
         # the public Base RPC rate-limits after a few calls: no poll under two minutes
         'min_poll_seconds': 120,
+        # the public endpoint, and the environment variable that replaces it
+        # (config.PUBLIC_RPC)
+        'public_rpc': 'https://mainnet.base.org', 'rpc_env': 'LPBOT_BASE_RPC',
+    },
+    'unichain': {
+        'native_symbol': 'ETH', 'native_decimals': 18, 'gecko_network': 'unichain',
+        # native ETH counts as WETH, as on Base (the EVM signers report it so)
+        'native_mint': '0x4200000000000000000000000000000000000006',
+        'sweep': False, 'janitor': False, 'audit': False,
+        'scanner': False,
+        'payout': True,
+        'swap_via': 'venue', 'payout_via': 'venue',
+        # one EVM profit wallet serves every EVM chain: the same pin
+        'pin_env': 'LPBOT_EVM_PROFIT_WALLET_PIN',
+        'rewards': False,
+        'txfees': False,
+        'venues': False,
+        'probe': 'eth_blockNumber',
+        'min_poll_seconds': 60,
+        'public_rpc': 'https://mainnet.unichain.org', 'rpc_env': 'LPBOT_UNICHAIN_RPC',
     },
 }
 
@@ -56,6 +76,7 @@ CHAINS = {
 ADDRESS = {
     'solana': re.compile(r'[1-9A-HJ-NP-Za-km-z]{32,44}'),
     'base': re.compile(r'0x[0-9a-fA-F]{40}'),
+    'unichain': re.compile(r'0x[0-9a-fA-F]{40}'),
 }
 
 

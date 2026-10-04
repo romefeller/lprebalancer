@@ -8,7 +8,8 @@
 # Every trading parameter comes from the rebalancer.config table, not from here.
 # The keys stay out of the repository and out of this file: the variables hold
 # PATHS to them, and the wallet row of the profile names which one it signs
-# with (WALLET_SECRET_PATH for Solana, LPBOT_EVM_KEY_PATH for Base).
+# with (WALLET_SECRET_PATH for Solana, LPBOT_EVM_KEY_PATH for Base,
+# LPBOT_UNICHAIN_KEY_PATH for Unichain).
 # Payouts go only to the pinned addresses, whatever the database says.
 #
 # Stop one profile:     touch /home/ubuntu/agent-fin/lp_bot/run/<profile>/HALT
@@ -30,6 +31,7 @@ Environment=LPBOT_EVM_PROFIT_WALLET_PIN=0x2b35948898e1b4897E7FC5a70e39b213dcfd01
 EnvironmentFile=-/home/ubuntu/.kamino-keys/env
 Environment=WALLET_SECRET_PATH=/home/ubuntu/.kamino-keys/bot-wallet.secret
 Environment=LPBOT_EVM_KEY_PATH=/home/ubuntu/.kamino-keys/evm-wallet.secret
+Environment=LPBOT_UNICHAIN_KEY_PATH=/home/ubuntu/.kamino-keys/unichain-wallet.secret
 Environment=SOLANA_RPC_URL=https://api.mainnet-beta.solana.com
 Environment=LPBOT_DSN=dbname=rebalancer
 ExecStart=/usr/bin/python3 -u /home/ubuntu/agent-fin/lp_bot/rebalancer.py

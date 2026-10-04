@@ -193,7 +193,8 @@ STABLE_MINTS = {'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v',   # USDC
                 'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB',   # USDT
                 '2b1kV6DkPAnxd5ixfnxCpjxmKwqjjaYmCZfHsFu24GXo',   # PYUSD
                 'USDSwr9ApdHk5bvJKMjzff41FfuX8bSxdKcR81vTwcA',    # USDS
-                '0x833589fcd6edb6e08f4c7c32d4f71b54bda02913'}     # USDC on Base (lower case)
+                '0x833589fcd6edb6e08f4c7c32d4f71b54bda02913',     # USDC on Base (lower case)
+                '0x078d782b760474a361dda0af3839290b0ef57ad6'}     # USDC on Unichain (lower case)
 MAJOR_MINTS = STABLE_MINTS | {'So11111111111111111111111111111111111111112'}   # + SOL
 
 
@@ -215,6 +216,16 @@ def as_record(pool):
     return pool
 
 
+def stable_quote(rec):
+    """USD per token B when one side is a stablecoin by mint: 1 when token B
+    is, 1/price when token A is (USDC/HYPE on Unichain: the price is HYPE per
+    USDC). None otherwise. Pure."""
+    if is_stable(rec.get('token_b')):
+        return 1.0
+    p = float(rec.get('price') or 0)
+    return 1.0 / p if is_stable(rec.get('token_a')) and p > 0 else None
+
+
 def pool_quote_price(pool):
     """USD price of the pool's quote token (token B), priced by MINT.
 
@@ -224,8 +235,9 @@ def pool_quote_price(pool):
     """
     rec = as_record(pool)
     b = rec.get('token_b') or {}
-    if is_stable(b):
-        return 1.0
+    q = stable_quote(rec)
+    if q is not None:
+        return q
     mint = b.get('address')
     if not mint:
         return None
@@ -899,7 +911,7 @@ def score_board(records, capital, bands, swap_cost=SWAP_COST, max_rebal_per_day=
     # Quote-token prices in one Jupiter call, so a non-dollar quote costs no
     # GeckoTerminal budget.
     quotes = {}
-    need = [r['token_b']['address'] for r, _ in todo if not is_stable(r['token_b'])]
+    need = [r['token_b']['address'] for r, _ in todo if stable_quote(r) is None]
     if need:
         quotes = dexes.jupiter_prices(need)
 
@@ -908,7 +920,7 @@ def score_board(records, capital, bands, swap_cost=SWAP_COST, max_rebal_per_day=
         if progress:
             progress(i, len(todo), rec)
         qsym, qmint = rec['token_b'].get('symbol'), rec['token_b'].get('address')
-        quote_usd = 1.0 if is_stable(rec['token_b']) else quotes.get(qmint) or pool_quote_price(rec)
+        quote_usd = stable_quote(rec) or quotes.get(qmint) or pool_quote_price(rec)
         if not quote_usd:
             out.append({**base, 'skipped': 'quote token unpriced'})
             continue

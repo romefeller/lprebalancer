@@ -8,6 +8,7 @@ pool lives:
 
     dex             'orca' | 'raydium-clmm' | 'byreal' | 'pancakeswap-v3-solana' | 'meteora-dlmm'
                     | 'aerodrome-slipstream' (Base; single-pool lookup only, never on the board)
+                    | 'uniswap-v3-unichain' (Unichain; single-pool lookup only, never on the board)
     kind            'clmm' (ticks) | 'dlmm' (bins)
     address, pair
     token_a/token_b {address, symbol, name, decimals}
@@ -863,7 +864,7 @@ def _base_rpcs():
     return ((own,) if own else ()) + BASE_RPCS
 
 
-def evm_calls(calls, urls=None, timeout=20):
+def evm_calls(calls, urls=None, timeout=20, chain='Base'):
     """eth_call each (to, data) at 'latest' in ONE JSON-RPC batch. Returns the
     hex results in order. Any error, missing id or failed call moves to the
     next endpoint; all failing raises. In-process: the URL may carry a key."""
@@ -887,7 +888,7 @@ def evm_calls(calls, urls=None, timeout=20):
             return out
         except Exception as e:         # next endpoint; the last error is reported
             errors.append(f'{url.split("/")[2]}: {str(e)[:120]}')
-    raise RuntimeError('all Base RPC endpoints failed: ' + ' | '.join(errors))
+    raise RuntimeError(f'all {chain} RPC endpoints failed: ' + ' | '.join(errors))
 
 
 def _words(hexstr):
@@ -992,11 +993,96 @@ def slipstream_pool(address):
     return from_slipstream(address, st, gecko)
 
 
+# --- Unichain: Uniswap v3 (EVM) ---------------------------------------------
+# One pool at a time, by address: `pool('uniswap-v3-unichain', addr)`. Never on
+# the Solana board. The pool's state comes from the chain (one eth_call batch);
+# volume and TVL from GeckoTerminal's 'unichain' network. A pool is accepted
+# only when its factory() is Uniswap's v3 factory on Unichain and that factory
+# maps (token0, token1, fee) back to the pool. fee() is fixed per pool (no
+# dynamic fee, no staking cut): the LP keeps fee/1e6 of every swap.
+
+GECKO_UNICHAIN = 'https://api.geckoterminal.com/api/v2/networks/unichain'
+UNICHAIN_RPCS = ('https://mainnet.unichain.org', 'https://unichain-rpc.publicnode.com')
+UNICHAIN_V3_FACTORY = '0x1f98400000000000000000000000000000000003'
+_SEL['getPool_v3'] = '0x1698ee82'          # getPool(address,address,uint24)
+
+
+def _unichain_rpcs():
+    own = os.environ.get('LPBOT_UNICHAIN_RPC')
+    return ((own,) if own else ()) + UNICHAIN_RPCS
+
+
+def uniswap_v3_state(address, urls=None):
+    """The pool's own facts, from the chain. Refuses a pool whose factory is
+    not Uniswap's v3 factory on Unichain, or that the factory does not map
+    back to this address."""
+    urls = urls or _unichain_rpcs()
+    names = ['factory', 'token0', 'token1', 'fee', 'tickSpacing', 'liquidity', 'slot0']
+    res = evm_calls([(address, _SEL[n]) for n in names], urls, chain='Unichain')
+    st = {n: _words(r) for n, r in zip(names, res)}
+    factory = f"0x{st['factory'][0]:040x}"
+    if factory != UNICHAIN_V3_FACTORY:
+        raise ValueError(f'{address} is not a pool of the Uniswap v3 factory on Unichain (factory {factory})')
+    t0, t1 = _evm_addr(st['token0'][0]), _evm_addr(st['token1'][0])
+    fee = st['fee'][0]
+    arg = lambda a: f'{int(a, 16):064x}'
+    tok = evm_calls([(t0, _SEL['decimals']), (t1, _SEL['decimals']),
+                     (t0, _SEL['symbol']), (t1, _SEL['symbol']),
+                     (factory, _SEL['getPool_v3'] + arg(t0) + arg(t1) + f'{fee:064x}')], urls, chain='Unichain')
+    if f"0x{_words(tok[4])[0]:040x}" != address.lower():
+        raise ValueError(f'factory {factory} does not map ({t0}, {t1}, {fee}) to {address}')
+    da, db_ = _words(tok[0])[0], _words(tok[1])[0]
+    sqrt_p = st['slot0'][0]
+    return {
+        'token0': t0, 'token1': t1, 'decimals0': da, 'decimals1': db_,
+        'symbol0': _abi_string(tok[2]), 'symbol1': _abi_string(tok[3]),
+        'tick_spacing': _signed(st['tickSpacing'][0], 24), 'tick': _signed(st['slot0'][1], 24),
+        'fee_pips': fee, 'liquidity_raw': st['liquidity'][0],
+        'price': (sqrt_p / 2 ** 96) ** 2 * 10 ** (da - db_),
+    }
+
+
+def from_uniswap_v3(address, st, gecko):
+    """The usual record from the chain state and GeckoTerminal's attributes."""
+    at = (gecko or {}).get('attributes') or {}
+    fee = st['fee_pips'] / 1e6
+    volume = _f((at.get('volume_usd') or {}).get('h24'))
+    da, db_ = st['decimals0'], st['decimals1']
+    return {
+        'dex': 'uniswap-v3-unichain', 'kind': 'clmm', 'chain': 'unichain',
+        'address': checksum_address(address), 'pair': f"{st['symbol0']}/{st['symbol1']}",
+        'token_a': _token(st['token0'], st['symbol0'], st['symbol0'], da),
+        'token_b': _token(st['token1'], st['symbol1'], st['symbol1'], db_),
+        'price': st['price'], 'chain_price': st['price'],
+        'fee': fee, 'fee_source': 'nominal', 'fee_nominal': fee,
+        'tvl_usd': _f(at.get('reserve_in_usd')), 'volume_24h_usd': volume,
+        'fees_24h_usd': volume * fee,
+        'liquidity': st['liquidity_raw'] / math.sqrt(10 ** da * 10 ** db_) or None,
+        'adaptive_fee': False, 'tick_spacing': st['tick_spacing'], 'tick': st['tick'],
+        'reward_usd_day': 0.0, 'reward_mints': [],
+    }
+
+
+def uniswap_v3_pool(address):
+    """One Uniswap v3 pool on Unichain. The chain is required; GeckoTerminal
+    only adds volume and TVL, and its absence leaves them at 0, not the record."""
+    try:
+        st = uniswap_v3_state(address)
+    except Exception:
+        return None
+    try:
+        d = _get(f'{GECKO_UNICHAIN}/pools/{address.lower()}', accept='application/json;version=20230203')
+        gecko = d.get('data') if isinstance(d, dict) else None
+    except Exception:
+        gecko = None
+    return from_uniswap_v3(address, st, gecko)
+
+
 ADAPTERS = {'orca': orca, 'raydium-clmm': raydium, 'byreal': byreal,
             'pancakeswap-v3-solana': pancakeswap, 'meteora-dlmm': meteora_dlmm}
 SINGLE = {'orca': orca_pool, 'raydium-clmm': raydium_pool, 'byreal': byreal_pool,
           'pancakeswap-v3-solana': pancakeswap_pool, 'meteora-dlmm': meteora_dlmm_pool,
-          'aerodrome-slipstream': slipstream_pool}
+          'aerodrome-slipstream': slipstream_pool, 'uniswap-v3-unichain': uniswap_v3_pool}
 
 
 def fetch_all(dexes=KNOWN, limit=50, timeout=120):

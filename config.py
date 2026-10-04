@@ -290,8 +290,16 @@ def policy():
 
 
 # --- plumbing ----------------------------------------------------------------
-PUBLIC_RPC = (os.environ.get('SOLANA_RPC_URL') or 'https://api.mainnet-beta.solana.com') if CHAIN == 'solana' \
-    else (os.environ.get('LPBOT_BASE_RPC') or 'https://mainnet.base.org')
+def public_rpc(chain, caps, env=os.environ):
+    """The public endpoint of `chain`: SOLANA_RPC_URL or mainnet-beta on
+    Solana; on another chain the row's rpc_env, else its public_rpc
+    (chains.py; LPBOT_BASE_RPC on Base). Pure."""
+    if chain == 'solana':
+        return env.get('SOLANA_RPC_URL') or 'https://api.mainnet-beta.solana.com'
+    return env.get(caps['rpc_env']) or caps['public_rpc']
+
+
+PUBLIC_RPC = public_rpc(CHAIN, CAPS)
 
 
 def keyed_rpc(env=os.environ):
@@ -304,7 +312,7 @@ def keyed_rpc(env=os.environ):
 
 
 # On Solana LPBOT_RPC wins; then the keyed Helius endpoint; then the public
-# one. On another chain only LPBOT_BASE_RPC (in PUBLIC_RPC) counts: the shared
+# one. On another chain only its rpc_env (in PUBLIC_RPC) counts: the shared
 # service environment's LPBOT_RPC and SOLANA_RPC_URL name Solana endpoints.
 RPC = _env('LPBOT_RPC', str, keyed_rpc() or PUBLIC_RPC) if CHAIN == 'solana' else PUBLIC_RPC
 WALLET = _env('LPBOT_WALLET', str, os.environ.get(WALLET_SECRET_ENV, ''))

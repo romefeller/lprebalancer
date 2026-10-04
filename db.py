@@ -1104,6 +1104,31 @@ def _paid_usd(profile):
         return 0.0
 
 
+def stable_first(mints):
+    """Whether a pool's token A is the stablecoin and token B is not (USDC/HYPE
+    on Unichain). Its price is then B per dollar, so the volatile token's
+    dollar price is 1/price. Unknown mints: False, the token-B-stable case
+    every older profile has. Pure apart from the mint table."""
+    import engine
+    m = list(mints or [])
+    return len(m) == 2 and engine.is_stable({'address': m[0]}) and not engine.is_stable({'address': m[1]})
+
+
+def volatile_usd(price, stable_a):
+    """The volatile token's dollar price from a pool price (B per A, UI
+    units): the price itself when B is the dollar, 1/price when A is. Pure."""
+    p = float(price)
+    if not stable_a:
+        return p
+    return 1.0 / p if p > 0 else 0.0
+
+
+def _profile_mints(cur, name):
+    cur.execute('select mints from config where name = %s', (name,))
+    row = cur.fetchone()
+    return (row or {}).get('mints')
+
+
 def daily_line(day, profile=None, wallet_id=None):
     """One UTC day of the book: re-centres (bands opened), fees harvested, and
     the value of the book (equity plus what was paid out) against a 50/50
@@ -1146,6 +1171,7 @@ def daily_line(day, profile=None, wallet_id=None):
                     f"and ts > %(t0)s and ts <= %(t1)s and {FLOW_IN}", dict(w, t0=a['t0'], t1=a['t1']))
         net = float(cur.fetchone()['n'])
         mixed = mixed_sides(_pairs_held(cur, w, start, end))['a']
+        stable_a = stable_first(_profile_mints(cur, names[0]))
     e0, p0, e1, p1 = float(a['e0']), float(a['p0']), float(a['e1']), float(a['p1'])
     # Earned is accrual, the same basis as the book's "today" (fees_between);
     # fees_usd is what was harvested in the day (audit 2026-09-30: $0.61 of
@@ -1154,7 +1180,9 @@ def daily_line(day, profile=None, wallet_id=None):
     value = e1 + paid
     # a day across pairs of different base tokens (sol-swing) opens on one
     # token's price and closes on another's: no price and no hold benchmark
-    hold = e0 * (0.5 + 0.5 * p1 / p0) + net if p0 > 0 and not mixed else None
+    # the hold's volatile half moves with the volatile token's dollar price
+    v0, v1 = volatile_usd(p0, stable_a), volatile_usd(p1, stable_a)
+    hold = e0 * (0.5 + 0.5 * v1 / v0) + net if v0 > 0 and not mixed else None
     return {'day': day.isoformat(), 'complete': now() >= end,
             'recentres': int(n), 'idle_redeploys': int(idle), 'fees_usd': round(f, 4),
             'fees_earned_usd': round(earned, 4),
@@ -1196,7 +1224,10 @@ def since_start(extra_usd=0.0, profile=None, wallet_id=None):
     with cursor() as cur:
         cur.execute('select * from config where name = %s', (names[0],))
         cfg = cur.fetchone() or {}
-        a = _scope_args(names, mint=(cfg.get('mints') or [None])[0] or cfg.get('deposit_mint'))
+        # the baseline's volatile token: token A, or token B when A is the stablecoin
+        stable_a = stable_first(cfg.get('mints'))
+        a = _scope_args(names, mint=cfg['mints'][1] if stable_a else
+                        (cfg.get('mints') or [None])[0] or cfg.get('deposit_mint'))
         cur.execute("select ts, coalesce((amounts->>%(mint)s::text)::numeric, sol) sol, usdc, usd, price "
                     f"from capital_flows where kind = 'baseline' and {FLOW_IN} "
                     "order by (profile is null), ts limit 1", a)
@@ -1228,11 +1259,12 @@ def since_start(extra_usd=0.0, profile=None, wallet_id=None):
         paid = float(cur.fetchone()['u'])
         mixed = mixed_sides(_pairs_held(cur, a))['a']
     p0, p1 = float(base['price']), float(last['price'])
+    v0, v1 = volatile_usd(p0, stable_a), volatile_usd(p1, stable_a)
     start = float(base['usd']) + float(fl['net_usd'])
     value = float(last['equity_usd']) + float(extra_usd or 0.0) + paid
-    hold = ((float(base['sol']) + float(fl['net_sol'])) * p1 + float(base['usdc']) + float(fl['net_usdc'])
+    hold = ((float(base['sol']) + float(fl['net_sol'])) * v1 + float(base['usdc']) + float(fl['net_usdc'])
             + float(fl['net_fixed_usd']))
-    hold_50 = float(base['usd']) * (0.5 + 0.5 * p1 / p0) + float(fl['net_usd'])
+    hold_50 = float(base['usd']) * (0.5 + 0.5 * v1 / v0) + float(fl['net_usd'])
     days = (last['ts'] - base['ts']).total_seconds() / 86400
     out = {'since': base['ts'].isoformat(), 'days': round(days, 2),
            'start_usd': round(start, 4), 'start_sol': round(float(base['sol']) + float(fl['net_sol']), 6),
