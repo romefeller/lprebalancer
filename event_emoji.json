@@ -59,5 +59,9 @@
  "wallet_lock_timeout": "🔒",
  "HOT_PAUSE": "⏸️",
  "HOT_RESUME": "▶️",
- "hot_paused": "⏸️"
+ "hot_paused": "⏸️",
+ "MACRO_PAUSE": "📅",
+ "macro_calendar_empty": "📅",
+ "macro_unread": "❓",
+ "macro_blocked": "⏳"
 }

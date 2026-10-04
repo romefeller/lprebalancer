@@ -233,6 +233,14 @@ HOT_PAUSE_FG_HOURS = float(_CFG.get('hot_pause_fg_hours') or 6)
 HOT_PAUSE_RESUME_S = int(_CFG.get('hot_pause_resume_minutes') or 30) * 60
 HOT_PAUSE_MAX_S = float(_CFG.get('hot_pause_max_hours') or 12) * 3600
 HOT_PAUSE_COOLDOWN_S = int(_CFG.get('hot_pause_cooldown_minutes') or 60) * 60
+# Scheduled pause around macro releases (sql/030, rebalancer.macro_events):
+# closed and waiting 50/50 from MACRO_PAUSE_BEFORE_S before each event to
+# MACRO_PAUSE_AFTER_S after it, whatever the market says.
+MACRO_PAUSE_ENABLED = _env('LPBOT_MACRO_PAUSE', lambda s: s.lower() in ('1', 'true', 'yes'),
+                           bool(_CFG.get('macro_pause_enabled')))
+MACRO_PAUSE_BEFORE_S = int(_CFG.get('macro_pause_before_minutes') if _CFG.get('macro_pause_before_minutes')
+                           is not None else 15) * 60
+MACRO_PAUSE_AFTER_S = int(_CFG.get('macro_pause_after_minutes') or 120) * 60
 # The edge watch (sql/025): within EDGE_WATCH_PCT percent of the price of a
 # band edge, read the pool's price every EDGE_WATCH_S between polls; 0 is off.
 EDGE_WATCH_PCT = float(_CFG.get('edge_watch_pct') or 0.0)

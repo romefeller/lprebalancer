@@ -316,9 +316,20 @@ export function render(row) {
       return `PAUSED · bad hot moment: fees ${n(row.ratio, 2)}x the in-band loss over ${n(row.hours, 0)}h`
         + ` (< ${n(row.threshold, 2)}) · ±${n(row.regime?.choice_pct, 2)}% chosen\n`
         + `price ${n(row.price, 4)} · closing, waiting 50/50 · reopens ${row.resume_minutes} min after it clears\n` + book(row);
+    case 'MACRO_PAUSE':
+      return `PAUSED · ${row.kind} at ${row.event_at} UTC: ${row.held === false ? 'no band held' : 'closing'}, `
+        + `waiting 50/50 · reopens in ${row.resume_minutes} min\n`
+        + (row.price == null ? '' : `price ${n(row.price, 4)}\n`) + book(row);
+    case 'macro_calendar_empty':
+      return `CALENDAR · ${row.reason}`;
+    case 'macro_blocked':
+      return `MACRO PAUSE HELD BACK · ${row.kind} at ${row.event_at} UTC · ${row.reason}`;
+    case 'macro_unread':
+      return `CALENDAR UNREADABLE · ${row.reason} · no macro pause until it reads`;
     case 'HOT_RESUME':
       return `RESUMING · ${row.reason} · paused ${row.paused_minutes} min`;
     case 'hot_paused':
+      if (row.kind === 'macro') return `paused ${row.paused_minutes} min · macro window · reopens in ${row.until_minutes} min`;
       return `paused ${row.paused_minutes} min · fees/loss ${row.ratio == null ? '—' : n(row.ratio, 2)}`
         + ` · hot ${row.hot ? 'yes' : 'no'} · clear ${row.clear_minutes} min`;
     case 'REGIME_NARROW':

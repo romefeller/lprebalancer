@@ -752,6 +752,24 @@ def close_position(mint, sig, withdraw_usd):
                     (now(), sig, withdraw_usd, mint))
 
 
+def macro_event_near(before_s, after_s):
+    """The macro event whose window [ts - before_s, ts + after_s) holds now:
+    {'ts': epoch seconds, 'kind'}, the earliest if several; or None."""
+    with cursor() as cur:
+        cur.execute("select extract(epoch from ts)::float8 t, kind from macro_events "
+                    "where ts - make_interval(secs => %s) <= now() and now() < ts + make_interval(secs => %s) "
+                    "order by ts limit 1", (before_s, after_s))
+        r = cur.fetchone()
+    return {'ts': r['t'], 'kind': r['kind']} if r else None
+
+
+def macro_next_ts():
+    """Epoch seconds of the next macro event, or None when none is listed."""
+    with cursor() as cur:
+        cur.execute('select extract(epoch from min(ts))::float8 t from macro_events where ts > now()')
+        return cur.fetchone()['t']                    # an aggregate: one row, null when none
+
+
 def position_closed(mint):
     """Whether the ledger has the position closed: True, False (still open),
     or None (no such position)."""

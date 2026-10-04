@@ -4,6 +4,7 @@
 (rebalancer.hot_pause) and the wait (rebalancer.hot_paused)."""
 import datetime as dt
 import math
+import time
 import unittest
 from unittest import mock
 
@@ -239,6 +240,8 @@ class Pause(unittest.TestCase):
                 mock.patch.object(rebalancer, 'save', lambda s: saved.append(dict(s))), \
                 mock.patch.object(rebalancer.time, 'time', lambda: now), \
                 mock.patch.object(config, 'HOT_PAUSE_COOLDOWN_S', 3600), \
+                mock.patch.object(config, 'HOT_PAUSE_ENABLED', True), \
+                mock.patch.object(config, 'MACRO_PAUSE_ENABLED', False), \
                 mock.patch.object(config, 'POOL', 'P'):
             r = rebalancer.hot_pause(state, status(quoteUsd=quote),
                                      rv if rv is not None else {'choice': 1.03, 'choice_pct': 3.0, 'stale': False})
@@ -306,6 +309,8 @@ class Pause(unittest.TestCase):
         seen = []
         for st_kw, want in (({'whirlpool': 'W'}, 'W'), ({'whirlpool': None}, 'P')):
             with mock.patch.object(rebalancer, 'hot_pause_view', lambda *a: (seen.append(a[0]) or {'bad': False})), \
+                    mock.patch.object(config, 'HOT_PAUSE_ENABLED', True), \
+                    mock.patch.object(config, 'MACRO_PAUSE_ENABLED', False), \
                     mock.patch.object(config, 'POOL', 'P'):
                 self.assertIs(rebalancer.hot_pause({}, status(**st_kw), {'choice': 1.03}), False)
             self.assertEqual(seen[-1], want)
@@ -462,7 +467,7 @@ class Loop(unittest.TestCase):
     src = open(rebalancer.__file__, encoding='utf-8').read()
 
     def test_held_band_checks_before_the_exit(self):
-        i = self.src.index('if config.HOT_PAUSE_ENABLED and hot_pause(state, status, rv):')
+        i = self.src.index('if (config.HOT_PAUSE_ENABLED or config.MACRO_PAUSE_ENABLED) and hot_pause(state, status, rv):')
         j = self.src.index("if not status.get('inRange'):\n            side =")
         k = self.src.index('fo = venue_failover(state, status)')
         self.assertLess(k, i); self.assertLess(i, j)
@@ -470,6 +475,10 @@ class Loop(unittest.TestCase):
 
     def test_no_position_waits_before_dormant_and_reopen(self):
         i = self.src.index("if state.get('hot_pause') and hot_paused(state):")
+        j = self.src.index('if macro_hold(state):')
+        self.assertLess(self.src.index('if dormant(state, b0):'), j)
+        self.assertLess(j, self.src.index("notify('no_position'"))
+        self.assertLess(j, self.src.index('if resume_reopen(state):'))
         self.assertLess(self.src.index('            sell_left_behind(state)\n            if state.get'), i)
         self.assertLess(i, self.src.index('if dormant(state, b0):'))
         self.assertLess(i, self.src.index('if resume_reopen(state):'))
@@ -508,3 +517,345 @@ class Config(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class MacroView(unittest.TestCase):
+    def go(self, enabled=True, near=None, nxt=NOW + 86400, st=None, boom=None, now=NOW):
+        told, asked = [], []
+
+        def near_f(b, a):
+            asked.append((b, a))
+            if boom:
+                raise boom
+            return near
+        state = st if st is not None else {}
+        with mock.patch.object(config, 'MACRO_PAUSE_ENABLED', enabled), \
+                mock.patch.object(config, 'MACRO_PAUSE_BEFORE_S', 900), mock.patch.object(config, 'MACRO_PAUSE_AFTER_S', 7200), \
+                mock.patch.object(rebalancer.db, 'macro_event_near', near_f), \
+                mock.patch.object(rebalancer.db, 'macro_next_ts', lambda: nxt), \
+                mock.patch.object(rebalancer, 'notify', lambda ev, **kw: told.append(ev)), \
+                mock.patch.object(rebalancer, 'save', lambda s: None), \
+                mock.patch.object(rebalancer.time, 'time', lambda: now):
+            r = rebalancer.macro_view(state)
+        return r, told, asked, state
+
+    def test_off_reads_nothing(self):
+        r, told, asked, _ = self.go(enabled=False, near={'ts': NOW, 'kind': 'FOMC'})
+        self.assertIsNone(r); self.assertEqual((told, asked), ([], []))
+
+    def test_window_and_until(self):
+        r, told, asked, _ = self.go(near={'ts': NOW + 600, 'kind': 'FOMC'})
+        self.assertEqual(r, {'ts': NOW + 600, 'kind': 'FOMC', 'until': NOW + 600 + 7200})
+        self.assertEqual(asked, [(900, 7200)]); self.assertEqual(told, [])
+        self.assertIsNone(self.go(near=None)[0])
+
+    def test_unreadable_calendar_is_no_window_and_told(self):
+        r, told, _, _ = self.go(boom=RuntimeError('db'))
+        self.assertIsNone(r); self.assertEqual(told, ['macro_unread'])
+
+    def test_empty_calendar_told_once_a_day(self):
+        for nxt in (None, NOW + 60 * 86400 + 1):
+            _, told, _, st = self.go(nxt=nxt)
+            self.assertEqual(told, ['macro_calendar_empty'], nxt); self.assertEqual(st['macro_calendar_checked'], NOW)
+        _, told, _, _ = self.go(nxt=NOW + 60 * 86400)
+        self.assertEqual(told, [])
+        _, told, _, _ = self.go(nxt=None, st={'macro_calendar_checked': NOW - 86399})
+        self.assertEqual(told, [])
+        _, told, _, _ = self.go(nxt=None, st={'macro_calendar_checked': NOW - 86400})
+        self.assertEqual(told, ['macro_calendar_empty'])
+
+    def test_no_state_skips_the_calendar_check(self):
+        told = []
+        with mock.patch.object(config, 'MACRO_PAUSE_ENABLED', True), \
+                mock.patch.object(rebalancer.db, 'macro_event_near', lambda b, a: None), \
+                mock.patch.object(rebalancer.db, 'macro_next_ts', side_effect=AssertionError('read')), \
+                mock.patch.object(rebalancer, 'notify', lambda ev, **kw: told.append(ev)):
+            self.assertIsNone(rebalancer.macro_view(None))
+        self.assertEqual(told, [])
+
+
+def book_fake(calls):
+    """notify_book's real signature, so a payload key named like its first
+    parameter fails here as it would live (audit 2026-10-04, C1)."""
+    def notify_book(event, **payload):
+        calls.append(('book', event, payload))
+    return notify_book
+
+
+class MacroPause(unittest.TestCase):
+    M = {'ts': NOW + 600, 'kind': 'FOMC', 'until': NOW + 7800}
+
+    def go(self, m=M, budget=5, venue_ok=True, rv=None, hot_enabled=False, st=None):
+        calls = []
+        state = st if st is not None else {}
+        with mock.patch.object(rebalancer, 'macro_view', lambda s: m), \
+                mock.patch.object(rebalancer, 'hot_pause_view', side_effect=AssertionError('no HOT read')), \
+                mock.patch.object(rebalancer, 'hot_pause_close',
+                                  lambda s, st, why, now, **kw: (calls.append(('close', why, now, kw)) or True)), \
+                mock.patch.object(rebalancer, 'calm_budget_left', lambda s: budget), \
+                mock.patch.object(rebalancer, 'voluntary_move_allowed', side_effect=AssertionError('no gap check')), \
+                mock.patch.object(rebalancer.health, 'allowed', lambda key, now: (calls.append(('breaker', key)) or (venue_ok, 0))), \
+                mock.patch.object(rebalancer, 'notify_book', book_fake(calls)), \
+                mock.patch.object(rebalancer, 'notify', lambda ev, **kw: calls.append(('notify', ev, kw))), \
+                mock.patch.object(rebalancer, 'save', lambda s: None), \
+                mock.patch.object(rebalancer.db, 'event', lambda *a: calls.append(('event', a[0]))), \
+                mock.patch.object(config, 'HOT_PAUSE_ENABLED', hot_enabled), \
+                mock.patch.object(config, 'DEX', 'raydium-clmm'), \
+                mock.patch.object(config, 'MACRO_PAUSE_AFTER_S', 7200), \
+                mock.patch.object(rebalancer.time, 'time', lambda: NOW):
+            r = rebalancer.hot_pause(state, status(), rv)
+        return r, calls, state
+
+    def test_a_window_closes_whatever_the_market_or_the_hot_switch(self):
+        r, calls, _ = self.go(rv=None)                                 # no regime view, HOT switch off
+        self.assertIs(r, True)
+        self.assertEqual([c[0] for c in calls], ['breaker', 'book', 'event', 'close'])
+        self.assertEqual(calls[0][1], 'venue:raydium-clmm')
+        self.assertEqual(calls[1][1], 'MACRO_PAUSE')
+        self.assertEqual({k: calls[1][2][k] for k in ('kind', 'event_at', 'resume_minutes', 'held', 'price')},
+                         {'kind': 'FOMC', 'event_at': '01-15 08:10', 'resume_minutes': 130, 'held': True, 'price': 120.0})
+        close = calls[3]
+        self.assertEqual(close[2], NOW); self.assertEqual(close[3], {'kind': 'macro', 'until': NOW + 7800})
+        self.assertEqual(close[1], 'macro pause: FOMC at 01-15 08:10 UTC; waiting 50/50 until 120 min after it')
+
+    def test_the_real_notify_book_accepts_the_payload(self):
+        sent = []
+        with mock.patch.object(rebalancer, 'macro_view', lambda s: self.M), \
+                mock.patch.object(rebalancer, 'hot_pause_close', lambda *a, **k: True), \
+                mock.patch.object(rebalancer, 'calm_budget_left', lambda s: 5), \
+                mock.patch.object(rebalancer.health, 'allowed', lambda key, now: (True, 0)), \
+                mock.patch.object(rebalancer.health, 'summary', lambda: []), \
+                mock.patch.object(rebalancer.db, 'stats', lambda: {'equity_usd': 1.0}), \
+                mock.patch.object(rebalancer, 'notify', lambda ev, **kw: sent.append((ev, kw))), \
+                mock.patch.object(rebalancer.db, 'event', lambda *a: None):
+            self.assertIs(rebalancer.hot_pause({}, status(), None), True)
+        self.assertEqual(sent[0][0], 'MACRO_PAUSE'); self.assertEqual(sent[0][1]['kind'], 'FOMC')
+
+    def test_budget_or_breaker_hold_the_close_and_say_so_once(self):
+        for kw in ({'budget': 0}, {'venue_ok': False}):
+            st = {}
+            r, calls, st = self.go(st=st, **kw)
+            self.assertIs(r, False, kw)
+            self.assertEqual([c[1] for c in calls if c[0] == 'notify'], ['macro_blocked'], kw)
+            self.assertEqual(st['macro_blocked_told'], NOW + 600)
+            r, calls, _ = self.go(st=st, **kw)
+            self.assertEqual([c for c in calls if c[0] in ('notify', 'close')], [], kw)   # once per window
+        r, calls, _ = self.go(budget=1)
+        self.assertIs(r, True)
+
+    def test_no_window_and_hot_off_does_nothing(self):
+        r, calls, _ = self.go(m=None, rv={'choice': 1.03})
+        self.assertIs(r, False); self.assertEqual(calls, [])
+
+
+class MacroHold(unittest.TestCase):
+    def go(self, m):
+        calls, state = [], {'pending_reopen': {'x': 1}}
+        with mock.patch.object(rebalancer, 'macro_view', lambda s: m), \
+                mock.patch.object(rebalancer, 'notify_book', book_fake(calls)), \
+                mock.patch.object(rebalancer.db, 'event', lambda *a: calls.append(('event', a[0]))), \
+                mock.patch.object(rebalancer, 'save', lambda s: None), \
+                mock.patch.object(config, 'POOL', 'P'), \
+                mock.patch.object(rebalancer.time, 'time', lambda: NOW):
+            r = rebalancer.macro_hold(state)
+        return r, calls, state
+
+    def test_no_window_holds_nothing(self):
+        r, calls, state = self.go(None)
+        self.assertIs(r, False); self.assertEqual(calls, []); self.assertNotIn('hot_pause', state)
+
+    def test_a_window_with_no_band_waits_and_keeps_the_reopen_intent(self):
+        r, calls, state = self.go({'ts': NOW + 600, 'kind': 'FOMC', 'until': NOW + 7800})
+        self.assertIs(r, True)
+        p = state['hot_pause']
+        self.assertEqual({k: p[k] for k in ('kind', 'until', 'mint', 'booked', 'swapped', 'pool', 'since')},
+                         {'kind': 'macro', 'until': NOW + 7800, 'mint': None, 'booked': True, 'swapped': False,
+                          'pool': 'P', 'since': NOW})
+        self.assertEqual(calls[0][1], 'MACRO_PAUSE'); self.assertIs(calls[0][2]['held'], False)
+        self.assertEqual(calls[0][2]['resume_minutes'], 130); self.assertEqual(calls[1], ('event', 'MACRO_PAUSE'))
+        self.assertEqual(state['pending_reopen'], {'x': 1})
+
+
+class MacroUnread(unittest.TestCase):
+    def test_told_once_an_hour(self):
+        told = []
+        state = {'macro_calendar_checked': NOW}
+        for t, want in ((NOW, 1), (NOW + 3599, 1), (NOW + 3600, 2)):
+            with mock.patch.object(config, 'MACRO_PAUSE_ENABLED', True), \
+                    mock.patch.object(rebalancer.db, 'macro_event_near', side_effect=RuntimeError('no table')), \
+                    mock.patch.object(rebalancer, 'notify', lambda ev, **kw: told.append(ev)), \
+                    mock.patch.object(rebalancer, 'save', lambda s: None), \
+                    mock.patch.object(rebalancer.time, 'time', lambda: t):
+                self.assertIsNone(rebalancer.macro_view(state))
+            self.assertEqual(len(told), want, t)
+        self.assertEqual(state['macro_unread_told'], NOW + 3600)
+
+    def test_no_state_still_tells_and_never_raises(self):
+        told = []
+        with mock.patch.object(config, 'MACRO_PAUSE_ENABLED', True), \
+                mock.patch.object(rebalancer.db, 'macro_event_near', side_effect=RuntimeError('no table')), \
+                mock.patch.object(rebalancer, 'notify', lambda ev, **kw: told.append(ev)):
+            self.assertIsNone(rebalancer.macro_view(None))
+        self.assertEqual(told, ['macro_unread'])
+
+
+class Close(unittest.TestCase):
+    def test_records_kind_and_until_before_the_close(self):
+        seen, saved = [], []
+        state = {}
+        with mock.patch.object(rebalancer, 'rebalance', lambda s, st, why, **kw: seen.append(dict(s['hot_pause']))), \
+                mock.patch.object(rebalancer.db, 'position_closed', lambda m: True), \
+                mock.patch.object(rebalancer, 'hot_pause_swap', lambda s, p: None), \
+                mock.patch.object(rebalancer, 'position_usd', lambda st: 5.0), \
+                mock.patch.object(rebalancer, 'save', lambda s: saved.append(1)), \
+                mock.patch.object(config, 'POOL', 'P'):
+            self.assertIs(rebalancer.hot_pause_close(state, status(), 'why', NOW, kind='macro', until=NOW + 9), True)
+        self.assertEqual(seen[0]['kind'], 'macro'); self.assertEqual(seen[0]['until'], NOW + 9)
+        self.assertIsNone(seen[0]['ratio']); self.assertIs(state['hot_pause']['booked'], True)
+        self.assertEqual(seen[0]['since'], NOW); self.assertEqual(seen[0]['withdraw_usd'], 5.0)
+
+
+class MacroPaused(unittest.TestCase):
+    def go(self, p, m=None, now=NOW, macro=True, hot=False, view=None):
+        told, events = [], []
+        self.swaps = 0
+        state = {'hot_pause': dict(p)}
+
+        def swap(s, pp):
+            self.swaps += 1; pp['swapped'] = True
+        with mock.patch.object(config, 'MACRO_PAUSE_ENABLED', macro), mock.patch.object(config, 'HOT_PAUSE_ENABLED', hot), \
+                mock.patch.object(rebalancer, 'hot_pause_swap', swap), \
+                mock.patch.object(config, 'POOL', 'P'), \
+                mock.patch.object(config, 'HOT_PAUSE_RESUME_S', 1800), mock.patch.object(config, 'HOT_PAUSE_MAX_S', 43200), \
+                mock.patch.object(rebalancer, 'macro_view', lambda s: m), \
+                mock.patch.object(rebalancer, 'sample_fee_growth', lambda s: None), \
+                mock.patch.object(rebalancer, 'daily_report', lambda s: None), \
+                mock.patch.object(rebalancer, 'run_audits', lambda s: None), \
+                mock.patch.object(rebalancer, 'wallet', lambda pl: {'balanceA': 1.0, 'price': 120.0, 'quoteUsd': 1.0}), \
+                mock.patch.object(rebalancer, 'regime_choice_now', lambda pl, px: 1.03), \
+                mock.patch.object(rebalancer, 'hot_pause_view',
+                                  lambda *a: (told.append(('view',)) or (view or {'hot': True, 'ratio': 0.5, 'bad': True}))), \
+                mock.patch.object(rebalancer, 'notify', lambda ev, **kw: told.append((ev, kw))), \
+                mock.patch.object(rebalancer.db, 'event', lambda *a: events.append(a)), \
+                mock.patch.object(rebalancer, 'save', lambda s: None), \
+                mock.patch.object(rebalancer.time, 'time', lambda: now):
+            r = rebalancer.hot_paused(state)
+        return r, state, told, events
+
+    P = {'since': NOW - 1200, 'last_bad': NOW - 1200, 'pool': 'P', 'told': NOW - 60, 'booked': True, 'swapped': True,
+         'kind': 'macro', 'until': NOW + 6000}
+
+    def test_waits_for_its_window_without_reading_the_market(self):
+        r, state, told, _ = self.go(self.P)
+        self.assertIs(r, True); self.assertNotIn(('view',), told); self.assertIn('hot_pause', state)
+        self.assertEqual(told, [])                                     # told a minute ago
+        self.assertEqual(self.swaps, 0); self.assertIs(state['hot_pause']['swapped'], True)
+
+    def test_tells_with_the_minutes_left(self):
+        r, state, told, _ = self.go(dict(self.P, told=NOW - 1800))
+        self.assertEqual(told[-1][0], 'hot_paused')
+        self.assertEqual(told[-1][1]['until_minutes'], 100); self.assertEqual(told[-1][1]['kind'], 'macro')
+        self.assertEqual(state['hot_pause']['told'], NOW)
+
+    def test_resumes_when_the_window_ends(self):
+        r, state, told, events = self.go(dict(self.P, until=NOW))
+        self.assertIs(r, False); self.assertNotIn('hot_pause', state); self.assertNotIn('hot_pause_resumed', state)
+        self.assertEqual(told[-1][0], 'HOT_RESUME'); self.assertEqual(told[-1][1]['reason'], 'the macro window is over')
+        self.assertEqual(told[-1][1]['paused_minutes'], 20); self.assertEqual(events[0][0], 'HOT_RESUME')
+        self.assertNotIn(('view',), told)
+        r, _, _, _ = self.go(dict(self.P, until=NOW + 1))
+        self.assertIs(r, True)
+
+    def test_a_window_still_open_extends_the_pause(self):
+        r, state, _, _ = self.go(dict(self.P, until=NOW - 5), m={'ts': NOW, 'kind': 'FOMC', 'until': NOW + 7200})
+        self.assertIs(r, True); self.assertEqual(state['hot_pause']['until'], NOW + 7200)
+        r, state, _, _ = self.go(dict(self.P, until=NOW + 9000), m={'ts': NOW, 'kind': 'FOMC', 'until': NOW + 7200})
+        self.assertEqual(state['hot_pause']['until'], NOW + 9000)     # never shortened
+
+    def test_a_hot_pause_waits_through_a_window_then_reads_the_market(self):
+        hp = dict(self.P, kind='hot', until=None, last_bad=NOW - 3600)
+        r, state, told, _ = self.go(hp, m={'ts': NOW, 'kind': 'FOMC', 'until': NOW + 7200}, hot=True)
+        self.assertIs(r, True); self.assertNotIn(('view',), told); self.assertEqual(state['hot_pause']['until'], NOW + 7200)
+        r, state, told, _ = self.go(dict(hp, until=NOW), hot=True, view={'hot': False, 'ratio': None, 'bad': False})
+        self.assertIn(('view',), told); self.assertIs(r, False)       # window over, signal clear for 60 min
+
+    def test_a_pool_switch_inside_the_window_waits_on_the_new_pool(self):
+        r, state, _, _ = self.go(dict(self.P, pool='OLD'))
+        self.assertIs(r, True); self.assertEqual(state['hot_pause']['pool'], 'P')
+        self.assertEqual(self.swaps, 1)                                # 50/50 in the new pool's tokens
+        r, state, told, _ = self.go(dict(self.P, pool='OLD', until=NOW))
+        self.assertIs(r, False); self.assertEqual(told[0][0], 'HOT_RESUME')   # window over: reopen there
+        self.assertIn('pool changed', told[0][1]['reason']); self.assertEqual(self.swaps, 0)
+        r, state, told, _ = self.go(dict(self.P, pool='OLD'), macro=False)
+        self.assertIs(r, False); self.assertIn('pool changed', told[0][1]['reason']); self.assertEqual(self.swaps, 0)
+        r, state, told, _ = self.go(dict(self.P, pool='OLD', kind='hot', until=None), hot=True)
+        self.assertIs(r, False); self.assertEqual(self.swaps, 0)       # a HOT pause has no window to keep
+
+    def test_switch_off_resumes_by_kind(self):
+        r, state, told, _ = self.go(self.P, macro=False, hot=True)
+        self.assertIs(r, False); self.assertEqual(told[0][0], 'HOT_RESUME')
+        self.assertNotIn('hot_pause_resumed', state)
+        r, state, _, _ = self.go(dict(self.P, kind='hot', until=None), macro=False, hot=False)
+        self.assertEqual(state['hot_pause_resumed'], NOW)
+        r, state, told, _ = self.go(dict(self.P, kind='hot', until=None), macro=True, hot=False)
+        self.assertIs(r, False)
+        r, state, _, _ = self.go(dict(self.P, kind=None, until=None, last_bad=NOW), macro=False, hot=True)
+        self.assertIs(r, True)                                         # an old pause without a kind is a HOT one
+
+
+class MacroCalendar(unittest.TestCase):
+    def setUp(self):
+        import db
+        self.db = db
+        self.clear()
+
+    def tearDown(self):
+        self.clear()
+
+    def clear(self):
+        with self.db.cursor(commit=True) as cur:
+            cur.execute("delete from macro_events where kind like 'TEST%'")
+
+    def put(self, secs_from_now, kind='TEST'):
+        with self.db.cursor(commit=True) as cur:
+            cur.execute("insert into macro_events (ts, kind, source) values (now() + make_interval(secs => %s), %s, 't')",
+                        (secs_from_now, kind))
+
+    def test_window_edges(self):
+        self.put(900 - 5)                                              # 14m55s ahead: inside a 15-min lead
+        m = self.db.macro_event_near(900, 7200)
+        self.assertEqual(m['kind'], 'TEST'); self.assertAlmostEqual(m['ts'], time.time() + 895, delta=5)
+        self.assertIsNone(self.db.macro_event_near(880, 7200))
+        self.clear()
+        self.put(-7200 + 5)
+        self.assertIsNotNone(self.db.macro_event_near(900, 7200))
+        self.assertIsNone(self.db.macro_event_near(900, 7190))
+
+    def test_earliest_of_two_and_next(self):
+        self.put(-600, 'TEST1'); self.put(300, 'TEST2')
+        self.assertEqual(self.db.macro_event_near(900, 7200)['kind'], 'TEST1')
+        self.assertAlmostEqual(self.db.macro_next_ts(), time.time() + 300, delta=5)
+        self.clear()
+        n = self.db.macro_next_ts()
+        self.assertTrue(n is None or n > time.time() + 600)            # the TEST rows are gone
+
+
+class MacroSeed(unittest.TestCase):
+    def test_the_fed_calendar_is_seeded_in_utc(self):
+        import db
+        with db.cursor() as cur:
+            cur.execute("select to_char(ts at time zone 'UTC', 'YYYY-MM-DD HH24:MI') t from macro_events "
+                        "where kind = 'FOMC' and source like 'federalreserve.gov%' order by ts")
+            got = [r['t'] for r in cur.fetchall()]
+        self.assertEqual(got[:3], ['2026-10-28 18:00', '2026-12-09 19:00', '2027-01-27 19:00'])
+        self.assertGreaterEqual(len(got), 10)
+
+    def test_config_defaults_and_constraint(self):
+        import db
+        _fixtures.ensure_profile()
+        row = db.load_config('sol-usdc')
+        self.assertFalse(row['macro_pause_enabled'])
+        self.assertEqual((row['macro_pause_before_minutes'], row['macro_pause_after_minutes']), (15, 120))
+        for k, v in (('macro_pause_before_minutes', '241'), ('macro_pause_after_minutes', '14')):
+            with self.assertRaises(Exception, msg=k):
+                db.set_param('sol-usdc', k, v)

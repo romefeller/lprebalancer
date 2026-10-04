@@ -239,12 +239,14 @@ TARGETS = {
     'liq_window': ('db.py', ['pool_stats_summary'], PY_TESTS('test_db.PoolStatsWindow', 'test_hardening.LiquiditySmoothed')),
     'pause_math': ('calm.py', ['fee_loss_ratio', 'hot_pause_step'], PY_TESTS('test_hot_pause')),
     'pause_yield': ('dexes.py', ['fee_yield'], PY_TESTS('test_hot_pause')),
-    'pause_loop': ('rebalancer.py', ['hot_pause_view', 'hot_pause_swap', 'hot_pause', 'hot_paused'], PY_TESTS('test_hot_pause')),
+    'pause_loop': ('rebalancer.py', ['hot_pause_view', 'hot_pause_swap', 'hot_pause', 'hot_pause_close', 'hot_paused',
+                                     'macro_view', 'macro_hold'], PY_TESTS('test_hot_pause')),
+    'macro_db': ('db.py', ['macro_event_near', 'macro_next_ts'], PY_TESTS('test_hot_pause')),
     'pause_db': ('db.py', ['position_closed'], PY_TESTS('test_hot_pause')),
     'evm_key': ('evm/keyfile.mjs', ['validKey', 'writeNewKey', 'readKey'], NODE_TESTS('test_evm_wallet.mjs')),
 }
 
-SQL_TARGETS = {'band_profile', 'daily', 'capital_db', 'book_scope', 'book_sums', 'stats_sum', 'wallets_db', 'wallet_names', 'db_stats', 'liq_window', 'pause_db'}
+SQL_TARGETS = {'band_profile', 'daily', 'capital_db', 'book_scope', 'book_sums', 'stats_sum', 'wallets_db', 'wallet_names', 'db_stats', 'liq_window', 'pause_db', 'macro_db'}
 
 # Mutants that cannot change behaviour, with the reason. Keyed by the mutant's
 # identity (see "identity" below):
@@ -252,6 +254,14 @@ SQL_TARGETS = {'band_profile', 'daily', 'capital_db', 'book_scope', 'book_sums',
 # The report prints each survivor's key: copy it here with a reason. The line
 # number is not in the key, so an edit above a mutant keeps its entry valid.
 EQUIVALENT = {
+    ('pause_loop', 'macro_view', 'const 0->1', "if state is None or time.time() - state.get('macro_unread_told', 0) >= MACRO_UNREAD_TELL_S:", 0):
+        'never told: the clock is decades past both 0 and 1, far beyond an hour',
+    ('pause_loop', 'macro_view', 'const 0->1', "if state is not None and time.time() - state.get('macro_calendar_checked', 0) >= 86400:", 0):
+        'never checked: the clock is decades past both 0 and 1, far beyond a day',
+    ('pause_loop', 'hot_paused', 'const 0->1', "p['until'] = max(p.get('until') or 0, m['until'])", 0):
+        'a window end is an epoch time, decades past both 0 and 1: max() picks it either way',
+    ('pause_loop', 'hot_paused', 'const 0->1', "if now - p.get('told', 0) >= HOT_PAUSE_TELL_S:", 1):
+        'never told: the clock is decades past both 0 and 1, far beyond the telling interval',
     ('pause_loop', 'hot_pause', 'const 0->1', "if now - state.get('hot_pause_resumed', 0) < config.HOT_PAUSE_COOLDOWN_S:", 0):
         'never resumed: the clock is decades past both 0 and 1, far beyond any cooldown',
     ('pause_loop', 'hot_paused', 'const 0->1', "if now - p.get('told', 0) >= HOT_PAUSE_TELL_S:", 0):

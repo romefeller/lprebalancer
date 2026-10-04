@@ -226,6 +226,19 @@ test('every message carries its pool, except the portfolio of all pools', () => 
   assert.ok(message({ event: 'PORTFOLIO', pair: 'SOL/USDC', pools: [], wallets: [] }).startsWith('📊 PORTFOLIO'));
 });
 
+test('the pause events render', () => {
+  assert.ok(render({ event: 'MACRO_PAUSE', kind: 'FOMC', event_at: '10-28 18:00', resume_minutes: 135, held: true, price: 120.5 })
+    .startsWith('PAUSED · FOMC at 10-28 18:00 UTC: closing, waiting 50/50 · reopens in 135 min\nprice 120.5'));
+  assert.ok(render({ event: 'MACRO_PAUSE', kind: 'FOMC', event_at: '10-28 18:00', resume_minutes: 130, held: false })
+    .startsWith('PAUSED · FOMC at 10-28 18:00 UTC: no band held, waiting 50/50 · reopens in 130 min\n'));
+  assert.equal(render({ event: 'hot_paused', kind: 'macro', paused_minutes: 30, until_minutes: 105 }),
+    'paused 30 min · macro window · reopens in 105 min');
+  assert.equal(render({ event: 'macro_blocked', kind: 'FOMC', event_at: '10-28 18:00', reason: 'r' }),
+    'MACRO PAUSE HELD BACK · FOMC at 10-28 18:00 UTC · r');
+  assert.equal(render({ event: 'macro_calendar_empty', reason: 'add dates' }), 'CALENDAR · add dates');
+  assert.equal(render({ event: 'macro_unread', reason: 'x' }), 'CALENDAR UNREADABLE · x · no macro pause until it reads');
+});
+
 test('the new events render', () => {
   assert.equal(render({ event: 'dormant', deployable_usd: 1.5, min_deploy_usd: 5, poll_seconds: 300 }),
     'DORMANT · no position and too little to deploy\ndeployable $1.50 · opens from $5.00 · light poll every 300s');
@@ -461,7 +474,10 @@ test('every row of the real feed renders as before, behind its pool label', { sk
       }
       // the old bridge printed "move at 2 steps" whatever the configured steps (ab89dc0 shows them)
       if (r.regime?.steps != null) want = want.replace('move at 2 steps', `move at ${r.regime.steps} steps`);
-      assert.equal(message(r), (label ? label + ' ' : '') + want, `${f}: ${line.slice(0, 200)}`);
+      let got = message(r);
+      // DAILY lines gained "capital moved" (665c039) and the reference-period line (9aaf63c) after the old bridge
+      if (r.event === 'DAILY') got = got.replace(/ · capital moved [^\n·]*/, '').replace(/\nvs [^\n]*?\(avg [^\n]*?(?= · SOL| ·? *$|$)/, '');
+      assert.equal(got, (label ? label + ' ' : '') + want, `${f}: ${line.slice(0, 200)}`);
       n += 1;
     }
   }

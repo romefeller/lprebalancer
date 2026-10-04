@@ -1465,7 +1465,7 @@ def band_profile(mint, event, reason=None):
     try:
         db.record_band_profile(mint, event, reason)
     except Exception as e:
-        notify('band_profile_failed', reason=f'{type(e).__name__}: {tidy(e)}', mint=mint, event=event)
+        notify('band_profile_failed', reason=f'{type(e).__name__}: {tidy(e)}', mint=mint, band_event=event)
 
 
 def dividend(state, status):
@@ -2537,14 +2537,84 @@ def hot_pause_swap(state, p):
     balance_wallet(state, bal, rec, share_a=0.5)     # wait as a holder: half in each token
 
 
+MACRO_CALENDAR_DAYS = 60          # warn when no macro event is listed this far ahead
+MACRO_UNREAD_TELL_S = 3600        # an unreadable calendar says so at most this often
+
+
+def macro_view(state=None):
+    """The scheduled macro window open now (sql/030): {'ts', 'kind', 'until'},
+    or None (switched off, no event near, or the calendar unreadable). Once
+    a day, says so when the calendar lists nothing in MACRO_CALENDAR_DAYS."""
+    if not config.MACRO_PAUSE_ENABLED:
+        return None
+    try:
+        if state is not None and time.time() - state.get('macro_calendar_checked', 0) >= 86400:
+            state['macro_calendar_checked'] = time.time(); save(state)
+            nxt = db.macro_next_ts()
+            if nxt is None or nxt - time.time() > MACRO_CALENDAR_DAYS * 86400:
+                notify('macro_calendar_empty', reason=f'no macro event listed in the next {MACRO_CALENDAR_DAYS} days: '
+                                                      'add the next FOMC dates to rebalancer.macro_events')
+        m = db.macro_event_near(config.MACRO_PAUSE_BEFORE_S, config.MACRO_PAUSE_AFTER_S)
+    except Exception as e:
+        if state is None or time.time() - state.get('macro_unread_told', 0) >= MACRO_UNREAD_TELL_S:
+            if state is not None:
+                state['macro_unread_told'] = time.time(); save(state)
+            notify('macro_unread', reason=f'{type(e).__name__}: {tidy(e)}')
+        return None
+    if not m:
+        return None
+    return dict(m, until=m['ts'] + config.MACRO_PAUSE_AFTER_S)
+
+
+def macro_hold(state):
+    """No band held and a macro window open: record a macro pause (the wallet
+    waits 50/50) instead of opening one the next poll would close. True when
+    the poll ends here; a reopen intent left by a failed open is kept for
+    after the window."""
+    m = macro_view(state)
+    if not m:
+        return False
+    now = time.time()
+    when = datetime.fromtimestamp(m['ts'], timezone.utc).strftime('%m-%d %H:%M')
+    why = f"macro pause: {m['kind']} at {when} UTC; no band held, waiting 50/50"
+    state['hot_pause'] = {'since': now, 'last_bad': now, 'pool': config.POOL, 'ratio': None, 'told': now,
+                          'mint': None, 'withdraw_usd': None, 'reason': why, 'booked': True, 'swapped': False,
+                          'kind': 'macro', 'until': m['until']}
+    save(state)
+    notify_book('MACRO_PAUSE', kind=m['kind'], event_at=when, resume_minutes=round((m['until'] - now) / 60),
+                held=False)
+    db.event('MACRO_PAUSE', why)
+    return True
+
+
 def hot_pause(state, status, rv):
-    """A held band in a bad HOT moment: harvest, close, and wait 50/50.
-    True when it closed (or tried to), so the poll ends here."""
+    """A held band in a scheduled macro window, or in a bad HOT moment:
+    harvest, close, and wait 50/50. True when it closed (or tried to), so
+    the poll ends here."""
     state.pop('hot_pause', None)                     # a held band is never paused
+    now = time.time()
+    m = macro_view(state)
+    if m:
+        when = datetime.fromtimestamp(m['ts'], timezone.utc).strftime('%m-%d %H:%M')
+        # No calm gap: the window has a start time. The budget keeps the hard
+        # ceiling's halt away; a venue in backoff gets no voluntary close.
+        blocked = calm_budget_left(state) <= 0 or not health.allowed(f'venue:{config.DEX}', now)[0]
+        if blocked:
+            if state.get('macro_blocked_told') != m['ts']:
+                state['macro_blocked_told'] = m['ts']; save(state)
+                notify('macro_blocked', kind=m['kind'], event_at=when,
+                       reason='the move budget is spent or the venue is in backoff: the band stays open')
+            return False
+        why = f"macro pause: {m['kind']} at {when} UTC; waiting 50/50 until {config.MACRO_PAUSE_AFTER_S // 60} min after it"
+        notify_book('MACRO_PAUSE', price=status['price'], lower=status['lowerPrice'], upper=status['upperPrice'],
+                    kind=m['kind'], event_at=when, resume_minutes=round((m['until'] - now) / 60), held=True, regime=rv)
+        db.event('MACRO_PAUSE', why)
+        return hot_pause_close(state, status, why, now, kind='macro', until=m['until'])
+    if not config.HOT_PAUSE_ENABLED:
+        return False
     q = status.get('quoteUsd')
     if q is None or not rv or rv.get('stale'):
         return False
-    now = time.time()
     if now - state.get('hot_pause_resumed', 0) < config.HOT_PAUSE_COOLDOWN_S:
         return False                                 # just resumed: no pause straight back
     pool = status.get('whirlpool') or config.POOL
@@ -2560,12 +2630,18 @@ def hot_pause(state, status, rv):
                 ratio=v['ratio'], threshold=config.HOT_PAUSE_FG_THRESHOLD, hours=config.HOT_PAUSE_FG_HOURS,
                 resume_minutes=config.HOT_PAUSE_RESUME_S // 60, regime=rv)
     db.event('HOT_PAUSE', why)
+    return hot_pause_close(state, status, why, now, ratio=v['ratio'])
+
+
+def hot_pause_close(state, status, why, now, kind='hot', until=None, ratio=None):
+    """The pause's close: record the pause, harvest and close the band, then
+    swap to 50/50. True: the poll ends here whether the close landed or not."""
     mint = status['positionMint']
     # Recorded before the close: a restart after it lands keeps waiting, and
     # books the close itself if this process stopped before rebalance did.
-    state['hot_pause'] = {'since': now, 'last_bad': now, 'pool': config.POOL, 'ratio': v['ratio'], 'told': now,
+    state['hot_pause'] = {'since': now, 'last_bad': now, 'pool': config.POOL, 'ratio': ratio, 'told': now,
                           'mint': mint, 'withdraw_usd': position_usd(status), 'reason': why,
-                          'booked': False, 'swapped': False}
+                          'booked': False, 'swapped': False, 'kind': kind, 'until': until}
     save(state)
     rebalance(state, status, why, calm_move=True, exit_move=True, close_only=True)
     # The ledger says whether the close landed: rebalance books it only then
@@ -2582,10 +2658,13 @@ def hot_pause(state, status, rv):
 
 def hot_paused(state):
     """Paused: True to keep waiting this poll; False when the pause is over
-    (the signal clear for HOT_PAUSE_RESUME_S, HOT_PAUSE_MAX_S reached, the
-    switch off, or the pool changed) and the loop reopens as usual."""
+    and the loop reopens as usual. A macro pause ends when its window does
+    (a window opening during any pause extends it); a HOT pause when the
+    signal has been clear for HOT_PAUSE_RESUME_S or HOT_PAUSE_MAX_S is
+    reached. Either ends at once when its switch is off or the pool changed."""
     p = state['hot_pause']
     now = time.time()
+    kind = p.get('kind')                             # 'macro', or a HOT pause ('hot' / older: none)
     if not p.get('booked'):
         # The process stopped between the close and its bookkeeping: the chain
         # holds no position (this is the no-position path), so book the close.
@@ -2595,8 +2674,16 @@ def hot_paused(state):
             state['calm_times'] = state.get('calm_times', []) + [p['since']]
         p['booked'] = True
         save(state)
-    if not config.HOT_PAUSE_ENABLED or p.get('pool') != config.POOL:
-        state.pop('hot_pause', None); state['hot_pause_resumed'] = now; save(state)
+    enabled = config.MACRO_PAUSE_ENABLED if kind == 'macro' else config.HOT_PAUSE_ENABLED
+    if p.get('pool') != config.POOL and p.get('until') and now < p['until']:
+        # A pool switch inside a window (the swing's move at the NYSE close):
+        # the window still holds; wait on the new pool, 50/50 in its tokens.
+        p['pool'] = config.POOL; p['swapped'] = False; save(state)
+    if not enabled or p.get('pool') != config.POOL:
+        state.pop('hot_pause', None)
+        if kind != 'macro':
+            state['hot_pause_resumed'] = now
+        save(state)
         notify('HOT_RESUME', reason='the pause is switched off or the pool changed',
                paused_minutes=round((now - p.get('since', now)) / 60))
         return False
@@ -2605,6 +2692,22 @@ def hot_paused(state):
     sample_fee_growth(state)
     daily_report(state)
     run_audits(state)
+    m = macro_view(state)
+    if m:
+        p['until'] = max(p.get('until') or 0, m['until'])
+    if p.get('until') and now < p['until']:
+        if now - p.get('told', 0) >= HOT_PAUSE_TELL_S:
+            p['told'] = now
+            notify('hot_paused', paused_minutes=round((now - p['since']) / 60), ratio=None, hot=None,
+                   clear_minutes=0, until_minutes=round((p['until'] - now) / 60), kind='macro')
+        save(state)
+        return True
+    if kind == 'macro':
+        state.pop('hot_pause', None); save(state)    # no HOT cooldown: after FOMC is when HOT is likely
+        why = 'the macro window is over'
+        notify('HOT_RESUME', reason=why, paused_minutes=round((now - p['since']) / 60))
+        db.event('HOT_RESUME', f"{why}; paused {round((now - p['since']) / 60)} min")
+        return False
     bal = wallet(config.POOL)
     q, price = bal.get('quoteUsd'), bal.get('price')
     v = {'hot': None, 'ratio': None, 'bad': False}
@@ -3731,6 +3834,9 @@ def main():
             if dormant(state, b0):
                 time.sleep(max(DORMANT_POLL_S, config.POLL_SECONDS))
                 continue
+            if macro_hold(state):
+                time.sleep(config.POLL_SECONDS)
+                continue
             notify('no_position', detail='chain reports no open position')
             try:
                 fo = venue_failover(state, None, price=b0.get('price'), quote=b0.get('quoteUsd'))
@@ -3812,7 +3918,7 @@ def main():
             time.sleep(config.CALM_POLL_SECONDS)
             continue
 
-        if config.HOT_PAUSE_ENABLED and hot_pause(state, status, rv):
+        if (config.HOT_PAUSE_ENABLED or config.MACRO_PAUSE_ENABLED) and hot_pause(state, status, rv):
             time.sleep(config.POLL_SECONDS)
             continue
         state.pop('hot_pause', None)

@@ -248,10 +248,13 @@ class Hooks(unittest.TestCase):
 
     def test_band_profile_reports_and_swallows_failures(self):
         seen = []
+
+        def notify(event, **payload):               # notify's real signature: a payload key 'event' fails here
+            seen.append((event, payload))
         with mock.patch.object(rebalancer.db, 'record_band_profile', side_effect=RuntimeError('db down')), \
-                mock.patch.object(rebalancer, 'notify', lambda ev, **kw: seen.append((ev, kw))):
+                mock.patch.object(rebalancer, 'notify', notify):
             rebalancer.band_profile('M', 'harvest')
-        self.assertEqual(seen[0][0], 'band_profile_failed'); self.assertEqual(seen[0][1]['event'], 'harvest')
+        self.assertEqual(seen[0][0], 'band_profile_failed'); self.assertEqual(seen[0][1]['band_event'], 'harvest')
 
     def test_band_profile_passes_its_arguments(self):
         calls = []
