@@ -847,17 +847,38 @@ def native_price(native_mint, stable_mints, max_age_s):
     return float(r['price']) if r else None
 
 
+FEE_LEVEL_MAX_HOURS = 1.0       # the age last_fees gives a level held over many snapshots, at most
+
+
 def last_fees(mint):
-    """The accrued fees at the last snapshot of `mint`, and its age in hours;
-    None when there is none. The yardstick of guards.fee_read_problem."""
+    """The accrued fees at the last snapshot of `mint`, and their age in
+    hours; None when there is none. The yardstick of guards.fee_read_problem.
+
+    The age is that of the first snapshot in the run that holds the same
+    figure (capped at FEE_LEVEL_MAX_HOURS, never less than the last
+    snapshot's age). A rejected read writes the last good figure again
+    with a new time; measured from that time, a real rise was still
+    rejected on the next poll and every poll after (2026-10-05, DJT/USDC)."""
     with cursor() as cur:
-        cur.execute("""select accrued_a, accrued_b, accrued_usd,
-                              extract(epoch from (now() - ts)) / 3600.0 hours
-                       from snapshots where mint = %s order by ts desc, id desc limit 1""", (mint,))
+        cur.execute("""with last as (
+                           select ts, accrued_a, accrued_b, accrued_usd from snapshots
+                           where mint = %(m)s order by ts desc, id desc limit 1),
+                       changed as (
+                           select max(s.ts) ts from snapshots s, last
+                           where s.mint = %(m)s and s.accrued_usd is distinct from last.accrued_usd)
+                       select last.accrued_a, last.accrued_b, last.accrued_usd,
+                              extract(epoch from (now() - last.ts)) / 3600.0 hours,
+                              (select extract(epoch from (now() - min(s.ts))) / 3600.0 from snapshots s
+                               where s.mint = %(m)s and s.ts > coalesce((select ts from changed), '-infinity')
+                              ) level_hours
+                       from last""", {'m': mint})
         r = cur.fetchone()
     if not r:
         return None
-    return {k: (float(r[k]) if r[k] is not None else None) for k in ('accrued_a', 'accrued_b', 'accrued_usd', 'hours')}
+    out = {k: (float(r[k]) if r[k] is not None else None) for k in ('accrued_a', 'accrued_b', 'accrued_usd', 'hours')}
+    # the last snapshot is in its own run, so level_hours is never null
+    out['hours'] = max(out['hours'], min(float(r['level_hours']), FEE_LEVEL_MAX_HOURS))
+    return out
 
 
 def record_payout(config_name, position, token_mint, symbol, amount, usd, kind,

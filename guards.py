@@ -123,10 +123,12 @@ def migration_target(target, *, execute_dexes, signers, known):
 # the price crossed a boundary tick, and reported $6,237 of fees on a $230
 # position. The gas split then booked $2,830 as gas and $3,408 as reinvested.
 # The signers now read atomically; this check stands behind them for every
-# venue. Bounds, generous on purpose (the fastest real rate so far is about
-# 0.03% of the position an hour):
+# venue. Bounds, generous on purpose. SOL/USDC earns about 0.03% of the
+# position an hour; on 2026-10-05 a DJT/USDC burst ($510k in 15 min through a
+# $714k pool, at the band's edge) earned 0.28% in 2 minutes, 7.6% an hour,
+# and the old 1% bound rejected real fees for the whole burst:
 FEE_MAX_FRACTION = 0.10         # accrued fees above 10% of the position
-FEE_MAX_RISE_PER_HOUR = 0.01    # a rise of more than 1% of the position an hour
+FEE_MAX_RISE_PER_HOUR = 0.10    # a rise of more than 10% of the position an hour
 FEE_RISE_SLACK = 0.002          # plus 0.2% of the position, for short gaps
 
 

@@ -108,7 +108,11 @@ class FeeReadBounds(unittest.TestCase):
         self.assertIsNone(guards.fee_read_problem(rd(0.1 + 0.39, 200.0), 0.1, 0.0))
 
     def test_rise_is_checked_inside_the_first_hour(self):
-        self.assertIsNotNone(guards.fee_read_problem(rd(2.0, 200.0), 0.1, 0.5))
+        self.assertIsNotNone(guards.fee_read_problem(rd(15.0, 200.0), 0.1, 0.5))
+
+    def test_the_djt_burst_passes(self):
+        # 2026-10-05: +$0.56 in 2.2 minutes on a $200.33 position, real fees
+        self.assertIsNone(guards.fee_read_problem(rd(0.81689, 200.33), 0.252557, 0.037))
 
     def test_negative_hours_skip_the_rise_check(self):
         self.assertIsNone(guards.fee_read_problem(rd(5.0, 200.0), 0.1, -1.0))
@@ -747,6 +751,50 @@ class RiskRecord(unittest.TestCase):
         got = db.last_fees('MX')
         self.assertEqual((got['accrued_a'], got['accrued_b'], got['accrued_usd']), (0.001, 0.2, 0.3))
         self.assertLess(got['hours'], 0.1)
+        _fixtures.reset_ledger()
+
+    def snap_at(self, minutes_ago, usd, mint='MX'):
+        with db.cursor(commit=True) as cur:
+            cur.execute("insert into snapshots (ts, mint, accrued_a, accrued_b, accrued_usd) "
+                        "values (now() - make_interval(mins => %s), %s, 0, %s, %s)", (minutes_ago, mint, usd, usd))
+
+    def test_a_repeated_figure_ages_from_its_first_snapshot(self):
+        # a rejected read writes the last good figure again: its age is that of
+        # the first snapshot holding it, not of the rewrite
+        _fixtures.reset_ledger()
+        self.snap_at(10, 0.1); self.snap_at(8, 0.25); self.snap_at(6, 0.25); self.snap_at(2, 0.25)
+        got = db.last_fees('MX')
+        self.assertEqual(got['accrued_usd'], 0.25)
+        self.assertAlmostEqual(got['hours'], 8 / 60, delta=0.01)
+        _fixtures.reset_ledger()
+
+    def test_a_changed_figure_ages_from_its_own_snapshot(self):
+        _fixtures.reset_ledger()
+        self.snap_at(10, 0.25); self.snap_at(8, 0.25); self.snap_at(2, 0.3)
+        self.assertAlmostEqual(db.last_fees('MX')['hours'], 2 / 60, delta=0.01)
+        _fixtures.reset_ledger()
+
+    def test_a_long_level_counts_one_hour_at_most(self):
+        _fixtures.reset_ledger()
+        self.snap_at(300, 0.25); self.snap_at(2, 0.25)
+        self.assertAlmostEqual(db.last_fees('MX')['hours'], db.FEE_LEVEL_MAX_HOURS, delta=0.01)
+        self.snap_at(200, 0.25, mint='MY')
+        self.assertAlmostEqual(db.last_fees('MY')['hours'], 200 / 60, delta=0.01)      # a real gap stays
+        _fixtures.reset_ledger()
+
+    def test_other_mints_do_not_count(self):
+        _fixtures.reset_ledger()
+        self.snap_at(30, 0.25, mint='OTHER'); self.snap_at(9, 0.1); self.snap_at(5, 0.25)
+        self.assertAlmostEqual(db.last_fees('MX')['hours'], 5 / 60, delta=0.01)
+        _fixtures.reset_ledger()
+
+    def test_the_rejection_does_not_ratchet(self):
+        # the read rejected at the first poll passes once the level is old enough
+        _fixtures.reset_ledger()
+        self.snap_at(40, 0.25); self.snap_at(20, 0.25); self.snap_at(1, 0.25)
+        f = db.last_fees('MX')
+        self.assertIsNone(guards.fee_read_problem(rd(1.6, 200.0), f['accrued_usd'], f['hours']))
+        self.assertIsNotNone(guards.fee_read_problem(rd(1.6, 200.0), 0.25, 1 / 60))
         _fixtures.reset_ledger()
 
     def test_the_loop_falls_back_to_the_profile_pool(self):

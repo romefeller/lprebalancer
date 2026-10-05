@@ -108,10 +108,10 @@ class FeeReadGuard(unittest.TestCase):
     def test_each_bound_and_its_edge(self):
         self.assertIsNone(guards.fee_read_problem(self.rd(20.0, 200.0)))          # exactly 10%
         self.assertIsNotNone(guards.fee_read_problem(self.rd(20.0001, 200.0)))
-        # rise: 1% an hour + 0.2% slack, of the position
-        allowed = 200.0 * (0.01 * 2.0 + 0.002)
-        self.assertIsNone(guards.fee_read_problem(self.rd(1.0 + allowed, 200.0), 1.0, 2.0))
-        self.assertIsNotNone(guards.fee_read_problem(self.rd(1.0 + allowed + 1e-6, 200.0), 1.0, 2.0))
+        # rise: 10% an hour + 0.2% slack, of the position
+        allowed = 200.0 * (0.10 * 0.1 + 0.002)
+        self.assertIsNone(guards.fee_read_problem(self.rd(1.0 + allowed, 200.0), 1.0, 0.1))
+        self.assertIsNotNone(guards.fee_read_problem(self.rd(1.0 + allowed + 1e-6, 200.0), 1.0, 0.1))
 
     def test_malformed_figures_are_rejected(self):
         for bad in (-1e-9, float('nan'), float('inf'), True, '1', [1]):
