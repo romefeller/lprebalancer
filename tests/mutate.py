@@ -160,6 +160,9 @@ TARGETS = {
                             'test_stats.TwoSolanaWallets')),
     # 2026-10-05: a profile that held two A tokens (sol-swing) showed '- DJT' on its fee lines
     'stats_swing_tokens': ('stats.py', ['_tok', '_side_a', '_pool_lines'], PY_TESTS('test_stats.SwingTokens')),
+    'book_a_by_token': ('db.py', ['by_symbol', 'combine_a_by_token', 'fees_between'],
+                        PY_TESTS('test_stats.ABySymbol', 'test_stats.TwoSolanaWallets', 'test_daily')),
+    'bridge_a_side': ('telegram_bridge.mjs', ['aSide'], NODE_TESTS('test_telegram_bridge.mjs')),
     'bridge_tail': ('telegram_bridge.mjs', ['feedFiles', 'migrateState', 'readNew', 'tailAll', 'message'],
                     NODE_TESTS('test_telegram_bridge.mjs')),
     'bridge_lines': ('book_format.mjs', ['poolLabel', 'redact', 'portfolioText', 'walletName'],

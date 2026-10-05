@@ -140,6 +140,16 @@ export function compareLine(row) {
     + ` · re-centres ${pair(row.recentres, c.recentres, v => n(v, 1))}`;
 }
 
+// One A-side fee figure: `x A` when the side is one token; else each token of
+// `perToken` ({token: amount}), zeros dropped unless all are zero, largest first.
+export function aSide(x, A, perToken, tok) {
+  if (x != null || !perToken || !Object.keys(perToken).length) return `${tok(x)} ${A}`;
+  const all = Object.entries(perToken).filter(([, v]) => v != null);
+  if (!all.length) return `${tok(null)} ${A}`;
+  const shown = all.some(([, v]) => Number(v)) ? all.filter(([, v]) => Number(v)) : all;
+  return shown.sort((p, q) => Number(q[1]) - Number(p[1])).map(([t, v]) => `${tok(v)} ${t}`).join(' ');
+}
+
 export function render(row) {
   const { event } = row;
   const n = (x, d = 2) => (x === undefined || x === null ? '—' : Number(x).toFixed(d));
@@ -153,12 +163,15 @@ export function render(row) {
   // position closes; the total only ever goes up.
   const book = (r) => {
     const A = r.token_a ?? 'A', B = r.token_b ?? 'B';
+    // The A side. A book that held two A tokens (sol-swing: SOL and DJT) has
+    // no single amount; each token is shown on its own (db.fees_a_by_token).
+    const side = (x, kind) => aSide(x, A, r.fees_a_by_token?.[kind], tok);
     return [
       `━━ 💰 FEES ━━`,
-      `today       ${tok(r.fees_today_a)} ${A}   ${tok(r.fees_today_b, 4)} ${B}   $${n(r.fees_today_usd, 4)}`,
-      `realised    ${tok(r.fees_realised_a)} ${A}   ${tok(r.fees_realised_b, 4)} ${B}   $${n(r.fees_realised_usd, 4)}`,
-      `unrealised  ${tok(r.fees_unrealised_a)} ${A}   ${tok(r.fees_unrealised_b, 4)} ${B}   $${n(r.fees_unrealised_usd, 4)}`,
-      `TOTAL       ${tok(r.fees_total_a)} ${A}   ${tok(r.fees_total_b, 4)} ${B}   $${n(r.fees_total_usd, 4)}`,
+      `today       ${side(r.fees_today_a, 'today')}   ${tok(r.fees_today_b, 4)} ${B}   $${n(r.fees_today_usd, 4)}`,
+      `realised    ${side(r.fees_realised_a, 'realised')}   ${tok(r.fees_realised_b, 4)} ${B}   $${n(r.fees_realised_usd, 4)}`,
+      `unrealised  ${side(r.fees_unrealised_a, 'unrealised')}   ${tok(r.fees_unrealised_b, 4)} ${B}   $${n(r.fees_unrealised_usd, 4)}`,
+      `TOTAL       ${side(r.fees_total_a, 'total')}   ${tok(r.fees_total_b, 4)} ${B}   $${n(r.fees_total_usd, 4)}`,
       ...(r.split ? [
         `profit      $${n(r.split.paid_usd, 4)} paid to the profit wallet · $${n(r.split.paid_today_usd, 4)} today`,
         `reinvested  $${n(r.split.reinvested_usd, 4)} back in the LP · gas $${n(r.split.gas_usd, 4)}`] : []),

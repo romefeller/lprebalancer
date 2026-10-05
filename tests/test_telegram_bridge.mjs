@@ -6,7 +6,7 @@ import fs from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import os from 'node:os';
 import path from 'node:path';
-import { feedFiles, migrateState, readNew, tailAll, message, render, MOVED_FEED, LEGACY_FEED }
+import { feedFiles, migrateState, readNew, tailAll, message, render, aSide, MOVED_FEED, LEGACY_FEED }
   from '../telegram_bridge.mjs';
 import { poolLabel, redact, portfolioText, equityLine, sinceStartLine, walletName } from '../book_format.mjs';
 
@@ -555,4 +555,53 @@ test('USDC/HYPE (stable token A): in-range and out-of-range lines show HYPE in d
   assert.ok(o.includes('went below') && o.includes('price 87.0000'), o);
   const s = render({ event: 'OUT_OF_BAND', pair: 'SOL/USDC', side: 'above', price: 125, lower: 118, upper: 122, action: 'x' });
   assert.ok(s.includes('went above') && s.includes('band 118.0000 — 122.0000'), s);
+});
+
+// 2026-10-05: sol-swing held SOL/USDC and DJT/USDC; the book's A side has no
+// single amount and showed '— DJT'. Each A token now shows on its own.
+test('aSide: one token as before, a mixed side per token', () => {
+  const tok = (x) => (x == null ? '—' : String(Number(Number(x).toFixed(6))));
+  assert.equal(aSide(1.5, 'SOL', null, tok), '1.5 SOL');
+  assert.equal(aSide(1.5, 'SOL', { DJT: 9 }, tok), '1.5 SOL');                 // a known amount wins
+  assert.equal(aSide(null, 'DJT', null, tok), '— DJT');
+  assert.equal(aSide(null, 'DJT', {}, tok), '— DJT');
+  assert.equal(aSide(null, 'DJT', { DJT: null }, tok), '— DJT');
+  assert.equal(aSide(null, 'DJT', { SOL: 0.025958, DJT: 0.046633 }, tok), '0.046633 DJT 0.025958 SOL');
+  assert.equal(aSide(null, 'DJT', { DJT: 0.035972, SOL: 0 }, tok), '0.035972 DJT');      // a zero is noise
+  assert.equal(aSide(null, 'DJT', { DJT: 0, SOL: 0 }, tok), '0 DJT 0 SOL');               // unless all are
+  assert.equal(aSide(0, 'SOL', { DJT: 1 }, tok), '0 SOL');                                 // 0 is an amount
+});
+
+test('aSide property: every non-zero token once, largest first', () => {
+  const tok = (x) => (x == null ? '—' : String(Number(Number(x).toFixed(6))));
+  let seed = 7; const rnd = () => (seed = (seed * 48271) % 2147483647) / 2147483647;
+  for (let i = 0; i < 300; i++) {
+    const per = {};
+    for (const t of ['SOL', 'DJT', 'MU']) if (rnd() < 0.7) per[t] = rnd() < 0.2 ? 0 : Math.round(rnd() * 1e6) / 1e3;
+    const out = aSide(null, 'A', per, tok);
+    if (!Object.keys(per).length) { assert.equal(out, '— A'); continue; }
+    const parts = out.split(' ');
+    const toks = parts.filter((_, j) => j % 2), vals = parts.filter((_, j) => !(j % 2)).map(Number);
+    const nz = Object.keys(per).filter(t => per[t]);
+    assert.deepEqual(new Set(toks), new Set(nz.length ? nz : Object.keys(per)), out);
+    assert.deepEqual(vals, [...vals].sort((p, q) => q - p), out);
+  }
+});
+
+test('the book of a swing names each A token', () => {
+  const row = { event: 'in_band', token_a: 'DJT', token_b: 'USDC', pair: 'DJT/USDC',
+    fees_today_a: null, fees_today_b: 0.5, fees_today_usd: 2.1,
+    fees_realised_a: null, fees_realised_b: 3.281015, fees_realised_usd: 6.8273,
+    fees_unrealised_a: null, fees_unrealised_b: 0.14, fees_unrealised_usd: 0.45,
+    fees_total_a: null, fees_total_b: 3.42, fees_total_usd: 7.28,
+    fees_a_by_token: { today: { DJT: 0.082605, SOL: 0.004741 }, realised: { DJT: 0.046633, SOL: 0.025958 },
+                       unrealised: { DJT: 0.035972, SOL: 0 }, total: { DJT: 0.082605, SOL: 0.025958 } } };
+  const text = render(row);
+  assert.ok(!/— DJT/.test(text), text);
+  assert.match(text, /today\s+0\.082605 DJT 0\.004741 SOL\s+0\.5 USDC/);
+  assert.match(text, /realised\s+0\.046633 DJT 0\.025958 SOL\s+3\.281 USDC/);
+  assert.match(text, /unrealised\s+0\.035972 DJT\s+0\.14 USDC/);
+  assert.match(text, /TOTAL\s+0\.082605 DJT 0\.025958 SOL\s+3\.42 USDC/);
+  const plain = render({ ...row, fees_a_by_token: null, fees_total_a: 1.25, token_a: 'SOL' });
+  assert.match(plain, /TOTAL\s+1\.25 SOL/);
 });

@@ -945,11 +945,13 @@ def _f(x):
     return float(x) if x is not None else 0.0
 
 
-def fees_between(start, end=None, profile=None, wallet_id=None):
+def fees_between(start, end=None, profile=None, wallet_id=None, a_by_token=False):
     """Accrual earned between two UTC boundaries, including closed positions.
 
     The latest observation before the start is the baseline, so collecting
     yesterday's fees today cannot count them as today's earnings.
+    With `a_by_token`, {A token: amount} instead: the A side of each pair on
+    its own (SOL and DJT do not add).
     """
     with cursor() as cur:
         cur.execute(f"""
@@ -966,9 +968,15 @@ def fees_between(start, end=None, profile=None, wallet_id=None):
                                   filter (where ts <= %(start)s))[1], 0) usd
                 from fee_points where ts <= %(end)s and {mint_in('fee_points.mint')} group by mint
             )
+        """ + ("""
+            select split_part(p.pair_label, '/', 1) sym, coalesce(sum(m.a), 0) a
+            from per_mint m join positions p on p.mint = m.mint group by 1
+        """ if a_by_token else """
             select coalesce(sum(a), 0) a, coalesce(sum(b), 0) b,
                    coalesce(sum(usd), 0) usd from per_mint
-        """, _scope_args(book_scope(profile, wallet_id), start=start, end=end or now()))
+        """), _scope_args(book_scope(profile, wallet_id), start=start, end=end or now()))
+        if a_by_token:
+            return {r['sym'] or '?': round(_f(r['a']), 6) for r in cur.fetchall()}
         return dict(cur.fetchone())
 
 
@@ -1512,7 +1520,8 @@ def stats(token_a=None, token_b=None, profile=None, wallet_id=None):
     started = first_eq and first_eq['equity_usd']
     sst = _since_start_or_none(name)
 
-    today = fees_between(now().replace(hour=0, minute=0, second=0, microsecond=0), None, name)
+    midnight = now().replace(hour=0, minute=0, second=0, microsecond=0)
+    today = fees_between(midnight, None, name)
 
     days = None
     if latest and span and span['t0']:
@@ -1524,6 +1533,9 @@ def stats(token_a=None, token_b=None, profile=None, wallet_id=None):
     apr = (rate / float(equity) * 365 * 100) if (rate and equity) else None
 
     pools = by_pool(name)
+    a_by_token = ({'today': fees_between(midnight, None, name, a_by_token=True),
+                   **{kind: by_symbol((p['pair_label'], p[key]) for p in pools) for kind, key in A_BY_POOL.items()}}
+                  if mixed['a'] else None)
     t6, t24 = trailing_rate(6, name), trailing_rate(24, name)
     outlook = season_outlook(season())
     eq_f = _f(equity) if equity else None
@@ -1563,6 +1575,8 @@ def stats(token_a=None, token_b=None, profile=None, wallet_id=None):
         'fees_total_a': tok('a', _f(r['a']) + u_a),
         'fees_total_b': tok('b', _f(r['b']) + u_b),
         'fees_total_usd': round(total_usd, 4),
+        # the mixed A side, one amount per token: {kind: {token: amount}}
+        'fees_a_by_token': a_by_token,
         'fees_per_day_usd': round(rate, 4) if rate else None,
         'apr_pct': round(apr, 2) if apr else None,
         # what it is doing NOW, not the average since the first position: the
@@ -1621,6 +1635,38 @@ def mixed_sides(labels):
             sides['a'].add(a.strip())
             sides['b'].add(b.strip())
     return {k: len(v) > 1 for k, v in sides.items()}
+
+
+# The by_pool amount behind each kind of fees_a_by_token (today comes from fee_points).
+A_BY_POOL = {'realised': 'realised_a', 'unrealised': 'unrealised_a', 'total': 'fees_a'}
+# The book key behind each kind, for a book whose A side is one token.
+A_BOOK_KEYS = {'today': 'fees_today_a', 'realised': 'fees_realised_a', 'unrealised': 'fees_unrealised_a',
+               'total': 'fees_total_a'}
+
+
+def by_symbol(rows):
+    """{A token: summed amount} from (pair label, amount) rows; an amount of
+    None is skipped, a label with no token is '?'. Pure."""
+    out = {}
+    for label, x in rows:
+        if x is None:
+            continue
+        sym = str(label or '').partition('/')[0].strip() or '?'
+        out[sym] = round(out.get(sym, 0.0) + _f(x), 6)
+    return out
+
+
+def combine_a_by_token(books):
+    """fees_a_by_token over several books: a book's own when it has one,
+    else its single A token and amount; each token summed. Pure."""
+    out = {}
+    for kind, key in A_BOOK_KEYS.items():
+        rows = []
+        for b in books:
+            own = (b.get('fees_a_by_token') or {}).get(kind)
+            rows += list(own.items()) if own is not None else [(b.get('token_a'), b.get(key))]
+        out[kind] = by_symbol(rows)
+    return out
 
 
 def _pairs_held(cur, a, since=None, until=None):
@@ -1766,6 +1812,7 @@ def combine_books(books):
                 for k in splits[0]} if splits else None),
         daily=[combine_days(v) for _, v in sorted(days.items(), reverse=True)],
         since_start=combine_since([b['since_start'] for b in books if b.get('since_start')]),
+        fees_a_by_token=None if out['token_a'] else combine_a_by_token(books),
         last_price=None, band=None,
         last_seen=max((b['last_seen'] for b in books if b.get('last_seen')), default=None))
     return out

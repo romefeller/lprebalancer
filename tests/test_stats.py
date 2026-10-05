@@ -1048,6 +1048,46 @@ class TwoSolanaWallets(unittest.TestCase):
         self.assertEqual(db.book_scope(wallet_id='sol-lp2'), ['sol-swing'])
         self.assertEqual(db.book_scope('sol-swing', 'sol-lp'), [])
 
+    def test_mixed_a_side_by_token(self):
+        """2026-10-05: the Telegram book showed '— DJT' for sol-swing. The book
+        now carries each A token on its own (fees_a_by_token)."""
+        b = db.stats(profile='sol-swing')
+        self.assertIsNone(b['fees_realised_a'])
+        by = b['fees_a_by_token']
+        self.assertEqual(by['realised'], {'DJT': 2.0, 'SOL': 0.01})
+        self.assertEqual(by['unrealised'], {'DJT': 0.0, 'SOL': 0.001})          # SW1 is closed
+        self.assertEqual(by['total'], {'DJT': 2.0, 'SOL': 0.011})
+        self.assertLessEqual(set(by['today']), {'DJT', 'SOL'})
+        midnight = db.now().replace(hour=0, minute=0, second=0, microsecond=0)
+        whole = db.fees_between(midnight, None, 'sol-swing')['a']             # the meaningless SOL+DJT sum
+        self.assertAlmostEqual(sum(by['today'].values()), float(whole), places=6)
+        self.assertEqual(db.fees_between(midnight, None, 'sol-swing', a_by_token=True), by['today'])
+        # one A token: no split, the plain amounts stand
+        one = db.stats(profile='sol-usdc')
+        self.assertIsNone(one['fees_a_by_token'])
+        self.assertEqual(one['fees_total_a'], 0.012)
+
+    def test_a_by_token_window_and_unlabelled(self):
+        # fee_points of sol-swing at -25h (SW1 snap), -21h (SW1 harvest), -3h/-1h (SW2 snaps), -2h (SW2 harvest)
+        start = db.now() - dt.timedelta(hours=26)
+        early = db.fees_between(start, db.now() - dt.timedelta(hours=10), 'sol-swing', a_by_token=True)
+        late = db.fees_between(start, None, 'sol-swing', a_by_token=True)
+        self.assertEqual(early.get('SOL', 0.0), 0.0, early)           # SW2 earned nothing by -10h
+        self.assertGreater(late['SOL'], 0.0, late)
+        with db.cursor(commit=True) as cur:
+            cur.execute("update positions set pair_label = null where mint = 'SW2'")
+        self.assertEqual(set(db.fees_between(start, None, 'sol-swing', a_by_token=True)), {'DJT', '?'})
+
+    def test_mixed_a_side_combined(self):
+        books = [db.stats(profile=n) for n in ('sol-usdc', 'mu-usdc', 'sol-swing')]
+        c = db.combine_books(books)
+        self.assertIsNone(c['token_a'])
+        self.assertEqual(c['fees_a_by_token']['total'], {'SOL': 0.023, 'MU': 0.21, 'DJT': 2.0})
+        self.assertEqual(c['fees_a_by_token']['realised'], {'SOL': 0.02, 'MU': 0.2, 'DJT': 2.0})
+        same = db.combine_books([books[0], books[0]])                        # one token: no split
+        self.assertEqual(same['token_a'], 'SOL')
+        self.assertIsNone(same['fees_a_by_token'])
+
     def test_the_text_names_each_wallet_and_each_pool_of_the_swing(self):
         out = io.StringIO()
         with context(), contextlib.redirect_stdout(out):
@@ -1266,6 +1306,39 @@ class SwingTokens(unittest.TestCase):
         self.assertIn('realised 1 A 3.28 B', stats._pool_lines(bare)[2])
         named = dict(r, fees_realised_a=1.0, by_pool=[])
         self.assertIn('realised 1 DJT 3.28 USDC', stats._pool_lines(named)[2])
+
+
+class ABySymbol(unittest.TestCase):
+    """db.by_symbol and db.combine_a_by_token: pure."""
+
+    def test_by_symbol(self):
+        self.assertEqual(db.by_symbol([('SOL/USDC', 1), ('SOL/USDC', 0.5), ('DJT/USDC', 2), ('MU/USDC', None)]),
+                         {'SOL': 1.5, 'DJT': 2.0})
+        self.assertEqual(db.by_symbol([(None, 1), ('', 2), ('/USDC', 3), ('SOL', 4), (' SOL /USDC', 5)]),
+                         {'?': 6.0, 'SOL': 9.0})
+        self.assertEqual(db.by_symbol([]), {})
+
+    @settings(max_examples=200, deadline=None)
+    @given(st.lists(st.tuples(st.sampled_from(['SOL/USDC', 'DJT/USDC', 'MU/USDC']),
+                              st.one_of(st.none(), st.floats(min_value=0, max_value=1e6, allow_nan=False))),
+                    max_size=8))
+    def test_property_sum_kept(self, rows):
+        out = db.by_symbol(rows)
+        self.assertAlmostEqual(sum(out.values()), sum(x for _, x in rows if x is not None), delta=1e-4)
+        self.assertEqual(set(out), {l.split('/')[0] for l, x in rows if x is not None})
+
+    def test_combine(self):
+        mixed = {'token_a': None, 'fees_a_by_token': {'today': {'DJT': 1.0}, 'realised': {'DJT': 2.0, 'SOL': 0.5},
+                                                      'unrealised': {}, 'total': {'DJT': 2.0, 'SOL': 0.5}}}
+        sol = {'token_a': 'SOL', 'fees_today_a': 0.1, 'fees_realised_a': 0.2, 'fees_unrealised_a': 0.3,
+               'fees_total_a': 0.5}
+        unknown = {'token_a': 'MU', 'fees_today_a': None, 'fees_realised_a': None, 'fees_unrealised_a': None,
+                   'fees_total_a': None}
+        self.assertEqual(db.combine_a_by_token([mixed, sol, unknown]),
+                         {'today': {'DJT': 1.0, 'SOL': 0.1}, 'realised': {'DJT': 2.0, 'SOL': 0.7},
+                          'unrealised': {'SOL': 0.3}, 'total': {'DJT': 2.0, 'SOL': 1.0}})
+        self.assertEqual(db.combine_a_by_token([{'fees_a_by_token': None, 'token_a': 'X', 'fees_today_a': 1}])['today'],
+                         {'X': 1.0})
 
 
 class ByPoolExact(unittest.TestCase):
