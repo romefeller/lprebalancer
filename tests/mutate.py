@@ -163,6 +163,10 @@ TARGETS = {
     'book_a_by_token': ('db.py', ['by_symbol', 'combine_a_by_token', 'fees_between'],
                         PY_TESTS('test_stats.ABySymbol', 'test_stats.TwoSolanaWallets', 'test_daily')),
     'bridge_a_side': ('telegram_bridge.mjs', ['aSide'], NODE_TESTS('test_telegram_bridge.mjs')),
+    # 2026-10-05: 'vs holding' read '-' for sol-swing (baseline SOL+USDC, pool DJT/USDC now)
+    'mixed_hold': ('db.py', ['mixed_hold', 'token_prices', 'since_start'],
+                   PY_TESTS('test_stats.MixedHold', 'test_stats.TwoSolanaWallets', 'test_since_start_scope',
+                            'test_audit.SinceStart')),
     'bridge_tail': ('telegram_bridge.mjs', ['feedFiles', 'migrateState', 'readNew', 'tailAll', 'message'],
                     NODE_TESTS('test_telegram_bridge.mjs')),
     'bridge_lines': ('book_format.mjs', ['poolLabel', 'redact', 'portfolioText', 'walletName'],

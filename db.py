@@ -1236,7 +1236,7 @@ def since_start(extra_usd=0.0, profile=None, wallet_id=None):
         stable_a = stable_first(cfg.get('mints'))
         a = _scope_args(names, mint=cfg['mints'][1] if stable_a else
                         (cfg.get('mints') or [None])[0] or cfg.get('deposit_mint'))
-        cur.execute("select ts, coalesce((amounts->>%(mint)s::text)::numeric, sol) sol, usdc, usd, price "
+        cur.execute("select ts, coalesce((amounts->>%(mint)s::text)::numeric, sol) sol, usdc, usd, price, amounts "
                     f"from capital_flows where kind = 'baseline' and {FLOW_IN} "
                     "order by (profile is null), ts limit 1", a)
         base = cur.fetchone()
@@ -1266,6 +1266,11 @@ def since_start(extra_usd=0.0, profile=None, wallet_id=None):
                     f"and ts >= %(since)s and {PAYOUT_IN}", dict(a, since=base['ts']))
         paid = float(cur.fetchone()['u'])
         mixed = mixed_sides(_pairs_held(cur, a))['a']
+        if mixed:
+            cur.execute("select case when kind in ('deposit', 'internal_in') then 1 else -1 end sgn, usd, amounts "
+                        "from capital_flows where kind in ('deposit', 'withdrawal', 'internal_in', 'internal_out') "
+                        f"and ts > %(since)s and {FLOW_IN}", dict(a, since=base['ts']))
+            flows = [(r['sgn'], r['usd'], r['amounts']) for r in cur.fetchall()]
     p0, p1 = float(base['price']), float(last['price'])
     v0, v1 = volatile_usd(p0, stable_a), volatile_usd(p1, stable_a)
     start = float(base['usd']) + float(fl['net_usd'])
@@ -1285,10 +1290,87 @@ def since_start(extra_usd=0.0, profile=None, wallet_id=None):
     if mixed:
         # A book that moved between pairs of different base tokens (sol-swing:
         # SOL, then DJT) has no one token to hold: its last price is the
-        # pool's now, its baseline amount another token's. Its dollar profit
-        # stands; the hold benchmarks and the token amount are None.
+        # pool's now, its baseline amount another token's. The benchmarks
+        # hold the baseline's own tokens, each at its own price now
+        # (mixed_hold); without a price for each, they are None.
         out.update({k: None for k in ('start_sol', 'price_start', 'price_now') + SINCE_HOLD})
+        mints = set(base['amounts'] or {}) | {m for _, _, am in flows for m in (am or {})}
+        h = mixed_hold(base['amounts'], float(base['usd']), p0, flows, token_prices(mints))
+        if h:
+            out.update({'hold_start_assets_usd': round(h['hold'], 4), 'vs_hold_start_assets_usd': round(value - h['hold'], 4),
+                        'hold_50_50_usd': round(h['hold_50'], 4), 'vs_hold_50_50_usd': round(value - h['hold_50'], 4),
+                        'price_start': p0, 'price_now': round(h['price_now'], 4)})
     return out
+
+
+def _is_stable(mint):
+    import engine
+    return engine.is_stable({'address': mint})
+
+
+def token_prices(mints):
+    """{mint: USD per token now} for `mints`: 1.0 for a stablecoin; else the
+    newest snapshot price of a position whose pair is '<its symbol>/<a
+    stablecoin>' (the symbol from a config row that names the mint in its
+    mints, else as a volatile deposit_mint, which is token A). A mint with no
+    such snapshot is left out."""
+    out, named, deposit = {}, {}, {}
+    with cursor() as cur:
+        cur.execute('select token_a, token_b, mints, deposit_mint from config order by name')
+        for r in cur.fetchall():
+            for mint, sym in zip(r['mints'] or [], (r['token_a'], r['token_b'])):
+                if sym:
+                    named.setdefault(mint, sym)
+            deposit.setdefault(r['deposit_mint'], r['token_a'])
+        for mint in mints:
+            sym = named.get(mint) or deposit.get(mint)
+            if _is_stable(mint):
+                out[mint] = 1.0
+            elif sym:
+                cur.execute("""select s.price from snapshots s join positions p on p.mint = s.mint
+                               where split_part(p.pair_label, '/', 1) = %s
+                                 and split_part(p.pair_label, '/', 2) = any(%s) and s.price > 0
+                               order by s.ts desc, s.id desc limit 1""",
+                            (sym, sorted(STABLE_SYMBOLS)))
+                r = cur.fetchone()
+                if r:
+                    out[mint] = float(r['price'])
+    return out
+
+
+# The quote tokens a pair's price is dollars in (engine.STABLES).
+STABLE_SYMBOLS = ('USDC', 'USDT', 'PYUSD', 'USDS', 'DAI', 'FDUSD', 'USDE')
+
+
+def mixed_hold(base_amounts, base_usd, base_price, flows, prices, stable=_is_stable):
+    """The hold benchmarks of a book whose base token changed. `base_amounts`
+    {mint: amount} is the baseline; `flows` (sign, usd, {mint: amount} or
+    None) the flows after it, a flow with no amounts counted at its dollar
+    value; `prices` {mint: USD now}. hold: every token kept, at its price now.
+    hold_50: the baseline as 50/50 of its largest volatile token (bought at
+    `base_price`) and dollars, plus the flows' dollars. None without
+    baseline amounts or with a held token unpriced. Pure apart from `stable`."""
+    if not base_amounts:
+        return None
+    held, fixed, net_usd = {}, 0.0, 0.0
+    for m, x in base_amounts.items():
+        held[m] = held.get(m, 0.0) + float(x)
+    for sgn, usd, am in flows:
+        net_usd += sgn * float(usd or 0)
+        if am:
+            for m, x in am.items():
+                held[m] = held.get(m, 0.0) + sgn * float(x)
+        else:
+            fixed += sgn * float(usd or 0)
+    if any(x and m not in prices for m, x in held.items()):
+        return None
+    hold = sum(x * prices[m] for m, x in held.items() if x) + fixed
+    vol = [(float(x) * prices[m], m) for m, x in base_amounts.items() if not stable(m) and float(x)]   # all priced
+    if vol and base_price:
+        m = max(vol)[1]
+        return {'hold': hold, 'hold_50': base_usd * (0.5 + 0.5 * prices[m] / float(base_price)) + net_usd,
+                'price_now': prices[m]}
+    return {'hold': hold, 'hold_50': base_usd + net_usd, 'price_now': None}
 
 
 def _pnl(equity, started, paid, sst):

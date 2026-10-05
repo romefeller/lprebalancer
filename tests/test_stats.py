@@ -991,11 +991,12 @@ class TwoSolanaWallets(unittest.TestCase):
         self.assertEqual((p['total']['harvests'], p['total']['recentres']), (4, 4))
         self.assertEqual((sub['sol-lp']['paid_usd'], sub['sol-lp2']['paid_usd'], p['total']['paid_usd']),
                          (1.0, 0.4, 1.4))
-        # the swing has a baseline and no benchmark (two base tokens): no hold benchmark in its sums
+        # the swing (two base tokens) holds its baseline's own tokens (db.mixed_hold): 10 DJT at 10 + 70 USDC
         self.assertIsNotNone(by['sol-swing']['profit_usd'])
-        self.assertIsNone(by['sol-swing']['vs_hold_usd'])
-        self.assertIsNone(sub['sol-lp2']['vs_hold_usd'])
-        self.assertIsNone(p['total']['vs_hold_usd'])
+        self.assertAlmostEqual(by['sol-swing']['vs_hold_usd'], 152.4 - 170.0, places=4)
+        self.assertEqual(sub['sol-lp2']['vs_hold_usd'], by['sol-swing']['vs_hold_usd'])
+        self.assertAlmostEqual(p['total']['vs_hold_usd'], by['sol-usdc']['vs_hold_usd'] + by['sol-swing']['vs_hold_usd'],
+                               places=4)
         self.assertIsNotNone(by['sol-usdc']['vs_hold_usd'])
         self.assertEqual(sub['sol-lp']['vs_hold_usd'], by['sol-usdc']['vs_hold_usd'])   # mu-usdc: no baseline
 
@@ -1154,18 +1155,71 @@ class TwoSolanaWallets(unittest.TestCase):
         self.assertEqual(db.flow_totals('sol-usdc')['deposits_usd'], 12.0)         # the legacy wallet's: sol-usdc's
         self.assertEqual(db.since_start(0.0, 'sol-usdc')['start_usd'], 230.0 + 7.0 + 5.0)   # not + 9
 
-    def test_the_swings_since_start_has_dollars_and_no_hold(self):
+    def test_the_swings_since_start_holds_its_baseline_tokens(self):
         s = db.since_start(0.0, 'sol-swing')
         self.assertEqual((s['start_usd'], s['equity_usd'], s['paid_out_usd']), (145.0, 152.0, 0.4))
         self.assertAlmostEqual(s['profit_usd'], 152.0 + 0.4 - 145.0, places=4)
-        for k in ('start_sol', 'price_start', 'price_now') + db.SINCE_HOLD:
+        self.assertIsNone(s['start_sol'])                                  # two base tokens: no one amount
+        # 2026-10-05: 'vs holding' read '-' for sol-swing. The baseline's own tokens, each at its price now
+        self.assertEqual((s['hold_start_assets_usd'], s['vs_hold_start_assets_usd']), (170.0, round(152.4 - 170.0, 4)))
+        self.assertEqual((s['hold_50_50_usd'], s['vs_hold_50_50_usd']), (145.0, 7.4))   # DJT 10 then and now
+        self.assertEqual((s['price_start'], s['price_now']), (10.0, 10.0))
+        # a later DJT price moves both benchmarks; an unpriced token blanks them
+        snap('SW1', 0, 0.2, 150.0, lp=140.0, accrued=(1.0, 0.1))
+        with db.cursor(commit=True) as cur:
+            cur.execute("update snapshots set price = 12 where id = (select max(id) from snapshots)")
+        s = db.since_start(0.0, 'sol-swing')
+        self.assertEqual(s['hold_start_assets_usd'], 190.0)
+        self.assertEqual(s['hold_50_50_usd'], round(145.0 * (0.5 + 0.5 * 12 / 10), 4))
+        with db.cursor(commit=True) as cur:
+            cur.execute("update positions set pair_label = 'XYZ/USDC' where pair_label = 'DJT/USDC'")
+        s = db.since_start(0.0, 'sol-swing')
+        for k in ('price_start', 'price_now') + db.SINCE_HOLD:
             self.assertIsNone(s[k], k)
         one = db.since_start(0.0, 'sol-usdc')
         self.assertTrue(all(one[k] is not None for k in ('start_sol', 'price_start', 'price_now') + db.SINCE_HOLD))
         with context():
             both = db.since_start(wallet_id=None)
-        self.assertTrue(all(both[k] is None for k in db.SINCE_HOLD))
+        self.assertTrue(all(both[k] is None for k in db.SINCE_HOLD))       # the XYZ swing has none
         self.assertIsNotNone(db.since_start(wallet_id='sol-lp')['vs_hold_50_50_usd'])     # mu-usdc: no baseline
+
+    def test_token_prices(self):
+        self.assertEqual(db.token_prices(set()), {})
+        self.assertEqual(db.token_prices({USDC_MINT}), {USDC_MINT: 1.0})
+        self.assertEqual(db.token_prices({DJT_MINT}), {DJT_MINT: 10.0})                 # djt-usdc's deposit_mint
+        self.assertEqual(db.token_prices({'unknownmint'}), {})
+        self.assertEqual(db.token_prices({SOL_MINT, DJT_MINT}), {SOL_MINT: 10.0, DJT_MINT: 10.0})
+        with db.cursor(commit=True) as cur:
+            # a mint named in mints wins over a deposit_mint row; a nameless token is no name
+            cur.execute("update config set mints = %s, token_a = 'MU' where name = 'mu-usdc'", ([DJT_MINT, USDC_MINT],))
+            cur.execute("update config set token_a = '' where name = 'djt-usdc'")
+            cur.execute("update snapshots set price = 7 where mint = 'MU1'")
+        self.assertEqual(db.token_prices({DJT_MINT}), {DJT_MINT: 7.0})
+        with db.cursor(commit=True) as cur:
+            cur.execute("update config set mints = null where name = 'mu-usdc'")
+        self.assertEqual(db.token_prices({DJT_MINT}), {})                                # djt-usdc: no token_a
+        with db.cursor(commit=True) as cur:
+            cur.execute("update config set token_a = 'DJT', deposit_mint = %s where name = 'djt-usdc'", (USDC_MINT,))
+        self.assertEqual(db.token_prices({DJT_MINT}), {})                                # a stable deposit_mint names nothing
+        self.assertEqual(db.token_prices({USDC_MINT}), {USDC_MINT: 1.0})
+        with db.cursor(commit=True) as cur:
+            # a nameless row (djt-usdc, first by name) does not hide a named one (mu-usdc)
+            cur.execute("update config set mints = %s, token_a = '' where name = 'djt-usdc'", ([DJT_MINT, USDC_MINT],))
+            cur.execute("update config set mints = %s, token_a = 'MU' where name = 'mu-usdc'", ([DJT_MINT, USDC_MINT],))
+        self.assertEqual(db.token_prices({DJT_MINT}), {DJT_MINT: 7.0})
+
+    def test_the_swings_hold_takes_flows_in_tokens(self):
+        flow('deposit', 20.0, 'sol-swing', 'sol-lp2', hours_ago=5, amounts={SOL_MINT: 2.0})
+        flow('withdrawal', 3.0, 'sol-swing', 'sol-lp2', hours_ago=4)                    # no amounts: its dollars
+        s = db.since_start(0.0, 'sol-swing')
+        self.assertEqual(s['hold_start_assets_usd'], 170.0 + 2.0 * 10.0 - 3.0)
+        self.assertEqual(s['hold_50_50_usd'], 145.0 + 20.0 - 3.0)
+        with db.cursor(commit=True) as cur:
+            cur.execute("update positions set pair_label = 'XYZ/USDC' where pair_label = 'SOL/USDC'")
+        self.assertIsNone(db.since_start(0.0, 'sol-swing')['hold_start_assets_usd'])     # the SOL flow unpriced
+        with db.cursor(commit=True) as cur:
+            cur.execute("update capital_flows set amounts = null where profile = 'sol-swing' and kind = 'baseline'")
+        self.assertIsNone(db.since_start(0.0, 'sol-swing')['hold_50_50_usd'])            # no baseline amounts
 
     def test_a_day_across_two_pairs_has_no_price_and_no_hold(self):
         # three days ago the swing held DJT then SOL; sol-usdc held SOL all day
@@ -1339,6 +1393,78 @@ class ABySymbol(unittest.TestCase):
                           'unrealised': {'SOL': 0.3}, 'total': {'DJT': 2.0, 'SOL': 1.0}})
         self.assertEqual(db.combine_a_by_token([{'fees_a_by_token': None, 'token_a': 'X', 'fees_today_a': 1}])['today'],
                          {'X': 1.0})
+
+
+class MixedHold(unittest.TestCase):
+    """db.mixed_hold: the hold benchmarks of a book whose base token changed. Pure."""
+    S, U, D = 'SOLm', 'USDCm', 'DJTm'
+    stable = staticmethod(lambda m: m == 'USDCm')
+
+    def hold(self, base, flows=(), prices=None, base_usd=None, base_price=119.0):
+        prices = prices if prices is not None else {self.S: 120.0, self.U: 1.0, self.D: 9.0}
+        return db.mixed_hold(base, base_usd if base_usd is not None else 215.0, base_price, list(flows), prices,
+                             stable=self.stable)
+
+    def test_replay_sol_swing(self):
+        # 2026-10-03 baseline 0.07 SOL + 206.958214 USDC ($215.29 at 119.0576); a 0.209884 USDC withdrawal
+        h = db.mixed_hold({self.S: 0.07, self.U: 206.958214}, 215.292247, 119.05761404864457,
+                          [(-1, 0.209884, None)], {self.S: 119.1598, self.U: 1.0}, stable=self.stable)
+        self.assertAlmostEqual(h['hold'], 0.07 * 119.1598 + 206.958214 - 0.209884, places=6)
+        self.assertAlmostEqual(h['hold_50'], 215.292247 * (0.5 + 0.5 * 119.1598 / 119.05761404864457) - 0.209884,
+                               places=6)
+        self.assertEqual(h['price_now'], 119.1598)
+
+    def test_none_cases(self):
+        self.assertIsNone(self.hold(None))
+        self.assertIsNone(self.hold({}))
+        self.assertIsNone(self.hold({self.S: 1.0}, prices={self.U: 1.0}))                 # SOL unpriced
+        self.assertIsNone(self.hold({self.U: 1.0}, [(1, 9.0, {self.D: 1.0})], prices={self.U: 1.0}))
+
+    def test_zero_amount_needs_no_price(self):
+        self.assertEqual(self.hold({self.U: 5.0, self.D: 0}, prices={self.U: 1.0})['hold'], 5.0)
+
+    def test_flows_by_token_and_by_dollar(self):
+        h = self.hold({self.S: 1.0, self.U: 100.0},
+                      [(1, 90.0, {self.D: 10.0}), (-1, 20.0, {self.U: 20.0}), (1, 3.0, None), (-1, 1.0, None)])
+        self.assertAlmostEqual(h['hold'], 120.0 + 100.0 + 90.0 - 20.0 + 3.0 - 1.0)
+        self.assertAlmostEqual(h['hold_50'], 215.0 * (0.5 + 0.5 * 120.0 / 119.0) + 90 - 20 + 3 - 1)
+
+    def test_largest_volatile_sets_the_50_50(self):
+        h = self.hold({self.S: 0.01, self.D: 20.0, self.U: 1.0}, base_price=8.0)
+        self.assertEqual(h['price_now'], 9.0)                                                  # DJT $180 > SOL $1.2
+        self.assertAlmostEqual(h['hold_50'], 215.0 * (0.5 + 0.5 * 9.0 / 8.0))
+
+    def test_stable_only_or_no_base_price(self):
+        self.assertEqual(self.hold({self.U: 215.0}, [(1, 5.0, None)]),
+                         {'hold': 220.0, 'hold_50': 220.0, 'price_now': None})
+        h = self.hold({self.S: 1.0}, base_price=0)
+        self.assertEqual((h['hold_50'], h['price_now']), (215.0, None))
+
+    def test_largest_by_dollars_not_by_amount(self):
+        self.assertEqual(self.hold({self.S: 2.0, self.D: 20.0}, base_price=100.0)['price_now'], 120.0)   # $240 > $180
+        self.assertEqual(self.hold({self.U: 215.0, self.D: 0.0}), {'hold': 215.0, 'hold_50': 215.0, 'price_now': None})
+
+    def test_a_flow_with_no_dollar_figure(self):
+        h = self.hold({self.U: 10.0}, [(1, None, None), (1, None, {self.U: 2.0})])
+        self.assertEqual((h['hold'], h['hold_50']), (12.0, 215.0))
+
+    @settings(max_examples=200, deadline=None)
+    @given(st.dictionaries(st.sampled_from(['SOLm', 'USDCm', 'DJTm']), st.floats(0, 1e5), min_size=1),
+           st.lists(st.tuples(st.sampled_from([1, -1]), st.floats(0, 1e4),
+                              st.one_of(st.none(), st.dictionaries(st.sampled_from(['SOLm', 'USDCm', 'DJTm']),
+                                                                   st.floats(0, 1e3), min_size=1))), max_size=5))
+    def test_property_hold_is_tokens_times_prices(self, base, flows):
+        prices = {self.S: 120.0, self.U: 1.0, self.D: 9.0}
+        h = self.hold(base, flows, prices)
+        want = sum(x * prices[m] for m, x in base.items())
+        for sgn, usd, am in flows:
+            want += sgn * (sum(x * prices[m] for m, x in am.items()) if am else usd)
+        self.assertAlmostEqual(h['hold'], want, delta=1e-6 * max(1.0, abs(want)))
+        # a price rise of every volatile token never lowers the hold
+        up = self.hold(base, flows, {self.S: 130.0, self.U: 1.0, self.D: 10.0})
+        held = {m: base.get(m, 0) + sum(s * (am or {}).get(m, 0) for s, _, am in flows) for m in prices}
+        if all(held[m] >= 0 for m in (self.S, self.D)):
+            self.assertGreaterEqual(up['hold'] + 1e-6, h['hold'])
 
 
 class ByPoolExact(unittest.TestCase):
