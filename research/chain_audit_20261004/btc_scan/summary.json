@@ -1,0 +1,120 @@
+{
+  "retrieved_utc": "2026-10-04T18:57:26.253895+00:00",
+  "notes": [
+    "Discovery only, not a fee-growth or inventory backtest.",
+    "Pool snapshot volumes from GeckoTerminal API; rolling windows may differ from cached web pages.",
+    "Chain figures use DefiLlama covered venues and are not assumed complete."
+  ],
+  "chains": [
+    {
+      "chain": "BOB",
+      "volume_30d_usd": 196131.91999999998,
+      "average_daily_30d_usd": 6537.730666666666
+    },
+    {
+      "chain": "Base",
+      "volume_30d_usd": 29172559278.449997,
+      "average_daily_30d_usd": 972418642.6149999
+    },
+    {
+      "chain": "Bitlayer",
+      "volume_30d_usd": 1107.1399999999999,
+      "average_daily_30d_usd": 36.904666666666664
+    },
+    {
+      "chain": "CORE",
+      "volume_30d_usd": 139057.71999999986,
+      "average_daily_30d_usd": 4635.2573333333285
+    },
+    {
+      "chain": "Merlin",
+      "volume_30d_usd": 19672.03,
+      "average_daily_30d_usd": 655.7343333333333
+    },
+    {
+      "chain": "Rootstock",
+      "volume_30d_usd": 11969937,
+      "average_daily_30d_usd": 398997.9
+    },
+    {
+      "chain": "Solana",
+      "volume_30d_usd": 78013000361.45004,
+      "average_daily_30d_usd": 2600433345.381668
+    },
+    {
+      "chain": "Stacks",
+      "volume_30d_usd": 105679271.01,
+      "average_daily_30d_usd": 3522642.367
+    },
+    {
+      "chain": "Sui",
+      "volume_30d_usd": 1568963223.0700002,
+      "average_daily_30d_usd": 52298774.10233334
+    }
+  ],
+  "pools": [
+    {
+      "network": "base",
+      "address": "0x160d7e9d948b16c163332a277b393c288408eb12",
+      "pair": "cbBTC / USDC 0.05%",
+      "tvl_usd": 5217409.2492,
+      "volume24h_usd": 14125942.9723866,
+      "dex": "aerodrome-slipstream-3",
+      "url": "https://www.geckoterminal.com/base/pools/0x160d7e9d948b16c163332a277b393c288408eb12"
+    },
+    {
+      "network": "base",
+      "address": "0xfbb6eed8e7aa03b138556eedaf5d271a5e1e43ef",
+      "pair": "cbBTC / USDC 0.05%",
+      "tvl_usd": 8841131.096,
+      "volume24h_usd": 1983500.34441822,
+      "dex": "uniswap-v3-base",
+      "url": "https://www.geckoterminal.com/base/pools/0xfbb6eed8e7aa03b138556eedaf5d271a5e1e43ef"
+    },
+    {
+      "network": "solana",
+      "address": "HxA6SKW5qA4o12fjVgTpXdq2YnZ5Zv1s7SB4FFomsyLM",
+      "pair": "cbBTC / USDC",
+      "tvl_usd": 6104536.2998,
+      "volume24h_usd": 3243511.87346863,
+      "dex": "orca",
+      "url": "https://www.geckoterminal.com/solana/pools/HxA6SKW5qA4o12fjVgTpXdq2YnZ5Zv1s7SB4FFomsyLM"
+    },
+    {
+      "network": "solana",
+      "address": "7ubS3GccjhQY99AYNKXjNJqnXjaokEdfdV915xnCb96r",
+      "pair": "cbBTC / USDC",
+      "tvl_usd": 1406799.6577,
+      "volume24h_usd": 483537.804753309,
+      "dex": "meteora",
+      "url": "https://www.geckoterminal.com/solana/pools/7ubS3GccjhQY99AYNKXjNJqnXjaokEdfdV915xnCb96r"
+    },
+    {
+      "network": "arbitrum",
+      "address": "0x0e4831319a50228b9e450861297ab92dee15b44f",
+      "pair": "USDC / WBTC 0.05%",
+      "tvl_usd": 8072491.5901,
+      "volume24h_usd": 1901305.99401586,
+      "dex": "uniswap_v3_arbitrum",
+      "url": "https://www.geckoterminal.com/arbitrum/pools/0x0e4831319a50228b9e450861297ab92dee15b44f"
+    },
+    {
+      "network": "bsc",
+      "address": "0x46cf1cf8c69595804ba91dfdd8d6b960c9b0a7c4",
+      "pair": "USDT / BTCB 0.05%",
+      "tvl_usd": 23923430.5552,
+      "volume24h_usd": 7141964.42312875,
+      "dex": "pancakeswap-v3-bsc",
+      "url": "https://www.geckoterminal.com/bsc/pools/0x46cf1cf8c69595804ba91dfdd8d6b960c9b0a7c4"
+    },
+    {
+      "network": "rootstock",
+      "address": "0xaef6fabf3b0c9e5f9d6d5170afc703a633479bbd",
+      "pair": "USD\u20ae0 / WRBTC 0.3%",
+      "tvl_usd": 358501.3905,
+      "volume24h_usd": 7800.5173800658,
+      "dex": "oku-trade-rootstock",
+      "url": "https://www.geckoterminal.com/rootstock/pools/0xaef6fabf3b0c9e5f9d6d5170afc703a633479bbd"
+    }
+  ]
+}

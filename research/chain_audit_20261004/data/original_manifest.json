@@ -1,0 +1,72 @@
+[
+  {
+    "original": "/tmp/claude-1000/-home-ubuntu-agent-fin/6970f2e7-71c6-4426-ab04-fad1ccac2827/scratchpad/aero/samples.jsonl",
+    "archive": "lp_bot/research/chain_audit_20261004/data/claude_aero_samples.jsonl.gz",
+    "sha256": "4713e414a6073ffa0e39e5f34fc66f9c0613e6bc17f999e603ea2b39cfafc0a0"
+  },
+  {
+    "original": "/tmp/claude-1000/-home-ubuntu-agent-fin/6970f2e7-71c6-4426-ab04-fad1ccac2827/scratchpad/aero/rows.json",
+    "archive": "lp_bot/research/chain_audit_20261004/data/claude_aero_rows.json.gz",
+    "sha256": "09d6619766fefb466c21578bd91f88ab2ac97a90684696121fea22ce6b6985b9"
+  },
+  {
+    "original": "/tmp/claude-1000/-home-ubuntu-agent-fin/6970f2e7-71c6-4426-ab04-fad1ccac2827/scratchpad/aero/ana.py",
+    "archive": "lp_bot/research/chain_audit_20261004/data/claude_aero_ana.py.gz",
+    "sha256": "3d078a9cfb8e1d37da8695b8919be1fdcaee41562dcf1d0922a412c321558a64"
+  },
+  {
+    "original": "/tmp/claude-1000/-home-ubuntu-agent-fin/6970f2e7-71c6-4426-ab04-fad1ccac2827/scratchpad/aero/net.py",
+    "archive": "lp_bot/research/chain_audit_20261004/data/claude_aero_net.py.gz",
+    "sha256": "4f979e819a6048195162317a71b5c85d2c4caac28be250996b2f58f925271730"
+  },
+  {
+    "original": "/tmp/claude-1000/-home-ubuntu-agent-fin/6970f2e7-71c6-4426-ab04-fad1ccac2827/scratchpad/panoptic/eth5m.json",
+    "archive": "lp_bot/research/chain_audit_20261004/data/claude_panoptic_eth5m.json.gz",
+    "sha256": "cc2a015699eae005dab3019a712fb1406223d4b392320ac6f12bdb384659614f"
+  },
+  {
+    "original": "/tmp/claude-1000/-home-ubuntu-agent-fin/6970f2e7-71c6-4426-ab04-fad1ccac2827/scratchpad/panoptic/regime_h.json",
+    "archive": "lp_bot/research/chain_audit_20261004/data/claude_panoptic_regime_h.json.gz",
+    "sha256": "5e8e352bb0729f700563423232844338fcab4934bc09e24321d1eb97ce0e9897"
+  },
+  {
+    "original": "/tmp/claude-1000/-home-ubuntu-agent-fin/6970f2e7-71c6-4426-ab04-fad1ccac2827/scratchpad/panoptic/regime.py",
+    "archive": "lp_bot/research/chain_audit_20261004/data/claude_panoptic_regime.py.gz",
+    "sha256": "aa2f14a502d3cee9e6eb94585cde04bee4c9daa4ecf2cc65c621fb457013c733"
+  },
+  {
+    "original": "/tmp/claude-1000/-home-ubuntu-agent-fin/6970f2e7-71c6-4426-ab04-fad1ccac2827/scratchpad/panoptic/eth88e6.json",
+    "archive": "lp_bot/research/chain_audit_20261004/data/claude_panoptic_eth88e6.json.gz",
+    "sha256": "a99b5d44eb97bfdc214fb4123bf99b0c3704081f49ddd0c098baafd7f3fbb5ef"
+  },
+  {
+    "original": "/tmp/claude-1000/-home-ubuntu-agent-fin/6970f2e7-71c6-4426-ab04-fad1ccac2827/scratchpad/sui/rows.json",
+    "archive": "lp_bot/research/chain_audit_20261004/data/claude_sui_rows.json.gz",
+    "sha256": "44dd6e61b1ae6651e4b1ff36dcb9279f44151fbb0a079fab71beac669489228e"
+  },
+  {
+    "original": "/tmp/claude-1000/-home-ubuntu-agent-fin/6970f2e7-71c6-4426-ab04-fad1ccac2827/scratchpad/sui/snap.json",
+    "archive": "lp_bot/research/chain_audit_20261004/data/claude_sui_snap.json.gz",
+    "sha256": "5c3d0840ba39dfce9b64cdae6076eecf57d556b12876e99608f7a4f0029e724b"
+  },
+  {
+    "original": "/tmp/claude-1000/-home-ubuntu-agent-fin/6970f2e7-71c6-4426-ab04-fad1ccac2827/scratchpad/sui/meta.json",
+    "archive": "lp_bot/research/chain_audit_20261004/data/claude_sui_meta.json.gz",
+    "sha256": "587df3be5009aa3a63e36b4ae7fe97a55a7b037d24bc241456ac977a87b54fd1"
+  },
+  {
+    "original": "/tmp/claude-1000/-home-ubuntu-agent-fin/6970f2e7-71c6-4426-ab04-fad1ccac2827/scratchpad/sui/kl.json",
+    "archive": "lp_bot/research/chain_audit_20261004/data/claude_sui_kl.json.gz",
+    "sha256": "3113f88a0d037ca61e10913bdbfda00f840aed4853b69b002afff510b47cf78b"
+  },
+  {
+    "original": "/tmp/claude-1000/-home-ubuntu-agent-fin/6970f2e7-71c6-4426-ab04-fad1ccac2827/scratchpad/sui/ana.py",
+    "archive": "lp_bot/research/chain_audit_20261004/data/claude_sui_ana.py.gz",
+    "sha256": "ef6d53ca5e452ad9b5137e1030225235cf18e29fb6f5f7b58b047bd566bbc323"
+  },
+  {
+    "original": "/tmp/claude-1000/-home-ubuntu-agent-fin/6970f2e7-71c6-4426-ab04-fad1ccac2827/scratchpad/sui/reg.py",
+    "archive": "lp_bot/research/chain_audit_20261004/data/claude_sui_reg.py.gz",
+    "sha256": "7512509dc38f125eac80c12a4a8873afd951560c2331e6fedb2d824d0e61b65c"
+  }
+]

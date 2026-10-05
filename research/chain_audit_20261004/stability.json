@@ -1,0 +1,77 @@
+[
+  {
+    "pool": "cetus_sui_5bp",
+    "policy": "notHOT",
+    "income": "both",
+    "ratio": 1.2186426604310674,
+    "first_half": 1.3322263412919022,
+    "second_half": 1.017268089098019,
+    "block_bootstrap_95pct": [
+      1.0899658437111768,
+      1.3580475510089711
+    ],
+    "selected_hours": 292.45769138846134,
+    "proxy_margin_usd_per_calendar_day_230": 0.5256065997862513,
+    "proxy_margin_usd_per_calendar_day_2000": 4.57049217205436
+  },
+  {
+    "pool": "cetus_sui_25bp",
+    "policy": "notHOT",
+    "income": "both",
+    "ratio": 1.0396781434800015,
+    "first_half": 1.0604855060314675,
+    "second_half": 1.002788392394134,
+    "block_bootstrap_95pct": [
+      0.9780798277630197,
+      1.1025637464593616
+    ],
+    "selected_hours": 292.45769138846134,
+    "proxy_margin_usd_per_calendar_day_230": 0.08887144214102488,
+    "proxy_margin_usd_per_calendar_day_2000": 0.7727951490523903
+  },
+  {
+    "pool": "cetus_eth_25bp",
+    "policy": "notHOT",
+    "income": "fee",
+    "ratio": 1.1866978813154878,
+    "first_half": 0.9908659586662332,
+    "second_half": 1.3655800726583915,
+    "block_bootstrap_95pct": [
+      1.0403709324964476,
+      1.3524323957611832
+    ],
+    "selected_hours": 680.4376583331822,
+    "proxy_margin_usd_per_calendar_day_230": 0.4923051800347693,
+    "proxy_margin_usd_per_calendar_day_2000": 4.2809146089979935
+  },
+  {
+    "pool": "bluefin_btc_20bp",
+    "policy": "weekend",
+    "income": "fee",
+    "ratio": 1.292108475097398,
+    "first_half": 1.0474828469019906,
+    "second_half": 1.49880083936717,
+    "block_bootstrap_95pct": [
+      0.9670489151958653,
+      1.7948432159556789
+    ],
+    "selected_hours": 233.6986386111046,
+    "proxy_margin_usd_per_calendar_day_230": 0.05500126219761545,
+    "proxy_margin_usd_per_calendar_day_2000": 0.47827184519665605
+  },
+  {
+    "pool": "aero_v3",
+    "policy": "weekend",
+    "income": "reward",
+    "ratio": 1.1287786953324277,
+    "first_half": 1.201372823660947,
+    "second_half": 1.0652171932540904,
+    "block_bootstrap_95pct": [
+      0.9331145542442475,
+      1.4689712880380923
+    ],
+    "selected_hours": 233.0,
+    "proxy_margin_usd_per_calendar_day_230": 0.06841979102421221,
+    "proxy_margin_usd_per_calendar_day_2000": 0.5949547045583671
+  }
+]

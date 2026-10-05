@@ -1,0 +1,18 @@
+{
+  "type": "illustrative example, not historical performance",
+  "initial_capital": 1000.0,
+  "range": [
+    2673.267326732673,
+    2727.0
+  ],
+  "price_path": "20 round trips 2700 -> 2713.5 -> 2700; fixed liquidity; fees not reinvested",
+  "assumed_fees": 20,
+  "terminal_principal": 1000.0,
+  "terminal_principal_plus_fees": 1020.0,
+  "endpoint_IL": 0.0,
+  "exact_sum_discrete_curvature_loss": 25.093283822604114,
+  "matching_delta_term": 25.09328382260411,
+  "variance_proxy": 25.06198240199164,
+  "fees_minus_variance_proxy": -5.061982401991639,
+  "actual_profit_before_gas": 20.0
+}
