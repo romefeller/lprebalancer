@@ -99,6 +99,21 @@ test('isEntry: true only for the script node was started with', () => {
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
+test('replay 2026-10-05: an overloaded account index moves to the next endpoint', async () => {
+  const OVERLOADED = 'failed to get token accounts owned by account 83HxMUUC7cn5oWKgNvUYCv52MVLUWmaUPFdCrgC4tV2f: account index service overloaded, please try again';
+  for (const m of [OVERLOADED, OVERLOADED.slice(0, 150), 'node is temporarily unavailable', 'busy, try again later'])
+    assert.equal(errorKind(new Error(m)), 'rotate', m);
+  assert.equal(errorKind(Object.assign(new Error(OVERLOADED), { sent: true })), 'fatal');   // after a send: never
+  const seen = [];
+  const v = await overEndpoints(['https://a.example', 'https://b.example'], async u => {
+    seen.push(u);
+    if (u.includes('a.example')) throw new Error(OVERLOADED);
+    return 'ok';
+  }, noSleep);
+  assert.equal(v, 'ok');
+  assert.deepEqual(seen, ['https://a.example', 'https://a.example', 'https://b.example']);
+});
+
 test('a dollar figure or a decimal is not an HTTP 5xx', () => {
   for (const m of ['refused: swap of $500.12 is over the cap', 'value 502.5 USDC', 'amount 1,503 SOL', 'impact 0.504%'])
     assert.equal(errorKind(new Error(m)), 'fatal', m);

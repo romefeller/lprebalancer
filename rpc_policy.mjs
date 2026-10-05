@@ -56,6 +56,9 @@ export function errorKind(e) {
   if (/HALT present/.test(m) || isProgramFailure(e)) return 'fatal';
   if (/\b429\b|Too Many Requests|rate.?limit/i.test(m)) return 'rotate';
   if (/\b403\b|Forbidden|Indexed requests|personal token|Request blocked/i.test(m)) return 'rotate';
+  // 2026-10-05: mainnet answered getTokenAccountsByOwner with "account index
+  // service overloaded, please try again": a busy node, so try the next one.
+  if (/overloaded|try again later|temporarily unavailable/i.test(m)) return 'rotate';
   if (/fetch failed|ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|socket hang up|timed? ?out|(?<![$\d.,])\b50[0-4]\b(?![.,]\d)|Internal Server Error|Service Unavailable|Bad Gateway/i.test(m)) return 'rotate';
   return 'fatal';
 }
