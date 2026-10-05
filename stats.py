@@ -46,6 +46,7 @@ TOKEN_KEYS = ('fees_realised_a', 'fees_realised_b', 'fees_unrealised_a', 'fees_u
 HOLD_KEYS = ('vs_hold_usd', 'vs_hold_50_50_usd')
 # One pool of a profile (db.by_pool): the figures the per-pool lines show.
 POOL_KEYS = ('dex', 'pool', 'pair_label', 'positions', 'open_now', 'days', 'fees_a', 'fees_b', 'fees_usd',
+             'realised_a', 'unrealised_a',
              'realised_usd', 'unrealised_usd', 'fees_per_day_usd', 'apr_pct', 'in_range_pct')
 # APRs recomputed on a sum: (APR key, the rate it annualises).
 APR_KEYS = (('apr_6h_pct', 'fees_per_day_6h_usd'), ('apr_24h_pct', 'fees_per_day_24h_usd'),
@@ -172,6 +173,27 @@ def _tok(x, sym):
     return f'- {sym}' if x is None else f'{x:.6f}'.rstrip('0').rstrip('.') + f' {sym}'
 
 
+# The by_pool amount behind each fee line of the A side.
+SIDE_A = {'fees_realised_a': 'realised_a', 'fees_unrealised_a': 'unrealised_a', 'fees_total_a': 'fees_a'}
+
+
+def _side_a(r, key, sym):
+    """The A side of a fee line. A profile that held two A tokens (sol-swing:
+    SOL and DJT) has no single amount, so each token is summed over its own
+    pools (by_pool) and shown on its own, the largest first. Pure."""
+    if r[key] is not None or not r.get('by_pool'):
+        return _tok(r[key], sym)
+    per = {}
+    for p in r['by_pool']:
+        tok = (p.get('pair_label') or '').split('/')[0] or '?'
+        if p.get(SIDE_A[key]) is not None:
+            per[tok] = per.get(tok, 0.0) + float(p[SIDE_A[key]])
+    if not per:
+        return _tok(None, sym)
+    shown = {t: v for t, v in per.items() if v} or per         # a zero token is noise
+    return ' '.join(_tok(v, t) for t, v in sorted(shown.items(), key=lambda kv: -kv[1]))
+
+
 def wallet_name(wallet_id, tag):
     """How a wallet is named: its id and its address's first 10 characters
     (db.wallet_tag), or the id alone when it has no address on record. Pure."""
@@ -217,11 +239,11 @@ def _pool_lines(r):
     return [f'  {r["pair"] or "-"}  ({r["profile"]}, {r["dex"] or "-"})'
             f'{"" if r["positions_open_now"] else "  no position"}',
             f'    equity  {_usd(r["equity_usd"])} · in LP {_usd(r["lp_usd"])} · idle {_usd(r["idle_usd"])}',
-            f'    fees    realised {_tok(r["fees_realised_a"], a)} {_tok(r["fees_realised_b"], b)}'
+            f'    fees    realised {_side_a(r, "fees_realised_a", a)} {_tok(r["fees_realised_b"], b)}'
             f' {_usd(r["fees_realised_usd"], 4)}',
-            f'            unrealised {_tok(r["fees_unrealised_a"], a)} {_tok(r["fees_unrealised_b"], b)}'
+            f'            unrealised {_side_a(r, "fees_unrealised_a", a)} {_tok(r["fees_unrealised_b"], b)}'
             f' {_usd(r["fees_unrealised_usd"], 4)}',
-            f'            total {_tok(r["fees_total_a"], a)} {_tok(r["fees_total_b"], b)}'
+            f'            total {_side_a(r, "fees_total_a", a)} {_tok(r["fees_total_b"], b)}'
             f' {_usd(r["fees_total_usd"], 4)} · today {_usd(r["fees_today_usd"], 4)}',
             f'    rate    6h {_usd(r["fees_per_day_6h_usd"], 4)}/d · 24h {_usd(r["fees_per_day_24h_usd"], 4)}/d'
             f' · since start {_usd(r["fees_per_day_usd"], 4)}/d · APR 24h {_pct(r["apr_24h_pct"])}'

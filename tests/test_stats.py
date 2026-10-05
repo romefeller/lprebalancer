@@ -1062,7 +1062,7 @@ class TwoSolanaWallets(unittest.TestCase):
         self.assertIn(f'    > pool  raydium-clmm SOL/USDC {SWING_POOL_SOL[:10]} · 1 pos over', text)
         self.assertIn(f'      pool  orca DJT/USDC {SWING_POOL_DJT[:10]} · 1 pos over', text)
         self.assertIn('fees 2 DJT 0.3 USDC $0.5000', text)
-        self.assertIn('realised - SOL 1.3 USDC $2.5000', text)                 # no SOL+DJT sum
+        self.assertIn('realised 2 DJT 0.01 SOL 1.3 USDC $2.5000', text)         # each A token, no SOL+DJT sum
         swing = text[text.index('WALLET sol-lp2'):text.index('TOTAL')]
         self.assertNotIn('sol-usdc', swing)
         self.assertEqual(text.count(' pool  '), 2)                            # one-pool profiles: no pool lines
@@ -1178,6 +1178,94 @@ def pos(mint, profile, pool, pair, dex, hours=30, closed_hours=None):
         cur.execute('update positions set opened_at = %s, closed_at = %s where mint = %s',
                     (T(hours), T(closed_hours) if closed_hours is not None else None, mint))
 
+
+
+class SwingTokens(unittest.TestCase):
+    """2026-10-05: sol-swing held SOL/USDC and DJT/USDC. SOL and DJT do not add,
+    so db.stats has no A-side amount, and the fee lines showed '- DJT'. Each
+    A token now shows on its own, summed over its pools."""
+
+    POOLS = [{'pair_label': 'DJT/USDC', 'realised_a': 0.046633, 'unrealised_a': 0.034904, 'fees_a': 0.081537},
+             {'pair_label': 'SOL/USDC', 'realised_a': 0.025958, 'unrealised_a': 0.0, 'fees_a': 0.025958}]
+
+    def rec(self, pools=POOLS, a=None):
+        return {'fees_realised_a': a, 'fees_unrealised_a': a, 'fees_total_a': a, 'by_pool': pools}
+
+    def test_replay_sol_swing(self):
+        r = self.rec()
+        self.assertEqual(stats._side_a(r, 'fees_realised_a', 'DJT'), '0.046633 DJT 0.025958 SOL')
+        self.assertEqual(stats._side_a(r, 'fees_unrealised_a', 'DJT'), '0.034904 DJT')        # 0 SOL is noise
+        self.assertEqual(stats._side_a(r, 'fees_total_a', 'DJT'), '0.081537 DJT 0.025958 SOL')
+
+    def test_one_pair_unchanged(self):
+        r = self.rec(a=1.5)
+        self.assertEqual(stats._side_a(r, 'fees_total_a', 'SOL'), '1.5 SOL')
+        self.assertEqual(stats._side_a(self.rec(pools=[]), 'fees_total_a', 'SOL'), '- SOL')
+        self.assertEqual(stats._side_a(self.rec(pools=[{'pair_label': 'SOL/USDC', 'fees_a': None}]),
+                                       'fees_total_a', 'SOL'), '- SOL')
+
+    def test_all_zero_still_shown(self):
+        r = self.rec(pools=[{'pair_label': 'SOL/USDC', 'unrealised_a': 0.0}])
+        self.assertEqual(stats._side_a(r, 'fees_unrealised_a', 'SOL'), '0 SOL')
+
+    def test_same_token_in_two_pools_adds(self):
+        pools = [{'pair_label': 'SOL/USDC', 'fees_a': 0.25}, {'pair_label': 'SOL/USDC', 'fees_a': 0.5},
+                 {'pair_label': 'DJT/USDC', 'fees_a': 1.0}]
+        self.assertEqual(stats._side_a(self.rec(pools=pools), 'fees_total_a', 'DJT'), '1 DJT 0.75 SOL')
+
+    @settings(max_examples=200, deadline=None)
+    @given(st.lists(st.tuples(st.sampled_from(['SOL', 'DJT', 'MU']),
+                              st.floats(min_value=0, max_value=1e6, allow_nan=False)), min_size=1, max_size=6))
+    def test_property_each_token_its_own_sum(self, rows):
+        pools = [{'pair_label': f'{t}/USDC', 'fees_a': v} for t, v in rows]
+        out = stats._side_a(self.rec(pools=pools), 'fees_total_a', 'X')
+        self.assertNotIn('-', out)
+        parts = out.split()
+        got = {parts[i + 1]: float(parts[i]) for i in range(0, len(parts), 2)}
+        want = {}
+        for t, v in rows:
+            want[t] = want.get(t, 0.0) + v
+        if any(want.values()):
+            want = {t: v for t, v in want.items() if v}
+        self.assertEqual(set(got), set(want))
+        for t in want:
+            self.assertAlmostEqual(got[t], round(want[t], 6), places=5)
+        vals = [float(parts[i]) for i in range(0, len(parts), 2)]
+        self.assertEqual(vals, sorted(vals, reverse=True))                                  # largest first
+
+    def test_missing_fields(self):
+        self.assertEqual(stats._side_a({'fees_total_a': None}, 'fees_total_a', 'SOL'), '- SOL')      # no by_pool
+        self.assertEqual(stats._side_a({'fees_total_a': 2.0}, 'fees_total_a', 'SOL'), '2 SOL')
+        self.assertEqual(stats._side_a(self.rec(pools=[{'pair_label': None, 'fees_a': 1.0}]), 'fees_total_a', 'S'),
+                         '1 ?')
+        self.assertEqual(stats._side_a(self.rec(pools=[{'fees_a': 1.0}]), 'fees_total_a', 'S'), '1 ?')
+        self.assertEqual(stats._side_a(self.rec(pools=[{'pair_label': '/USDC', 'fees_a': 1.0}]), 'fees_total_a', 'S'),
+                         '1 ?')
+
+    def test_render_has_no_dash_for_swing(self):
+        r = {'profile': 'sol-swing', 'pair': 'DJT/USDC', 'dex': 'orca', 'token_a': 'DJT', 'token_b': 'USDC',
+             'positions_open_now': 1, 'equity_usd': 1, 'lp_usd': 1, 'idle_usd': 0,
+             'fees_realised_a': None, 'fees_realised_b': 3.28, 'fees_realised_usd': 6.8,
+             'fees_unrealised_a': None, 'fees_unrealised_b': 0.13, 'fees_unrealised_usd': 0.4,
+             'fees_total_a': None, 'fees_total_b': 3.41, 'fees_total_usd': 7.2, 'fees_today_usd': 2,
+             'fees_per_day_6h_usd': 1, 'fees_per_day_24h_usd': 1, 'fees_per_day_usd': 1,
+             'apr_24h_pct': 1, 'apr_pct': 1, 'paid_usd': 1, 'reinvested_usd': 1, 'gas_usd': 0,
+             'profit_usd': 1, 'since': None, 'vs_hold_usd': None, 'vs_hold_50_50_usd': None,
+             'deposits_usd': 0, 'deposits': 0, 'withdrawals_usd': 0, 'withdrawals': 0,
+             'recentres': 1, 'harvests': 1, 'in_range_pct': 100, 'tracked_days': 1,
+             'by_pool': [dict(p, dex='orca', pool='x', positions=1, open_now=0, days=1, fees_b=1, fees_usd=1,
+                              realised_usd=1, unrealised_usd=0, fees_per_day_usd=1, apr_pct=1, in_range_pct=1)
+                         for p in self.POOLS]}
+        fees = [l for l in stats._pool_lines(r) if 'realised' in l or 'total ' in l]
+        self.assertEqual(len(fees), 3)
+        for l in fees:
+            self.assertNotIn('- DJT', l)
+        self.assertIn('realised 0.046633 DJT 0.025958 SOL 3.28 USDC', fees[0])
+        self.assertIn('total 0.081537 DJT 0.025958 SOL 3.41 USDC', fees[2])
+        bare = dict(r, token_a=None, token_b=None, fees_realised_a=1.0, by_pool=[])
+        self.assertIn('realised 1 A 3.28 B', stats._pool_lines(bare)[2])
+        named = dict(r, fees_realised_a=1.0, by_pool=[])
+        self.assertIn('realised 1 DJT 3.28 USDC', stats._pool_lines(named)[2])
 
 
 class ByPoolExact(unittest.TestCase):
