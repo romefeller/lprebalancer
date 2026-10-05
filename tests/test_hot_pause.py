@@ -468,7 +468,7 @@ class Loop(unittest.TestCase):
 
     def test_held_band_checks_before_the_exit(self):
         i = self.src.index('if (config.HOT_PAUSE_ENABLED or config.MACRO_PAUSE_ENABLED) and hot_pause(state, status, rv):')
-        j = self.src.index("if not status.get('inRange'):\n            side =")
+        j = self.src.index("if not status.get('inRange'):\n            seen = poll_seen(")
         k = self.src.index('fo = venue_failover(state, status)')
         self.assertLess(k, i); self.assertLess(i, j)
         self.assertIn("state.pop('hot_pause', None)", self.src[i:j])

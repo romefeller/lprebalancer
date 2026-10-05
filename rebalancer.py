@@ -1204,15 +1204,15 @@ def forecast_for(status):
                                 threshold=config.PROACTIVE_THRESHOLD)
 
 
-def harvest_due(state, status):
-    """The dividend: accrued fees go to the wallet every HARVEST_INTERVAL,
-    once at least MIN_HARVEST_USD has accrued. Never while a rebalance is
-    about to harvest anyway."""
-    if not config.HARVEST_INTERVAL:
+def harvest_ready(fees_usd, since_s, interval_s, min_usd):
+    """The dividend: accrued fees go to the wallet every `interval_s`, once
+    at least `min_usd` has accrued; `since_s` is the time since the last
+    one. Never while a rebalance is about to harvest anyway. Pure."""
+    if not interval_s:
         return False
-    if (status.get('feesAccrued_USD') or 0) < config.MIN_HARVEST_USD:
+    if (fees_usd or 0) < min_usd:
         return False
-    return time.time() - state.get('last_harvest', 0) >= config.HARVEST_INTERVAL
+    return since_s >= interval_s
 
 
 _POOL_REC = {}
@@ -1980,9 +1980,15 @@ def voluntary_move_allowed(state):
     so a move held back is not announced on every poll (review, 2026-09-26:
     up to five duplicate messages a move)."""
     now = time.time()
-    recent = [t for t in state.get('calm_times', []) if now - t < 86400]
-    last_any = max([state.get('last_rebalance', 0)] + recent)
-    return now - last_any >= config.CALM_MIN_GAP and health.allowed(f'venue:{config.DEX}', now)[0]
+    return (move_gap_ok(state.get('calm_times', []), state.get('last_rebalance', 0), now, config.CALM_MIN_GAP)
+            and health.allowed(f'venue:{config.DEX}', now)[0])
+
+
+def move_gap_ok(calm_times, last_rebalance, now, min_gap):
+    """Whether `min_gap` seconds have passed since the last move: the last
+    rebalance or a voluntary move of the last 24 h. Pure."""
+    recent = [t for t in calm_times if now - t < 86400]
+    return now - max([last_rebalance] + recent) >= min_gap
 
 
 FAILOVER_MIN_RATIO = 0.8          # a failover target earns at least this share of the held venue
@@ -2063,9 +2069,13 @@ def venue_failover(state, status, price=None, quote=None):
 
 
 def calm_budget_left(state):
-    now = time.time()
-    used = [t for t in state.get('calm_times', []) if now - t < 86400]
-    return max(config.CALM_MAX_MOVES - len(used), 0)
+    return moves_left(state.get('calm_times', []), time.time(), config.CALM_MAX_MOVES)
+
+
+def moves_left(calm_times, now, max_moves):
+    """Voluntary moves still allowed in the 24 h before `now`. Pure."""
+    used = [t for t in calm_times if now - t < 86400]
+    return max(max_moves - len(used), 0)
 
 
 def calm_view(state, status):
@@ -2754,12 +2764,18 @@ def calm_reopen_band(v, state):
     """The band to reopen at after a tight band exits: tight again while calm,
     budget left and a fresh tight band is unlikely to be touched soon;
     otherwise None, which means the ladder's band."""
-    if not v or not v.get('calm') or calm_budget_left(state) <= 0:
+    return tight_reopen(v, calm_budget_left(state), config.CALM_BAND, config.CALM_THRESHOLD)
+
+
+def tight_reopen(v, budget_left, band, threshold):
+    """calm_reopen_band on its inputs: `band` while calm, with budget left
+    and P(touch) of a fresh tight band under `threshold`, else None. Pure."""
+    if not v or not v.get('calm') or budget_left <= 0:
         return None
     pf = v.get('p_touch_fresh')
-    if pf is not None and pf >= config.CALM_THRESHOLD:
+    if pf is not None and pf >= threshold:
         return None
-    return config.CALM_BAND
+    return band
 
 
 def resume_reopen(state):
@@ -3719,6 +3735,101 @@ def rebalance(state, status, reason, target=None, band=None, calm_move=False, ex
     reopen(state, reason, band=band, exit_side=0 if target else exit_side)
 
 
+# --- replay testing: each poll's market decision as a pure function ----------
+#
+# poll_seen gathers what a poll knows; poll_verdict turns it into the poll's
+# move, reading nothing else. The loop acts on that verdict and stores both
+# (sql/032), so tests/test_replay.py can run recorded polls through the
+# current code and fail on any verdict that changed.
+
+SEEN_REGIME = ('mode', 'choice', 'choice_pct', 'held', 'held_pct', 'inside', 'stale', 'p_held',
+               'sigma_5m_pct', 'velocity')
+SEEN_CALM = ('calm', 'tight_held', 'p_touch', 'p_touch_fresh', 'threshold', 'sigma_5m_pct', 'cut_pct')
+CALM_ACTS = {'narrow': 'calm_narrow', 'recentre': 'calm_recentre', 'widen': 'calm_widen'}
+
+
+def _plain(x):
+    """A numpy scalar as its Python value, for json.dumps."""
+    return x.item() if hasattr(x, 'item') else str(x)
+
+
+def poll_knobs():
+    """The configuration poll_verdict reads, from config."""
+    return {'regime_enabled': bool(config.REGIME_ENABLED), 'calm_enabled': bool(config.CALM_ENABLED),
+            'widths': list(config.REGIME_WIDTHS), 'steps': config.REGIME_STEPS,
+            'calm_band': config.CALM_BAND, 'calm_threshold': config.CALM_THRESHOLD,
+            'calm_min_gap': config.CALM_MIN_GAP, 'calm_max_moves': config.CALM_MAX_MOVES,
+            'proactive_threshold': config.PROACTIVE_THRESHOLD,
+            'harvest_interval': config.HARVEST_INTERVAL, 'min_harvest_usd': config.MIN_HARVEST_USD}
+
+
+def poll_seen(state, status, rv, cv, fc):
+    """Everything poll_verdict needs from this poll, as plain JSON values.
+    Reads the venue's breaker, and the hour's volume profile only when a
+    proactive re-centre is on the table (the only verdict that reads it)."""
+    now = time.time()
+    act = bool(fc and fc.get('act') and config.PROACTIVE_THRESHOLD)
+    seen = {'at': now, 'knobs': poll_knobs(),
+            'band': {'price': status['price'], 'lower': status['lowerPrice'], 'upper': status['upperPrice'],
+                     'in_range': bool(status.get('inRange')), 'fees_usd': status.get('feesAccrued_USD')},
+            'regime': {k: rv.get(k) for k in SEEN_REGIME} if rv else None,
+            'calm': {k: cv.get(k) for k in SEEN_CALM} if cv else None,
+            'forecast': {'act': bool(fc.get('act')), 'p_exit_horizon': fc.get('p_exit_horizon')} if fc else None,
+            'gates': {'calm_times': [t for t in state.get('calm_times', []) if now - t < 86400],
+                      'last_rebalance': state.get('last_rebalance', 0),
+                      'last_harvest': state.get('last_harvest', 0),
+                      'breaker_ok': bool(health.allowed(f'venue:{config.DEX}', now)[0]),
+                      'busy': busy_hour() if act else None}}
+    return json.loads(json.dumps(seen, default=_plain))
+
+
+def poll_verdict(seen):
+    """The poll's move, from poll_seen alone. Pure.
+
+    {'act', 'band', 'side', 'deferred', 'harvest'}: `act` is 'exit' (the
+    price left the band: reopen at `band`, None meaning the ladder's), a
+    voluntary move (regime_widen, regime_narrow, calm_narrow, calm_recentre,
+    calm_widen, proactive) or None; `deferred` a proactive re-centre held
+    for a quiet hour; `harvest` the dividend is due (only when `act` is
+    None)."""
+    k, b, g = seen['knobs'], seen['band'], seen['gates']
+    rv, cv, fc = seen['regime'], seen['calm'], seen['forecast']
+    out = {'act': None, 'band': None, 'side': None, 'deferred': False, 'harvest': False}
+    budget = moves_left(g['calm_times'], seen['at'], k['calm_max_moves'])
+    if not b['in_range']:
+        if k['regime_enabled']:
+            band = rv['choice'] if rv else k['widths'][-1]
+        else:
+            tight = bool(cv and cv.get('tight_held'))
+            band = tight_reopen(cv, budget, k['calm_band'], k['calm_threshold']) if tight else None
+        return dict(out, act='exit', band=band, side='above' if b['price'] > b['upper'] else 'below')
+    voluntary = move_gap_ok(g['calm_times'], g['last_rebalance'], seen['at'], k['calm_min_gap']) and g['breaker_ok']
+    ract = calm.regime_decide(rv, widths=k['widths'], steps=k['steps']) if rv else None
+    if ract == 'narrow' and rv.get('stale'):
+        ract = None                                   # never narrow on a stale tape
+    if ract and budget > 0 and voluntary:
+        return dict(out, act=f'regime_{ract}', band=rv['choice'])
+    cact = None if rv else calm.decide(cv, enabled=k['calm_enabled'], budget_left=budget)
+    if cact and voluntary:
+        return dict(out, act=CALM_ACTS[cact], band=None if cact == 'widen' else k['calm_band'])
+    if fc and fc['act'] and k['proactive_threshold']:
+        if g['busy'] and (fc['p_exit_horizon'] or 0) < 0.9:
+            out['deferred'] = True
+        else:
+            return dict(out, act='proactive')
+    out['harvest'] = harvest_ready(b['fees_usd'], seen['at'] - g['last_harvest'],
+                                   k['harvest_interval'], k['min_harvest_usd'])
+    return out
+
+
+def record_poll(pool, seen, verdict):
+    """Store this poll for replay testing. Never blocks the loop."""
+    try:
+        db.record_replay_poll(pool, seen, verdict)
+    except Exception as e:
+        notify('replay_record_failed', reason=f'{type(e).__name__}: {tidy(e)}')
+
+
 def profile_enabled():
     """Whether this profile is enabled now (config.enabled, read every poll:
     an operator disables a running profile with an UPDATE). A pre-020
@@ -3942,12 +4053,11 @@ def main():
         state.pop('hot_pause', None)
 
         if not status.get('inRange'):
-            side = 'above' if price > status['upperPrice'] else 'below'
-            if config.REGIME_ENABLED:
-                k = rv['choice'] if rv else config.REGIME_WIDTHS[-1]
-            else:
-                k = calm_reopen_band(cv, state) if tight else None
-            k = reopen_width(k, status.get('whirlpool') or config.POOL, price)
+            seen = poll_seen(state, status, rv, cv, fc)
+            verdict = poll_verdict(seen)
+            record_poll(status.get('whirlpool') or config.POOL, seen, verdict)
+            side = verdict['side']
+            k = reopen_width(verdict['band'], status.get('whirlpool') or config.POOL, price)
             notify('OUT_OF_BAND', side=side, price=price,
                    lower=status['lowerPrice'], upper=status['upperPrice'],
                    action=('harvest, close, reopen tight' if k else 'harvest, close, re-optimise, reopen'),
@@ -3966,27 +4076,25 @@ def main():
             time.sleep(config.CALM_POLL_SECONDS)
             continue
 
-        ract = calm.regime_decide(rv, widths=config.REGIME_WIDTHS, steps=config.REGIME_STEPS) if rv else None
-        if ract == 'narrow' and rv.get('stale'):
-            ract = None                                   # never narrow on a stale tape
-        if ract and calm_budget_left(state) > 0 and voluntary_move_allowed(state):
-            ev = 'REGIME_WIDEN' if ract == 'widen' else 'REGIME_NARROW'
+        seen = poll_seen(state, status, rv, cv, fc)
+        verdict = poll_verdict(seen)
+        record_poll(status.get('whirlpool') or config.POOL, seen, verdict)
+        if verdict['act'] in ('regime_widen', 'regime_narrow'):
+            ev = {'regime_widen': 'REGIME_WIDEN', 'regime_narrow': 'REGIME_NARROW'}[verdict['act']]
             notify_book(ev, price=price, lower=status['lowerPrice'], upper=status['upperPrice'],
                         regime=rv, forecast=fc)
             db.event(ev, f"+/-{rv['held_pct']}% -> +/-{rv['choice_pct']}% ({rv['mode']}) "
                          f"sigma {rv['sigma_5m_pct']}% velocity {rv['velocity']}")
             rebalance(state, status, f"regime {rv['mode']}: +/-{rv['held_pct']}% -> +/-{rv['choice_pct']}%",
-                      band=rv['choice'], calm_move=True)
+                      band=verdict['band'], calm_move=True)
             time.sleep(config.CALM_POLL_SECONDS)
             continue
-        act = None if rv else calm.decide(cv, enabled=config.CALM_ENABLED,
-                                          budget_left=(cv or {}).get('budget_left', 0))
-        if act and not voluntary_move_allowed(state):
-            act = None                                    # inside the gap: announce nothing, try next poll
-        if act:
-            what = {'narrow': ('CALM_NARROW', config.CALM_BAND, 'calm: tight band'),
-                    'recentre': ('CALM_RECENTRE', config.CALM_BAND, 'calm: tight band re-centred before a touch'),
-                    'widen': ('CALM_WIDEN', None, 'calm over: back to the ladder band')}[act]
+        # A calm move inside the gap is no verdict: announce nothing, try next poll.
+        if verdict['act'] in CALM_ACTS.values():
+            what = {'calm_narrow': ('CALM_NARROW', 'calm: tight band'),
+                    'calm_recentre': ('CALM_RECENTRE', 'calm: tight band re-centred before a touch'),
+                    'calm_widen': ('CALM_WIDEN', 'calm over: back to the ladder band')}[verdict['act']]
+            what = (what[0], verdict['band'], what[1])
             notify_book(what[0], price=price, lower=status['lowerPrice'], upper=status['upperPrice'],
                         calm=cv, forecast=fc)
             db.event(what[0], f"sigma {cv['sigma_5m_pct']}% cut {cv['cut_pct']}% "
@@ -3999,9 +4107,9 @@ def main():
         # rather than at whatever price the exit happens to land on. Waits
         # for a quiet hour only while the probability is below the ceiling
         # (90%): past that the exit is imminent and the hour does not matter.
-        if fc and fc.get('act') and config.PROACTIVE_THRESHOLD:
+        if verdict['deferred'] or verdict['act'] == 'proactive':
             p_now = fc.get('p_exit_horizon')
-            if busy_hour() and (p_now or 0) < 0.9:
+            if verdict['deferred']:
                 o = db.season_outlook(db.season(), hour=utc_hour())
                 notify('recentre_deferred', p_exit=p_now, horizon_hours=config.PROACTIVE_HORIZON,
                        reason=f"hour {o['hour_utc']:02d} UTC runs {o['now_x']}x the average; "
@@ -4020,7 +4128,7 @@ def main():
                 time.sleep(config.POLL_SECONDS)
                 continue
 
-        if harvest_due(state, status):
+        if verdict['harvest']:
             dividend(state, status)
             status, err = read_status()
             if not status or not status.get('positionMint'):

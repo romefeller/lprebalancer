@@ -271,9 +271,14 @@ class MainLoopExit(unittest.TestCase):
         src = open(rebalancer.__file__, encoding='utf-8').read()      # the file: other tests patch main
         i = src.index("if not status.get('inRange'):")
         block = src[i:i + 1600]
-        self.assertIn("k = reopen_width(k, status.get('whirlpool') or config.POOL, price)", block)
+        self.assertIn("k = reopen_width(verdict['band'], status.get('whirlpool') or config.POOL, price)", block)
         self.assertIn("exit_side=1 if side == 'above' else -1", block)
-        self.assertIn("side = 'above' if price > status['upperPrice'] else 'below'", block)
+        self.assertIn("side = verdict['side']", block)
+        self.assertEqual(rebalancer.poll_verdict(
+            {'at': 0, 'knobs': rebalancer.poll_knobs(), 'regime': None, 'calm': None, 'forecast': None,
+             'band': {'price': 103.0, 'lower': 98.0, 'upper': 102.0, 'in_range': False, 'fees_usd': 0},
+             'gates': {'calm_times': [], 'last_rebalance': 0, 'last_harvest': 0, 'breaker_ok': True, 'busy': None}}
+        )['side'], 'above')
 
 
 class Reopen(unittest.TestCase):

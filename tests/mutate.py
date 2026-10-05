@@ -80,7 +80,12 @@ TARGETS = {
                   NODE_TESTS('test_swap_orca.mjs')),
     'resilience': ('rebalancer.py', ['health_key', 'counts_as_failure', 'chain', 'failover_pick', 'venue_failover',
                                      'voluntary_move_allowed', 'idle_deploys_left', 'deploy_idle'],
-                   PY_TESTS('test_health', 'test_deploy_idle', 'test_edges_0930', 'test_multi_loop', 'test_scaled', 'test_review_edges')),
+                   PY_TESTS('test_health', 'test_deploy_idle', 'test_edges_0930', 'test_multi_loop', 'test_scaled', 'test_review_edges',
+                            'test_increase_idle', 'test_replay')),
+    'replay': ('rebalancer.py', ['poll_verdict', 'poll_seen', 'record_poll', 'poll_knobs', 'move_gap_ok', 'moves_left',
+                                 'tight_reopen', 'harvest_ready', '_plain'],
+               PY_TESTS('test_replay', 'test_rebalancer.Proactive', 'test_calm', 'test_edges_0930')),
+    'replay_db': ('db.py', ['record_replay_poll'], PY_TESTS('test_replay.Recording')),
     'books': ('rebalancer.py', ['regime_at_move', 'notify_book', 'emoji_for', 'tidy'],
               PY_TESTS('test_move_books', 'test_observability', 'test_rebalancer', 'test_edges_0930')),
     'deployment': ('db.py', ['_pct', '_deployment', 'deployment_now', '_pnl'], PY_TESTS('test_move_books', 'test_audit_more', 'test_edges_0930', 'test_db')),
@@ -446,16 +451,19 @@ EQUIVALENT = {
         'one second more on a 420 s signer timeout',
     ('resilience', 'deploy_idle', 'swap Lt->LtE', "state['idle_deploys'] = [t for t in (state.get('idle_deploys') or []) if now - t < 86400] + [now]; save(state)", 0):
         'only a deploy exactly 86400.0 s old differs: a float clock never lands there',
-    ('resilience', 'voluntary_move_allowed', 'const 86400->86401', "recent = [t for t in state.get('calm_times', []) if now - t < 86400]", 0):
+    # Re-keyed 2026-10-05 (the window and the gap moved into move_gap_ok; each reason checked again)
+    ('replay', 'move_gap_ok', 'const 86400->86401', 'recent = [t for t in calm_times if now - t < 86400]', 0):
         'a move older than a day passes the gap anyway: keeping it in the window changes nothing',
-    ('resilience', 'voluntary_move_allowed', 'const 86400->172800', "recent = [t for t in state.get('calm_times', []) if now - t < 86400]", 0):
+    ('replay', 'move_gap_ok', 'const 86400->172800', 'recent = [t for t in calm_times if now - t < 86400]', 0):
         'a move older than a day passes the gap anyway: keeping it in the window changes nothing',
-    ('resilience', 'voluntary_move_allowed', 'swap Lt->LtE', "recent = [t for t in state.get('calm_times', []) if now - t < 86400]", 0):
+    ('replay', 'move_gap_ok', 'swap Lt->LtE', 'recent = [t for t in calm_times if now - t < 86400]', 0):
         'only a move exactly 86400.0 s old differs: a float clock never lands there',
-    ('resilience', 'voluntary_move_allowed', 'const 0->1', "last_any = max([state.get('last_rebalance', 0)] + recent)", 0):
+    ('replay', 'poll_seen', 'swap Lt->LtE', "'gates': {'calm_times': [t for t in state.get('calm_times', []) if now - t < 86400],", 0):
+        'only a move exactly 86400.0 s old differs: a float clock never lands there',
+    ('replay', 'poll_seen', 'const 86400->86401', "'gates': {'calm_times': [t for t in state.get('calm_times', []) if now - t < 86400],", 0):
+        'a move one second past a day is past the gap and out of moves_left: recording it changes no verdict',
+    ('resilience', 'voluntary_move_allowed', 'const 0->1', "return (move_gap_ok(state.get('calm_times', []), state.get('last_rebalance', 0), now, config.CALM_MIN_GAP)", 0):
         'a last rebalance at epoch 0 or 1 is decades past the gap',
-    ('resilience', 'voluntary_move_allowed', 'swap GtE->Gt', "return now - last_any >= config.CALM_MIN_GAP and health.allowed(f'venue:{config.DEX}', now)[0]", 0):
-        'only a gap of exactly CALM_MIN_GAP seconds differs: a float clock never lands there',
     ('resilience', 'failover_pick', 'drop operand 0', "if not v.get('held') and v.get('dex') != held_dex and v.get('row')", 0):
         'the held venue is the held dex (config.POOL is on config.DEX): `dex != held_dex` excludes it too',
     ('one_outcome', 'balance_wallet', 'drop operand 0', "if (SWAP_FALLBACK and SWAP_FALLBACK in SIGNERS and swap_dex == 'jupiter'", 0):

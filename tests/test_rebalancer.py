@@ -362,15 +362,15 @@ if __name__ == '__main__':
 class Proactive(unittest.TestCase):
     """The loop acts on the forecast, and the dividend is gated."""
 
-    def test_harvest_due_gates_on_interval_and_amount(self):
-        with mock.patch.object(rebalancer.config, 'HARVEST_INTERVAL', 24 * 3600), \
-                mock.patch.object(rebalancer.config, 'MIN_HARVEST_USD', 0.25):
-            self.assertTrue(rebalancer.harvest_due({'last_harvest': 0}, {'feesAccrued_USD': 0.5}))
-            self.assertFalse(rebalancer.harvest_due({'last_harvest': 0}, {'feesAccrued_USD': 0.1}))
-            import time
-            self.assertFalse(rebalancer.harvest_due({'last_harvest': time.time() - 3600}, {'feesAccrued_USD': 5}))
-        with mock.patch.object(rebalancer.config, 'HARVEST_INTERVAL', 0):
-            self.assertFalse(rebalancer.harvest_due({'last_harvest': 0}, {'feesAccrued_USD': 5}))
+    def test_harvest_ready_gates_on_interval_and_amount(self):
+        day = 24 * 3600
+        self.assertTrue(rebalancer.harvest_ready(0.5, 1e9, day, 0.25))
+        self.assertFalse(rebalancer.harvest_ready(0.1, 1e9, day, 0.25))
+        self.assertFalse(rebalancer.harvest_ready(5, 3600, day, 0.25))
+        self.assertFalse(rebalancer.harvest_ready(5, 1e9, 0, 0.25))
+        self.assertTrue(rebalancer.harvest_ready(0.25, day, day, 0.25))         # both edges count
+        self.assertFalse(rebalancer.harvest_ready(None, 1e9, day, 0.25))
+        self.assertTrue(rebalancer.harvest_ready(None, 1e9, day, 0))
 
     def test_dividend_records_once_and_zeroes_the_counter(self):
         sent, snaps, harvests = [], [], []

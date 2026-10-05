@@ -552,6 +552,20 @@ def record_risk_profile(pool, mint, price, regime, metrics, forecast):
         cur.execute("delete from risk_profile where ts < now() - interval '30 days'")
 
 
+REPLAY_KEEP_DAYS = 14
+
+
+def record_replay_poll(pool, seen, verdict):
+    """One poll's inputs and verdict, for replay testing (sql/032). Keeps
+    only this profile's last REPLAY_KEEP_DAYS days."""
+    profile = CONTEXT.get('profile')
+    with cursor(commit=True) as cur:
+        cur.execute('insert into replay_polls (ts, profile, pool, seen, verdict) values (%s, %s, %s, %s, %s)',
+                    (now(), profile, pool, json.dumps(seen), json.dumps(verdict)))
+        cur.execute('delete from replay_polls where profile = %s and ts < now() - make_interval(days => %s)',
+                    (profile, REPLAY_KEEP_DAYS))
+
+
 # risk_profile column -> band_profile mean column
 BAND_MEANS = {'sigma_5m_pct': 'sigma_mean', 'velocity': 'velocity_mean', 'instability': 'instability_mean',
               'vol_of_vol_24h': 'vol_of_vol_mean', 'arch_lm_24h': 'arch_lm_mean', 'arch_lm_p_24h': 'arch_lm_p_mean',
