@@ -388,7 +388,69 @@ if __name__ == '__main__':
     unittest.main()
 
 
+class FeeTolerance(unittest.TestCase):
+    """The tail's tolerance carries the pool's fee: trade-price closes sit a
+    fee away from the pool price (DJT/USDC, 0.30%, 2026-10-06)."""
+
+    setUp = None                                                        # set below from WithSurrogate
+
+    def liq(self, rec):
+        p = mock.patch.dict(rebalancer._LIQ, {self.MU_POOL: (time.time(), rec)} if rec is not None else {}, clear=True)
+        p.start(); self.addCleanup(p.stop)
+
+    def test_the_fee_is_added(self):
+        self.liq({'fee': 0.003})
+        self.assertAlmostEqual(rebalancer.quiet_tolerance(self.MU_POOL), calm.QUIET_TOL + 0.003)
+
+    def test_no_record_or_no_usable_fee_is_the_plain_tolerance(self):
+        for rec in (None, {}, {'fee': None}, {'fee': 'x'}, {'fee': -0.01}, {'fee': float('nan')},
+                    {'fee': float('inf')}, {'fee': [1]}):
+            with self.subTest(rec=rec):
+                self.liq(rec)
+                self.assertEqual(rebalancer.quiet_tolerance(self.MU_POOL), calm.QUIET_TOL)
+
+    def test_a_large_fee_is_capped_and_the_cap_is_inclusive(self):
+        self.liq({'fee': 0.25})
+        self.assertAlmostEqual(rebalancer.quiet_tolerance(self.MU_POOL), calm.QUIET_TOL + rebalancer.QUIET_FEE_MAX)
+        self.liq({'fee': rebalancer.QUIET_FEE_MAX})
+        self.assertAlmostEqual(rebalancer.quiet_tolerance(self.MU_POOL), calm.QUIET_TOL + rebalancer.QUIET_FEE_MAX)
+
+    def test_another_pools_record_does_not_count(self):
+        p = mock.patch.dict(rebalancer._LIQ, {self.SOL_POOL: (time.time(), {'fee': 0.003})}, clear=True)
+        p.start(); self.addCleanup(p.stop)
+        self.assertEqual(rebalancer.quiet_tolerance(self.MU_POOL), calm.QUIET_TOL)
+
+    def test_the_djt_case_fills_with_the_fee_and_not_without(self):
+        # the live price 0.30% above the last trade-price close, past the mismatch wait
+        have = [slot(self.now, k) for k in (8, 7, 6, 5, 4)]
+        bars = tape(have, [8.6446] * len(have))
+        live = 8.6446 * 1.00301
+        self.liq({'fee': 0.003})
+        rebalancer._QUIET_MISMATCH[self.MU_POOL] = time.time() - calm.QUIET_MISMATCH_S - 1
+        out = rebalancer.with_surrogate(self.MU_POOL, bars, live, 'DJT/USDC')
+        self.assertEqual(list(out[0]), [slot(self.now, k) for k in range(8, -1, -1)])
+        self.assertTrue(calm.tape_fresh(out[0], time.time()))
+        self.assertIsNone(rebalancer._QUIET_MISMATCH[self.MU_POOL])
+        self.liq({})
+        rebalancer._QUIET_MISMATCH[self.MU_POOL] = time.time() - calm.QUIET_MISMATCH_S - 1
+        out = rebalancer.with_surrogate(self.MU_POOL, bars, live, 'DJT/USDC')
+        self.assertEqual(list(out[0]), have)                              # the old rule: STALE
+        self.assertFalse(calm.tape_fresh(out[0], time.time()))
+
+    def test_a_real_move_beyond_the_fee_still_ends_the_fill(self):
+        have = [slot(self.now, k) for k in (8, 7, 6, 5, 4)]
+        bars = tape(have, [8.6446] * len(have))
+        self.liq({'fee': 0.003})
+        rebalancer._QUIET_MISMATCH[self.MU_POOL] = time.time() - calm.QUIET_MISMATCH_S - 1
+        out = rebalancer.with_surrogate(self.MU_POOL, bars, 8.6446 * 1.0061, 'DJT/USDC')
+        self.assertEqual(list(out[0]), have)
+
+
 WithSurrogateMore.setUp = WithSurrogate.setUp
 WithSurrogateMore.cleanup = WithSurrogate.cleanup
+FeeTolerance.setUp = WithSurrogate.setUp
+FeeTolerance.cleanup = WithSurrogate.cleanup
+for _k in ('MU_POOL', 'SOL_POOL', 'SOL', 'USDC'):
+    setattr(FeeTolerance, _k, getattr(WithSurrogate, _k))
 for _k in ('MU_POOL', 'SOL_POOL', 'SOL', 'USDC'):
     setattr(WithSurrogateMore, _k, getattr(WithSurrogate, _k))

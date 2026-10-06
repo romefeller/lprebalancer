@@ -1646,6 +1646,25 @@ def quiet_ref_ts(pool, now):
     return ts
 
 
+QUIET_FEE_MAX = 0.01            # a pool fee above this is not taken as a price gap
+
+
+def quiet_tolerance(pool):
+    """calm.QUIET_TOL plus the pool's fee, from the record liquidity_view
+    cached. GeckoTerminal's closes are trade prices, which carry the fee: on
+    DJT/USDC (0.30%) the live price sat a median 0.300% from the last close
+    (SOL/USDC, 0.04%: 0.04%), so every quiet stretch read STALE (2026-10-06).
+    No record or no usable fee: calm.QUIET_TOL."""
+    entry = _LIQ.get(pool)
+    try:
+        fee = float(entry[1]['fee'])
+    except (TypeError, ValueError, KeyError):
+        fee = 0.0
+    if not math.isfinite(fee) or fee < 0:
+        fee = 0.0
+    return calm.QUIET_TOL + min(fee, QUIET_FEE_MAX)
+
+
 def with_surrogate(pool, bars, price, pair=None):
     """_with_surrogate's tape with the slots a quiet pool did not trade in
     filled flat at the last close (calm.quiet_fill): GeckoTerminal emits no
@@ -1658,7 +1677,8 @@ def with_surrogate(pool, bars, price, pair=None):
         return None
     now = time.time()
     try:
-        ok, _QUIET_MISMATCH[pool] = calm.quiet_tail_ok(price, float(out[4][-1]), _QUIET_MISMATCH.get(pool), now)
+        ok, _QUIET_MISMATCH[pool] = calm.quiet_tail_ok(price, float(out[4][-1]), _QUIET_MISMATCH.get(pool), now,
+                                                       tol=quiet_tolerance(pool))
         window_s = tape_bars() * calm.BAR_SECONDS
         q = calm.quiet_fill(out[0], out[4], now, quiet_ref_ts(pool, now), ok, window_s)
         if q is None:

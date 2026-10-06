@@ -198,7 +198,8 @@ TARGETS = {
                         PY_TESTS('test_shared_wallet_books', 'test_since_start_scope', 'test_audit.SinceStart',
                                  'test_audit_more.SinceStartEdges', 'test_db', 'test_scaled', 'test_stats.TwoSolanaWallets')),
     'quiet_pool': ('calm.py', ['quiet_tail_ok', 'quiet_fill'], PY_TESTS('test_quiet_pool')),
-    'quiet_overlay': ('rebalancer.py', ['quiet_ref_ts', 'with_surrogate', '_surrogate_ts', '_merge_all', 'tape_source'],
+    'quiet_overlay': ('rebalancer.py', ['quiet_ref_ts', 'with_surrogate', '_surrogate_ts', '_merge_all', 'tape_source',
+                                        'quiet_tolerance'],
                       PY_TESTS('test_quiet_pool', 'test_tape_surrogate')),
     'quiet_db': ('db.py', ['tape_ref_pool'], PY_TESTS('test_quiet_pool')),
     # 2026-10-02: a payout's priority fee, and the send loop that proves an expired one never landed
@@ -464,6 +465,8 @@ EQUIVALENT = {
         'a move one second past a day is past the gap and out of moves_left: recording it changes no verdict',
     ('resilience', 'voluntary_move_allowed', 'const 0->1', "return (move_gap_ok(state.get('calm_times', []), state.get('last_rebalance', 0), now, config.CALM_MIN_GAP)", 0):
         'a last rebalance at epoch 0 or 1 is decades past the gap',
+    ('quiet_overlay', 'quiet_tolerance', 'swap Lt->LtE', 'if not math.isfinite(fee) or fee < 0:', 0):
+        'a fee of exactly 0 becomes 0 either way: the tolerance is the same',
     ('resilience', 'failover_pick', 'drop operand 0', "if not v.get('held') and v.get('dex') != held_dex and v.get('row')", 0):
         'the held venue is the held dex (config.POOL is on config.DEX): `dex != held_dex` excludes it too',
     ('one_outcome', 'balance_wallet', 'drop operand 0', "if (SWAP_FALLBACK and SWAP_FALLBACK in SIGNERS and swap_dex == 'jupiter'", 0):
