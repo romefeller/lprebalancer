@@ -3804,9 +3804,11 @@ def poll_verdict(seen):
             band = tight_reopen(cv, budget, k['calm_band'], k['calm_threshold']) if tight else None
         return dict(out, act='exit', band=band, side='above' if b['price'] > b['upper'] else 'below')
     voluntary = move_gap_ok(g['calm_times'], g['last_rebalance'], seen['at'], k['calm_min_gap']) and g['breaker_ok']
-    ract = calm.regime_decide(rv, widths=k['widths'], steps=k['steps']) if rv else None
-    if ract == 'narrow' and rv.get('stale'):
-        ract = None                                   # never narrow on a stale tape
+    # A stale tape moves no band that is still inside, either way: its widest
+    # width is for an exit to reopen at. Widening on it closed and reopened a
+    # DJT band, then narrowed it back when the tape returned, every time
+    # GeckoTerminal published late (2026-10-06, three loops in an hour).
+    ract = calm.regime_decide(rv, widths=k['widths'], steps=k['steps']) if rv and not rv.get('stale') else None
     if ract and budget > 0 and voluntary:
         return dict(out, act=f'regime_{ract}', band=rv['choice'])
     cact = None if rv else calm.decide(cv, enabled=k['calm_enabled'], budget_left=budget)

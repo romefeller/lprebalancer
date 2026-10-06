@@ -170,8 +170,8 @@ class Properties(unittest.TestCase):
         if v['act'].startswith('calm'):
             self.assertIsNone(s['regime'])                        # regime mode owns the band when it has a view
             self.assertTrue(k['calm_enabled'])
-        if v['act'] == 'regime_narrow':
-            self.assertFalse(s['regime'].get('stale'))
+        if v['act'].startswith('regime'):
+            self.assertFalse(s['regime'].get('stale'))                # a stale tape moves no band
 
     @FAST
     @given(seen_st())
@@ -187,7 +187,9 @@ class Properties(unittest.TestCase):
 # --- the loop's inline rules, as they stood before poll_verdict -----------------
 
 def inline_rules(s):
-    """The decisions main() made inline (main at ec61e41), on the same inputs."""
+    """The decisions main() made inline (main at ec61e41), on the same inputs,
+    with the one change made since: a stale tape moves no band that is inside
+    (it only blocked narrowing; 2026-10-06)."""
     k, b, g = s['knobs'], s['band'], s['gates']
     rv, cv, fc = s['regime'], s['calm'], s['forecast']
     now = s['at']
@@ -208,7 +210,7 @@ def inline_rules(s):
             band = None
         return ('exit', band, side, False, False)
     ract = calm.regime_decide(rv, widths=k['widths'], steps=k['steps']) if rv else None
-    if ract == 'narrow' and rv.get('stale'):
+    if ract and rv.get('stale'):
         ract = None
     if ract and budget > 0 and allowed:
         return ('regime_' + ract, rv['choice'], None, False, False)
