@@ -636,6 +636,42 @@ class RepointLeftovers(unittest.TestCase):
         self.assertNotIn('left_behind_at', state)                                  # the next sale is now
 
 
+    def test_a_reopen_intent_moves_with_the_pool(self):
+        # A failed open held through an FOMC window that ends at the NYSE
+        # close: the swing repoints, and the intent must not halt the loop.
+        seq = iter([((DJT, 'DJT'), (tml.USDC, 'USDC')), ((tml.SOL, 'SOL'), (tml.USDC, 'USDC'))])
+        pending = {'mint': 'M', 'pool': 'DJTPOOL', 'dex': 'orca', 'band': 1.01, 'reason': 'x',
+                   'started_at': time.time() - 60, 'withdraw_usd': 10.0, 'closed': True}      # fresh: not dropped
+        state, saved, halted = {'pending_reopen': dict(pending)}, [], []
+
+        def repoint(t):
+            config.POOL, config.DEX = t['address'], t['dex']
+        with mock.patch.object(rebalancer, 'pool_tokens', lambda: next(seq)), \
+                mock.patch.object(rebalancer, 'repoint', repoint), \
+                mock.patch.object(rebalancer, 'save', lambda s: saved.append(dict(s.get('pending_reopen') or {}))), \
+                mock.patch.object(rebalancer, 'notify', lambda *a, **k: None), \
+                mock.patch.object(config, 'POOL', 'DJTPOOL'), mock.patch.object(config, 'DEX', 'orca'):
+            rebalancer.repoint_with_leftovers(state, {'dex': 'raydium-clmm', 'address': 'SOLPOOL'})
+            self.assertEqual(saved[-1]['pool'], 'SOLPOOL')                         # saved, not only in memory
+            reopened = []
+            with mock.patch.object(rebalancer, 'halt', lambda why: halted.append(why)), \
+                    mock.patch.object(rebalancer, 'reopen', lambda *a, **k: reopened.append(k.get('band'))):
+                self.assertIs(rebalancer.resume_reopen(state), True)
+        self.assertEqual(halted, []); self.assertEqual(reopened, [1.01])        # reopened on the new pool, its band
+        self.assertEqual({k: v for k, v in state.get('pending_reopen', pending).items() if k not in ('pool', 'dex')},
+                         {k: v for k, v in pending.items() if k not in ('pool', 'dex')})
+
+    def test_no_intent_stays_no_intent(self):
+        seq = iter([((DJT, 'DJT'), (tml.USDC, 'USDC')), ((tml.SOL, 'SOL'), (tml.USDC, 'USDC'))])
+        state = {}
+        with mock.patch.object(rebalancer, 'pool_tokens', lambda: next(seq)), \
+                mock.patch.object(rebalancer, 'repoint', lambda t: None), \
+                mock.patch.object(rebalancer, 'save', lambda s: None), \
+                mock.patch.object(rebalancer, 'notify', lambda *a, **k: None):
+            rebalancer.repoint_with_leftovers(state, {'dex': 'orca'})
+        self.assertNotIn('pending_reopen', state)
+
+
 class OperatorTarget(unittest.TestCase):
     """operator_target's other refusals and a same-pair move."""
 

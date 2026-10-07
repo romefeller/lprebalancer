@@ -3293,12 +3293,18 @@ def left_behind(old_tokens, new_tokens):
 
 def repoint_with_leftovers(state, target):
     """repoint(), and remember in state['left_behind'] the old pool's tokens
-    the new pool does not hold (sell_left_behind sells them)."""
+    the new pool does not hold (sell_left_behind sells them). A reopen intent
+    moves with the pool, as on a failover: its funds are in the wallet, and
+    an intent left on the old pool halted resume_reopen (a failed open held
+    through an FOMC window that ends at the NYSE close, the swing's switch)."""
     old = pool_tokens()
     repoint(target)
     rest = left_behind(old, pool_tokens())
     state['left_behind'] = sorted(set(state.get('left_behind') or []) | set(rest))
     state.pop('left_behind_at', None)
+    pending = state.get('pending_reopen')
+    if pending:
+        pending.update(pool=config.POOL, dex=config.DEX)
     save(state)
     notify('REPOINTED', dex=config.DEX, pool=config.POOL, pair=config.PAIR_LABEL, left_behind=rest)
 
