@@ -233,6 +233,8 @@ HOT_PAUSE_FG_HOURS = float(_CFG.get('hot_pause_fg_hours') or 6)
 HOT_PAUSE_RESUME_S = int(_CFG.get('hot_pause_resume_minutes') or 30) * 60
 HOT_PAUSE_MAX_S = float(_CFG.get('hot_pause_max_hours') or 12) * 3600
 HOT_PAUSE_COOLDOWN_S = int(_CFG.get('hot_pause_cooldown_minutes') or 60) * 60
+# The pools the HOT pause guards (sql/033); empty: every pool the profile holds.
+HOT_PAUSE_POOLS = frozenset(_CFG.get('hot_pause_pools') or ())
 # Scheduled pause around macro releases (sql/030, rebalancer.macro_events):
 # closed and waiting 50/50 from MACRO_PAUSE_BEFORE_S before each event to
 # MACRO_PAUSE_AFTER_S after it, whatever the market says.

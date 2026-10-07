@@ -2538,6 +2538,13 @@ def regime_choice_now(pool, price, pair=None):
 HOT_PAUSE_TELL_S = 1800          # a waiting pause says so at most this often
 
 
+def hot_pause_on(pool):
+    """Whether the HOT pause guards `pool`: switched on, and `pool` in
+    HOT_PAUSE_POOLS when that list is set (sql/033: the swing pauses its
+    SOL/USDC hours and keeps DJT through HOT ones)."""
+    return config.HOT_PAUSE_ENABLED and (not config.HOT_PAUSE_POOLS or pool in config.HOT_PAUSE_POOLS)
+
+
 def hot_pause_view(pool, usd_a, usd_b, choice):
     """The bad-moment signal (sql/029): the width choice above
     +/-HOT_PAUSE_HOT_PCT and the pool's fees over the last HOT_PAUSE_FG_HOURS
@@ -2658,14 +2665,14 @@ def hot_pause(state, status, rv):
                     kind=m['kind'], event_at=when, resume_minutes=round((m['until'] - now) / 60), held=True, regime=rv)
         db.event('MACRO_PAUSE', why)
         return hot_pause_close(state, status, why, now, kind='macro', until=m['until'])
-    if not config.HOT_PAUSE_ENABLED:
+    pool = status.get('whirlpool') or config.POOL
+    if not hot_pause_on(pool):
         return False
     q = status.get('quoteUsd')
     if q is None or not rv or rv.get('stale'):
         return False
     if now - state.get('hot_pause_resumed', 0) < config.HOT_PAUSE_COOLDOWN_S:
         return False                                 # just resumed: no pause straight back
-    pool = status.get('whirlpool') or config.POOL
     v = hot_pause_view(pool, status['price'] * q, q, rv.get('choice'))
     if calm.hot_pause_step(None, v['bad'], now, resume_s=config.HOT_PAUSE_RESUME_S,
                            max_s=config.HOT_PAUSE_MAX_S) != 'pause':
@@ -2722,7 +2729,7 @@ def hot_paused(state):
             state['calm_times'] = state.get('calm_times', []) + [p['since']]
         p['booked'] = True
         save(state)
-    enabled = config.MACRO_PAUSE_ENABLED if kind == 'macro' else config.HOT_PAUSE_ENABLED
+    enabled = config.MACRO_PAUSE_ENABLED if kind == 'macro' else hot_pause_on(config.POOL)
     if p.get('pool') != config.POOL and p.get('until') and now < p['until']:
         # A pool switch inside a window (the swing's move at the NYSE close):
         # the window still holds; wait on the new pool, 50/50 in its tokens.

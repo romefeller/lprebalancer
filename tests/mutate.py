@@ -258,7 +258,7 @@ TARGETS = {
     'liq_window': ('db.py', ['pool_stats_summary'], PY_TESTS('test_db.PoolStatsWindow', 'test_hardening.LiquiditySmoothed')),
     'pause_math': ('calm.py', ['fee_loss_ratio', 'hot_pause_step'], PY_TESTS('test_hot_pause')),
     'pause_yield': ('dexes.py', ['fee_yield'], PY_TESTS('test_hot_pause')),
-    'pause_loop': ('rebalancer.py', ['hot_pause_view', 'hot_pause_swap', 'hot_pause', 'hot_pause_close', 'hot_paused',
+    'pause_loop': ('rebalancer.py', ['hot_pause_on', 'hot_pause_view', 'hot_pause_swap', 'hot_pause', 'hot_pause_close', 'hot_paused',
                                      'macro_view', 'macro_hold'], PY_TESTS('test_hot_pause')),
     'macro_db': ('db.py', ['macro_event_near', 'macro_next_ts'], PY_TESTS('test_hot_pause')),
     'pause_db': ('db.py', ['position_closed'], PY_TESTS('test_hot_pause')),

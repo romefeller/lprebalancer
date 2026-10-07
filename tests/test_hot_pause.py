@@ -212,7 +212,7 @@ class View(unittest.TestCase):
 
 class Pause(unittest.TestCase):
     def go(self, view=None, rv=None, st=None, closed=True, budget=5, quote=1.0, bal_ok=True, allowed=True,
-           now=NOW, rec_boom=False):
+           now=NOW, rec_boom=False, pools=frozenset()):
         calls, saved = [], []
         state = st if st is not None else {}
         v = view or {'hot': True, 'ratio': 0.5, 'bad': True}
@@ -241,6 +241,7 @@ class Pause(unittest.TestCase):
                 mock.patch.object(rebalancer.time, 'time', lambda: now), \
                 mock.patch.object(config, 'HOT_PAUSE_COOLDOWN_S', 3600), \
                 mock.patch.object(config, 'HOT_PAUSE_ENABLED', True), \
+                mock.patch.object(config, 'HOT_PAUSE_POOLS', frozenset(pools)), \
                 mock.patch.object(config, 'MACRO_PAUSE_ENABLED', False), \
                 mock.patch.object(config, 'POOL', 'P'):
             r = rebalancer.hot_pause(state, status(quoteUsd=quote),
@@ -302,6 +303,28 @@ class Pause(unittest.TestCase):
                                  st={'hot_pause': {'since': 1, 'last_bad': 1, 'pool': 'P'}})
         self.assertNotIn('hot_pause', state)
 
+    def test_only_the_listed_pools_pause(self):
+        # sql/033: the swing pauses its SOL/USDC hours, never its DJT ones.
+        for pools, paused in ((frozenset(), True), ({'P'}, True), ({'P', 'Q'}, True), ({'Q'}, False)):
+            r, calls, state, _ = self.go(pools=pools)
+            self.assertIs(r, paused, pools)
+            self.assertEqual('rebalance' in [c[0] for c in calls], paused, pools)
+            if not paused:
+                self.assertEqual(calls, [], pools)                    # an unguarded pool reads nothing
+                self.assertNotIn('hot_pause', state)
+
+    def test_the_list_is_checked_against_the_band_pool(self):
+        for st_kw, pools, want in (({'whirlpool': 'W'}, {'W'}, True), ({'whirlpool': 'W'}, {'P'}, False),
+                                   ({'whirlpool': None}, {'P'}, True)):
+            seen = []
+            with mock.patch.object(rebalancer, 'hot_pause_view', lambda *a: (seen.append(a[0]) or {'bad': False})), \
+                    mock.patch.object(config, 'HOT_PAUSE_ENABLED', True), \
+                    mock.patch.object(config, 'HOT_PAUSE_POOLS', frozenset(pools)), \
+                    mock.patch.object(config, 'MACRO_PAUSE_ENABLED', False), \
+                    mock.patch.object(config, 'POOL', 'P'):
+                rebalancer.hot_pause({}, status(**st_kw), {'choice': 1.03})
+            self.assertEqual(bool(seen), want, (st_kw, pools))
+
     def test_one_move_left_is_enough(self):
         self.assertIs(self.go(budget=1)[0], True)
 
@@ -321,12 +344,13 @@ class Pause(unittest.TestCase):
 
 
 class Paused(unittest.TestCase):
-    def go(self, p, view=None, enabled=True, pool='P', now=NOW, bal=None, choice=1.03, closed=True):
+    def go(self, p, view=None, enabled=True, pool='P', now=NOW, bal=None, choice=1.03, closed=True, pools=frozenset()):
         told, events, sampled, books = [], [], [], []
         state = {'hot_pause': dict(p), 'calm_times': [NOW - 99999]}
         v = view or {'hot': True, 'ratio': 0.5, 'bad': True}
         b = bal if bal is not None else {'balanceA': 1.0, 'price': 120.0, 'quoteUsd': 1.0}
         with mock.patch.object(config, 'HOT_PAUSE_ENABLED', enabled), mock.patch.object(config, 'POOL', pool), \
+                mock.patch.object(config, 'HOT_PAUSE_POOLS', frozenset(pools)), \
                 mock.patch.object(config, 'HOT_PAUSE_RESUME_S', 1800), mock.patch.object(config, 'HOT_PAUSE_MAX_S', 43200), \
                 mock.patch.object(rebalancer, 'sample_fee_growth', lambda s: sampled.append('fg')), \
                 mock.patch.object(rebalancer, 'daily_report', lambda s: sampled.append('daily')), \
@@ -381,6 +405,17 @@ class Paused(unittest.TestCase):
             self.assertIs(r, False, kw); self.assertNotIn('hot_pause', state, kw)
             self.assertEqual(told[0][0], 'HOT_RESUME', kw); self.assertEqual(sampled, [], kw)
             self.assertEqual(state['hot_pause_resumed'], NOW, kw)
+
+    def test_a_pool_off_the_list_resumes_at_once(self):
+        # The swing switched to DJT during a SOL/USDC pause: DJT is not
+        # guarded, so the pause ends and the loop opens there.
+        for pools, pool, waits in (({'P'}, 'P', True), ({'P'}, 'Q', False), ({'Q'}, 'Q', False),
+                                   (frozenset(), 'P', True)):
+            r, state, told, _, _ = self.go(dict(self.P, pool='P'), pools=pools, pool=pool)
+            self.assertIs(r, waits, (pools, pool))
+            self.assertEqual('hot_pause' in state, waits, (pools, pool))
+            if not waits:
+                self.assertEqual(told[0][0], 'HOT_RESUME')
 
     def test_tells_every_half_hour(self):
         p = dict(self.P, told=NOW - 1800)
@@ -497,7 +532,31 @@ class PositionClosed(unittest.TestCase):
         self.assertIsNone(db.position_closed('HP-none'))
 
 
+class PauseOn(unittest.TestCase):
+    def test_table(self):
+        for enabled, pools, pool, want in ((False, frozenset(), 'P', False), (False, {'P'}, 'P', False),
+                                           (True, frozenset(), 'P', True), (True, {'P'}, 'P', True),
+                                           (True, {'P'}, 'Q', False), (True, {'P', 'Q'}, 'Q', True)):
+            with mock.patch.object(config, 'HOT_PAUSE_ENABLED', enabled), \
+                    mock.patch.object(config, 'HOT_PAUSE_POOLS', frozenset(pools)):
+                self.assertIs(rebalancer.hot_pause_on(pool), want, (enabled, pools, pool))
+
+
 class Config(unittest.TestCase):
+    def test_pools_default_to_every_pool_and_refuse_empty_entries(self):
+        import db
+        _fixtures.ensure_profile()
+        self.assertIsNone(db.load_config('sol-usdc')['hot_pause_pools'])
+        try:
+            db.set_param('sol-usdc', 'hot_pause_pools', 'P1, P2')
+            self.assertEqual(db.load_config('sol-usdc')['hot_pause_pools'], ['P1', 'P2'])
+            for bad in ('', 'P1,'):
+                with self.assertRaises(Exception, msg=bad):
+                    db.set_param('sol-usdc', 'hot_pause_pools', bad)
+        finally:
+            with db.cursor(commit=True) as cur:
+                cur.execute("update config set hot_pause_pools = null where name = 'sol-usdc'")
+
     def test_defaults_and_constraint(self):
         import db
         _fixtures.ensure_profile()
