@@ -746,6 +746,15 @@ def open_position(mint, pool, pair, lower, upper, band_pct, sig,
               deposit_usd, reason, dex))
 
 
+def set_deposit(mint, usd):
+    """An open position's deposit replaced by the chain's mark (an open whose
+    own read missed the new position recorded the signer's estimate). Returns
+    the rows changed: 0 once the position is closed."""
+    with cursor(commit=True) as cur:
+        cur.execute('update positions set deposit_usd = %s where mint = %s and closed_at is null', (usd, mint))
+        return cur.rowcount
+
+
 def add_deposit(mint, usd):
     """Liquidity added to an open position (increase, 2026-10-03): its
     deposit grows by `usd`, so the position's P&L (withdraw - deposit) stays

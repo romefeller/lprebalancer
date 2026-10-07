@@ -2535,6 +2535,49 @@ def regime_choice_now(pool, price, pair=None):
     return v['choice']
 
 
+# The chain's mark of a position just opened is read this many times, this
+# far apart, before the signer's estimate stands in (settle_deposit then
+# books the first mark a poll reads).
+OPEN_MARK_TRIES = 3
+OPEN_MARK_PAUSE_S = 5
+
+
+def opened_mark(mint):
+    """The chain's mark of the position `mint` just opened (position_usd:
+    tokens plus rent, as every snapshot), or None. 2026-10-07: an Orca read
+    right after an open missed the new position, and the ledger kept the
+    signer's estimate on the requested band, $13 above what went into the
+    tick-rounded one: the DJT P&L showed -$19.66 for a -$5.73 session."""
+    for i in range(OPEN_MARK_TRIES):
+        if i:
+            time.sleep(OPEN_MARK_PAUSE_S)
+        st, _ = read_status(mint)
+        if st and st.get('positionMint') == mint:
+            usd = position_usd(st)
+            if usd is not None:
+                return usd
+    return None
+
+
+def settle_deposit(state, status):
+    """Replace an estimated deposit (state['deposit_estimate']) with the
+    first chain mark of that position, once. A different position held, or
+    none, drops the estimate: that band is closed, its deposit stands."""
+    mint = state.get('deposit_estimate')
+    if not mint:
+        return False
+    if status.get('positionMint') != mint:
+        state.pop('deposit_estimate', None); save(state)
+        return False
+    usd = position_usd(status)
+    if usd is None:
+        return False                                     # unpriced this poll: the next one books it
+    db.set_deposit(mint, usd)
+    state.pop('deposit_estimate', None); save(state)
+    notify('deposit_settled', positionMint=mint, deposit_usd=round(usd, 2))
+    return True
+
+
 HOT_PAUSE_TELL_S = 1800          # a waiting pause says so at most this often
 
 
@@ -3585,12 +3628,8 @@ def reopen(state, reason, band=None, recovering=False, exit_side=0):
     # side opens a smaller position, and the ledger must say so. The chain's
     # own mark of the new position is the truth; the signer's estimate is the
     # fallback if that read fails.
-    deposit_usd = None
-    if mint:
-        st, _ = read_status(mint)
-        # The same mark the snapshots use: tokens plus the rent, so the
-        # deposit and every later mark are measured the same way.
-        deposit_usd = position_usd(st) if st else None
+    deposit_usd = opened_mark(mint) if mint else None
+    estimated = deposit_usd is None and bool(mint)
     if deposit_usd is None:
         deposit_usd = (out or {}).get('depositUsd')
     if deposit_usd is None:
@@ -3600,6 +3639,10 @@ def reopen(state, reason, band=None, recovering=False, exit_side=0):
                      deposit_usd, reason, config_name=config.PROFILE, dex=config.DEX)
     record_baseline(funded, read_at)
     state.pop('pending_reopen', None)
+    if estimated:
+        state['deposit_estimate'] = mint                  # settle_deposit books the first chain mark
+        notify('deposit_estimated', positionMint=mint, deposit_usd=round(deposit_usd, 2),
+               reason='the chain did not show the new position yet: the next poll books its mark')
     save(state)
     notify_book('OPEN', pair=config.PAIR_LABEL, pool=pool, dex=config.DEX, lp_now_usd=deposit_usd,
            moves_24h_now=config.CALM_MAX_MOVES - calm_budget_left(state),
@@ -4074,6 +4117,7 @@ def main():
                         status.get('feesAccruedB', 0.0),
                         status.get('feesAccrued_USD', 0.0),
                         wusd, position_usd(status), forecast=fc)
+        settle_deposit(state, status)
         record_risk(status, rv, fc)
         daily_report(state)
         run_audits(state)

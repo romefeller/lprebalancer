@@ -205,6 +205,8 @@ TARGETS = {
     # 2026-10-02: a payout's priority fee, and the send loop that proves an expired one never landed
     'payout_send': ('payout.mjs', ['payoutCuPrice'], NODE_TESTS('test_payout_send.mjs')),
     'tx_send': ('tx_send.mjs', ['sendUntilLanded'], NODE_TESTS('test_payout_send.mjs')),
+    'deposit_mark': ('rebalancer.py', ['opened_mark', 'settle_deposit'], PY_TESTS('test_deposit_mark')),
+    'deposit_db': ('db.py', ['set_deposit'], PY_TESTS('test_deposit_mark')),
     'tx_send_price': ('tx_send.mjs', ['priorityCuPrice'], NODE_TESTS('test_payout_send.mjs', 'test_raydium_landing.mjs')),
     'raydium_landing': ('signer_raydium.mjs', ['sendLanded', 'sendAll', 'rebuildOnRefusal'], NODE_TESTS('test_raydium_landing.mjs')),
     'swap_send': ('swap_jupiter.mjs', ['sendSwap'], NODE_TESTS('test_payout_send.mjs')),
@@ -287,7 +289,7 @@ TARGETS = {
                       NODE_TESTS('test_book_format.mjs', 'test_telegram_bridge.mjs')),
 }
 
-SQL_TARGETS = {'unichain_book', 'unichain_quote', 'band_profile', 'daily', 'capital_db', 'book_scope', 'book_sums', 'stats_sum', 'wallets_db', 'wallet_names', 'db_stats', 'liq_window', 'pause_db', 'macro_db'}
+SQL_TARGETS = {'deposit_db', 'unichain_book', 'unichain_quote', 'band_profile', 'daily', 'capital_db', 'book_scope', 'book_sums', 'stats_sum', 'wallets_db', 'wallet_names', 'db_stats', 'liq_window', 'pause_db', 'macro_db'}
 
 # Mutants that cannot change behaviour, with the reason. Keyed by the mutant's
 # identity (see "identity" below):
