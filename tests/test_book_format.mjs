@@ -91,6 +91,9 @@ test('emoji rule and health line', () => {
   assert.equal(emojiFor('move_deferred', {}), '⏳');
   assert.equal(emojiFor('whatever', {}), '▫️');
   assert.equal(emojiFor('_comment', { _comment: 'x' }), '▫️');
+  assert.equal(emojiFor('PAYOUT', { PAYOUT: '💸', GAS_LOW: '⛽' }, { gas_low: true }), '⛽');
+  assert.equal(emojiFor('PAYOUT', { PAYOUT: '💸', GAS_LOW: '⛽' }, { gas_low: false }), '💸');
+  assert.equal(emojiFor('PAYOUT', { PAYOUT: '💸' }, { gas_low: true }), '💸');           // no GAS_LOW in the map
   assert.equal(healthLine(null), null);
   assert.equal(healthLine([]), '🩺 health   🟢 all systems');
   assert.equal(healthLine([{ key: 'swap', state: 'closed' }]), '🩺 health   🟢 all systems (1 watched)');

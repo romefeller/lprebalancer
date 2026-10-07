@@ -6,7 +6,7 @@ import fs from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import os from 'node:os';
 import path from 'node:path';
-import { feedFiles, migrateState, readNew, tailAll, message, render, aSide, MOVED_FEED, LEGACY_FEED }
+import { feedFiles, migrateState, readNew, tailAll, message, render, aSide, payoutHeld, MOVED_FEED, LEGACY_FEED }
   from '../telegram_bridge.mjs';
 import { poolLabel, redact, portfolioText, equityLine, sinceStartLine, walletName } from '../book_format.mjs';
 
@@ -474,6 +474,7 @@ test('every row of the real feed renders as before, behind its pool label', { sk
       }
       // the old bridge printed "move at 2 steps" whatever the configured steps (ab89dc0 shows them)
       if (r.regime?.steps != null) want = want.replace('move at 2 steps', `move at ${r.regime.steps} steps`);
+      if (r.event === 'PAYOUT' && r.gas_low) continue;                    // the held payout's own text and ⛽ (payout-gas-emoji)
       let got = message(r);
       // DAILY lines gained "capital moved" (665c039) and the reference-period line (9aaf63c) after the old bridge
       if (r.event === 'DAILY') got = got.replace(/ · capital moved [^\n·]*/, '').replace(/\nvs [^\n]*?\(avg [^\n]*?(?= · SOL| ·? *$|$)/, '');
@@ -604,4 +605,26 @@ test('the book of a swing names each A token', () => {
   assert.match(text, /TOTAL\s+0\.082605 DJT 0\.025958 SOL\s+3\.42 USDC/);
   const plain = render({ ...row, fees_a_by_token: null, fees_total_a: 1.25, token_a: 'SOL' });
   assert.match(plain, /TOTAL\s+1\.25 SOL/);
+});
+
+// --- a payout held for gas says so, with ⛽ ----------------------------------------------
+
+test('a payout held for gas shows the pump, what stayed and why', () => {
+  // the 2026-10-07 20:01Z DJT close: 0.694 USDC reinvested, the owner thought it a bug
+  const row = { event: 'PAYOUT', pair: 'DJT/USDC', gas_low: true, sol_before: 0.049209, gas_reserve: 0.05,
+                held: [{ symbol: 'USDC', amount: 0.693993, usd: 0.693993 }], sent: [],
+                split: { paid: 0, reinvested: 1.2287, gas: 0 } };
+  assert.equal(message(row),
+    '[DJT/USDC] ⛽ PAYOUT HELD · gas low: 0.049209 SOL under the 0.05 SOL reserve\n'
+    + '0.693993 USDC ($0.6940) reinvested, not sent to the profit wallet\n'
+    + 'no SOL fee refilled gas · payouts resume when gas is back at the reserve\n'
+    + 'split  paid $0.0000 · reinvested $1.2287 · gas $0.0000');
+  // SOL/USDC: a SOL fee refills gas; an old row has no held list nor reserve
+  assert.equal(payoutHeld({ gas_low: true, sol_before: 0.0429, split: { gas: 0.0068 } }),
+    'PAYOUT HELD · gas low: 0.042900 SOL under the reserve\nnothing sent this harvest\n'
+    + 'a SOL fee refilled gas $0.0068 · payouts resume when gas is back at the reserve');
+  assert.ok(!message({ event: 'PAYOUT', gas_low: true }).includes('undefined'));
+  // a normal payout keeps 💸 and its old text
+  assert.equal(message({ event: 'PAYOUT', gas_low: false, sent: [], split: { paid: 0.3, reinvested: 0.3, gas: 0 } }),
+    '💸 PAYOUT\nnothing sent this harvest\nsplit  paid $0.3000 · reinvested $0.3000 · gas $0.0000');
 });

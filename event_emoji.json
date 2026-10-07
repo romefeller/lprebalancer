@@ -1,5 +1,5 @@
 {
- "_comment": "One emoji per event, shared by the loop's log lines (rebalancer.notify) and Telegram (telegram_bridge.mjs). grep the emoji to find the event. Events not listed get the rule in emoji_for(): failures ❌, deferrals ⏳, else ▫️.",
+ "_comment": "One emoji per event, shared by the loop's log lines (rebalancer.notify) and Telegram (telegram_bridge.mjs). grep the emoji to find the event. Events not listed get the rule in emoji_for(): failures ❌, deferrals ⏳, else ▫️. A row with gas_low true (a payout held for gas) shows GAS_LOW, whatever its event.",
  "startup": "🚀",
  "halted": "🛑",
  "BREAKER": "🛑",
@@ -11,6 +11,7 @@
  "HARVEST": "🌾",
  "DIVIDEND": "🌾",
  "PAYOUT": "💸",
+ "GAS_LOW": "⛽",
  "REWARD_PAYOUT": "🎁",
  "SWAP": "🔁",
  "SWEEP": "🧹",

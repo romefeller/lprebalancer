@@ -113,11 +113,29 @@ export async function tailAll(state, root, sendRow, save = () => {}) {
   }
 }
 
+// A harvest whose payout the gas rule held (fees.py): the LP wallet's SOL
+// was under the reserve, so the payout-token fees were reinvested, not sent.
+// Says how far under, what stayed, and whether a SOL fee refilled gas: a pool
+// without SOL (DJT/USDC) cannot refill it, and holds every payout until gas
+// is topped up or the wallet is back on a SOL pool.
+export function payoutHeld(row) {
+  const n = (x, d = 2) => (x === undefined || x === null ? '—' : Number(x).toFixed(d));
+  const reserve = row.gas_reserve != null ? ` under the ${row.gas_reserve} SOL reserve` : ' under the reserve';
+  const held = (row.held ?? []).filter(x => x && x.amount > 0)
+    .map(x => `${x.amount} ${x.symbol}${x.usd != null ? ` ($${n(x.usd, 4)})` : ''}`).join(' + ');
+  const gas = Number(row.split?.gas) > 0
+    ? `a SOL fee refilled gas $${n(row.split.gas, 4)}`
+    : 'no SOL fee refilled gas';
+  return `PAYOUT HELD · gas low: ${n(row.sol_before, 6)} SOL${reserve}\n`
+    + (held ? `${held} reinvested, not sent to the profit wallet\n` : 'nothing sent this harvest\n')
+    + `${gas} · payouts resume when gas is back at the reserve`;
+}
+
 // The message of one row: the pool's label, the event's emoji, the text,
 // with every secret-shaped string masked.
 export function message(row) {
   const label = row && row.event !== 'PORTFOLIO' ? poolLabel(row) : '';
-  return redact(`${label ? label + ' ' : ''}${emojiFor(row.event, EMOJI)} ${render(row)}`);
+  return redact(`${label ? label + ' ' : ''}${emojiFor(row.event, EMOJI, row)} ${render(row)}`);
 }
 
 // The pool's base token: the row's token_a, else the first half of its pair.
@@ -367,10 +385,10 @@ export function render(row) {
     case 'swap_failed':
       return `SWAP FAILED · ${row.reason}\nfailures ${row.failures} · nothing opened`;
     case 'PAYOUT': {
+      const split = `split  paid $${n(row.split?.paid, 4)} · reinvested $${n(row.split?.reinvested, 4)} · gas $${n(row.split?.gas, 4)}`;
+      if (row.gas_low) return payoutHeld(row) + '\n' + split;
       const sent = (row.sent ?? []).map(x => `${x.amount} ${x.symbol} ($${n(x.usd, 4)}) → profit wallet\n${x.signature}`).join('\n');
-      return `PAYOUT${row.gas_low ? ' · gas low, SOL refilled gas, payout reinvested' : ''}\n`
-        + (sent || 'nothing sent this harvest') + `\n`
-        + `split  paid $${n(row.split?.paid, 4)} · reinvested $${n(row.split?.reinvested, 4)} · gas $${n(row.split?.gas, 4)}`;
+      return 'PAYOUT\n' + (sent || 'nothing sent this harvest') + '\n' + split;
     }
     case 'REWARD_PAYOUT':
       return `REWARDS${row.gas_low ? ' · gas low, swapped to SOL for gas' : ''}\n`

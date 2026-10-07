@@ -112,8 +112,9 @@ export function splitMessage(text, limit = 4000) {
 
 // One emoji per event, shared with the loop's log lines (event_emoji.json;
 // rebalancer.emoji_for has the same rule): grep the emoji to find the event.
-export function emojiFor(event, map = {}) {
+export function emojiFor(event, map = {}, row = null) {
   const e = String(event);
+  if (row?.gas_low && Object.prototype.hasOwnProperty.call(map, 'GAS_LOW')) return map.GAS_LOW;   // payout held for gas
   if (Object.prototype.hasOwnProperty.call(map, e) && !e.startsWith('_')) return map[e];
   if (/fail|unreadable|refused|rejected|error/i.test(e)) return '❌';
   if (/defer|skip|wait|held/i.test(e)) return '⏳';

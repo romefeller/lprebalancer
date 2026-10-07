@@ -46,6 +46,26 @@ class Emoji(unittest.TestCase):
         py = [rebalancer.emoji_for(e) for e in events]
         self.assertEqual(dict(zip(events, py)), dict(zip(events, node)))
 
+    def test_a_payout_held_for_gas_shows_the_pump_in_python_and_node(self):
+        rows = [('PAYOUT', {'gas_low': True}), ('REWARD_PAYOUT', {'gas_low': True}),
+                ('PAYOUT', {'gas_low': False}), ('PAYOUT', {})]
+        js = ("import fs from 'fs'; import { emojiFor } from './book_format.mjs';"
+              "const m = JSON.parse(fs.readFileSync('./event_emoji.json', 'utf8'));"
+              f"console.log(JSON.stringify({json.dumps(rows)}.map(([e, r]) => emojiFor(e, m, r))));")
+        r = subprocess.run(['node', '--input-type=module', '-e', js], cwd=ROOT, capture_output=True, text=True, timeout=60)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        py = [rebalancer.emoji_for(e, p) for e, p in rows]
+        self.assertEqual(py, ['⛽', '⛽', '💸', '💸'])
+        self.assertEqual(json.loads(r.stdout.strip().splitlines()[-1]), py)
+
+    def test_the_log_line_of_a_held_payout_carries_the_pump(self):
+        seen = []
+        with mock.patch('builtins.print', lambda *a, **k: seen.append(a[0])), \
+                mock.patch.object(rebalancer, 'FEED', pathlib.Path('/dev/null')):
+            rebalancer.notify('PAYOUT', gas_low=True)
+            rebalancer.notify('PAYOUT', gas_low=False)
+        self.assertIn('] ⛽ PAYOUT: ', seen[0]); self.assertIn('] 💸 PAYOUT: ', seen[1])
+
     def test_failures_are_marked_as_failures(self):
         for e in emitted_events():
             if re.search(r'fail(?!over)', e, re.I) or e in ('failover_failed', 'status_unreadable', 'BREAKER', 'halted'):

@@ -396,6 +396,20 @@ class Distribute(unittest.TestCase):
         _, rows, *_ = self.run_it(0.002, 0.3, bal=bal)
         self.assertEqual({r['kind']: r.get('detail') for r in rows}, {'gas': 'gas under the reserve', 'reinvested': None})
 
+    def test_a_held_payout_names_what_stayed_and_the_reserve(self):
+        # 2026-10-07 DJT close: gas 0.049209 < 0.05 held a 0.694 USDC payout; the message must say so
+        bal = {'balanceA': 0.03, 'balanceB': 40.0, 'sol': 0.03, 'price': 120.0, 'quoteUsd': 1.0}
+        *_, calls, _, _, seen = self.run_it(0.002, 0.3, bal=bal)
+        pay = [kw for e, kw in seen if e == 'PAYOUT'][0]
+        self.assertTrue(pay['gas_low']); self.assertEqual(pay['sent'], []); self.assertEqual(calls, [])
+        self.assertEqual(pay['gas_reserve'], rebalancer.config.GAS_RESERVE_SOL)
+        self.assertEqual(pay['held'], [{'symbol': 'USDC', 'amount': 0.3, 'usd': 0.3}])
+
+    def test_a_paid_harvest_holds_nothing(self):
+        *_, seen = self.run_it(0.002, 0.3)
+        pay = [kw for e, kw in seen if e == 'PAYOUT'][0]
+        self.assertFalse(pay['gas_low']); self.assertEqual(pay['held'], [])
+
     def test_paid_row_records_amount_dollars_destination_and_signature(self):
         _, rows, calls, *_ = self.run_it(0.002, 0.3)
         paid = [r for r in rows if r['kind'] == 'paid'][0]

@@ -195,10 +195,14 @@ def _load_emoji():
 EVENT_EMOJI = _load_emoji()
 
 
-def emoji_for(event):
+def emoji_for(event, payload=None):
     """The event's emoji (event_emoji.json, shared with the Telegram bridge),
-    or by rule: a failure ❌, a deferral ⏳, anything else ▫️. Pure."""
+    or by rule: a failure ❌, a deferral ⏳, anything else ▫️. A row that says
+    gas is under the reserve (`gas_low`) shows GAS_LOW: the payout was held
+    for gas. Pure."""
     e = str(event)
+    if (payload or {}).get('gas_low') and 'GAS_LOW' in EVENT_EMOJI:
+        return EVENT_EMOJI['GAS_LOW']
     if e in EVENT_EMOJI:
         return EVENT_EMOJI[e]
     if re.search(r'fail|unreadable|refused|rejected|error', e, re.I):
@@ -253,7 +257,7 @@ def notify(event, **payload):
     FEED.parent.mkdir(parents=True, exist_ok=True)
     with open(FEED, 'a') as fh:
         fh.write(line + '\n')
-    print(redact(f'[{row["t"]}] {emoji_for(event)} {event}: {json.dumps(payload, default=str, sort_keys=True)}'),
+    print(redact(f'[{row["t"]}] {emoji_for(event, payload)} {event}: {json.dumps(payload, default=str, sort_keys=True)}'),
           flush=True)
 
 
@@ -1426,8 +1430,12 @@ def distribute(state, position, fee_a, fee_b):
     save(state)
     summary = {k: round(sum((x['usd'] or 0) for x in parts if x['kind'] == k), 4)
                for k in ('paid', 'reinvested', 'gas')}
+    payout_mint = wallets.norm(config.PAYOUT_MINT)
+    held = [{'symbol': x['symbol'], 'amount': round(x['amount'], 6),
+             'usd': round(x['usd'], 4) if x['usd'] is not None else None}
+            for x in parts if x['kind'] == 'reinvested' and x['mint'] == payout_mint]
     notify('PAYOUT', sent=sent, split=summary, gas_low=sol_before < config.GAS_RESERVE_SOL,
-           sol_before=round(sol_before, 6), to=config.PROFIT_WALLET,
+           sol_before=round(sol_before, 6), gas_reserve=config.GAS_RESERVE_SOL, held=held, to=config.PROFIT_WALLET,
            parts=[{k: (round(v, 6) if isinstance(v, float) else v) for k, v in x.items()} for x in parts])
     return parts
 
