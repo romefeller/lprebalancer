@@ -227,6 +227,14 @@ test('every message carries its pool, except the portfolio of all pools', () => 
 });
 
 test('the pause events render', () => {
+  // the first live hot pause and resume, 2026-10-06 (their fields as rebalancer.hot_pause sends them)
+  assert.ok(message({ event: 'HOT_PAUSE', pair: 'SOL/USDC', wallet_tag: '83HxMUUC7c', price: 119.09575, ratio: 0.59,
+                      threshold: 0.8, hours: 6.0, resume_minutes: 30, regime: { choice_pct: 2.5 } })
+    .startsWith('[SOL/USDC · 83HxMUUC7c] ⏸️ PAUSED · bad hot moment: fees 0.59x the in-band loss over 6h (< 0.80) · ±2.50% chosen\n'
+      + 'price 119.0957 · closing, waiting 50/50 · reopens 30 min after it clears\n'));
+  assert.equal(message({ event: 'HOT_RESUME', pair: 'SOL/USDC', wallet_tag: '83HxMUUC7c', reason: 'clear for 30 min',
+                         paused_minutes: 32, ratio: null, hot: false }),
+    '[SOL/USDC · 83HxMUUC7c] ▶️ RESUMING · clear for 30 min · paused 32 min');
   assert.ok(render({ event: 'MACRO_PAUSE', kind: 'FOMC', event_at: '10-28 18:00', resume_minutes: 135, held: true, price: 120.5 })
     .startsWith('PAUSED · FOMC at 10-28 18:00 UTC: closing, waiting 50/50 · reopens in 135 min\nprice 120.5'));
   assert.ok(render({ event: 'MACRO_PAUSE', kind: 'FOMC', event_at: '10-28 18:00', resume_minutes: 130, held: false })
@@ -469,8 +477,17 @@ test('every row of the real feed renders as before, behind its pool label', { sk
       const label = poolLabel(r);
       let want = oldMessage(r);
       if (want.includes(` ${r.event} · {`)) {                             // the generic JSON: the label's fields leave it
-        const { profile, wallet_id, chain, pair, ...rest } = r;
+        const { profile, wallet_id, wallet_tag, chain, pair, ...rest } = r;   // wallet_tag is in the label (poolLabel)
         want = oldMessage(rest);
+        // an event born after the old bridge (HOT_PAUSE, HOT_RESUME, ...) has its own text now, not JSON:
+        // nothing to compare it with, so it must only be its own, whole message
+        const mine = message(r);
+        if (!mine.includes(` ${r.event} · {`)) {
+          assert.ok(mine.startsWith(label ? label + ' ' : ''), `${f}: ${r.event} lost its label`);
+          assert.ok(!/undefined|NaN/.test(mine), `${f}: ${r.event}: ${mine.slice(0, 200)}`);
+          n += 1;
+          continue;
+        }
       }
       // the old bridge printed "move at 2 steps" whatever the configured steps (ab89dc0 shows them)
       if (r.regime?.steps != null) want = want.replace('move at 2 steps', `move at ${r.regime.steps} steps`);
