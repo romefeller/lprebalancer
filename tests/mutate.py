@@ -205,6 +205,8 @@ TARGETS = {
     # 2026-10-02: a payout's priority fee, and the send loop that proves an expired one never landed
     'payout_send': ('payout.mjs', ['payoutCuPrice'], NODE_TESTS('test_payout_send.mjs')),
     'tx_send': ('tx_send.mjs', ['sendUntilLanded'], NODE_TESTS('test_payout_send.mjs')),
+    'tx_send_price': ('tx_send.mjs', ['priorityCuPrice'], NODE_TESTS('test_payout_send.mjs', 'test_raydium_landing.mjs')),
+    'raydium_landing': ('signer_raydium.mjs', ['sendLanded', 'sendAll', 'rebuildOnRefusal'], NODE_TESTS('test_raydium_landing.mjs')),
     'swap_send': ('swap_jupiter.mjs', ['sendSwap'], NODE_TESTS('test_payout_send.mjs')),
     # 2026-10-02: the swing (a profile on one pool in its market's session, another outside it)
     'swing_calendar': ('swing.py', ['session', 'is_open', 'wanted', 'decide', 'audit'],
@@ -677,6 +679,16 @@ EQUIVALENT = {
     ('risk', 'risk_metrics', 'const 1e-06->5e-07', 'if sd > 1e-6 * rms24:', 0):
         'a float-noise tolerance: 2x on its scale changes nothing',
     # Signer send paths: `e?.message ?? e` only builds the text of an error.
+    ('raydium_landing', 'sendAll', '\\?\\? -> ||', 'signatures: sigs, error: String(e?.message ?? e).slice(0, 300) }, null, 1));', 0):
+        'error-message text only: ?? and || differ only for an error with an empty message',
+    ('raydium_landing', 'sendAll', '\\?\\? -> ||', 'throw Object.assign(new Error(`partial send: ${sigs.length}/${builts.length} sent; ${e?.message ?? e}`), { sent: true });', 0):
+        'error-message text only: ?? and || differ only for an error with an empty message',
+    ('raydium_landing', 'sendLanded', '\\?\\? -> ||', 'tx.sign(payer, ...(built.signers ?? []));', 0):
+        'the SDK gives signers as an array or not at all; ?? and || differ only for a falsy non-array',
+    ('tx_send_price', 'priorityCuPrice', '\\?\\? -> ||', 'const fees = (recent ?? []).map(r => Number(r?.prioritizationFee ?? r)).filter(f => f > 0).sort((a, b) => a - b);', 0):
+        'recent is an array, null or undefined; ?? and || differ only for a falsy non-array',
+    ('tx_send_price', 'priorityCuPrice', '\\?\\? -> ||', 'const fees = (recent ?? []).map(r => Number(r?.prioritizationFee ?? r)).filter(f => f > 0).sort((a, b) => a - b);', 1):
+        'a fee of 0 falls back to the record itself: Number of an object is NaN, filtered out as 0 is',
     ('rpc_raydium', 'sendAll', '\\?\\? -> ||', 'signatures: sigs, error: String(e?.message ?? e).slice(0, 300) }, null, 1));', 0):
         'error-message text only: ?? and || differ only for an error with an empty message',
     ('rpc_raydium', 'sendAll', '\\?\\? -> ||', 'throw Object.assign(new Error(`partial send: ${sigs.length}/${builts.length} sent; ${e?.message ?? e}`), { sent: true });', 0):

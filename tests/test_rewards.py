@@ -243,9 +243,38 @@ class ChainRewards(unittest.TestCase):
 
 
 class CloseRetry(unittest.TestCase):
+    # 2026-10-07: the real error of a close sent once and expired, and the
+    # Raydium signer's NeverLanded after its rebuilds.
+    EXPIRED = ('ERROR: Signature 5kPK has expired: block height exceeded',
+               'expired: block height passed and the chain has no record of 5kPK; nothing was sent')
+
     def test_a_rate_limited_close_is_retried_once_when_the_position_is_still_there(self):
+        for err in ('RPC rate limited', *self.EXPIRED):
+            with self.subTest(err=err):
+                calls, sent, state = self.close_after(err)
+                self.assertEqual(calls, ['harvest', 'close', 'close'])
+                self.assertIn('close_retry', sent); self.assertIn('REOPEN', sent)
+                self.assertEqual(state['failures'], 0)
+
+    def test_a_program_refusal_is_not_retried(self):
+        calls, sent, state = self.close_after('PriceSlippageCheck (6017): price moved beyond the slippage limit')
+        self.assertEqual(calls, ['harvest', 'close'])
+        self.assertNotIn('close_retry', sent); self.assertIn('close_failed', sent)
+        self.assertEqual(state['failures'], 1)
+
+    def test_the_retry_pattern(self):
+        for err in ('429', 'request timed out', 'ECONNRESET', 'Blockhash not found', *self.EXPIRED):
+            self.assertRegex(err, '(?i)' + rebalancer.CLOSE_RETRY_ERRORS)
+        for err in ('PriceSlippageCheck (6017)', 'transaction failed on chain: {"InstructionError":[2,{"Custom":1}]}',
+                    'position M not found for this wallet on this pool', 'partial send: 1/2 sent'):
+            self.assertNotRegex(err, '(?i)' + rebalancer.CLOSE_RETRY_ERRORS)
+
+    def close_after(self, err):
+        """A rebalance whose first close fails with `err` and whose second
+        lands, the position still there in between: (signer calls, notices,
+        state)."""
         calls, sent = [], []
-        results = iter([({'signature': 'h'}, None), (None, 'RPC rate limited'), ({'closed': 'M', 'signature': 'c'}, None)])
+        results = iter([({'signature': 'h'}, None), (None, err), ({'closed': 'M', 'signature': 'c'}, None)])
         state = {'last_rebalance': 0, 'rebalance_times': [], 'calm_times': [], 'failures': 0}
         with mock.patch.object(rebalancer, 'chain', lambda *a, **k: (calls.append(a[0]) or next(results))), \
                 mock.patch.object(rebalancer, 'read_status', lambda *a: ({'positionMint': 'M'}, None)), \
@@ -260,8 +289,7 @@ class CloseRetry(unittest.TestCase):
                 mock.patch.object(rebalancer.db, 'record_harvest', lambda *a: None), \
                 mock.patch.object(rebalancer.db, 'snapshot', lambda *a, **k: None), \
                 mock.patch.object(rebalancer.db, 'close_position', lambda *a: None), \
-                mock.patch.object(rebalancer.db, 'event', lambda *a: None):
+                mock.patch.object(rebalancer.db, 'event', lambda *a: None), \
+                mock.patch.object(rebalancer, 'record_health', lambda *a, **k: None):
             rebalancer.rebalance(state, {'positionMint': 'M', 'price': 100, 'whirlpool': 'P'}, 'x')
-        self.assertEqual(calls, ['harvest', 'close', 'close'])
-        self.assertIn('close_retry', sent); self.assertIn('REOPEN', sent)
-        self.assertEqual(state['failures'], 0)
+        return calls, sent, state

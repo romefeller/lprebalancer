@@ -3602,6 +3602,12 @@ def reopen(state, reason, band=None, recovering=False, exit_side=0):
     return True
 
 
+# A close error that a second try 15 s later may fix. 2026-10-07: "Signature
+# X has expired: block height exceeded" did not match 'blockhash', and an
+# out-of-range band waited five minutes for the next poll in a 2% drop.
+CLOSE_RETRY_ERRORS = r'rate limit|429|timeout|timed out|ECONNRESET|blockhash|block height'
+
+
 def rebalance(state, status, reason, target=None, band=None, calm_move=False, exit_move=False, close_only=False,
               operator=False, exit_side=0):
     """Harvest, close, and reopen: on the same pool, or on `target` (a board
@@ -3681,7 +3687,7 @@ def rebalance(state, status, reason, target=None, band=None, calm_move=False, ex
     if held(err):
         state.pop('pending_reopen', None); save(state)
         return                      # held: said once by chain(), no failure counted
-    if err and re.search(r'rate limit|429|timeout|timed out|ECONNRESET|blockhash', str(err), re.I):
+    if err and re.search(CLOSE_RETRY_ERRORS, str(err), re.I):
         # A transport failure: if the position is provably still there, the
         # close did not land and one more try is safe. On 2026-09-26 a
         # rate-limited close left a move half-done until the next poll.

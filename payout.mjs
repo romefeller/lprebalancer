@@ -23,7 +23,7 @@ import { createRequire } from 'node:module';
 
 import { readMints, rawToUi, uiToRaw, writeRefusal } from './token2022.mjs';
 import { isEntry } from './rpc_policy.mjs';
-import { NeverLanded, sendUntilLanded, REBROADCAST_MS } from './tx_send.mjs';
+import { NeverLanded, priorityCuPrice, sendUntilLanded, REBROADCAST_MS } from './tx_send.mjs';
 
 export { NeverLanded, sendUntilLanded, REBROADCAST_MS };
 
@@ -52,10 +52,7 @@ export const PRIORITY_MAX_LAMPORTS = Number(process.env.LPBOT_PAYOUT_PRIORITY_MA
 
 // Compute-unit price (micro-lamports) from recent prioritization fees. Pure.
 export function payoutCuPrice(recent, units = CU_LIMIT, cap = PRIORITY_MAX_LAMPORTS) {
-  const fees = (recent ?? []).map(r => Number(r?.prioritizationFee ?? r)).filter(f => f > 0).sort((a, b) => a - b);
-  const p75 = fees.length ? fees[Math.min(fees.length - 1, Math.floor(fees.length * 0.75))] : 0;
-  const ceiling = Math.floor(Number(cap) * 1_000_000 / Math.max(1, units));
-  return Math.max(0, Math.min(Math.max(p75, CU_PRICE_FLOOR), ceiling));
+  return priorityCuPrice(recent, units, cap, CU_PRICE_FLOOR);
 }
 
 function guard() {

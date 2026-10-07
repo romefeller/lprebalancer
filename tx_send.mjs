@@ -13,6 +13,16 @@ export const REBROADCAST_MS = 2_000;
 // know its signature: it never landed and never can.
 export class NeverLanded extends Error {}
 
+// Compute-unit price (micro-lamports) from recent prioritization fees: their
+// 75th percentile, at least `floor`, and never more than `cap` lamports over
+// `units`. Pure.
+export function priorityCuPrice(recent, units, cap, floor) {
+  const fees = (recent ?? []).map(r => Number(r?.prioritizationFee ?? r)).filter(f => f > 0).sort((a, b) => a - b);
+  const p75 = fees.length ? fees[Math.min(fees.length - 1, Math.floor(fees.length * 0.75))] : 0;
+  const ceiling = Math.floor(Number(cap) * 1_000_000 / Math.max(1, units));
+  return Math.max(0, Math.min(Math.max(p75, floor), ceiling));
+}
+
 // Send `raw` and send it again every REBROADCAST_MS until it is confirmed or
 // its blockhash expires. Returns the signature once confirmed. An error of
 // the first send is thrown as it is: nothing proves the transaction went

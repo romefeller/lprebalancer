@@ -49,6 +49,7 @@ import path from 'node:path';
 import { assertNotHalted } from './halt_guard.mjs';
 import { createRequire } from 'node:module';
 import { waitTurn } from './jupiter_gate.mjs';
+import { NeverLanded, priorityCuPrice, sendUntilLanded } from './tx_send.mjs';
 
 // The SDK's ESM build loads under Node 24, but the CommonJS build is used so
 // that this file, the SDK and web3.js share one copy of PublicKey and BN.
@@ -82,6 +83,20 @@ const HEADERS = { accept: 'application/json', 'user-agent': 'Mozilla/5.0' };
 // through a websocket subscription with a bare 60 s timeout, which a public
 // RPC without websockets never answers.
 const TX_VERSION = TxVersion.LEGACY;
+
+// The exit's priority fee. 2026-10-07: a close sent once with the base fee
+// only expired unconfirmed ("block height exceeded") in a 2% drop, and the
+// band sat out of range six more minutes. A harvest or close is one
+// decreaseLiquidity per transaction (70k-79k units measured on mainnet);
+// EXIT_CU_LIMIT leaves room. Price: the 75th percentile of the recent fees on
+// the pool account, at least EXIT_CU_PRICE_FLOOR, and never more than
+// EXIT_PRIORITY_MAX_LAMPORTS in all (100k lamports, about $0.012).
+export const EXIT_CU_LIMIT = 200_000;
+export const EXIT_CU_PRICE_FLOOR = 10_000;                  // micro-lamports per unit: 2,000 lamports in all
+export const EXIT_PRIORITY_MAX_LAMPORTS = Number(process.env.LPBOT_EXIT_PRIORITY_MAX_LAMPORTS ?? 100_000);
+// Builds of a close or open in all, after a slippage refusal or a send that
+// provably never landed.
+const REBUILD_ATTEMPTS = 3;
 
 if (!CLMM_PROGRAM_ID.equals(PROGRAM_ID)) {
   throw new Error(`SDK program id ${CLMM_PROGRAM_ID.toBase58()} differs from the expected CLMM program`);
@@ -456,13 +471,13 @@ async function sendBuilt(built) {
   } finally { console.log = log; }
 }
 
-// Send several built transactions in order. After the first one lands, a
-// failure is reported as a partial send and never retried.
-export async function sendAll(builts, report) {
+// Send several built transactions in order, each through `send`. After the
+// first one lands, a failure is reported as a partial send and never retried.
+export async function sendAll(builts, report, send = sendBuilt) {
   const sigs = [];
   for (const b of builts) {
     try {
-      sigs.push(await sendBuilt(b));
+      sigs.push(await send(b));
     } catch (e) {
       if (!sigs.length) throw e;
       console.log(JSON.stringify({ ...report, sent: true, partial: true, signature: sigs[sigs.length - 1],
@@ -600,25 +615,54 @@ function closeMinimumsRaw(sqrtPriceX64, p) {
   return { minA: atUp.amountA, minB: atDn.amountB };
 }
 
-async function buildDecrease(raydium, r, p, liquidity, minA, minB, closePosition) {
+async function buildDecrease(raydium, r, p, liquidity, minA, minB, closePosition, computeBudgetConfig) {
   return raydium.clmm.decreaseLiquidity({
     poolInfo: r.poolInfo, poolKeys: r.poolKeys, ownerPosition: p,
     ownerInfo: { useSOLBalance: true, closePosition },
     liquidity, amountMinA: minA, amountMinB: minB,
-    txVersion: TX_VERSION,
+    computeBudgetConfig, txVersion: TX_VERSION,
   });
+}
+
+// The compute budget of a harvest or close on `pool`. An unreadable fee
+// history prices at the floor.
+async function exitBudget(connection, pool) {
+  let recent = [];
+  try { recent = await connection.getRecentPrioritizationFees({ lockedWritableAccounts: [new PublicKey(pool)] }); } catch { recent = []; }
+  return { units: EXIT_CU_LIMIT,
+           microLamports: priorityCuPrice(recent, EXIT_CU_LIMIT, EXIT_PRIORITY_MAX_LAMPORTS, EXIT_CU_PRICE_FLOOR) };
+}
+
+// Sign and send one built legacy transaction, re-sent until it lands or its
+// blockhash expires (tx_send.sendUntilLanded). NeverLanded is thrown as
+// itself: nothing went out, and the operation may be rebuilt. Any other
+// error is marked sent, as executeBuilt does: the controller reads the
+// outcome and never executes the operation again on another endpoint.
+export async function sendLanded(connection, payer, built, deps = {}) {
+  try {
+    const tx = built.transaction;
+    const bh = await connection.getLatestBlockhash('confirmed');
+    tx.recentBlockhash = bh.blockhash;
+    tx.feePayer = payer.publicKey;
+    tx.sign(payer, ...(built.signers ?? []));
+    return await sendUntilLanded(connection, tx.serialize(), bh.lastValidBlockHeight, deps);
+  } catch (error) {
+    if (error instanceof NeverLanded) throw error;
+    throw Object.assign(new Error(signerError(error)), { sent: true, cause: error });
+  }
 }
 
 async function harvest(address, execute) {
   const pool = poolArg();
-  return withRpc(async ({ connection, raydium }) => {
+  return withRpc(async ({ connection, payer, raydium }) => {
     const r = await loadPool(raydium, pool);
     const info = await describe(pool, r, connection);
     assertWritable(info.mints);
     const ps = await findPositions(raydium, pool, address);
     const tickOf = await tickStates(connection, pool, ps, info.tickSpacing);
     const builts = [];
-    for (const p of ps) builts.push(await buildDecrease(raydium, r, p, new BN(0), new BN(0), new BN(0), false));
+    const budget = await exitBudget(connection, pool);
+    for (const p of ps) builts.push(await buildDecrease(raydium, r, p, new BN(0), new BN(0), new BN(0), false, budget));
     const fees = ps.map(p => positionAmounts(p, r, tickOf));
     const sum = (k) => fees.reduce((n, f) => n.add(f[k]), new BN(0));
     const report = {
@@ -635,20 +679,21 @@ async function harvest(address, execute) {
       console.log('DRY RUN — pass --execute to collect fees.');
       return;
     }
-    const sigs = await sendAll(builts, report);
+    const sigs = await sendAll(builts, report, b => sendLanded(connection, payer, b));
     console.log(JSON.stringify({ harvested: address, signature: sigs[sigs.length - 1], signatures: sigs }, null, 1));
   });
 }
 
 async function close(address, execute) {
   const pool = poolArg();
-  return withRpc(async ({ connection, raydium }) => {
+  return withRpc(async ({ connection, payer, raydium }) => {
     const r = await loadPool(raydium, pool);
     const info = await describe(pool, r, connection);
     assertWritable(info.mints);
     const ps = await findPositions(raydium, pool, address);
     const tickOf = await tickStates(connection, pool, ps, info.tickSpacing);
     const builts = [], ests = [];
+    const budget = await exitBudget(connection, pool);
     for (const p of ps) {
       const am = positionAmounts(p, r, tickOf);
       ests.push(am);
@@ -658,7 +703,7 @@ async function close(address, execute) {
       // that token. A 1% cut of each amount was a ~0.01% price tolerance on a
       // +/-1% band, and closes failed with PriceSlippageCheck (6017).
       const { minA, minB } = closeMinimumsRaw(r.rpcPoolInfo.sqrtPriceX64, p);
-      builts.push(await buildDecrease(raydium, r, p, p.liquidity, minA, minB, true));
+      builts.push(await buildDecrease(raydium, r, p, p.liquidity, minA, minB, true, budget));
     }
     const sum = (k) => ests.reduce((n, e) => n.add(e[k]), new BN(0));
     const report = {
@@ -677,7 +722,7 @@ async function close(address, execute) {
       console.log('DRY RUN — close instructions built. Pass --execute to send.');
       return;
     }
-    const sigs = await sendAll(builts, report);
+    const sigs = await sendAll(builts, report, b => sendLanded(connection, payer, b));
     console.log(JSON.stringify({ closed: address, signature: sigs[sigs.length - 1], signatures: sigs }, null, 1));
   });
 }
@@ -772,18 +817,21 @@ export async function increase(address, uiMaxA, uiMaxB, execute) {
   });
 }
 
-// Up to three builds on fresh pool state when the chain refuses on slippage.
-// Only a single-transaction open or close is rebuilt: a refused transaction
+// Up to REBUILD_ATTEMPTS builds on fresh pool state when the chain refuses
+// on slippage, or when the first transaction provably never landed
+// (NeverLanded: its blockhash expired and the chain has no record of it).
+// Only the first transaction's failure is rebuilt: a refused transaction
 // reverted whole. A partial multi-transaction send is never retried.
-async function rebuildOnSlippage(fn, execute, attempts = 3) {
+export async function rebuildOnRefusal(fn, execute, { attempts = REBUILD_ATTEMPTS, sleep = ms => new Promise(res => setTimeout(res, ms)) } = {}) {
   for (let i = 1; ; i++) {
     try {
       return await fn();
     } catch (e) {
       const m = signerError(e);
-      if (!execute || i >= attempts || !SLIPPAGE_REFUSAL.test(m) || /partial send/.test(m)) throw e;
-      console.error(`slippage refusal; rebuilding on fresh pool state (attempt ${i + 1}/${attempts})`);
-      await new Promise(res => setTimeout(res, 1500));
+      const expired = e instanceof NeverLanded;
+      if (!execute || i >= attempts || /partial send/.test(m) || !(expired || SLIPPAGE_REFUSAL.test(m))) throw e;
+      console.error(`${expired ? 'expired unsent' : 'slippage refusal'}; rebuilding on fresh pool state (attempt ${i + 1}/${attempts})`);
+      await sleep(1500);
     }
   }
 }
@@ -797,10 +845,10 @@ async function main() {
   if (cmd === 'balance') return balance(rest[0]);
   if (cmd === 'positions') return positions();
   if (cmd === 'status') return status(rest[0]);
-  if (cmd === 'harvest') return harvest(rest[0], execute);
-  if (cmd === 'close') return rebuildOnSlippage(() => close(rest[0], execute), execute);
-  if (cmd === 'increase') return rebuildOnSlippage(() => increase(rest[0], rest[1], rest[2], execute), execute);
-  if (cmd === 'open') return rebuildOnSlippage(() => open(rest[0], rest[1], rest[2], rest[3], rest[4], execute), execute);
+  if (cmd === 'harvest') return rebuildOnRefusal(() => harvest(rest[0], execute), execute);
+  if (cmd === 'close') return rebuildOnRefusal(() => close(rest[0], execute), execute);
+  if (cmd === 'increase') return rebuildOnRefusal(() => increase(rest[0], rest[1], rest[2], execute), execute);
+  if (cmd === 'open') return rebuildOnRefusal(() => open(rest[0], rest[1], rest[2], rest[3], rest[4], execute), execute);
   if (cmd === 'pool') {
     // Read-only: no key is loaded.
     const pool = poolArg(rest[0]);
