@@ -14,7 +14,9 @@ service environment pins (LPBOT_SWING_POOLS), so neither this process nor a
 row can redirect money.
 
 It is also each switch's auditor: within SWITCH_DEADLINE_S of a request the
-profile must hold an open position on the wanted pool, and within
+profile must hold an open position on the wanted pool (once it has, the
+switch has arrived, and a later re-centre's close-to-open gap is no lateness),
+and within
 LEFTOVER_DEADLINE_S nothing the old pair left may remain; otherwise one
 SWING_LATE / SWING_LEFTOVER alert per switch, on run/swing/events.jsonl (the
 Telegram bridge tails it) and in the events table, under the profile.
@@ -112,14 +114,17 @@ def decide(now_utc, row, last_request):
 
 def audit(now_s, request, position_pool, left_behind):
     """The alerts a switch has earned by `now_s`: [('SWING_LATE' |
-    'SWING_LEFTOVER', why)]. `request` is {'pool', 'at'} (the last switch),
-    `position_pool` the pool of the profile's open position (None: none),
-    `left_behind` the profile's unsold leftovers. Pure."""
+    'SWING_LEFTOVER', why)]. `request` is {'pool', 'at', 'arrived'?} (the last
+    switch; 'arrived' once a position opened on its pool), `position_pool` the
+    pool of the profile's open position (None: none), `left_behind` the
+    profile's unsold leftovers. An arrived switch is never late: on 2026-10-08
+    a re-centre's 33 s with no position read as "883 min after the switch ...
+    on no pool". Pure."""
     if not request:
         return []
     age = now_s - float(request['at'])
     out = []
-    if age > SWITCH_DEADLINE_S and position_pool != request['pool']:
+    if age > SWITCH_DEADLINE_S and not request.get('arrived') and position_pool != request['pool']:
         out.append(('SWING_LATE', f'{age / 60:.0f} min after the switch to {request["pool"]} the position is on '
                                   f'{position_pool or "no pool"}'))
     if age > LEFTOVER_DEADLINE_S and left_behind:
@@ -198,7 +203,10 @@ def tick(row, state, now_utc, dry=False):
         feed(profile, 'SWING', to=f'{want[0]} {want[1]}', held=row['held_pool'],
              market='open' if want[1] == row['open_pool'] else 'closed')
         return action
-    for kind, why in audit(now_utc.timestamp(), state.get('request'), row['position_pool'], left_behind(profile)):
+    request = state.get('request')
+    if not dry and request and not request.get('arrived') and row['position_pool'] == request['pool']:
+        request['arrived'] = now_utc.timestamp()       # the switch is done; re-centres after it are not late
+    for kind, why in audit(now_utc.timestamp(), request, row['position_pool'], left_behind(profile)):
         if kind not in state.setdefault('told', []):
             state['told'].append(kind)
             feed(profile, kind, reason=why)

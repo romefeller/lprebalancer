@@ -9,6 +9,7 @@ fake chain: SOL/USDC -> DJT/USDC -> SOL/USDC, what each move leaves behind
 sold into USDC above the gas reserve, then 50/50 and an open."""
 import contextlib
 import datetime as dt
+import itertools
 import json
 import pathlib
 import tempfile
@@ -143,6 +144,25 @@ class Audit(unittest.TestCase):
         late = swing.audit(1000.0 + swing.SWITCH_DEADLINE_S + 1, self.REQ, None, ['SOL'])
         self.assertEqual([k for k, _ in late], ['SWING_LATE'])
         self.assertIn('no pool', late[0][1])
+
+
+    def test_an_arrived_switch_is_never_late(self):
+        # 2026-10-08 10:43Z: the switch landed at 20:04Z; a re-centre's 33 s with no position is no lateness
+        t = 1000.0 + swing.SWITCH_DEADLINE_S + 883 * 60
+        self.assertEqual(swing.audit(t, dict(self.REQ, arrived=1240.0), None, []), [])
+        self.assertEqual(swing.audit(t, dict(self.REQ, arrived=1240.0), CLOSED[1], []), [])
+        # leftovers are still checked after arrival
+        self.assertEqual([k for k, _ in swing.audit(1000.0 + swing.LEFTOVER_DEADLINE_S + 1,
+                                                    dict(self.REQ, arrived=1240.0), OPEN[1], ['SOL'])],
+                         ['SWING_LEFTOVER'])
+
+    def test_property_late_iff_past_the_deadline_not_arrived_and_off_the_pool(self):
+        for age, arrived, pos in itertools.product((0, swing.SWITCH_DEADLINE_S, swing.SWITCH_DEADLINE_S + 1, 9e5),
+                                                   (None, 1001.0), (None, OPEN[1], CLOSED[1])):
+            req = dict(self.REQ, **({'arrived': arrived} if arrived else {}))
+            late = 'SWING_LATE' in [k for k, _ in swing.audit(1000.0 + age, req, pos, [])]
+            self.assertEqual(late, age > swing.SWITCH_DEADLINE_S and not arrived and pos != OPEN[1],
+                             (age, arrived, pos))
 
 
 class Tick(unittest.TestCase):
@@ -798,6 +818,25 @@ class TickMore(Tick):
         self.assertEqual(swing.tick(self.row(held=DJT_POOL), {}, ny(2026, 10, 5, 20, 0)), 'request')
         rows = [json.loads(x) for x in swing.FEED.read_text().splitlines()]
         self.assertEqual(rows[-1]['market'], 'closed')
+
+    def test_a_recentre_gap_after_arrival_raises_no_late_alert(self):
+        # the 2026-10-08 false alarm: switch, position on the pool, then a re-centre closes it for a moment
+        (self.tmp / 'run' / 'tk-swing').mkdir(parents=True)
+        state = {}
+        self.assertEqual(swing.tick(self.row(), state, ny(2026, 10, 5, 11, 0)), 'request')
+        swing.tick(self.row(held=DJT_POOL, position_pool=DJT_POOL), state, ny(2026, 10, 5, 11, 4))
+        self.assertTrue(state['request']['arrived'])
+        swing.tick(self.row(held=DJT_POOL, position_pool=None), state, ny(2026, 10, 5, 15, 43))
+        self.assertNotIn('SWING_LATE', [e for _, e in self.feed()])
+
+    def test_a_switch_that_never_arrives_is_still_late(self):
+        (self.tmp / 'run' / 'tk-swing').mkdir(parents=True)
+        state = {}
+        swing.tick(self.row(), state, ny(2026, 10, 5, 11, 0))
+        swing.tick(self.row(held=DJT_POOL, position_pool=CLOSED[1]), state, ny(2026, 10, 5, 11, 4))
+        swing.tick(self.row(held=DJT_POOL, position_pool=None), state, ny(2026, 10, 5, 11, 20))
+        self.assertNotIn('arrived', state['request'])
+        self.assertEqual([e for _, e in self.feed()].count('SWING_LATE'), 1)
 
     def test_a_dry_tick_answers_without_writing(self):
         state = {}
