@@ -35,6 +35,7 @@
 //   node signer_uniswap.mjs close <tokenId> [--execute]
 //   node signer_uniswap.mjs rebalance <mintA> <mintB> <targetUsdA> <targetUsdB> [--execute]
 //   node signer_uniswap.mjs send <token> <amount> <to> [--execute]
+//   node signer_uniswap.mjs wrap <amount> [--execute]                (native coin -> its wrapped token)
 import path from 'node:path';
 import { assertNotHalted } from './halt_guard.mjs';
 import { createPublicClient, http, getAddress, isAddress, encodeFunctionData, encodeAbiParameters, decodeEventLog, keccak256 } from 'viem';
@@ -986,6 +987,46 @@ async function send(token, amountArg, toArg, execute) {
   });
 }
 
+// Native coin into its wrapped token (POL -> WPOL on Polygon), so a deposit of native coin
+// can be deployed (owner, 2026-10-08: "let 10 POL for gas and the rest swap to pool"). Only
+// where the wrapped token is one of the pool's: the loop's wrap_native checks it; here the
+// refusal is the gas reserve: the native left after the wrap must cover it. One transaction,
+// the wrapped token's own deposit().
+export function planWrap(native, amountArg, cfg) {
+  const amount = Number(amountArg);
+  if (!Number.isFinite(amount) || amount <= 0) throw new Error(`amount must be a positive number, got ${amountArg}`);
+  const raw = M.toRaw(String(amountArg), 18);
+  if (raw <= 0n) throw new Error('amount rounds to zero');
+  const refusals = [];
+  if (native - raw < cfg.gasReserve) {
+    refusals.push(`wrapping ${amount} ${U.NATIVE_SYMBOL} would leave ${M.toHuman(native - raw, 18)}, below the ${M.toHuman(cfg.gasReserve, 18)} gas reserve`);
+  }
+  return { raw, refusals };
+}
+
+async function wrap(amountArg, execute) {
+  guard();
+  const cfg = settings();
+  if (!U.WRAPPED_NATIVE) throw new Error(`${U.NAME} has no wrapped native token`);
+  return withRpc(async (ctx) => {
+    const { pub, me } = ctx;
+    const native = await pub.getBalance({ address: me });
+    const plan = planWrap(native, amountArg, cfg);
+    const step = { label: `wrap ${U.NATIVE_SYMBOL}`, to: U.WRAPPED_NATIVE,
+      data: encodeFunctionData({ abi: U.WRAPPED_ABI, functionName: 'deposit' }), value: plan.raw };
+    const report = { wrapped: M.toHuman(plan.raw, 18), symbol: U.NATIVE_SYMBOL, to: U.WRAPPED_NATIVE, chain: U.CHAIN,
+      nativeBefore: M.toHuman(native, 18), nativeAfter: M.toHuman(native - plan.raw, 18), transactions: 1 };
+    const simulation = await simulateSequence(pub, me, [step]);
+    if (!execute || plan.refusals.length) {
+      return reportUnsent(report, plan.refusals, simulation, 'DRY RUN — wrap built and simulated. Pass --execute to sign and send.');
+    }
+    const bad = blockingFailure(simulation);
+    if (bad) throw new Error(`refused: simulation of ${bad.label} reverts: ${bad.revert}`);
+    ctx.nonce = await nonceFor(pub, me);
+    return reportSent(report, await runSteps(ctx, [step], cfg));
+  });
+}
+
 // `balance <token>` in payout.mjs's shape. Read-only.
 async function tokenBalance(token) {
   return withRpc(async ({ pub, me }) => {
@@ -1047,13 +1088,17 @@ async function main() {
     if (r.length < 4) throw new Error('usage: rebalance <mintA> <mintB> <targetUsdA> <targetUsdB> [--execute]');
     return rebalance(r[0], r[1], r[2], r[3], execute);
   }
+  if (cmd === 'wrap') {
+    if (r.length < 1) throw new Error('usage: wrap <amount> [--execute]');
+    return wrap(r[0], execute);
+  }
   if (cmd === 'send') {
     if (r.length < 3) throw new Error('usage: send <token> <amount> <to> [--execute]');
     return send(r[0], r[1], r[2], execute);
   }
   console.log('commands: balance [pool|token] | positions | status [tokenId] | pool [pool] | '
     + 'open <pool> <lo> <hi> <maxA> <maxB> [--execute] | increase <tokenId> <maxA> <maxB> [--execute] | harvest <tokenId> [--execute] | close <tokenId> [--execute] | '
-    + 'rebalance <mintA> <mintB> <usdA> <usdB> [--execute] | send <token> <amount> <to> [--execute]   (pool via --pool or LPBOT_POOL)');
+    + 'rebalance <mintA> <mintB> <usdA> <usdB> [--execute] | send <token> <amount> <to> [--execute] | wrap <amount> [--execute]   (pool via --pool or LPBOT_POOL)');
 }
 
 if (isEntry(import.meta.url)) {

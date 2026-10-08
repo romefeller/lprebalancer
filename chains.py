@@ -75,6 +75,9 @@ CHAINS = {
         # EVM balance reader adds native gas to the native mint. Gas POL stays
         # outside the pool, as ETH does on Unichain.
         'native_mint': '0x0000000000000000000000000000000000001010',
+        # the wrapped native token, a pool token here: native POL above the
+        # profile's native_keep is wrapped into it (rebalancer.wrap_native)
+        'wrapped_native': '0x0d500b1d8e8ef31e21c99d1db9a6444d3adf1270',
         'sweep': False, 'janitor': False, 'audit': False,
         'scanner': False,
         'payout': True,

@@ -62,6 +62,16 @@ class PolyChain(M.FakeChain):
                 'feesAccrued_USD': fa * PRICE + fb}
 
     def answer(self, *args, dex=None, extra_env=None):
+        if args[0] == 'wrap':
+            self.calls.append({'args': args, 'dex': dex, 'env': extra_env or {}, 'profile': rebalancer.config.PROFILE})
+            amt = float(args[1])
+            if self.refuse:
+                return None, self.refuse
+            if self.wallet[POL] - amt < rebalancer.config.GAS_RESERVE_SOL:
+                return None, 'refused: below the gas reserve'
+            self.wallet[POL] -= amt
+            self.wallet[WPOL] += amt
+            return {'wrapped': amt, 'symbol': 'POL', 'signature': f'wrap{len(self.calls)}', 'sent': True}, None
         if args[0] == 'harvest':
             pool = next((k for k, v in self.positions.items() if v['mint'] == args[1]), None)
             if pool == POLY_POOL:
@@ -187,6 +197,57 @@ class Polygon(M.Fixture):
         self.assertEqual(pay['held'], [{'symbol': 'USDT0', 'amount': 3.0, 'usd': 3.0}])
         self.assertEqual(pay['split']['gas'], 0)                         # WPOL fees never refill POL
         self.assertEqual(rebalancer.emoji_for('PAYOUT', pay), '⛽')
+
+    def keep(self, n=10.0):
+        p = mock.patch.object(config, 'NATIVE_KEEP', n)
+        p.start(); self.addCleanup(p.stop)
+
+    def test_a_native_pol_deposit_keeps_10_for_gas_and_the_rest_goes_to_the_pool(self):
+        # owner, 2026-10-08: about $400 sent as native POL
+        self.keep(10.0)
+        self.chain.wallet.update({POL: 4010.0})
+        self.poll('e2e-poly')
+        wraps = self.chain.of('e2e-poly', 'wrap')
+        self.assertEqual(len(wraps), 1)
+        self.assertEqual(wraps[0]['args'][1:], ('4000.000000000', '--execute'))
+        self.assertEqual(self.chain.wallet[POL], 10.0)                    # the gas float stays native
+        swap = self.chain.of('e2e-poly', 'rebalance')
+        self.assertEqual(len(swap), 1)                                   # WPOL toward 50/50
+        self.assertIn(POLY_POOL, self.chain.positions)                   # and opened in the same poll
+        pos = self.chain.positions[POLY_POOL]
+        self.assertAlmostEqual(pos['a'] * PRICE + pos['b'], 400.0, delta=10.0)
+
+    def test_no_wrap_at_or_under_the_keep_or_when_keep_is_off(self):
+        self.keep(10.0)
+        self.chain.wallet.update({POL: 10.9})                            # under keep + WRAP_MIN
+        self.poll('e2e-poly')
+        self.assertEqual(self.chain.of('e2e-poly', 'wrap'), [])
+        self.keep(0.0)
+        self.chain.wallet.update({POL: 4010.0})
+        self.poll('e2e-poly')
+        self.assertEqual(self.chain.of('e2e-poly', 'wrap'), [])           # native_keep unset: never wrap
+
+    def test_a_top_up_with_a_position_open_is_wrapped_and_not_recentred(self):
+        self.keep(10.0)
+        self.opened()
+        moves = len(self.chain.of('e2e-poly', 'close'))
+        self.chain.wallet[POL] += 500.0                                  # 10 + 500 POL
+        self.poll('e2e-poly')
+        self.assertEqual(self.chain.of('e2e-poly', 'wrap')[0]['args'][1], '500.000000000')
+        self.assertEqual(len(self.chain.of('e2e-poly', 'close')), moves)   # no re-centre for the top-up
+        self.assertEqual(self.chain.wallet[POL], 10.0)
+
+    def test_a_failed_wrap_is_said_once_and_leaves_the_pol(self):
+        self.keep(10.0)
+        seen = []
+        real = rebalancer.notify
+        self.chain.refuse = 'refused: the RPC refused the transaction'
+        with mock.patch.object(rebalancer, 'notify', lambda e, **kw: (seen.append(e), real(e, **kw))):
+            self.chain.wallet.update({POL: 4010.0})
+            self.poll('e2e-poly', n=2)
+        self.assertEqual(len(self.chain.of('e2e-poly', 'wrap')), 2)       # tried each poll
+        self.assertEqual(seen.count('wrap_failed'), 1)                    # said once
+        self.assertEqual(self.chain.wallet[POL], 4010.0)
 
     def test_an_operator_close_on_a_disabled_profile_harvests_and_closes(self):
         self.opened()

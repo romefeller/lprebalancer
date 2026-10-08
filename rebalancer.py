@@ -3957,6 +3957,59 @@ def disabled_hold(state, status):
                positionMint=status['positionMint'])
 
 
+WRAP_MIN = 1.0                    # native units: a smaller excess waits (a wrap costs ~45k gas)
+
+
+def native_to_wrap(native, keep, reserve, min_wrap=WRAP_MIN):
+    """How much native coin to wrap into the pool token: everything above
+    the larger of `keep` (the gas float) and `reserve` (the signer's floor),
+    or 0 when that is under `min_wrap`, unknown, or keep is off (0). Pure."""
+    try:
+        native, keep, reserve = float(native), float(keep), float(reserve)
+    except (TypeError, ValueError):
+        return 0.0
+    if not (keep > 0) or not all(math.isfinite(x) for x in (native, keep, reserve)):
+        return 0.0
+    excess = native - max(keep, reserve)
+    return excess if excess >= min_wrap else 0.0
+
+
+def wrap_native(state):
+    """Native coin above native_keep into the pool's wrapped native token
+    (owner, 2026-10-08: "let 10 POL for gas and the rest swap to pool"), so
+    a deposit of native POL is seen like a WPOL deposit: deposit_seen, the
+    swap to 50/50, the open; with a position open, the idle WPOL goes in by
+    `increase`. Only where the chain names a wrapped native that is one of
+    the pool's tokens. Never feeds the venue breaker. True when it wrapped."""
+    wrapped = config.CAPS.get('wrapped_native')
+    if not wrapped or not (config.NATIVE_KEEP > 0):
+        return False
+    try:
+        (ma, _), (mb, _) = pool_tokens()
+    except Exception:
+        return False
+    if wallets.norm(wrapped) not in {wallets.norm(ma), wallets.norm(mb)}:
+        return False
+    bal = wallet(config.POOL)
+    amount = native_to_wrap(bal.get('sol'), config.NATIVE_KEEP, config.GAS_RESERVE_SOL)
+    if amount <= 0:
+        return False
+    sym = config.CAPS['native_symbol']
+    out, err = chain('wrap', f'{amount:.9f}', '--execute', record=False)
+    if err or not (out or {}).get('signature'):
+        told = state.get('wrap_failed_told')
+        if told != str(err):
+            state['wrap_failed_told'] = str(err); save(state)
+            notify('wrap_failed', reason=err or 'no signature', amount=round(amount, 6), symbol=sym)
+            db.event('wrap_failed', f'{amount:.4f} {sym}: {err or "no signature"}')
+        return False
+    state.pop('wrap_failed_told', None); save(state)
+    notify('WRAP', amount=round(amount, 6), symbol=sym, kept=config.NATIVE_KEEP,
+           native_before=round(float(bal.get('sol') or 0), 6), signature=out['signature'])
+    db.event('WRAP', f'{amount:.4f} {sym} wrapped into the pool token, {config.NATIVE_KEEP:g} kept for gas: {out["signature"]}')
+    return True
+
+
 DORMANT_POLL_S = 300              # a dormant profile reads its wallet at most this often
 
 
@@ -4039,6 +4092,7 @@ def main():
             continue
         state.pop('disabled_told', None)
         portfolio_report(state)
+        wrap_native(state)
 
         if not status.get('positionMint'):
             if MIGRATE.exists():

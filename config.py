@@ -61,6 +61,10 @@ ENABLED = bool(_CFG.get('enabled'))
 DEPOSIT_MINT = _CFG.get('deposit_mint')
 RESIDUAL_OWNER = bool(_CFG.get('residual_owner')) or not WALLET_ID
 MIN_DEPLOY_USD = float(_CFG.get('min_deploy_usd') or 5.0)
+# Native coin kept for gas; the rest is wrapped into the pool's token each poll,
+# on a chain whose wrapped native is a pool token (chains.py 'wrapped_native':
+# Polygon's WPOL). 0 or unset: never wrap (sql/035).
+NATIVE_KEEP = _env('LPBOT_NATIVE_KEEP', float, float(_CFG.get('native_keep') or 0))
 db.set_context(PROFILE, WALLET_ID)
 
 # Per-profile runtime files: state, feed and the operator triggers. A HALT

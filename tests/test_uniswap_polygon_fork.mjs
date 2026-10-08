@@ -122,6 +122,19 @@ test('fork (Polygon): rebalance -> open -> trade -> harvest -> close, pinned sen
   await rpc('anvil_setBalance', [TRADER.addr, '0x8AC7230489E80000']);
   await fund(USDT0, LP.addr, 200_000_000n);                               // 200 USDT0, no WPOL
 
+  // 0a. Wrap: native POL above the gas into WPOL (a native POL deposit); the reserve is kept.
+  await rpc('anvil_setBalance', [LP.addr, '0x56BC75E2D63100000']);       // 100 POL
+  const wr = run(['wrap', '60', '--execute'], lp);
+  assert.strictEqual(wr.status, 0, wr.stderr + wr.stdout);
+  assert.deepStrictEqual(await targets(wr.json.signatures), [WPOL.toLowerCase()]);
+  assert.strictEqual(run(['balance'], lp).json.balanceA, 60, '60 WPOL from 60 POL');
+  const over = run(['wrap', '39.9999', '--execute'], lp, { LPBOT_GAS_RESERVE_NATIVE: '1' });
+  assert.notStrictEqual(over.status, 0); assert.match(over.stderr + over.stdout, /gas reserve/);
+  // send the 60 WPOL away so the rest of the test starts from USDT0 only
+  const away = run(['send', WPOL, '60', PROFIT, '--execute'], lp);
+  assert.strictEqual(away.status, 0, away.stderr);
+  await rpc('anvil_setBalance', [LP.addr, '0x8AC7230489E80000']);         // back to 10 POL
+
   // 0. Gas POL is not WPOL: the wallet view shows no side A, and POL as the gas.
   const w0 = run(['balance'], lp).json;
   assert.strictEqual(w0.balanceA, 0, 'native POL is never counted as WPOL');

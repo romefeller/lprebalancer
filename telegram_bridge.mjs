@@ -390,6 +390,10 @@ export function render(row) {
       const sent = (row.sent ?? []).map(x => `${x.amount} ${x.symbol} ($${n(x.usd, 4)}) → profit wallet\n${x.signature}`).join('\n');
       return 'PAYOUT\n' + (sent || 'nothing sent this harvest') + '\n' + split;
     }
+    case 'WRAP':
+      return `WRAP · ${row.amount} ${row.symbol} into the pool token · ${row.kept} ${row.symbol} kept for gas\n${row.signature ?? ''}`;
+    case 'wrap_failed':
+      return `WRAP FAILED · ${row.amount} ${row.symbol} stays native · ${row.reason}`;
     case 'REWARD_PAYOUT':
       return `REWARDS${row.gas_low ? ' · gas low, swapped to SOL for gas' : ''}\n`
         + (row.rewards ?? []).map(x => `$${n(x.usd, 4)} → ${x.to}${x.signature ? `\n${x.signature}` : ''}`).join('\n');

@@ -182,6 +182,112 @@ class ChainRow(unittest.TestCase):
                          'https://own.example')
 
 
+class NativeToWrap(unittest.TestCase):
+    def test_the_table(self):
+        f = rebalancer.native_to_wrap
+        self.assertEqual(f(4010, 10, 2), 4000)
+        self.assertEqual(f(4010, 2, 10), 4000)                           # the reserve, when larger, is kept too
+        self.assertEqual(f(11.0, 10, 2), 1.0)                            # exactly WRAP_MIN
+        self.assertEqual(f(10.99, 10, 2), 0.0)
+        self.assertEqual(f(10, 10, 2), 0.0)
+        self.assertEqual(f(5, 10, 2), 0.0)
+        self.assertEqual(f(10, 0.5, 2), 8.0)                             # a keep under the reserve still wraps
+        for bad in ((4010, 0, 2), (None, 10, 2), ('x', 10, 2), (float('nan'), 10, 2), (4010, float('inf'), 2),
+                    (float('inf'), 10, 2), (4010, 10, float('inf'))):
+            self.assertEqual(f(*bad), 0.0, bad)
+
+    def test_property_never_below_the_floor(self):
+        import random
+        rng = random.Random(8)
+        for _ in range(2000):
+            native, keep, reserve = rng.uniform(0, 1e5), rng.uniform(0.01, 100), rng.uniform(0, 50)
+            w = rebalancer.native_to_wrap(native, keep, reserve)
+            self.assertTrue(w == 0 or w >= rebalancer.WRAP_MIN)
+            self.assertGreaterEqual(native - w, min(native, max(keep, reserve)) - 1e-9)
+
+
+class WrapNative(unittest.TestCase):
+    def go(self, caps=None, keep=10.0, sol=4010.0, tokens=((WPOL.lower(), 'WPOL'), (USDT0.lower(), 'USDT0')), answer=None):
+        calls, seen, self.reads = [], [], []
+
+        def read_tokens():
+            self.reads.append('tokens')
+            if isinstance(tokens, Exception):
+                raise tokens
+            return tokens
+
+        def read_wallet(p):
+            self.reads.append('wallet')
+            return {'sol': sol, 'balanceA': 0.0, 'balanceB': 0.0}
+        caps = chains.caps('polygon') if caps is None else caps
+        with mock.patch.object(rebalancer.config, 'CAPS', caps), \
+                mock.patch.object(rebalancer.config, 'NATIVE_KEEP', keep), \
+                mock.patch.object(rebalancer.config, 'GAS_RESERVE_SOL', 2.0), \
+                mock.patch.object(rebalancer, 'pool_tokens', read_tokens), \
+                mock.patch.object(rebalancer, 'wallet', read_wallet), \
+                mock.patch.object(rebalancer, 'chain', lambda *a, **k: (calls.append((a, k)) or (answer or ({'signature': 'W'}, None)))), \
+                mock.patch.object(rebalancer, 'save', lambda s: None), \
+                mock.patch.object(rebalancer, 'notify', lambda e, **kw: seen.append((e, kw))), \
+                mock.patch.object(rebalancer.db, 'event', lambda *a: None):
+            state = {}
+            out = rebalancer.wrap_native(state)
+        return out, calls, seen, state
+
+    def test_wraps_the_excess_once_without_feeding_the_breaker(self):
+        out, calls, seen, _ = self.go()
+        self.assertTrue(out)
+        self.assertEqual(calls, [(('wrap', '4000.000000000', '--execute'), {'record': False})])
+        self.assertEqual(seen[0][0], 'WRAP')
+        self.assertEqual((seen[0][1]['amount'], seen[0][1]['symbol'], seen[0][1]['kept']), (4000.0, 'POL', 10.0))
+
+    def test_nothing_on_other_chains_or_pools_or_with_keep_off(self):
+        for kw in ({'caps': chains.caps('unichain')}, {'caps': chains.caps('base')}, {'keep': 0.0},
+                   {'tokens': ((USDC.lower(), 'USDC'), (USDT0.lower(), 'USDT0'))}, {'sol': 10.5}):
+            out, calls, _, _ = self.go(**kw)
+            self.assertEqual((out, calls), (False, []), kw)
+        self.assertNotIn('wrapped_native', chains.caps('unichain'))      # Unichain's WETH is no pool token
+
+    def test_other_chains_and_keep_off_read_nothing(self):
+        # the cheap exit: every non-Polygon profile runs this each poll
+        for kw in ({'caps': chains.caps('unichain')}, {'caps': chains.caps('solana')}, {'keep': 0.0}, {'keep': -1.0}):
+            out, _, _, _ = self.go(**kw)
+            self.assertIs(out, False, kw)
+            self.assertEqual(self.reads, [], kw)
+        out, _, _, _ = self.go(tokens=RuntimeError('rpc down'))
+        self.assertIs(out, False); self.assertEqual(self.reads, ['tokens'])   # no wallet read without the pool's tokens
+        out, _, _, _ = self.go(tokens=((USDC.lower(), 'USDC'), (USDT0.lower(), 'USDT0')))
+        self.assertIs(out, False); self.assertEqual(self.reads, ['tokens'])
+
+    def test_a_keep_under_one_and_an_excess_of_exactly_one(self):
+        out, calls, _, _ = self.go(keep=0.5, sol=10.0)                   # reserve 2 binds: 8 POL
+        self.assertIs(out, True); self.assertEqual(calls[0][0][1], '8.000000000')
+        out, calls, _, _ = self.go(sol=11.0)                             # exactly WRAP_MIN above the keep
+        self.assertIs(out, True); self.assertEqual(calls[0][0][1], '1.000000000')
+
+    def test_an_error_with_a_signature_or_a_signature_without_one_is_a_failure(self):
+        for answer in (({'signature': 'W'}, 'timed out'), ({}, None), (None, None)):
+            out, _, seen, _ = self.go(answer=answer)
+            self.assertIs(out, False, answer)
+            self.assertEqual([e for e, _ in seen], ['wrap_failed'], answer)
+
+    def test_a_failure_is_said_with_the_reason(self):
+        out, _, seen, state = self.go(answer=(None, 'refused: below reserve'))
+        self.assertIs(out, False)
+        self.assertEqual(seen[0][0], 'wrap_failed')
+        self.assertEqual(state['wrap_failed_told'], 'refused: below reserve')
+
+
+class Migration035(unittest.TestCase):
+    SQL = (pathlib.Path(__file__).parent.parent / 'sql' / '035_native_keep.sql').read_text()
+
+    def test_runs_twice_and_refuses_a_negative_keep(self):
+        with db.cursor(commit=True) as cur:
+            cur.execute(self.SQL.replace('begin;', '').replace('commit;', ''))
+            cur.execute(self.SQL.replace('begin;', '').replace('commit;', ''))
+        with self.assertRaises(psycopg2.errors.CheckViolation), db.cursor(commit=True) as cur:
+            cur.execute("update config set native_keep = -1 where name = (select name from config limit 1)")
+
+
 class Stables(unittest.TestCase):
     def test_polygon_usdt0_and_usdc_are_stable_and_wpol_is_not(self):
         for m in (USDT0, USDC):

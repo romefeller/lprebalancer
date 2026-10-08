@@ -18,8 +18,10 @@ The profile starts dormant: it opens nothing until its wallet holds at least
 ## 1. Schema (once, with the deploy)
 
     psql -d rebalancer -v ON_ERROR_STOP=1 -f sql/034_polygon.sql
+    psql -d rebalancer -v ON_ERROR_STOP=1 -f sql/035_native_keep.sql
 
-Additive and idempotent: it lets a `wallets` row name chain `polygon`.
+Additive and idempotent: they let a `wallets` row name chain `polygon`, and
+add `config.native_keep`.
 
 ## 2. The key (once)
 
@@ -85,21 +87,29 @@ The book says `dormant` once. Nothing is signed while the wallet is empty.
 
 ## 5. Fund it
 
-Send to the address from step 2, on Polygon PoS:
+Send to the address from step 2, on Polygon PoS. The simplest is native POL
+only, e.g. about $400 of POL:
 
-- POL for gas: the 2 POL reserve plus a margin, e.g. 10 POL in all (about
-  $1). A re-centre is about 880k gas: 0.25 POL at 281 gwei. The study expects
-  about 3.7 re-centres a day, so about 0.9 POL a day.
-- WPOL and/or USDT0 on Polygon, about $230 in all. The profile swaps toward
-  50/50 itself and opens. Native POL is NOT WPOL: wrap it first, or send USDT0
-  only.
+- The profile keeps `native_keep` POL for gas (10, sql/035) and wraps the rest
+  into WPOL on its next poll (rebalancer.wrap_native, the signer's `wrap`).
+  Telegram says 🪙 WRAP. The WPOL is then a deposit like any other: deposit
+  seen, the swap toward 50/50 in the pool, the open. A top-up while a position
+  is open is wrapped too and goes in with `increase`, without a re-centre.
+- WPOL and/or USDT0 work as well, plus at least 10 POL for gas.
+
+    psql -d rebalancer -c "update rebalancer.config set native_keep = 10 where name = 'poly-wpol-usdt'"
+
+`max_usd` is 600 (as on SOL/USDC): an open is at most max_usd / 1.1, so up to
+~$545 deploys in one position.
+
+The bot spends about 0.9 POL a day on gas. It never buys POL back: once the
+10 POL run under the 2 POL reserve, the USDT0 fees of each harvest are
+reinvested instead of paid (Telegram ⛽ PAYOUT HELD). Send POL again then;
+anything above 10 POL is wrapped into the pool again.
 
 USDT0 fees go to the EVM profit wallet on each harvest (the pin
 `LPBOT_EVM_PROFIT_WALLET_PIN`; the same address serves Base, Unichain and
-Polygon, a plain account on all three). WPOL fees are reinvested. While POL is
-under the reserve, the USDT0 fees of a harvest are reinvested instead of paid
-(Telegram shows ⛽ PAYOUT HELD): top up the POL. The bot cannot buy gas from
-WPOL on this chain.
+Polygon, a plain account on all three). WPOL fees are reinvested.
 
 ## Gas cap
 

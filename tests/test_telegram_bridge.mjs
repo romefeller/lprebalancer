@@ -645,3 +645,9 @@ test('a payout held for gas shows the pump, what stayed and why', () => {
   assert.equal(message({ event: 'PAYOUT', gas_low: false, sent: [], split: { paid: 0.3, reinvested: 0.3, gas: 0 } }),
     '💸 PAYOUT\nnothing sent this harvest\nsplit  paid $0.3000 · reinvested $0.3000 · gas $0.0000');
 });
+
+test('the wrap of native POL says what was wrapped and what stays for gas', () => {
+  assert.strictEqual(message({ event: 'WRAP', pair: 'WPOL/USDT0', amount: 4000, symbol: 'POL', kept: 10, signature: '0xabc' }),
+    '[WPOL/USDT0] 🪙 WRAP · 4000 POL into the pool token · 10 POL kept for gas\n0xabc');
+  assert.ok(message({ event: 'wrap_failed', amount: 1, symbol: 'POL', reason: 'r' }).includes('WRAP FAILED · 1 POL stays native · r'));
+});

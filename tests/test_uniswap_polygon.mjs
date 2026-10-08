@@ -204,3 +204,15 @@ test('planIncrease: a pool without a dollar price for token B refuses, and says 
   assert.ok(plan.refusals.some(r => r === `position about $? after the add exceeds cap $${CFG().maxUsd}`), plan.refusals.join(' | '));
   assert.ok(plan.refusals.some(r => /cannot price/.test(r)));
 });
+
+test('planWrap: the native left must cover the gas reserve; a bad amount is refused', () => {
+  S.useChain('polygon');
+  const cfg = CFG({ gasReserve: M.toRaw('2', 18) });
+  const ok = S.planWrap(M.toRaw('4010', 18), '4000', cfg);
+  assert.deepStrictEqual(ok.refusals, []); assert.strictEqual(ok.raw, M.toRaw('4000', 18));
+  assert.deepStrictEqual(S.planWrap(M.toRaw('4010', 18), '4008', cfg).refusals, [], 'exactly the reserve left passes');
+  assert.match(S.planWrap(M.toRaw('4010', 18), '4008.000000001', cfg).refusals.join(), /would leave .* below the 2 gas reserve/);
+  assert.match(S.planWrap(M.toRaw('1', 18), '5', cfg).refusals.join(), /POL would leave/);
+  for (const bad of ['0', '-1', 'x', 'NaN']) assert.throws(() => S.planWrap(M.toRaw('10', 18), bad, cfg), /must be a positive number/, bad);
+  assert.throws(() => S.planWrap(M.toRaw('10', 18), '1e-30', cfg), /rounds to zero/);
+});

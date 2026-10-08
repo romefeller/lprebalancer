@@ -285,12 +285,14 @@ TARGETS = {
     'uniswap_signer': ('signer_uniswap.mjs', ['settings', 'marketRefusals', 'referencePrices', 'spendable', 'planOpen',
                                               'positionView', 'closeCalls', 'v4PoolsFor', 'v4SwapCalldata', 'blockingFailure',
                                               'simulateSequence', 'runSteps', 'checkRecipient', 'describe', 'parseArgs',
-                                              'useChain', 'isNative', 'planIncrease'],
+                                              'useChain', 'isNative', 'planIncrease', 'planWrap'],
                        NODE_TESTS('test_uniswap.mjs', 'test_uniswap_polygon.mjs')),
     'unichain_registry': ('evm/unichain.mjs', ['unichainEndpoints', 'simulationEndpoints'], NODE_TESTS('test_uniswap.mjs')),
     # Polygon (2026-10-08): the chain module's endpoints and the registry that picks it.
     'polygon_registry': ('evm/polygon.mjs', ['polygonEndpoints', 'simulationEndpoints'], NODE_TESTS('test_uniswap_polygon.mjs')),
     'evm_chains': ('evm/chains.mjs', ['chainModule'], NODE_TESTS('test_uniswap_polygon.mjs', 'test_uniswap.mjs')),
+    # native POL above native_keep into WPOL (owner, 2026-10-08)
+    'native_wrap': ('rebalancer.py', ['native_to_wrap', 'wrap_native'], PY_TESTS('test_polygon', 'test_polygon_loop')),
     'book_inverted': ('book_format.mjs', ['pricedView', 'shownPrice', 'shownBand', 'shownMovePct', 'shownSide', 'equityLine', 'sinceStartLine'],
                       NODE_TESTS('test_book_format.mjs', 'test_telegram_bridge.mjs')),
 }
