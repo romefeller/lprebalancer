@@ -1769,11 +1769,23 @@ def _with_surrogate(pool, bars, price, pair=None):
 
 IDLE_MIN_AGE_S = 600              # an open this recent may still be settling
 IDLE_DEPLOYS_PER_DAY = 3          # re-centres to deploy idle money, at most, in 24 h
+IDLE_ADDS_PER_DAY = 24            # adds (signer `increase`) of idle money, at most, in 24 h: one per open and more
 
 
-def idle_deploys_left(times, now):
-    """Idle-deploy re-centres still allowed in the 24 h before `now`. Pure."""
-    return max(0, IDLE_DEPLOYS_PER_DAY - sum(1 for t in (times or []) if now - t < 86400))
+def idle_deploys_left(times, now, per_day=IDLE_DEPLOYS_PER_DAY):
+    """Idle deploys still allowed in the 24 h before `now`: `per_day` of them
+    (re-centres by default; adds where the venue can add). Pure."""
+    return max(0, per_day - sum(1 for t in (times or []) if now - t < 86400))
+
+
+def adds_open_leftover():
+    """Whether this profile adds an open's leftover to the position (owner,
+    2026-10-08: "almost 99% in LP, idle money is bad"; the same strategy on
+    every pool but the DJT swing test). Only where the venue's signer has
+    `increase`: there the leftover goes in as a swap of the leftover alone
+    and one add, not a re-centre. The swing (LPBOT_SWING_POOLS) keeps the
+    leftover excused, as before."""
+    return config.DEX in INCREASE_DEXES and not config.SWING_POOLS
 
 
 def idle_to_deploy(deployable_usd, equity_usd, seconds_since_open):
@@ -1804,13 +1816,21 @@ def deploy_idle(state, status, wbal, rv, price):
     # first reading of a band after such an open is that leftover; only new
     # money beyond it (a deposit, a sweep) is deployed. After an open that
     # skipped its swap, nothing is excused.
+    # Where the venue can add (adds_open_leftover), that leftover is not
+    # excused: it goes in once the band is IDLE_MIN_AGE_S old, by `increase`.
+    # What that add leaves out is excused (add_idle), so it does not repeat.
+    adds = adds_open_leftover()
     base = state.get('idle_baseline') or {}
     if base.get('mint') != status['positionMint']:
-        excused = 0.0 if state.get('open_unbalanced') else idle
+        excused = 0.0 if state.get('open_unbalanced') or adds else idle
         state['idle_baseline'] = {'mint': status['positionMint'], 'usd': round(excused, 4)}; save(state)
         base = state['idle_baseline']
     idle_new = idle - float(base['usd'])                 # always written as a number above
-    if not (idle_to_deploy(idle_new, equity, age) and calm_budget_left(state) > 0 and voluntary_move_allowed(state)):
+    # An add is not a move: it waits for no move gap and spends no move
+    # budget; the venue's breaker still holds it.
+    allowed = (health.allowed(f'venue:{config.DEX}', time.time())[0] if adds
+               else calm_budget_left(state) > 0 and voluntary_move_allowed(state))
+    if not (idle_to_deploy(idle_new, equity, age) and allowed):
         return False
     # The re-centre deploys idle money only through its swap: while swaps
     # fail (the 'swap' breaker, exponential backoff, health.py), it would
@@ -1818,14 +1838,14 @@ def deploy_idle(state, status, wbal, rv, price):
     # needs (2026-09-30: every ~11 minutes). At most a few a day.
     now = time.time()
     ok, _st, wait, rec = health.allowed('swap', now)
-    left = idle_deploys_left(state.get('idle_deploys'), now)
+    left = idle_deploys_left(state.get('idle_deploys'), now, IDLE_ADDS_PER_DAY if adds else IDLE_DEPLOYS_PER_DAY)
     if not ok or left <= 0:
         told = state.get('idle_deferred_told')
         key = f"{rec.get('last_fail')}:{left}"
         if told != key:
             state['idle_deferred_told'] = key; save(state)
             why = (f"the swap failed {rec.get('fails')}x in a row: next try in {wait / 60:.0f} min"
-                   if not ok else f'{IDLE_DEPLOYS_PER_DAY} idle deploys in 24 h already')
+                   if not ok else f'{IDLE_ADDS_PER_DAY if adds else IDLE_DEPLOYS_PER_DAY} idle deploys in 24 h already')
             notify('deploy_idle_deferred', idle_usd=round(idle, 2), reason=why)
             db.event('deploy_idle_deferred', f'${idle:.2f} idle: {why}')
         return False

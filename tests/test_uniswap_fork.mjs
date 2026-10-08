@@ -139,8 +139,20 @@ test('fork: rebalance -> open -> trade -> harvest -> close, pinned send, HALT', 
 
   // 4. Another trader swaps through the v3 pool both ways: fees accrue in A and B.
   await fund(USDC, TRADER.addr, 3_000_000_000n);
-  const tr1 = run(['rebalance', USDC, HYPE, '0', '2000', '--execute'], trader, { LPBOT_MAX_USD: '100000', LPBOT_MAX_IMPACT: '0.05' });
-  assert.strictEqual(tr1.status, 0, tr1.stderr + tr1.stdout);
+  // Straight through the v3 router into the held pool: the signer's own swap takes the best
+  // quote, and once the v4 pool quoted better (2026-10-08) the trade skipped our pool.
+  await rpc('anvil_impersonateAccount', [TRADER.addr]);
+  const send = async (to, data) => {
+    const h = await rpc('eth_sendTransaction', [{ from: TRADER.addr, to, data }]);
+    let rc = null;
+    for (let i = 0; i < 40 && !rc; i++) { rc = await rpc('eth_getTransactionReceipt', [h]); if (!rc) await new Promise(r => setTimeout(r, 250)); }
+    assert.strictEqual(rc?.status, '0x1', `trader tx to ${to}`);
+  };
+  const TRADE = 2_000_000_000n;                                           // 2000 USDC
+  await send(USDC, encodeFunctionData({ abi: parseAbi(['function approve(address,uint256) returns (bool)']), functionName: 'approve', args: [V3.router, TRADE] }));
+  await send(V3.router, encodeFunctionData({ abi: parseAbi(['struct P { address tokenIn; address tokenOut; uint24 fee; address recipient; uint256 amountIn; uint256 amountOutMinimum; uint160 sqrtPriceLimitX96; }', 'function exactInputSingle(P params) payable returns (uint256)']),
+    functionName: 'exactInputSingle', args: [{ tokenIn: USDC, tokenOut: HYPE, fee: 3000, recipient: TRADER.addr, amountIn: TRADE, amountOutMinimum: 0n, sqrtPriceLimitX96: 0n }] }));
+  await rpc('anvil_stopImpersonatingAccount', [TRADER.addr]);
   const fees = run(['status'], lp).json;
   t.diagnostic(`fees after a $2000 trade: A ${fees.feesAccruedA} B ${fees.feesAccruedB} ($${fees.feesAccrued_USD})`);
   assert.ok(fees.feesAccruedA > 0 || fees.feesAccruedB > 0, `no fees after a trade: ${JSON.stringify(fees)}`);

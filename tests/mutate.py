@@ -254,6 +254,9 @@ TARGETS = {
     'evm_cap_held': ('evm/clmath.mjs', ['capToHeld'], NODE_TESTS('test_uniswap_polygon.mjs')),
     # the hot pause's fee side on Uniswap v3 venues (2026-10-08)
     'v3_fee_pool': ('dexes.py', ['v3_fee_state', 'uniswap_v3_fee_state'], PY_TESTS('test_polygon_hot_pause', 'test_hot_pause')),
+    # an open's leftover into the position where the venue can add (2026-10-08)
+    'open_leftover': ('rebalancer.py', ['adds_open_leftover', 'deploy_idle', 'idle_deploys_left'],
+                      PY_TESTS('test_deploy_leftover', 'test_deploy_idle', 'test_increase_idle')),
     'v3_fee_loop': ('rebalancer.py', ['sample_fee_growth', 'sample_v3_fee_growth'],
                     PY_TESTS('test_polygon_hot_pause', 'test_hot_pause', 'test_venues')),
     'evm_signer': ('signer_aerodrome.mjs', ['guard', 'marketRefusals', 'spendable', 'positionView', 'simulateSequence',
@@ -311,6 +314,8 @@ SQL_TARGETS = {'deposit_db', 'unichain_book', 'unichain_quote', 'band_profile', 
 # The report prints each survivor's key: copy it here with a reason. The line
 # number is not in the key, so an edit above a mutant keeps its entry valid.
 EQUIVALENT = {
+    ('open_leftover', 'deploy_idle', 'drop operand 0', "if 'balanceA' not in wbal or wbal.get('walletUsd') is None:", 0):
+        'deployable_usd returns None for a read without balanceA, and deploy_idle returns False on it two lines later',
     ('v3_fee_loop', 'sample_fee_growth', 'const 0->1', "if time.time() - state.get('last_fee_sample', 0) < config.VENUE_SAMPLE_S:", 0):
         'a never-sampled state: now - 0 and now - 1 are both decades past the interval',
     ('v3_fee_loop', 'sample_v3_fee_growth', 'const 0->1', "if time.time() - state.get('last_fee_sample', 0) < config.VENUE_SAMPLE_S:", 0):
