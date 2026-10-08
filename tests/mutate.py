@@ -252,6 +252,10 @@ TARGETS = {
                                     'parseSleeve', 'sleeveCap', 'capped'], NODE_TESTS('test_aerodrome.mjs')),
     # 2026-10-08: a 9-decimal request rounded up past an 18-decimal holding is the holding
     'evm_cap_held': ('evm/clmath.mjs', ['capToHeld'], NODE_TESTS('test_uniswap_polygon.mjs')),
+    # the hot pause's fee side on Uniswap v3 venues (2026-10-08)
+    'v3_fee_pool': ('dexes.py', ['v3_fee_state', 'uniswap_v3_fee_state'], PY_TESTS('test_polygon_hot_pause', 'test_hot_pause')),
+    'v3_fee_loop': ('rebalancer.py', ['sample_fee_growth', 'sample_v3_fee_growth'],
+                    PY_TESTS('test_polygon_hot_pause', 'test_hot_pause', 'test_venues')),
     'evm_signer': ('signer_aerodrome.mjs', ['guard', 'marketRefusals', 'spendable', 'positionView', 'simulateSequence',
                                             'runSteps', 'planOpen', 'closeCalls', 'checkRecipient', 'isNative',
                                             'deploymentOf', 'describe', 'ownPositions'],
@@ -307,6 +311,10 @@ SQL_TARGETS = {'deposit_db', 'unichain_book', 'unichain_quote', 'band_profile', 
 # The report prints each survivor's key: copy it here with a reason. The line
 # number is not in the key, so an edit above a mutant keeps its entry valid.
 EQUIVALENT = {
+    ('v3_fee_loop', 'sample_fee_growth', 'const 0->1', "if time.time() - state.get('last_fee_sample', 0) < config.VENUE_SAMPLE_S:", 0):
+        'a never-sampled state: now - 0 and now - 1 are both decades past the interval',
+    ('v3_fee_loop', 'sample_v3_fee_growth', 'const 0->1', "if time.time() - state.get('last_fee_sample', 0) < config.VENUE_SAMPLE_S:", 0):
+        'a never-sampled state: now - 0 and now - 1 are both decades past the interval',
     ('evm_cap_held', 'capToHeld', '(?<![<>=!-])>(?![>=]) -> >=', 'return raw > held && raw - held <= slack ? held : raw;', 0):
         'raw == held returns held either way',
     ('uniswap_signer', 'atBlock', '\\?\\? -> ||', "if (!MISSING_BLOCK.test(String(e?.details ?? '') + ' ' + String(e?.shortMessage ?? e?.message ?? e))) throw e;", 0):

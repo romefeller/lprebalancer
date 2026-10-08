@@ -1095,6 +1095,40 @@ def uniswap_v3_pool(address, dex='uniswap-v3-unichain'):
     return from_uniswap_v3(address, st, gecko, dex)
 
 
+_SEL['feeGrowthGlobal0X128'] = '0xf3058399'
+_SEL['feeGrowthGlobal1X128'] = '0x46141319'
+
+
+def v3_fee_state(raw):
+    """A fee_growth sample from a Uniswap v3 pool's own counters, in the Q64
+    units of the Solana layouts, so dexes.fee_yield and the hot pause's
+    fee / in-band-loss ratio read it unchanged. `raw` holds the pool's
+    feeGrowthGlobal0X128 / 1X128 (Q128, mod 2^256) and slot0's sqrtPriceX96
+    (Q96), with the pool's tokens and decimals. The counters are cut to 128
+    bits after the shift, as fee_yield takes differences mod 2^128. Pure."""
+    return {'sqrt_price': raw['sqrt_price_x96'] >> 32,
+            'g0': (raw['g0_x128'] >> 64) % U128, 'g1': (raw['g1_x128'] >> 64) % U128,
+            'rewards': [], 'dec_a': raw['dec_a'], 'dec_b': raw['dec_b'],
+            'mint_a': raw['mint_a'], 'mint_b': raw['mint_b']}
+
+
+def uniswap_v3_fee_state(address, dex='uniswap-v3-unichain', urls=None):
+    """One fee_growth sample of a Uniswap v3 pool, from one eth_call batch of
+    the pool and its tokens. The hot pause needs these on EVM chains: with no
+    sample it reads "no data" and never pauses (2026-10-08: Polygon had none).
+    Raises when the chain cannot be read."""
+    v = UNISWAP_V3[dex]
+    urls = urls or _uniswap_rpcs(dex)
+    names = ['feeGrowthGlobal0X128', 'feeGrowthGlobal1X128', 'slot0', 'token0', 'token1']
+    res = evm_calls([(address, _SEL[n]) for n in names], urls, chain=v['name'])
+    w = {n: _words(r) for n, r in zip(names, res)}
+    t0, t1 = _evm_addr(w['token0'][0]), _evm_addr(w['token1'][0])
+    dec = evm_calls([(t0, _SEL['decimals']), (t1, _SEL['decimals'])], urls, chain=v['name'])
+    return v3_fee_state({'g0_x128': w['feeGrowthGlobal0X128'][0], 'g1_x128': w['feeGrowthGlobal1X128'][0],
+                         'sqrt_price_x96': w['slot0'][0], 'dec_a': _words(dec[0])[0], 'dec_b': _words(dec[1])[0],
+                         'mint_a': t0.lower(), 'mint_b': t1.lower()})
+
+
 def uniswap_v3_polygon_pool(address):
     """One Uniswap v3 pool on Polygon (uniswap_v3_pool for 'uniswap-v3-polygon')."""
     return uniswap_v3_pool(address, dex='uniswap-v3-polygon')

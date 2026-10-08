@@ -3181,8 +3181,12 @@ def venue_candidates():
 def sample_fee_growth(state, status=None):
     """Every VENUE_SAMPLE_S: one RPC call reads the fee counters of the held
     pool and every same-pair candidate, stores one sample each, and refreshes
-    the ranking the book shows. Only where the chain has the counters."""
+    the ranking the book shows. Only where the chain has the counters. On a
+    Uniswap v3 venue (Unichain, Polygon) the held pool's own counters are
+    sampled, so the hot pause has its fee side (2026-10-08)."""
     if not config.CAPS.get('venues'):
+        if config.DEX in dexes.UNISWAP_V3:
+            sample_v3_fee_growth(state)
         return
     if time.time() - state.get('last_fee_sample', 0) < config.VENUE_SAMPLE_S:
         return
@@ -3197,6 +3201,25 @@ def sample_fee_growth(state, status=None):
             venue_view(status['price'], status['quoteUsd'])
     except Exception as e:
         notify('venue_sample_failed', reason=tidy(e))
+
+
+def sample_v3_fee_growth(state):
+    """The held Uniswap v3 pool's fee counters into fee_growth, every
+    VENUE_SAMPLE_S, under the profile's pool key (the tape's and the hot
+    pause's). A failed read is said once per kind of error and retried at
+    the next sample; it never stops the poll."""
+    if time.time() - state.get('last_fee_sample', 0) < config.VENUE_SAMPLE_S:
+        return
+    state['last_fee_sample'] = time.time(); save(state)
+    try:
+        st = dexes.uniswap_v3_fee_state(config.POOL, dex=config.DEX)
+        db.record_fee_state(config.DEX, config.POOL, st)
+        state.pop('fee_sample_failed_told', None)
+    except Exception as e:
+        why = tidy(e)
+        if state.get('fee_sample_failed_told') != why:
+            state['fee_sample_failed_told'] = why; save(state)
+            notify('venue_sample_failed', reason=why)
 
 
 _REWARD_PX = {}                 # mint -> (fetched_at, usd): the last good price
