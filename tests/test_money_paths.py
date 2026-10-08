@@ -354,6 +354,14 @@ class Distribute(unittest.TestCase):
         ret, rows, calls, ev, *_ = self.run_it(0.002, 0.3, bal={'sol': 0.07})
         self.assertEqual((ret, rows, calls), (None, [], [])); self.assertIn('payout_skipped', ev)
 
+    def test_a_quote_token_without_a_dollar_price_books_nothing(self):
+        # quote_price None: no dollar figure for the split, so nothing is paid, booked or sent
+        with mock.patch.object(rebalancer, 'quote_price', lambda bal: None):
+            ret, rows, calls, ev, *_, seen = self.run_it(0.002, 0.3)
+        self.assertEqual((ret, rows, calls), (None, [], []))
+        self.assertEqual(ev, ['payout_skipped'])
+        self.assertIn('no USD price', seen[0][1]['reason'])
+
     def test_returns_the_parts(self):
         ret, rows, *_ = self.run_it(0.002, 0.3)
         self.assertEqual(sorted((p['symbol'], p['kind']) for p in ret), [('SOL', 'reinvested'), ('USDC', 'paid')])

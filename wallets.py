@@ -400,10 +400,10 @@ def _evm_head(url, timeout):
     return int(_rpc(url, 'eth_blockNumber', [], timeout), 16)
 
 
-READERS = {'solana': _solana_balance, 'base': _evm_balance, 'unichain': _evm_balance}
+READERS = {'solana': _solana_balance, 'base': _evm_balance, 'unichain': _evm_balance, 'polygon': _evm_balance}
 # The slot (block) every read of one measurement is pinned to: EVM reads
 # name a block; Solana reads report theirs.
-HEADS = {'base': _evm_head, 'unichain': _evm_head}
+HEADS = {'base': _evm_head, 'unichain': _evm_head, 'polygon': _evm_head}
 
 
 def read_balances(chain, url, owner, mints, native_mint, timeout=10, tries=2):
@@ -457,7 +457,8 @@ def _evm_write_slot(url, signatures, timeout):
     return max(slots)
 
 
-WRITE_SLOTS = {'solana': _solana_write_slot, 'base': _evm_write_slot, 'unichain': _evm_write_slot}
+WRITE_SLOTS = {'solana': _solana_write_slot, 'base': _evm_write_slot, 'unichain': _evm_write_slot,
+               'polygon': _evm_write_slot}
 
 
 def write_slot(chain, url, signatures, timeout=10):

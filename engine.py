@@ -194,7 +194,9 @@ STABLE_MINTS = {'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v',   # USDC
                 '2b1kV6DkPAnxd5ixfnxCpjxmKwqjjaYmCZfHsFu24GXo',   # PYUSD
                 'USDSwr9ApdHk5bvJKMjzff41FfuX8bSxdKcR81vTwcA',    # USDS
                 '0x833589fcd6edb6e08f4c7c32d4f71b54bda02913',     # USDC on Base (lower case)
-                '0x078d782b760474a361dda0af3839290b0ef57ad6'}     # USDC on Unichain (lower case)
+                '0x078d782b760474a361dda0af3839290b0ef57ad6',     # USDC on Unichain (lower case)
+                '0xc2132d05d31c914a87c6611c10748aeb04b58e8f',     # USDT0 on Polygon (lower case)
+                '0x3c499c542cef5e3811e1192ce70d8cc03d5c3359'}     # USDC on Polygon (lower case)
 MAJOR_MINTS = STABLE_MINTS | {'So11111111111111111111111111111111111111112'}   # + SOL
 
 

@@ -1,18 +1,19 @@
-// Rebalancer — the Uniswap v3 signing layer on Unichain. Same commands and output fields as
+// Rebalancer — the Uniswap v3 signing layer on Unichain and Polygon (LPBOT_CHAIN picks the chain
+// module in evm/chains.mjs; unset means Unichain). Same commands and output fields as
 // the other signers (SIGNER_CONTRACT.md), plus the EVM additions of MULTI_DESIGN.md:
 // `rebalance` (the swap_jupiter.mjs shape) and `send` / `balance <token>` (the payout.mjs
 // shape, to the pinned profit wallet only).
 //
 // A position is an ERC-721 of the NonfungiblePositionManager (NPM). The signer reads, opens,
 // harvests and closes only NFTs of THIS wallet on THIS pool (same token0, token1 and fee).
-// The pool must be a pool of the UniswapV3Factory in evm/unichain.mjs (its factory() and
+// The pool must be a pool of the UniswapV3Factory in the chain module (its factory() and
 // getPool() agree), and the NPM, router and quoter must each name that factory.
 //
-// Neither pool token is native: ETH pays gas only and never goes below
+// Neither pool token is native: ETH (POL on Polygon) pays gas only and never goes below
 // LPBOT_GAS_RESERVE_NATIVE. Approvals are exact (the amount the next call pulls).
 //
 // A swap takes the better of two quotes: the held v3 pool through SwapRouter02, or a
-// hookless v4 pool of the same pair (evm/unichain.mjs V4_POOLS) through the Universal
+// hookless v4 pool of the same pair (the chain module's V4_POOLS; none on Polygon) through the Universal
 // Router and Permit2. The 0.05% v4 pool costs a sixth of the held pool's 0.3% fee.
 //
 // Every write: HALT check, pool genuineness, the price reference check (marketRefusals), a
@@ -29,6 +30,7 @@
 //   node signer_uniswap.mjs status [tokenId]
 //   node signer_uniswap.mjs pool [pool]
 //   node signer_uniswap.mjs open <pool> <lowerPrice> <upperPrice> <maxA> <maxB> [--execute]
+//   node signer_uniswap.mjs increase <tokenId> <maxA> <maxB> [--execute]   (add to the open position, in range)
 //   node signer_uniswap.mjs harvest <tokenId> [--execute]
 //   node signer_uniswap.mjs close <tokenId> [--execute]
 //   node signer_uniswap.mjs rebalance <mintA> <mintB> <targetUsdA> <targetUsdB> [--execute]
@@ -37,17 +39,21 @@ import path from 'node:path';
 import { assertNotHalted } from './halt_guard.mjs';
 import { createPublicClient, http, getAddress, isAddress, encodeFunctionData, encodeAbiParameters, decodeEventLog, keccak256 } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
-import { unichain } from 'viem/chains';
 import { isEntry } from './rpc_policy.mjs';
 import { planRebalance, TARGET_TOLERANCE } from './rebalance_plan.mjs';
 import { readKey } from './evm/keyfile.mjs';
 import { overBase, evmErrorKind } from './evm/rpc.mjs';
-import * as U from './evm/unichain.mjs';
+import { chainModule } from './evm/chains.mjs';
 import * as M from './evm/clmath.mjs';
 
 const DIR = path.dirname(new URL(import.meta.url).pathname);
-const DEX = 'uniswap-v3-unichain';
-const CHAIN = 'unichain';
+// The chain module: Unichain unless LPBOT_CHAIN names another (evm/chains.mjs).
+let U = chainModule(process.env.LPBOT_CHAIN);
+// Tests switch the chain without a new process. Returns the module.
+export function useChain(name) {
+  U = chainModule(name);
+  return U;
+}
 const DEADLINE_S = 300;
 const RECEIPT_TIMEOUT_MS = 120_000;
 const MAX_POSITIONS_SCANNED = 200;
@@ -68,7 +74,7 @@ export function settings(env = process.env) {
     gasReserve: M.toRaw(num('LPBOT_GAS_RESERVE_NATIVE', 0.0005), 18),
     maxImpact: num('LPBOT_MAX_IMPACT', 0.01),
     maxOracleDev: num('LPBOT_MAX_ORACLE_DEV', 0.02),
-    maxFeeWei: M.toRaw(num('LPBOT_EVM_MAX_GWEI', 0.5), 9),
+    maxFeeWei: M.toRaw(num('LPBOT_EVM_MAX_GWEI', U.MAX_GWEI_DEFAULT), 9),
     pin: env.LPBOT_EVM_PROFIT_WALLET_PIN ?? '',
     profit: env.LPBOT_PROFIT_WALLET ?? '',
     sleeve: env.LPBOT_SLEEVE ?? '',
@@ -94,15 +100,15 @@ const r6 = (x, d = 6) => (x == null ? null : Number(Number(x).toFixed(d)));
 // --- connection -----------------------------------------------------------------------
 export async function connect(url) {
   guard();
-  const pub = createPublicClient({ chain: unichain, transport: http(url, { retryCount: 1, timeout: 20_000 }) });
+  const pub = createPublicClient({ chain: U.VIEM_CHAIN, transport: http(url, { retryCount: 1, timeout: 20_000 }) });
   const chainId = await pub.getChainId();
-  if (chainId !== U.CHAIN_ID) throw new Error(`RPC ${new URL(url).host} serves chain ${chainId}, not Unichain (${U.CHAIN_ID}); refusing`);
+  if (chainId !== U.CHAIN_ID) throw new Error(`RPC ${new URL(url).host} serves chain ${chainId}, not ${U.NAME} (${U.CHAIN_ID}); refusing`);
   const account = privateKeyToAccount(readKey(process.env.WALLET_SECRET_PATH));
   return { pub, account, me: account.address, url };
 }
 
 export async function withRpc(fn, deps = {}) {
-  const { urls = U.unichainEndpoints(), connectFn = connect, sleep } = deps;
+  const { urls = U.endpoints(), connectFn = connect, sleep } = deps;
   return overBase(urls, async url => fn(await connectFn(url)), { sleep });
 }
 
@@ -141,7 +147,7 @@ export async function describe(pub, pool, refs = referencePrices) {
   const poolUsd = stableB ? price : stableA && price > 0 ? 1 / price : null;   // USD per volatile token, by the pool
   const ref = volatile ? await refs(volatile) : { usd: null, sources: [] };
   return {
-    pool, dex: DEX, chain: CHAIN, factory, npm: U.V3.npm, router: U.V3.router, quoter: U.V3.quoter,
+    pool, dex: U.DEX, chain: U.CHAIN, factory, npm: U.V3.npm, router: U.V3.router, quoter: U.V3.quoter,
     mintA: t0, mintB: t1, symbolA: s0, symbolB: s1, decimalsA: decA, decimalsB: decB,
     tickSpacing: Number(ts), tick: Number(slot0[1]), sqrtPriceX96: slot0[0].toString(), price,
     // SIGNER_CONTRACT's Token-2022 fields: ERC-20 amounts carry no UI multiplier
@@ -154,7 +160,7 @@ export async function describe(pub, pool, refs = referencePrices) {
   };
 }
 
-// USD price of `token` from its public references (evm/unichain.mjs REFERENCES): the
+// USD price of `token` from its public references (the chain module's REFERENCES): the
 // median of the ones that answer, with each source's figure. No reference: usd null.
 export async function referencePrices(token, fetchFn = fetch) {
   const list = U.REFERENCES[String(token).toLowerCase()] ?? [];
@@ -213,7 +219,7 @@ async function balance(poolExplicit) {
     const ua = M.toHuman(h.rawA, info.decimalsA), ub = M.toHuman(h.rawB, info.decimalsB);
     const ethHuman = M.toHuman(h.eth, 18);
     const out = {
-      owner: me, chain: CHAIN, sol: ethHuman, eth: ethHuman, pool, dex: DEX,
+      owner: me, chain: U.CHAIN, sol: ethHuman, eth: ethHuman, pool, dex: U.DEX,
       tokenA: info.symbolA, tokenB: info.symbolB, mintA: info.mintA, mintB: info.mintB,
       price: info.price, uiPrice: info.uiPrice, multiplierA: 1, multiplierB: 1,
       quoteUsd: info.quoteUsd, nativeSide: null, balanceA: ua, balanceB: ub,
@@ -279,7 +285,7 @@ export function positionView(x, info, fees) {
   const feeA = M.toHuman(fees[0], info.decimalsA), feeB = M.toHuman(fees[1], info.decimalsB);
   const id = x.tokenId.toString();
   const out = {
-    positionMint: id, tokenId: id, whirlpool: info.pool, pool: info.pool, dex: DEX, chain: CHAIN,
+    positionMint: id, tokenId: id, whirlpool: info.pool, pool: info.pool, dex: U.DEX, chain: U.CHAIN,
     pair: `${info.symbolA}/${info.symbolB}`, tokenA: info.symbolA, tokenB: info.symbolB,
     decimalsA: info.decimalsA, decimalsB: info.decimalsB,
     quoteUsd: info.quoteUsd, quoteUsdSource: info.quoteUsdSource,
@@ -335,7 +341,7 @@ async function ownedPosition(pub, me, info, tokenArg) {
 // succeeded. With no endpoint answering, each call is eth_call'ed alone (`sequence: false`):
 // a call that needs an earlier approval may then show a revert it would not have.
 export async function simulateSequence(pub, me, steps, deps = {}) {
-  const clients = deps.clients ?? [pub, ...U.simulationEndpoints().map(u => createPublicClient({ chain: unichain, transport: http(u, { retryCount: 0, timeout: 15_000 }) }))];
+  const clients = deps.clients ?? [pub, ...U.simulationEndpoints().map(u => createPublicClient({ chain: U.VIEM_CHAIN, transport: http(u, { retryCount: 0, timeout: 15_000 }) }))];
   let batchError = null;
   for (const client of clients) {
     try {
@@ -404,7 +410,7 @@ async function signStep(ctx, step, cfg) {
   const fees = await pub.estimateFeesPerGas();
   if (fees.maxFeePerGas > cfg.maxFeeWei) throw new Error(`refused: max fee ${fees.maxFeePerGas} wei/gas exceeds LPBOT_EVM_MAX_GWEI`);
   const eth = await pub.getBalance({ address: me });
-  if (eth < req.value + gas * fees.maxFeePerGas) throw new Error(`refused: ${M.toHuman(eth, 18)} ETH cannot pay ${step.label}`);
+  if (eth < req.value + gas * fees.maxFeePerGas) throw new Error(`refused: ${M.toHuman(eth, 18)} ${U.NATIVE_SYMBOL} cannot pay ${step.label}`);
   const serialized = await account.signTransaction({
     chainId: U.CHAIN_ID, type: 'eip1559', nonce: ctx.nonce, to: step.to, data: step.data, value: req.value,
     gas, maxFeePerGas: fees.maxFeePerGas, maxPriorityFeePerGas: fees.maxPriorityFeePerGas,
@@ -486,7 +492,7 @@ export function planOpen(info, h, cfg, sleeve, lower, upper, maxA, maxB) {
   if (!(info.tick >= tickLower && info.tick < tickUpper)) {
     refusals.push(`price ${info.price} (tick ${info.tick}) is outside the band ticks ${tickLower}..${tickUpper}`);
   }
-  if (h.eth < cfg.gasReserve) refusals.push(`ETH ${M.toHuman(h.eth, 18)} is below the ${M.toHuman(cfg.gasReserve, 18)} gas reserve`);
+  if (h.eth < cfg.gasReserve) refusals.push(`${U.NATIVE_SYMBOL} ${M.toHuman(h.eth, 18)} is below the ${M.toHuman(cfg.gasReserve, 18)} gas reserve`);
   const capA = M.capped(M.toRaw(maxA, info.decimalsA), M.sleeveCap(sleeve, info.mintA, info.decimalsA));
   const capB = M.capped(M.toRaw(maxB, info.decimalsB), M.sleeveCap(sleeve, info.mintB, info.decimalsB));
   const sa = M.sqrtRatioAtTick(tickLower), sb = M.sqrtRatioAtTick(tickUpper);
@@ -523,7 +529,7 @@ async function open(poolIn, lower, upper, maxA, maxB, execute) {
       }] }) },
     ];
     const report = {
-      pool, dex: DEX, chain: CHAIN, pair: `${info.symbolA}/${info.symbolB}`, tokenA: info.symbolA, tokenB: info.symbolB,
+      pool, dex: U.DEX, chain: U.CHAIN, pair: `${info.symbolA}/${info.symbolB}`, tokenA: info.symbolA, tokenB: info.symbolB,
       requestedLower: Number(lower), requestedUpper: Number(upper),
       lowerPrice: r6(M.priceAtTick(plan.tickLower, info.decimalsA, info.decimalsB), PX_DECIMALS),
       upperPrice: r6(M.priceAtTick(plan.tickUpper, info.decimalsA, info.decimalsB), PX_DECIMALS),
@@ -563,6 +569,99 @@ async function open(poolIn, lower, upper, maxA, maxB, execute) {
   });
 }
 
+// --- increase: idle cash into the open position ----------------------------------------
+// Idle cash beside the band goes into the position at its own ticks, instead of a close,
+// a swap and a reopen (owner, 2026-10-08: "cost efficient on WPOL as well"; on Polygon a
+// re-centre is ~1.0M gas plus a 0.05% swap of half the book, an increase ~200k gas plus
+// a swap of the idle cash only). Pure given the chain reads. Refused, before anything is
+// signed: a position out of range, gas under the reserve, a position that would pass
+// LPBOT_MAX_USD, caps that fund no liquidity, a wallet short of the deposit.
+export function planIncrease(info, x, h, cfg, sleeve, maxA, maxB) {
+  const refusals = [...marketRefusals(info, cfg)];
+  if (!(info.tick >= x.tickLower && info.tick < x.tickUpper)) {
+    refusals.push(`price ${info.price} (tick ${info.tick}) is outside the position ticks ${x.tickLower}..${x.tickUpper}: nothing to add`);
+  }
+  if (h.eth < cfg.gasReserve) refusals.push(`${U.NATIVE_SYMBOL} ${M.toHuman(h.eth, 18)} is below the ${M.toHuman(cfg.gasReserve, 18)} gas reserve`);
+  const capA = M.capped(M.toRaw(maxA, info.decimalsA), M.sleeveCap(sleeve, info.mintA, info.decimalsA));
+  const capB = M.capped(M.toRaw(maxB, info.decimalsB), M.sleeveCap(sleeve, info.mintB, info.decimalsB));
+  const sp = BigInt(info.sqrtPriceX96);
+  const sa = M.sqrtRatioAtTick(x.tickLower), sb = M.sqrtRatioAtTick(x.tickUpper);
+  const dep = M.depositFor(sp, sa, sb, capA, capB);
+  const amtA = M.toHuman(dep.amountA, info.decimalsA), amtB = M.toHuman(dep.amountB, info.decimalsB);
+  const q = info.quoteUsd > 0 ? info.quoteUsd : NaN;
+  const addUsd = (amtA * info.price + amtB) * q;
+  const [h0, h1] = M.amountsForLiquidity(sp, sa, sb, x.liquidity, false);
+  const heldUsd = (M.toHuman(h0, info.decimalsA) * info.price + M.toHuman(h1, info.decimalsB)) * q;
+  if (dep.liquidity === 0n) refusals.push('nothing to add: the caps fund no liquidity');
+  if (!(heldUsd + addUsd <= cfg.maxUsd)) {
+    refusals.push(`position about $${Number.isFinite(heldUsd + addUsd) ? (heldUsd + addUsd).toFixed(2) : '?'} after the add exceeds cap $${cfg.maxUsd}`);
+  }
+  if (h.rawA < dep.amountA) refusals.push(`wallet lacks ${amtA} ${info.symbolA}`);
+  if (h.rawB < dep.amountB) refusals.push(`wallet lacks ${amtB} ${info.symbolB}`);
+  const minA = M.minWithSlippage(dep.amountA, cfg.slippageBps), minB = M.minWithSlippage(dep.amountB, cfg.slippageBps);
+  return { refusals, capA, capB, dep, amtA, amtB, addUsd, heldUsd, minA, minB };
+}
+
+async function increase(tokenArg, maxA, maxB, execute) {
+  guard();
+  const [a, b] = [Number(maxA), Number(maxB)];
+  if (![a, b].every(v => Number.isFinite(v) && v >= 0) || !(a > 0 || b > 0)) {
+    throw new Error('increase needs <tokenId> <maxA> <maxB>, both >= 0 and one > 0');
+  }
+  const pool = poolArg();
+  const cfg = settings();
+  const sleeve = M.parseSleeve(cfg.sleeve);
+  return withRpc(async (ctx) => {
+    const { pub, me } = ctx;
+    const info = await describe(pub, pool);
+    const x = await ownedPosition(pub, me, info, tokenArg);
+    const h = await holdings(pub, me, info);
+    const plan = planIncrease(info, x, h, cfg, sleeve, maxA, maxB);
+    const dl = await deadline(pub);
+    const steps = [
+      ...(await approveSteps(pub, me, info.mintA, plan.dep.amountA, info.npm)),
+      ...(await approveSteps(pub, me, info.mintB, plan.dep.amountB, info.npm)),
+      { label: 'increase', to: info.npm, data: encodeFunctionData({ abi: U.NPM_ABI, functionName: 'increaseLiquidity', args: [{
+        tokenId: x.tokenId, amount0Desired: plan.dep.amountA, amount1Desired: plan.dep.amountB,
+        amount0Min: plan.minA, amount1Min: plan.minB, deadline: dl,
+      }] }) },
+    ];
+    const report = {
+      positionMint: x.tokenId.toString(), pool, dex: U.DEX, chain: U.CHAIN, pair: `${info.symbolA}/${info.symbolB}`,
+      tokenA: info.symbolA, tokenB: info.symbolB, tokenMaxA: a, tokenMaxB: b,
+      lowerPrice: r6(M.priceAtTick(x.tickLower, info.decimalsA, info.decimalsB), PX_DECIMALS),
+      upperPrice: r6(M.priceAtTick(x.tickUpper, info.decimalsA, info.decimalsB), PX_DECIMALS),
+      price: r6(info.price, PX_DECIMALS), depositEstA: plan.amtA, depositEstB: plan.amtB,
+      liquidityBefore: x.liquidity.toString(), liquidityAdded: plan.dep.liquidity.toString(),
+      heldUsd: Number.isFinite(plan.heldUsd) ? Number(plan.heldUsd.toFixed(4)) : null,
+      depositUsd: Number.isFinite(plan.addUsd) ? Number(plan.addUsd.toFixed(4)) : null,
+      transactions: steps.length, plannedSteps: steps.map(st => st.label),
+    };
+    const simulation = await simulateSequence(pub, me, steps);
+    if (!execute || plan.refusals.length) {
+      return reportUnsent(report, plan.refusals, simulation, 'DRY RUN — increase built and simulated. Pass --execute to sign and send.');
+    }
+    const bad = blockingFailure(simulation);
+    if (bad) throw new Error(`refused: simulation of ${bad.label} reverts: ${bad.revert}`);
+    ctx.nonce = await nonceFor(pub, me);
+    const r = await runSteps(ctx, steps, cfg);
+    // what went in, from the receipt's IncreaseLiquidity event: the program's amounts, not the plan's
+    const extra = {};
+    for (const log of r.sent.find(st => st.label === 'increase')?.receipt?.logs ?? []) {
+      if (!same(log.address, info.npm)) continue;
+      try {
+        const ev = decodeEventLog({ abi: U.NPM_ABI, data: log.data, topics: log.topics });
+        if (ev.eventName === 'IncreaseLiquidity') {
+          extra.depositA = M.toHuman(ev.args.amount0, info.decimalsA); extra.depositB = M.toHuman(ev.args.amount1, info.decimalsB);
+          extra.liquidityAdded = ev.args.liquidity.toString();
+          if (info.quoteUsd > 0) extra.depositUsd = Number(((extra.depositA * info.price + extra.depositB) * info.quoteUsd).toFixed(4));
+        }
+      } catch { /* another event */ }
+    }
+    return reportSent(report, r, extra);
+  });
+}
+
 // --- harvest and close ----------------------------------------------------------------
 function collectData(tokenId, me) {
   return encodeFunctionData({ abi: U.NPM_ABI, functionName: 'collect', args: [{ tokenId, recipient: me, amount0Max: M.MAX_UINT128, amount1Max: M.MAX_UINT128 }] });
@@ -590,7 +689,7 @@ async function harvest(tokenArg, execute) {
     const x = await ownedPosition(pub, me, info, tokenArg);
     const [f0, f1] = await feesOwed(pub, me, info, x.tokenId);
     const steps = [{ label: 'collect', to: info.npm, data: collectData(x.tokenId, me) }];
-    const report = { mint: x.tokenId.toString(), pool, dex: DEX,
+    const report = { mint: x.tokenId.toString(), pool, dex: U.DEX,
       feesA: M.toHuman(f0, info.decimalsA), feesB: M.toHuman(f1, info.decimalsB), transactions: 1 };
     if (!execute) return reportUnsent(report, [], await simulateSequence(pub, me, steps), 'DRY RUN — pass --execute to collect fees.');
     if (f0 === 0n && f1 === 0n) {
@@ -600,7 +699,7 @@ async function harvest(tokenArg, execute) {
     }
     ctx.nonce = await nonceFor(pub, me);
     const r = await runSteps(ctx, steps, cfg);
-    return reportSent({ harvested: x.tokenId.toString(), pool, dex: DEX }, r, collected(r.sent[0]?.receipt, info));
+    return reportSent({ harvested: x.tokenId.toString(), pool, dex: U.DEX }, r, collected(r.sent[0]?.receipt, info));
   });
 }
 
@@ -632,18 +731,18 @@ async function close(tokenArg, execute) {
     const [f0, f1] = await feesOwed(pub, me, info, x.tokenId);
     const { calls, estA, estB } = closeCalls(x, info, me, cfg, await deadline(pub));
     const steps = [{ label: 'decrease+collect+burn', to: info.npm, data: encodeFunctionData({ abi: U.NPM_ABI, functionName: 'multicall', args: [calls] }) }];
-    const report = { mint: x.tokenId.toString(), pool, dex: DEX, transactions: 1, instructions: calls.length,
+    const report = { mint: x.tokenId.toString(), pool, dex: U.DEX, transactions: 1, instructions: calls.length,
       quote: { tokenEstA: estA.toString(), tokenEstB: estB.toString() },
       feesQuote: { feeOwedA: f0.toString(), feeOwedB: f1.toString() }, slippageBps: cfg.slippageBps };
     if (!execute) return reportUnsent(report, [], await simulateSequence(pub, me, steps), 'DRY RUN — close built and simulated. Pass --execute to send.');
     ctx.nonce = await nonceFor(pub, me);
     const r = await runSteps(ctx, steps, cfg);
-    return reportSent({ closed: x.tokenId.toString(), pool, dex: DEX }, r, collected(r.sent[0]?.receipt, info));
+    return reportSent({ closed: x.tokenId.toString(), pool, dex: U.DEX }, r, collected(r.sent[0]?.receipt, info));
   });
 }
 
 // --- swaps: the held v3 pool or a hookless v4 pool, whichever quotes more ----------------
-// The v4 pools of evm/unichain.mjs that trade exactly this pair. Pure.
+// The v4 pools of the chain module that trade exactly this pair. Pure.
 export function v4PoolsFor(tokA, tokB, registry = U.V4_POOLS) {
   return registry.filter(p => (same(p.currency0, tokA) && same(p.currency1, tokB)) || (same(p.currency0, tokB) && same(p.currency1, tokA)))
     .filter(p => same(p.hooks, ZERO));
@@ -828,11 +927,11 @@ export function checkRecipient(to, cfg, me) {
 
 const NATIVE = '0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE';
 export function isNative(token) {
-  return String(token).toUpperCase() === 'ETH' || same(token, NATIVE);
+  return String(token).toUpperCase() === U.NATIVE_SYMBOL || same(token, NATIVE);
 }
 
 async function tokenFacts(pub, token) {
-  if (isNative(token)) return { mint: NATIVE, symbol: 'ETH', decimals: 18 };
+  if (isNative(token)) return { mint: NATIVE, symbol: U.NATIVE_SYMBOL, decimals: 18 };
   if (!isAddress(String(token), { strict: false })) throw new Error(`token ${token} is not an address`);
   const t = getAddress(token);
   const [decimals, symbol] = await pub.multicall({ allowFailure: false, contracts: [
@@ -859,16 +958,16 @@ async function send(token, amountArg, toArg, execute) {
     const t = await tokenFacts(pub, token);
     const raw = M.toRaw(String(amountArg), t.decimals);
     if (raw <= 0n) throw new Error('amount rounds to zero');
-    const cap = M.sleeveCap(sleeve, t.mint === NATIVE ? U.WETH : t.mint, t.decimals);
+    const cap = M.sleeveCap(sleeve, t.mint === NATIVE ? U.WRAPPED_NATIVE : t.mint, t.decimals);
     if (cap != null && raw > cap) throw new Error(`refused: ${amount} ${t.symbol} exceeds this profile's sleeve of ${M.toHuman(cap, t.decimals)}`);
     const have = await rawOf(pub, me, t);
     if (t.mint === NATIVE) {
-      if (have < raw + cfg.gasReserve) throw new Error(`refused: sending ${amount} ETH would leave ${M.toHuman(have - raw, 18)} ETH, below the ${M.toHuman(cfg.gasReserve, 18)} gas reserve`);
+      if (have < raw + cfg.gasReserve) throw new Error(`refused: sending ${amount} ${U.NATIVE_SYMBOL} would leave ${M.toHuman(have - raw, 18)} ${U.NATIVE_SYMBOL}, below the ${M.toHuman(cfg.gasReserve, 18)} gas reserve`);
     } else if (have < raw) {
       throw new Error(`LP wallet holds ${M.toHuman(have, t.decimals)}, less than ${amount}`);
     }
     const step = t.mint === NATIVE
-      ? { label: 'send ETH', to, data: '0x', value: raw }
+      ? { label: `send ${U.NATIVE_SYMBOL}`, to, data: '0x', value: raw }
       : { label: `send ${t.symbol}`, to: t.mint, data: erc20(t.mint, 'transfer', [to, raw]) };
     const report = { mint: t.mint, symbol: t.symbol, amount: M.toHuman(raw, t.decimals), raw: raw.toString(), decimals: t.decimals, from: me, to };
     if (!execute) {
@@ -938,6 +1037,10 @@ async function main() {
     if (r.length < 5) throw new Error('usage: open <pool> <lowerPrice> <upperPrice> <maxA> <maxB> [--execute]');
     return open(r[0], r[1], r[2], r[3], r[4], execute);
   }
+  if (cmd === 'increase') {
+    if (r.length < 3) throw new Error('usage: increase <tokenId> <maxA> <maxB> [--execute]');
+    return increase(r[0], r[1], r[2], execute);
+  }
   if (cmd === 'harvest') return harvest(r[0], execute);
   if (cmd === 'close') return close(r[0], execute);
   if (cmd === 'rebalance') {
@@ -949,7 +1052,7 @@ async function main() {
     return send(r[0], r[1], r[2], execute);
   }
   console.log('commands: balance [pool|token] | positions | status [tokenId] | pool [pool] | '
-    + 'open <pool> <lo> <hi> <maxA> <maxB> [--execute] | harvest <tokenId> [--execute] | close <tokenId> [--execute] | '
+    + 'open <pool> <lo> <hi> <maxA> <maxB> [--execute] | increase <tokenId> <maxA> <maxB> [--execute] | harvest <tokenId> [--execute] | close <tokenId> [--execute] | '
     + 'rebalance <mintA> <mintB> <usdA> <usdB> [--execute] | send <token> <amount> <to> [--execute]   (pool via --pool or LPBOT_POOL)');
 }
 

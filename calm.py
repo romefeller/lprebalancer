@@ -93,7 +93,7 @@ SURROGATE_TIMEOUT_S = 10     # a surrogate fetch never holds the loop longer tha
 GECKO_GRACE_S = 120          # GeckoTerminal may publish a closed bar this late
 FRESH_BARS = 6               # the last half hour of bars must be complete
 FRESH_MAX_AGE_S = 900        # and its newest bar no older than this
-TOKEN_ALIASES = {'WSOL': 'SOL', 'WETH': 'ETH', 'WBTC': 'BTC', 'CBBTC': 'BTC'}
+TOKEN_ALIASES = {'WSOL': 'SOL', 'WETH': 'ETH', 'WBTC': 'BTC', 'CBBTC': 'BTC', 'WPOL': 'POL', 'USDT0': 'USDT'}
 
 
 def pair_tokens(pair):

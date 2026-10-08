@@ -46,7 +46,7 @@ WALLET_ID = re.compile(r'^[a-z0-9][a-z0-9-]{1,40}$')
 SECRET_ENV = re.compile(r'^[A-Z][A-Z0-9_]{2,63}$')
 # An address on each chain the wallets table allows (its wallets_check).
 EVM_ADDRESS = lambda s: isinstance(s, str) and re.fullmatch(r'0x[0-9a-fA-F]{40}', s) is not None
-ADDRESS = {'solana': guards.is_address, 'base': EVM_ADDRESS, 'unichain': EVM_ADDRESS}
+ADDRESS = {'solana': guards.is_address, 'base': EVM_ADDRESS, 'unichain': EVM_ADDRESS, 'polygon': EVM_ADDRESS}
 
 
 class Refused(ValueError):

@@ -52,7 +52,8 @@ TARGETS = {
     'txfees': ('txfees.py', ['_raw', 'outflow', 'parse', 'fetch', 'harvested'],
                PY_TESTS('test_money_paths.TxParse', 'test_money_paths.TxFetch', 'test_fee_integrity.TxFees', 'test_fee_integrity.Replay')),
     'distribute': ('rebalancer.py', ['distribute'],
-                   PY_TESTS('test_money_paths.Distribute', 'test_fee_integrity.DistributeProperties', 'test_fee_integrity.Replay', 'test_payout')),
+                   PY_TESTS('test_money_paths.Distribute', 'test_fee_integrity.DistributeProperties', 'test_fee_integrity.Replay', 'test_payout',
+                            'test_polygon_loop')),
     'read_status': ('rebalancer.py', ['read_status', 'fee_problem', 'sanitised'],
                     PY_TESTS('test_money_paths.Status', 'test_fee_integrity.ReadStatus', 'test_fee_integrity.Replay')),
     'measured': ('rebalancer.py', ['measured_fees'], PY_TESTS('test_money_paths.Measured', 'test_fee_integrity.Replay')),
@@ -268,8 +269,9 @@ TARGETS = {
     # Unichain / Uniswap v3 (2026-10-04): the pool lookup, the endpoint, and the money
     # figures of a pool whose stablecoin is token A (USDC/HYPE: quote 1/price, the hold
     # benchmarks on the HYPE's dollar price).
-    'unichain_pool': ('dexes.py', ['_unichain_rpcs', 'uniswap_v3_state', 'from_uniswap_v3', 'uniswap_v3_pool'],
-                      PY_TESTS('test_unichain')),
+    'unichain_pool': ('dexes.py', ['_uniswap_rpcs', 'uniswap_v3_state', 'from_uniswap_v3', 'uniswap_v3_pool',
+                                   'uniswap_v3_polygon_pool'],
+                      PY_TESTS('test_unichain', 'test_polygon')),
     'unichain_config': ('config.py', ['public_rpc'], PY_TESTS('test_unichain.ConfigEndpoint')),
     'unichain_quote': ('rebalancer.py', ['stable_quote_usd', 'quote_price', 'sleeve_of'],
                        PY_TESTS('test_unichain_loop', 'test_multi_loop', 'test_claims_units', 'test_money_paths',
@@ -282,9 +284,13 @@ TARGETS = {
     # same code on chain; it is not in the mutant loop: one run takes a minute).
     'uniswap_signer': ('signer_uniswap.mjs', ['settings', 'marketRefusals', 'referencePrices', 'spendable', 'planOpen',
                                               'positionView', 'closeCalls', 'v4PoolsFor', 'v4SwapCalldata', 'blockingFailure',
-                                              'simulateSequence', 'runSteps', 'checkRecipient', 'describe', 'parseArgs'],
-                       NODE_TESTS('test_uniswap.mjs')),
+                                              'simulateSequence', 'runSteps', 'checkRecipient', 'describe', 'parseArgs',
+                                              'useChain', 'isNative', 'planIncrease'],
+                       NODE_TESTS('test_uniswap.mjs', 'test_uniswap_polygon.mjs')),
     'unichain_registry': ('evm/unichain.mjs', ['unichainEndpoints', 'simulationEndpoints'], NODE_TESTS('test_uniswap.mjs')),
+    # Polygon (2026-10-08): the chain module's endpoints and the registry that picks it.
+    'polygon_registry': ('evm/polygon.mjs', ['polygonEndpoints', 'simulationEndpoints'], NODE_TESTS('test_uniswap_polygon.mjs')),
+    'evm_chains': ('evm/chains.mjs', ['chainModule'], NODE_TESTS('test_uniswap_polygon.mjs', 'test_uniswap.mjs')),
     'book_inverted': ('book_format.mjs', ['pricedView', 'shownPrice', 'shownBand', 'shownMovePct', 'shownSide', 'equityLine', 'sinceStartLine'],
                       NODE_TESTS('test_book_format.mjs', 'test_telegram_bridge.mjs')),
 }
@@ -305,7 +311,7 @@ EQUIVALENT = {
         "the only falsy string || would replace is '' itself",
     ('uniswap_signer', 'referencePrices', '\\?\\? -> ||', "const list = U.REFERENCES[String(token).toLowerCase()] ?? [];", 0):
         'a registry entry is a non-empty frozen array: truthy, so ?? and || pick the same',
-    ('uniswap_signer', 'simulateSequence', '\\?\\? -> ||', "const clients = deps.clients ?? [pub, ...U.simulationEndpoints().map(u => createPublicClient({ chain: unichain, transport: http(u, { retryCount: 0, timeout: 15_000 }) }))];", 0):
+    ('uniswap_signer', 'simulateSequence', '\\?\\? -> ||', "const clients = deps.clients ?? [pub, ...U.simulationEndpoints().map(u => createPublicClient({ chain: U.VIEM_CHAIN, transport: http(u, { retryCount: 0, timeout: 15_000 }) }))];", 0):
         'deps.clients is an array or absent: an array is truthy, so ?? and || pick the same',
     ('uniswap_signer', 'simulateSequence', '\\?\\? -> ||', "blocks: [{ calls: steps.map(s => ({ from: me, to: s.to, data: s.data, value: s.value ?? 0n })) }],", 0):
         'value is a bigint or absent; || replaces 0n with 0n',

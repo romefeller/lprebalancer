@@ -189,14 +189,21 @@ class Routing(Hook):
         self.assertEqual(added[0][4], 119.5)
         self.assertAlmostEqual(added[0][3], 0.187 * 119.5 + 0.75, places=1)
 
+    def test_polygon_adds_instead_of_recentring(self):
+        # 2026-10-08: a Polygon re-centre is ~1.0M gas plus a 0.05% swap of half the book
+        out, moves, added = self.go_dex('uniswap-v3-polygon')
+        self.assertEqual(out, 'added'); self.assertEqual(moves, [])
+
     def test_other_venues_keep_the_recentre(self):
-        for dex in ('orca', 'meteora-dlmm', 'byreal'):
+        for dex in ('orca', 'meteora-dlmm', 'byreal', 'uniswap-v3-unichain', 'aerodrome-slipstream'):
             out, moves, added = self.go_dex(dex)
             self.assertTrue(out); self.assertEqual(len(moves), 1); self.assertEqual(added, [])
 
     def test_the_venue_breaker_covers_the_add(self):
         self.assertIn('increase', rebalancer.WRITE_COMMANDS)
-        self.assertEqual(rebalancer.INCREASE_DEXES, {'raydium-clmm'})
+        self.assertEqual(rebalancer.INCREASE_DEXES, {'raydium-clmm', 'uniswap-v3-polygon'})
+        for dex in rebalancer.INCREASE_DEXES:                            # every listed venue's signer has the command
+            self.assertIn("'increase'", open(rebalancer.SIGNERS[dex]).read(), dex)
 
 
 class AddDeposit(unittest.TestCase):

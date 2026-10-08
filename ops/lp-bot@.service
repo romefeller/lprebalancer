@@ -32,6 +32,7 @@ EnvironmentFile=-/home/ubuntu/.kamino-keys/env
 Environment=WALLET_SECRET_PATH=/home/ubuntu/.kamino-keys/bot-wallet.secret
 Environment=LPBOT_EVM_KEY_PATH=/home/ubuntu/.kamino-keys/evm-wallet.secret
 Environment=LPBOT_UNICHAIN_KEY_PATH=/home/ubuntu/.kamino-keys/unichain-wallet.secret
+Environment=LPBOT_POLYGON_KEY_PATH=/home/ubuntu/.kamino-keys/polygon-wallet.secret
 Environment=SOLANA_RPC_URL=https://api.mainnet-beta.solana.com
 Environment=LPBOT_DSN=dbname=rebalancer
 ExecStart=/usr/bin/python3 -u /home/ubuntu/agent-fin/lp_bot/rebalancer.py

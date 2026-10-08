@@ -113,6 +113,7 @@ SIGNERS = {'orca': str(ROOT / 'signer2.mjs'),
            'pancakeswap-v3-solana': str(ROOT / 'signer_pancake.mjs'),
            'aerodrome-slipstream': str(ROOT / 'signer_aerodrome.mjs'),     # Base: positions, swaps, payouts
            'uniswap-v3-unichain': str(ROOT / 'signer_uniswap.mjs'),       # Unichain: positions, swaps, payouts
+           'uniswap-v3-polygon': str(ROOT / 'signer_uniswap.mjs'),        # Polygon: the same signer, LPBOT_CHAIN=polygon
            'jupiter': str(ROOT / 'swap_jupiter.mjs'),       # swaps, not positions
            'orca-swap': str(ROOT / 'swap_orca.mjs'),        # the fallback swap, direct on an Orca whirlpool
            'payout': str(ROOT / 'payout.mjs'),              # transfers to the profit wallet only
@@ -689,6 +690,8 @@ def _chain(*args, dex=None, timeout=420, extra_env=None):
     # The gas reserve is in the chain's native token: _SOL for the Solana
     # scripts, _NATIVE for every signer that is not Solana's. LPBOT_RUN_DIR:
     # a signer refuses writes on this profile's HALT as on the global one.
+    # LPBOT_CHAIN: the EVM Uniswap signer serves Unichain and Polygon and picks
+    # its chain module by it (evm/chains.mjs).
     # The profile's own signer gets its opt-ins (config.SIGNER_ENV); no other
     # script does.
     own = config.SIGNER_ENV if (dex or config.DEX) == config.DEX else {}
@@ -702,6 +705,7 @@ def _chain(*args, dex=None, timeout=420, extra_env=None):
                LPBOT_GAS_RESERVE_SOL=str(config.GAS_RESERVE_SOL),
                LPBOT_GAS_RESERVE_NATIVE=str(config.GAS_RESERVE_SOL),
                LPBOT_RUN_DIR=str(RUN),
+               LPBOT_CHAIN=config.CHAIN,
                LPBOT_PROFIT_WALLET=config.PROFIT_WALLET, **(extra_env or {}))
     try:
         r = subprocess.run(['node', script, *args], capture_output=True,
@@ -952,7 +956,8 @@ def ui_price(rec):
 OPEN_RENT_HEADROOM_SOL = 0.009       # every venue not listed below
 # Aerodrome (Base) and Uniswap v3 (Unichain) keep no rent: an NFT mint costs gas
 # only, inside the gas reserve; 0.009 of ETH there would leave ~$25 never deployed.
-OPEN_RENT_HEADROOM = {'meteora-dlmm': 0.05, 'aerodrome-slipstream': 0.0, 'uniswap-v3-unichain': 0.0}
+OPEN_RENT_HEADROOM = {'meteora-dlmm': 0.05, 'aerodrome-slipstream': 0.0, 'uniswap-v3-unichain': 0.0,
+                      'uniswap-v3-polygon': 0.0}
 
 
 def open_headroom(dex):
@@ -1835,7 +1840,7 @@ def deploy_idle(state, status, wbal, rv, price):
     return True
 
 
-INCREASE_DEXES = {'raydium-clmm'}  # signers with `increase`: idle cash goes into the open position
+INCREASE_DEXES = {'raydium-clmm', 'uniswap-v3-polygon'}  # signers with `increase`: idle cash goes into the open position
 INCREASE_RECHECKS, INCREASE_RECHECK_S = 6, 15  # after an errored add: re-reads for ~90 s (blockhash expiry)
 
 

@@ -69,6 +69,25 @@ CHAINS = {
         'min_poll_seconds': 60,
         'public_rpc': 'https://mainnet.unichain.org', 'rpc_env': 'LPBOT_UNICHAIN_RPC',
     },
+    'polygon': {
+        'native_symbol': 'POL', 'native_decimals': 18, 'gecko_network': 'polygon_pos',
+        # Polygon's native-token address, NOT WPOL: WPOL is a pool token and the
+        # EVM balance reader adds native gas to the native mint. Gas POL stays
+        # outside the pool, as ETH does on Unichain.
+        'native_mint': '0x0000000000000000000000000000000000001010',
+        'sweep': False, 'janitor': False, 'audit': False,
+        'scanner': False,
+        'payout': True,
+        'swap_via': 'venue', 'payout_via': 'venue',
+        'pin_env': 'LPBOT_EVM_PROFIT_WALLET_PIN',
+        'rewards': False,
+        'txfees': False,
+        'venues': False,
+        'probe': 'eth_blockNumber',
+        'min_poll_seconds': 60,
+        # polygon-rpc.com answers 403 (2026-10-08); publicnode answers and simulates
+        'public_rpc': 'https://polygon-bor-rpc.publicnode.com', 'rpc_env': 'LPBOT_POLYGON_RPC',
+    },
 }
 
 # Address shapes per chain: base58 on Solana, 0x-hex on EVM chains. The same
@@ -77,6 +96,7 @@ ADDRESS = {
     'solana': re.compile(r'[1-9A-HJ-NP-Za-km-z]{32,44}'),
     'base': re.compile(r'0x[0-9a-fA-F]{40}'),
     'unichain': re.compile(r'0x[0-9a-fA-F]{40}'),
+    'polygon': re.compile(r'0x[0-9a-fA-F]{40}'),
 }
 
 
