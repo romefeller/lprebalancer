@@ -162,10 +162,17 @@ test('fork (Polygon): rebalance -> open -> trade -> harvest -> close, pinned sen
   const capped = run(['open', POOL, lo, hi, capA, capB], lp, { LPBOT_SLEEVE: JSON.stringify({ [USDT0]: 20 }) });
   assert.ok(capped.json.depositEstB <= 20, `sleeve breached: ${capped.json.depositEstB}`);
 
+  // 2b. The 2026-10-08 incident: the loop asks for the whole WPOL holding written with 9
+  // decimals and rounded UP, a few wei more than the wallet holds. The open must use the
+  // holding, not refuse "wallet lacks".
+  const upA = (Math.ceil(w.balanceA * 1e9) / 1e9).toFixed(9);
+  const rounded = run(['open', POOL, lo, hi, upA, capB], lp);
+  assert.ok(!/wallet lacks/.test(rounded.stdout + rounded.stderr), `rounded-up WPOL refused: ${rounded.stdout}`);
+
   // 3. Open: the position manager recomputes the liquidity from amountDesired, so it pulls
   // at most the plan and may pull a few wei less (WPOL has 18 decimals: one double step at
   // ~1e21 wei is ~131k wei). Never more than planned; within 1e-12 of it.
-  const op = run(['open', POOL, lo, hi, capA, capB, '--execute'], lp);
+  const op = run(['open', POOL, lo, hi, upA, capB, '--execute'], lp);
   assert.strictEqual(op.status, 0, op.stderr + op.stdout);
   assert.ok(/^\d+$/.test(op.json.positionMint));
   for (const [got, plan, side] of [[op.json.depositA, op.json.depositEstA, 'A'], [op.json.depositB, op.json.depositEstB, 'B']]) {

@@ -250,6 +250,8 @@ TARGETS = {
                                     'liquidityForAmount0', 'liquidityForAmount1', 'liquidityForAmounts', 'depositFor',
                                     'minWithSlippage', 'tickAtPrice', 'bandTicks', 'wrapPlan', 'toRaw', 'rawFromFloat',
                                     'parseSleeve', 'sleeveCap', 'capped'], NODE_TESTS('test_aerodrome.mjs')),
+    # 2026-10-08: a 9-decimal request rounded up past an 18-decimal holding is the holding
+    'evm_cap_held': ('evm/clmath.mjs', ['capToHeld'], NODE_TESTS('test_uniswap_polygon.mjs')),
     'evm_signer': ('signer_aerodrome.mjs', ['guard', 'marketRefusals', 'spendable', 'positionView', 'simulateSequence',
                                             'runSteps', 'planOpen', 'closeCalls', 'checkRecipient', 'isNative',
                                             'deploymentOf', 'describe', 'ownPositions'],
@@ -285,7 +287,7 @@ TARGETS = {
     'uniswap_signer': ('signer_uniswap.mjs', ['settings', 'marketRefusals', 'referencePrices', 'spendable', 'planOpen',
                                               'positionView', 'closeCalls', 'v4PoolsFor', 'v4SwapCalldata', 'blockingFailure',
                                               'simulateSequence', 'runSteps', 'checkRecipient', 'describe', 'parseArgs',
-                                              'useChain', 'isNative', 'planIncrease', 'planWrap'],
+                                              'useChain', 'isNative', 'planIncrease', 'planWrap', 'nonceFor', 'atBlock'],
                        NODE_TESTS('test_uniswap.mjs', 'test_uniswap_polygon.mjs')),
     'unichain_registry': ('evm/unichain.mjs', ['unichainEndpoints', 'simulationEndpoints'], NODE_TESTS('test_uniswap.mjs')),
     # Polygon (2026-10-08): the chain module's endpoints and the registry that picks it.
@@ -305,6 +307,10 @@ SQL_TARGETS = {'deposit_db', 'unichain_book', 'unichain_quote', 'band_profile', 
 # The report prints each survivor's key: copy it here with a reason. The line
 # number is not in the key, so an edit above a mutant keeps its entry valid.
 EQUIVALENT = {
+    ('evm_cap_held', 'capToHeld', '(?<![<>=!-])>(?![>=]) -> >=', 'return raw > held && raw - held <= slack ? held : raw;', 0):
+        'raw == held returns held either way',
+    ('uniswap_signer', 'atBlock', '\\?\\? -> ||', "if (!MISSING_BLOCK.test(String(e?.details ?? '') + ' ' + String(e?.shortMessage ?? e?.message ?? e))) throw e;", 0):
+        'details is a string or absent: || only also replaces the empty string with the empty string',
     ('uniswap_signer', 'settings', '\\?\\? -> ||', "pin: env.LPBOT_EVM_PROFIT_WALLET_PIN ?? '',", 0):
         "the only falsy string || would replace is '' itself",
     ('uniswap_signer', 'settings', '\\?\\? -> ||', "profit: env.LPBOT_PROFIT_WALLET ?? '',", 0):

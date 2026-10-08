@@ -392,13 +392,48 @@ export function blockingFailure(simulation) {
   return null;
 }
 
-async function nonceFor(pub, me) {
-  const [latest, pending] = await Promise.all([
-    pub.getTransactionCount({ address: me, blockTag: 'latest' }),
-    pub.getTransactionCount({ address: me, blockTag: 'pending' }),
-  ]);
-  if (pending > latest) throw new Error(`refused: ${pending - latest} transaction(s) from this wallet are pending; not stacking another`);
-  return latest;
+// A load-balanced endpoint answers each call from any of its nodes; one a block behind
+// shows a transaction that landed as still pending (2026-10-08 15:22: a payout had its
+// receipt, the close 26 s later was refused). A transaction really pending stays so: ask
+// again for up to NONCE_RECHECKS x NONCE_RECHECK_MS before refusing.
+const NONCE_RECHECKS = 5, NONCE_RECHECK_MS = 2_000;
+export async function nonceFor(pub, me, deps = {}) {
+  const { tries = NONCE_RECHECKS, sleep = ms => new Promise(r => setTimeout(r, ms)) } = deps;
+  let latest = 0, pending = 0;
+  for (let i = 0; i < tries; i++) {
+    if (i) await sleep(NONCE_RECHECK_MS);
+    [latest, pending] = await Promise.all([
+      pub.getTransactionCount({ address: me, blockTag: 'latest' }),
+      pub.getTransactionCount({ address: me, blockTag: 'pending' }),
+    ]);
+    if (pending <= latest) return latest;
+  }
+  throw new Error(`refused: ${pending - latest} transaction(s) from this wallet are pending; not stacking another`);
+}
+
+// The checks of a step that follows a sent one run at a block that holds the earlier step:
+// a node a block behind would not see the approve the next call spends (2026-10-08 15:28:
+// the approve landed, the swap's eth_call said STF). Waits until the endpoint's head is at
+// or past `minBlock`, then calls at that head; a node that does not have the block yet
+// ("header not found", "unknown block") is asked again. A revert at such a block is real.
+const BLOCK_RECHECKS = 15, BLOCK_RECHECK_MS = 1_000;
+const MISSING_BLOCK = /header not found|unknown block|block not found|missing trie node|cannot query unfinalized|after last accepted block|is in the future/i;
+export async function atBlock(pub, minBlock, fn, deps = {}) {
+  const { tries = BLOCK_RECHECKS, sleep = ms => new Promise(r => setTimeout(r, ms)) } = deps;
+  if (minBlock == null) return fn(undefined);
+  let last = null;
+  for (let i = 0; i < tries; i++) {
+    if (i) await sleep(BLOCK_RECHECK_MS);
+    const head = await pub.getBlockNumber();
+    if (head < minBlock) { last = new Error(`the endpoint is at block ${head}, before ${minBlock}`); continue; }
+    try {
+      return await fn(head);
+    } catch (e) {
+      if (!MISSING_BLOCK.test(String(e?.details ?? '') + ' ' + String(e?.shortMessage ?? e?.message ?? e))) throw e;
+      last = e;
+    }
+  }
+  throw new Error(`refused: no endpoint node reached block ${minBlock}: ${String(last?.shortMessage ?? last?.message ?? last).split('\n')[0]}`);
 }
 
 // Simulate, estimate, sign one step. Nothing leaves the process.
@@ -406,8 +441,11 @@ async function signStep(ctx, step, cfg) {
   guard();
   const { pub, account, me } = ctx;
   const req = { account: me, to: step.to, data: step.data, value: step.value ?? 0n };
-  await pub.call(req);
-  const gas = (await pub.estimateGas(req)) * 13n / 10n;
+  const gas = await atBlock(pub, ctx.minBlock, async (bn) => {
+    const at = bn == null ? {} : { blockNumber: bn };
+    await pub.call({ ...req, ...at });
+    return (await pub.estimateGas({ ...req, ...at })) * 13n / 10n;
+  }, ctx.blockDeps);
   const fees = await pub.estimateFeesPerGas();
   if (fees.maxFeePerGas > cfg.maxFeeWei) throw new Error(`refused: max fee ${fees.maxFeePerGas} wei/gas exceeds LPBOT_EVM_MAX_GWEI`);
   const eth = await pub.getBalance({ address: me });
@@ -435,6 +473,7 @@ export async function runSteps(ctx, steps, cfg, deps = {}) {
       const receipt = await ctx.pub.waitForTransactionReceipt({ hash, timeout: RECEIPT_TIMEOUT_MS, pollingInterval: 1000 });
       if (receipt.status !== 'success') throw new Error(`transaction ${hash} (${step.label}) reverted on chain`);
       sent.push({ label: step.label, hash, receipt });
+      ctx.minBlock = receipt.blockNumber;          // the next step is checked at or past this block
     } catch (e) {
       // A signed transaction whose send threw may still have reached a node: it counts.
       if (hash) sent.push({ label: step.label, hash, receipt: null });
@@ -494,8 +533,8 @@ export function planOpen(info, h, cfg, sleeve, lower, upper, maxA, maxB) {
     refusals.push(`price ${info.price} (tick ${info.tick}) is outside the band ticks ${tickLower}..${tickUpper}`);
   }
   if (h.eth < cfg.gasReserve) refusals.push(`${U.NATIVE_SYMBOL} ${M.toHuman(h.eth, 18)} is below the ${M.toHuman(cfg.gasReserve, 18)} gas reserve`);
-  const capA = M.capped(M.toRaw(maxA, info.decimalsA), M.sleeveCap(sleeve, info.mintA, info.decimalsA));
-  const capB = M.capped(M.toRaw(maxB, info.decimalsB), M.sleeveCap(sleeve, info.mintB, info.decimalsB));
+  const capA = M.capped(M.capToHeld(M.toRaw(maxA, info.decimalsA), h.rawA, info.decimalsA), M.sleeveCap(sleeve, info.mintA, info.decimalsA));
+  const capB = M.capped(M.capToHeld(M.toRaw(maxB, info.decimalsB), h.rawB, info.decimalsB), M.sleeveCap(sleeve, info.mintB, info.decimalsB));
   const sa = M.sqrtRatioAtTick(tickLower), sb = M.sqrtRatioAtTick(tickUpper);
   const dep = M.depositFor(BigInt(info.sqrtPriceX96), sa, sb, capA, capB);
   const amtA = M.toHuman(dep.amountA, info.decimalsA), amtB = M.toHuman(dep.amountB, info.decimalsB);
@@ -583,8 +622,8 @@ export function planIncrease(info, x, h, cfg, sleeve, maxA, maxB) {
     refusals.push(`price ${info.price} (tick ${info.tick}) is outside the position ticks ${x.tickLower}..${x.tickUpper}: nothing to add`);
   }
   if (h.eth < cfg.gasReserve) refusals.push(`${U.NATIVE_SYMBOL} ${M.toHuman(h.eth, 18)} is below the ${M.toHuman(cfg.gasReserve, 18)} gas reserve`);
-  const capA = M.capped(M.toRaw(maxA, info.decimalsA), M.sleeveCap(sleeve, info.mintA, info.decimalsA));
-  const capB = M.capped(M.toRaw(maxB, info.decimalsB), M.sleeveCap(sleeve, info.mintB, info.decimalsB));
+  const capA = M.capped(M.capToHeld(M.toRaw(maxA, info.decimalsA), h.rawA, info.decimalsA), M.sleeveCap(sleeve, info.mintA, info.decimalsA));
+  const capB = M.capped(M.capToHeld(M.toRaw(maxB, info.decimalsB), h.rawB, info.decimalsB), M.sleeveCap(sleeve, info.mintB, info.decimalsB));
   const sp = BigInt(info.sqrtPriceX96);
   const sa = M.sqrtRatioAtTick(x.tickLower), sb = M.sqrtRatioAtTick(x.tickUpper);
   const dep = M.depositFor(sp, sa, sb, capA, capB);
@@ -957,11 +996,13 @@ async function send(token, amountArg, toArg, execute) {
     const { pub, me } = ctx;
     checkRecipient(to, cfg, me);
     const t = await tokenFacts(pub, token);
-    const raw = M.toRaw(String(amountArg), t.decimals);
+    const have = await rawOf(pub, me, t);
+    // an ERC-20 amount rounded up at the 9th decimal is the holding (capToHeld); native coin
+    // keeps its reserve check below, so it is never stretched to the whole balance
+    const raw = t.mint === NATIVE ? M.toRaw(String(amountArg), t.decimals) : M.capToHeld(M.toRaw(String(amountArg), t.decimals), have, t.decimals);
     if (raw <= 0n) throw new Error('amount rounds to zero');
     const cap = M.sleeveCap(sleeve, t.mint === NATIVE ? U.WRAPPED_NATIVE : t.mint, t.decimals);
     if (cap != null && raw > cap) throw new Error(`refused: ${amount} ${t.symbol} exceeds this profile's sleeve of ${M.toHuman(cap, t.decimals)}`);
-    const have = await rawOf(pub, me, t);
     if (t.mint === NATIVE) {
       if (have < raw + cfg.gasReserve) throw new Error(`refused: sending ${amount} ${U.NATIVE_SYMBOL} would leave ${M.toHuman(have - raw, 18)} ${U.NATIVE_SYMBOL}, below the ${M.toHuman(cfg.gasReserve, 18)} gas reserve`);
     } else if (have < raw) {

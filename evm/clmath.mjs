@@ -195,6 +195,17 @@ export function sleeveCap(sleeve, token, decimals) {
   return v == null ? null : toRaw(v, decimals);
 }
 
+// The loop writes human amounts with 9 decimals ('%.9f'), rounded half up. For a token of
+// more decimals (WPOL, HYPE: 18) "all of it" can then name up to half a unit of the 9th
+// decimal MORE than the wallet holds (2026-10-08: 1951.983722348 WPOL asked, 1951.98372234798
+// held: the open was refused three times and the breaker halted the profile). Within one unit
+// of the 9th decimal, the amount is the holding; a larger excess stays an excess, so a real
+// shortfall is still refused. Pure.
+export function capToHeld(raw, held, decimals) {
+  const slack = decimals > 9 ? 10n ** BigInt(decimals - 9) : 0n;
+  return raw > held && raw - held <= slack ? held : raw;
+}
+
 export function capped(raw, cap) {
   return cap == null || raw < cap ? raw : cap;
 }

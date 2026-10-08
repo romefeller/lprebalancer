@@ -86,6 +86,8 @@ test('referencePrices on Polygon: WPOL has the POL references; USDT0 has none', 
   assert.strictEqual((await S.referencePrices(P.WPOL, fetchFn)).usd, null, 'Unichain has no WPOL reference');
 });
 
+// The tick of $0.10 per WPOL (USDT0 6 decimals, WPOL 18): the fake pool's slot0 is consistent.
+const TICK = M.tickAtPrice(0.1, 18, 6);
 // A WPOL/USDT0 pool view, as describe() reads it from the chain (token A = WPOL, B = USDT0).
 function fakePub(over = {}) {
   const c = { factory: P.V3.factory, t0: P.WPOL, t1: P.USDT0, fee: 500, ts: 10, mapsTo: POOL, npmF: P.V3.factory, routerF: P.V3.factory, quoterF: P.V3.factory, ...over };
@@ -93,7 +95,7 @@ function fakePub(over = {}) {
   return {
     async multicall({ contracts }) {
       if (contracts[0].functionName === 'factory' && contracts[0].address === POOL) {
-        return [c.factory, c.t0, c.t1, c.fee, c.ts, 10n ** 15n, [sp, -299000, 0, 0, 0, 0, true]];
+        return [c.factory, c.t0, c.t1, c.fee, c.ts, 10n ** 15n, [sp, TICK, 0, 0, 0, 0, true]];
       }
       return [c.mapsTo, c.npmF, c.routerF, c.quoterF, 18, 6, 'WPOL', 'USDT0'];
     },
@@ -140,8 +142,8 @@ async function polyInfo(refUsd = 0.1) {
   S.useChain('polygon');
   return S.describe(fakePub(), POOL, async () => ({ usd: refUsd, sources: [] }));
 }
-// A position around the price (tick -299000 at $0.10): +/-2% is about +/-200 ticks.
-const POS = { tokenId: 7n, tickLower: -299200, tickUpper: -298800, liquidity: 10n ** 15n };
+// A position around the price: +/-2% is about +/-200 ticks, on the pool's spacing of 10.
+const POS = { tokenId: 7n, tickLower: Math.floor((TICK - 200) / 10) * 10, tickUpper: Math.ceil((TICK + 200) / 10) * 10, liquidity: 10n ** 15n };
 const wallet = (a = 10n ** 24n, b = 10n ** 12n, eth = 10n ** 19n) => ({ rawA: a, rawB: b, eth });
 const CFG = (over = {}) => ({ ...S.settings({}), ...over });
 
@@ -191,8 +193,21 @@ test('planIncrease edges: the tick at the lower edge is in, at the upper edge ou
   const base = S.planIncrease(info, POS, wallet(), CFG(), new Map(), '1000', '100');
   const exact = S.planIncrease(info, POS, wallet(base.dep.amountA, base.dep.amountB), CFG(), new Map(), '1000', '100');
   assert.ok(!exact.refusals.some(r => /wallet lacks/.test(r)), 'a wallet holding exactly the deposit passes');
-  const short = S.planIncrease(info, POS, wallet(base.dep.amountA - 1n, base.dep.amountB - 1n), CFG(), new Map(), '1000', '100');
-  assert.strictEqual(short.refusals.filter(r => /wallet lacks/.test(r)).length, 2, 'one wei short on each side is refused on each side');
+  // WPOL not binding (a huge cap, USDT0 binds): the wallet holds exactly the computed WPOL deposit
+  const freeA = S.planIncrease(info, POS, wallet(), CFG(), new Map(), '100000', '1');
+  const exactA = S.planIncrease(info, POS, wallet(freeA.dep.amountA, freeA.dep.amountB), CFG(), new Map(), '100000', '1');
+  assert.strictEqual(exactA.dep.amountA, freeA.dep.amountA);
+  assert.ok(!exactA.refusals.some(r => /wallet lacks/.test(r)), exactA.refusals.join());
+  // asking for exactly what the deposit needs: 1 wei short of WPOL (18 decimals) is rounding and
+  // the holding is used; 1e9 + 1 wei short is a real shortfall; USDT0 (6 decimals) has no slack
+  const need = [M.toHuman(base.dep.amountA, 18).toFixed(9), M.toHuman(base.dep.amountB, 6).toFixed(6)];
+  const oneWei = S.planIncrease(info, POS, wallet(base.dep.amountA - 1n, base.dep.amountB), CFG(), new Map(), ...need);
+  assert.ok(!oneWei.refusals.some(r => /wallet lacks/.test(r)), oneWei.refusals.join());
+  assert.ok(oneWei.dep.amountA <= base.dep.amountA - 1n, 'never above the holding');
+  const real = S.planIncrease(info, POS, wallet(M.toRaw(need[0], 18) - 10n ** 9n - 1n, base.dep.amountB), CFG(), new Map(), need[0], '0.000001');
+  assert.ok(real.dep.amountA < M.toRaw(need[0], 18), 'a real shortfall is not stretched to the request');
+  const shortB = S.planIncrease(info, POS, wallet(base.dep.amountA, base.dep.amountB - 1n), CFG(), new Map(), '1000', '100');
+  assert.ok(shortB.dep.amountB <= base.dep.amountB - 1n || shortB.refusals.some(r => /wallet lacks .* USDT0/.test(r)));
   const atCap = S.planIncrease(info, POS, wallet(), CFG({ maxUsd: base.heldUsd + base.addUsd }), new Map(), '1000', '100');
   assert.ok(!atCap.refusals.some(r => /exceeds cap/.test(r)), 'a position exactly at LPBOT_MAX_USD passes');
 });
@@ -215,4 +230,72 @@ test('planWrap: the native left must cover the gas reserve; a bad amount is refu
   assert.match(S.planWrap(M.toRaw('1', 18), '5', cfg).refusals.join(), /POL would leave/);
   for (const bad of ['0', '-1', 'x', 'NaN']) assert.throws(() => S.planWrap(M.toRaw('10', 18), bad, cfg), /must be a positive number/, bad);
   assert.throws(() => S.planWrap(M.toRaw('10', 18), '1e-30', cfg), /rounds to zero/);
+});
+
+// --- 2026-10-08 incident: the three failures that halted poly-wpol-usdt ----------------------
+test('capToHeld: a request rounded up at the 9th decimal is the holding; more is not', () => {
+  const held = 1951983722347981500000n;                                    // the WPOL the wallet held
+  const asked = M.toRaw('1951.983722348', 18);                              // what the loop wrote
+  assert.ok(asked > held);
+  assert.strictEqual(M.capToHeld(asked, held, 18), held);
+  assert.strictEqual(M.capToHeld(held + 10n ** 9n, held, 18), held, 'one unit of the 9th decimal');
+  assert.strictEqual(M.capToHeld(held + 10n ** 9n + 1n, held, 18), held + 10n ** 9n + 1n, 'beyond: unchanged');
+  assert.strictEqual(M.capToHeld(held - 5n, held, 18), held - 5n, 'under the holding: unchanged');
+  assert.strictEqual(M.capToHeld(1_000_001n, 1_000_000n, 6), 1_000_001n, 'six decimals: no slack');
+  assert.strictEqual(M.capToHeld(1_000_000_001n, 1_000_000_000n, 9), 1_000_000_001n, 'nine decimals: no slack');
+  assert.strictEqual(M.capToHeld(20n, 10n, 10), 10n, 'ten decimals: one unit of the 9th decimal is 10 raw units');
+  assert.strictEqual(M.capToHeld(21n, 10n, 10), 21n);
+});
+
+test('capToHeld property: any holding written with %.9f opens without a "wallet lacks"', async () => {
+  const info = await polyInfo();
+  await fc.assert(fc.asyncProperty(fc.bigInt({ min: 10n ** 18n, max: 10n ** 24n }), async (rawA) => {
+    const asked = (Number(rawA) / 1e18).toFixed(9);                       // the loop's '%.9f' of a float read
+    const plan = S.planIncrease(info, POS, wallet(rawA, 10n ** 12n), CFG({ maxUsd: 1e12 }), new Map(), asked, '1000000');
+    assert.ok(!plan.refusals.some(r => /wallet lacks WPOL|lacks .* WPOL/.test(r)), `${rawA} ${asked}: ${plan.refusals}`);
+    assert.ok(plan.dep.amountA <= rawA);
+  }), { numRuns: 300 });
+});
+
+test('nonceFor: a pending count that clears on a second read is a lagging node; one that stays is refused', async () => {
+  const pub = (seq) => ({ async getTransactionCount({ blockTag }) { const x = seq[0]; if (blockTag === 'pending') seq.shift(); return blockTag === 'latest' ? x[0] : x[1]; } });
+  const naps = [];
+  const sleep = async ms => naps.push(ms);
+  assert.strictEqual(await S.nonceFor(pub([[12, 13], [13, 13]]), 'me', { sleep }), 13);
+  assert.deepStrictEqual(naps, [2000]);
+  const stuck = [[12, 13], [12, 13], [12, 13], [13, 13]];
+  await assert.rejects(S.nonceFor(pub(stuck), 'me', { tries: 3, sleep }), /1 transaction\(s\) from this wallet are pending/);
+  assert.strictEqual(stuck.length, 1, 'exactly 3 reads, then the refusal');
+  assert.strictEqual(await S.nonceFor(pub([[7, 7]]), 'me', { sleep: async () => assert.fail('no wait when clear') }), 7);
+});
+
+test('atBlock: waits for the endpoint to reach the block, retries a node without it, keeps a real revert', async () => {
+  const naps = [];
+  const sleep = async ms => naps.push(ms);
+  const heads = [99n, 100n, 101n];
+  const pub = { async getBlockNumber() { return heads.length > 1 ? heads.shift() : heads[0]; } };
+  const seen = [];
+  const out = await S.atBlock(pub, 100n, async bn => { seen.push(bn); if (seen.length === 1) throw new Error('header not found'); return 'ok'; }, { sleep });
+  assert.strictEqual(out, 'ok');
+  assert.deepStrictEqual(seen, [100n, 101n], 'never called before block 100; the missing header was asked again');
+  await assert.rejects(S.atBlock({ async getBlockNumber() { return 200n; } }, 100n,
+    async () => { throw new Error('Execution reverted with reason: STF.'); }, { sleep }), /STF/);
+  let asks = 0;
+  await assert.rejects(S.atBlock({ async getBlockNumber() { asks += 1; return asks > 3 ? 100n : 5n; } }, 100n, async () => 'never', { tries: 3, sleep }),
+    /no endpoint node reached block 100/);
+  assert.strictEqual(asks, 3, 'exactly 3 head reads, then the refusal');
+  assert.strictEqual(await S.atBlock(pub, undefined, async bn => bn ?? 'latest'), 'latest', 'a first step runs at latest');
+});
+
+test('runSteps: the step after a sent one is checked at or past its receipt block', async () => {
+  const blocks = [];
+  const ctx = { nonce: 1, pub: {
+    async sendRawTransaction() {},
+    async waitForTransactionReceipt({ hash }) { return { status: 'success', blockNumber: hash === 'h1' ? 500n : 501n, gasUsed: 1n, effectiveGasPrice: 1n }; },
+  } };
+  let n = 0;
+  const sign = async (c) => { blocks.push(c.minBlock); n += 1; return { serialized: '0x', hash: `h${n}` }; };
+  const r = await S.runSteps(ctx, [{ label: 'approve' }, { label: 'swap' }], {}, { signStep: sign });
+  assert.strictEqual(r.error, null);
+  assert.deepStrictEqual(blocks, [undefined, 500n]);
 });
