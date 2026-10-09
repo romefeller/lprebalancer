@@ -1,9 +1,25 @@
 {
-  "name": "lp-bot-next",
+  "name": "lp-rebalancer",
   "private": true,
-  "description": "EVM dependencies of the LP bot (Base / Aerodrome Slipstream signer). Solana packages resolve from the parent node_modules.",
+  "description": "Node dependencies of the LP bot: Solana and EVM signers, swaps, payout, Telegram bridge. Versions are pinned to what the live server runs.",
   "license": "UNLICENSED",
   "dependencies": {
+    "@byreal-io/byreal-clmm-sdk": "0.2.2",
+    "@coral-xyz/anchor": "0.32.1",
+    "@meteora-ag/dlmm": "1.9.14",
+    "@orca-so/whirlpools": "8.0.1",
+    "@orca-so/whirlpools-client": "7.0.0",
+    "@orca-so/whirlpools-core": "3.1.0",
+    "@raydium-io/raydium-sdk-v2": "0.2.73-alpha",
+    "@solana-program/token-2022": "0.6.1",
+    "@solana/kit": "5.5.1",
+    "@solana/spl-token": "0.4.15",
+    "@solana/web3.js": "1.98.4",
+    "bn.js": "5.2.5",
+    "decimal.js": "10.6.0",
     "viem": "2.56.9"
+  },
+  "devDependencies": {
+    "fast-check": "4.10.2"
   }
 }

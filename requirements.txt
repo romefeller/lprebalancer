@@ -1,0 +1,4 @@
+# Python dependencies of the bot and its tests, pinned to the live server's versions.
+numpy==2.5.3
+psycopg2-binary==2.9.13
+hypothesis==6.168.2

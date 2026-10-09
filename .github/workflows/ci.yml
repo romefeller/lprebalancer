@@ -1,0 +1,48 @@
+# Every push and pull request: the whole test suite against a fresh database.
+# No key and no wallet: tests that need one skip themselves.
+name: tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  tests:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: ci
+          POSTGRES_PASSWORD: ci
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U ci"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      PGHOST: localhost
+      PGUSER: ci
+      PGPASSWORD: ci
+      # libpq reads PGHOST, PGUSER and PGPASSWORD: the DSN names the database only
+      LPBOT_TEST_DSN: dbname=rebalancer_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: pip
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - run: sudo apt-get update -q && sudo apt-get install -y -q postgresql-client
+      - run: pip install -r requirements.txt
+      - run: npm ci --no-audit --no-fund
+      - name: Test database
+        run: bash tests/ci_db.sh rebalancer_test
+      - name: Tests
+        run: cd tests && bash run.sh
