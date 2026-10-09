@@ -8,7 +8,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { feedFiles, migrateState, readNew, tailAll, message, render, aSide, payoutHeld, MOVED_FEED, LEGACY_FEED }
   from '../telegram_bridge.mjs';
-import { poolLabel, redact, portfolioText, equityLine, sinceStartLine, walletName } from '../book_format.mjs';
+import { poolLabel, redact, secretValues, portfolioText, equityLine, sinceStartLine, walletName } from '../book_format.mjs';
 
 const HERE = path.dirname(new URL(import.meta.url).pathname);
 // The live bot's directory: its feeds are real rows to render (read only).
@@ -502,7 +502,19 @@ test('every row of the real feed renders as before, behind its pool label', { sk
   assert.ok(n > 1000, `only ${n} rows`);
 });
 
+test('a value the environment names as a secret is masked whatever its shape', () => {
+  const env = { KAMINO_RPC_KEY: 'plain-looking-value-123', TELEGRAM_BOT_TOKEN: '1:x', WALLET_SECRET_PATH: '/home/u/.kamino-keys/w.secret',
+    SHORT_KEY: 'abc', LPBOT_PROFIT_WALLET_PIN: '8funmDkPNBtjqfNkBEoBF16eBfyQ4vMAFrs4Nyys5D1h', LONGER_SECRET: ' plain-looking-value-123-and-more ' };
+  const secrets = secretValues(env);
+  assert.deepEqual(secrets, ['plain-looking-value-123-and-more', 'plain-looking-value-123']);   // longest first
+  assert.equal(redact('rpc https://x/plain-looking-value-123-and-more and plain-looking-value-123 done', secrets), 'rpc https://x/*** and *** done');
+  assert.equal(redact('nothing', secrets), 'nothing');
+  assert.equal(redact('nothing', secretValues({})), 'nothing');
+  assert.deepEqual(secretValues({ A_KEY: 'exactly12chr', B_KEY: 'only11chars', C_KEY: 42 }), ['exactly12chr']);
+});
+
 // --- the program, end to end, against a stub Telegram -------------------------------------
+const E2E_SECRET = 'sekrit-0123456789abcdef';
 
 test('the bridge migrates the old cursor at start and sends only what is new, labelled', async () => {
   const { spawn } = await import('node:child_process');
@@ -512,7 +524,7 @@ test('the bridge migrates the old cursor at start and sends only what is new, la
   }
   const old = row('in_band', { n: 1 }) + row('in_band', { n: 2 });
   put(dir, MOVED_FEED, old + row('OPEN', { n: 3, pair: 'SOL/USDC', profile: 'sol-usdc' }));
-  put(dir, run('mu-usdc'), row('dormant', { n: 4, pair: 'MU/USDC', reason: 'nothing to deploy' }) + '{"half');
+  put(dir, run('mu-usdc'), row('dormant', { n: 4, pair: 'MU/USDC', reason: `nothing to deploy; rpc https://x/${E2E_SECRET}` }) + '{"half');
   fs.writeFileSync(path.join(dir, 'telegram_bridge_state.json'), JSON.stringify({ pos: old.length }));
   const sent = path.join(dir, 'sent.jsonl');
   // Telegram, stubbed: every request is written to a file and answered ok
@@ -520,7 +532,7 @@ test('the bridge migrates the old cursor at start and sends only what is new, la
 globalThis.fetch = async (url, init) => { fs.appendFileSync(${JSON.stringify(sent)},
   JSON.stringify({ host: new URL(url).host, body: JSON.parse(init.body) }) + '\\n'); return { json: async () => ({ ok: true }) }; };`);
   const child = spawn(process.execPath, ['--import', path.join(dir, 'stub.mjs'), path.join(dir, 'telegram_bridge.mjs')],
-    { env: { PATH: process.env.PATH, TELEGRAM_BOT_TOKEN: '1:x', TELEGRAM_CHAT_ID: '42' }, stdio: 'ignore' });
+    { env: { PATH: process.env.PATH, TELEGRAM_BOT_TOKEN: '1:x', TELEGRAM_CHAT_ID: '42', KAMINO_RPC_KEY: E2E_SECRET }, stdio: 'ignore' });
   try {
     const until = Date.now() + 15000;
     while (Date.now() < until && !(fs.existsSync(sent) && fs.readFileSync(sent, 'utf8').split('\n').filter(Boolean).length >= 2)) {
@@ -532,10 +544,11 @@ globalThis.fetch = async (url, init) => { fs.appendFileSync(${JSON.stringify(sen
   assert.deepEqual(msgs.map(m => m.body.chat_id), ['42', '42']);
   const texts = msgs.map(m => m.body.text).sort();
   assert.ok(texts[0].startsWith('[MU/USDC] 😴 DORMANT · nothing to deploy'), texts[0]);
+  assert.ok(!texts[0].includes(E2E_SECRET) && texts[0].includes('rpc https://x/***'), texts[0]);   // the bridge redacts what it sends
   assert.ok(texts[1].startsWith('[SOL/USDC] 🟩 OPENED'), texts[1]);
   const st = JSON.parse(fs.readFileSync(path.join(dir, 'telegram_bridge_state.json'), 'utf8'));
   assert.equal(st.files[MOVED_FEED].pos, fs.statSync(path.join(dir, MOVED_FEED)).size);
-  assert.equal(st.files[run('mu-usdc')].pos, row('dormant', { n: 4, pair: 'MU/USDC', reason: 'nothing to deploy' }).length);
+  assert.equal(st.files[run('mu-usdc')].pos, row('dormant', { n: 4, pair: 'MU/USDC', reason: `nothing to deploy; rpc https://x/${E2E_SECRET}` }).length);
 });
 
 test('a DAILY line names the capital moved, and only when some moved', () => {

@@ -405,3 +405,93 @@ class LiquiditySmoothed(unittest.TestCase):
             med = float(rng.uniform(1, 1e6)); a, b = sorted(rng.uniform(0.01, 10, 2) * med)
             fa = self.lv(1.0, self.summ(med, a))[0]['factor']; fb = self.lv(1.0, self.summ(med, b))[0]['factor']
             self.assertTrue(0.6 <= fb <= fa <= 1.25)              # more liquidity never loosens
+
+
+# --- security review, 2026-10-09 ----------------------------------------------------------
+
+class SignerEnvironment(unittest.TestCase):
+    def test_the_telegram_token_is_withheld_from_signers(self):
+        seen = {}
+
+        class R:
+            returncode, stdout, stderr = 0, '{"ok": true}', ''
+
+        def run(cmd, **kw):
+            seen.update(kw['env'])
+            return R()
+        with mock.patch.dict(os.environ, {'TELEGRAM_BOT_TOKEN': '1:abc', 'TELEGRAM_CHAT_ID': '42', 'KAMINO_RPC_KEY': 'k'}), \
+                mock.patch.object(rebalancer.subprocess, 'run', run), \
+                mock.patch.object(rebalancer.guards, 'inside', lambda *a: None), \
+                mock.patch.dict(rebalancer.SIGNERS, {'jupiter': str(rebalancer.ROOT / 'venues/jupiter/swap.mjs')}):
+            out, err = rebalancer._chain('balance', dex='jupiter')
+        self.assertEqual((out, err), ({'ok': True}, None))
+        self.assertNotIn('TELEGRAM_BOT_TOKEN', seen); self.assertNotIn('TELEGRAM_CHAT_ID', seen)
+        self.assertEqual(seen.get('KAMINO_RPC_KEY'), 'k')          # the rest of the environment passes through
+        self.assertIn('WALLET_SECRET_PATH', seen)
+
+
+class SwapMints(unittest.TestCase):
+    """The pre-open swap sells towards the tokens the pool RECORD names (a
+    DEX API's answer). When the signer's balance read names the pool's own
+    mints, they must agree, or nothing is swapped."""
+    REC = {'token_a': {'address': SOL}, 'token_b': {'address': USDC}}
+    OTHER = '4qQeZ5LwSz6HuupUu8jCtgXyW1mYQcNbFAW1sWZp89HL'
+
+    def run_it(self, b, rec=None, chain_name='solana'):
+        calls, notes = [], []
+        with mock.patch.object(rebalancer.config, 'REBALANCE_SWAP', True), \
+                mock.patch.object(rebalancer.config, 'DEPLOY_ALL', True), \
+                mock.patch.object(rebalancer.config, 'MAX_USD', 300.0), \
+                mock.patch.object(rebalancer.config, 'SIDE_CAP_FRACTION', 0.55), \
+                mock.patch.object(rebalancer.config, 'GAS_RESERVE_SOL', 0.05), \
+                mock.patch.object(rebalancer.config, 'CAPITAL_USD', 190.0), \
+                mock.patch.object(rebalancer.config, 'PAYOUT_ENABLED', False), \
+                mock.patch.object(rebalancer.config, 'WALLET_ID', None), \
+                mock.patch.object(rebalancer.config, 'CHAIN', chain_name), \
+                mock.patch.object(rebalancer, 'SWAP_FALLBACK', ''), \
+                mock.patch.object(rebalancer, 'chain', lambda *a, **k: (calls.append(a) or ({'sent': True, 'signature': 's'}, None))), \
+                mock.patch.object(rebalancer, 'notify', lambda ev, **kw: notes.append((ev, kw))), \
+                mock.patch.object(rebalancer, 'record_health', lambda *a, **k: None), \
+                mock.patch.object(rebalancer, 'save', lambda s: None), \
+                mock.patch.object(rebalancer.db, 'event', lambda *a: None), \
+                mock.patch.object(rebalancer.time, 'sleep', lambda s: None):
+            out = rebalancer.balance_wallet({'failures': 0}, dict(b), rec or self.REC)
+        return out, calls, notes
+
+    def lopsided(self, **more):
+        return dict({'balanceA': 0.2, 'balanceB': 200.0, 'price': 120.0, 'quoteUsd': 1.0, 'nativeSide': 'A'}, **more)
+
+    def swapped(self, calls):
+        return [c[0] for c in calls][:1] == ['rebalance']           # the swap, then the re-reads of the wallet
+
+    def test_a_read_without_mints_swaps_as_before(self):
+        _, calls, _ = self.run_it(self.lopsided())
+        self.assertTrue(self.swapped(calls))
+
+    def test_a_read_whose_mints_agree_swaps(self):
+        _, calls, _ = self.run_it(self.lopsided(mintA=SOL, mintB=USDC))
+        self.assertTrue(self.swapped(calls))
+        _, calls, _ = self.run_it(self.lopsided(mintA=USDC, mintB=SOL))          # order is not the point
+        self.assertTrue(self.swapped(calls))
+
+    def test_a_record_naming_other_tokens_swaps_nothing(self):
+        b = self.lopsided(mintA=SOL, mintB=self.OTHER)
+        out, calls, notes = self.run_it(b)
+        self.assertEqual(calls, [])
+        self.assertEqual(out, b)                                    # the wallet as it is, no failure counted
+        self.assertEqual(notes[-1][0], 'swap_skipped'); self.assertIn('does not hold', notes[-1][1]['reason'])
+        self.assertEqual(notes[-1][1]['chain'], sorted([SOL, self.OTHER]))
+
+    def test_a_record_without_two_addresses_swaps_nothing(self):
+        for rec in ({'token_a': {}, 'token_b': {'address': USDC}}, {'token_a': {'address': SOL}, 'token_b': None},
+                    {'token_a': {'address': 'not an address'}, 'token_b': {'address': USDC}}):
+            b = self.lopsided()
+            out, calls, notes = self.run_it(b, rec)
+            self.assertEqual(calls, []); self.assertEqual(out, b)
+            self.assertEqual(notes[-1][0], 'swap_skipped'); self.assertIn('no mints', notes[-1][1]['reason'])
+
+    def test_evm_addresses_compare_without_case(self):
+        a, b = '0x' + 'ab' * 20, '0x' + 'cd' * 20
+        rec = {'token_a': {'address': a}, 'token_b': {'address': b}}
+        _, calls, _ = self.run_it(self.lopsided(mintA='0x' + 'AB' * 20, mintB=b, nativeSide=None), rec, 'polygon')
+        self.assertTrue(self.swapped(calls))

@@ -123,6 +123,11 @@ TARGETS = {
     'unsettled_guard': ('rebalancer.py', ['unsettled_guard', 'settle_mark', 'wallet'], PY_TESTS('test_unsettled_guard')),
     'priority_fee': ('venues/jupiter/swap.mjs', ['swapRequestBody', 'priorityFeeLamports', 'verifyPriorityFee'],
                      NODE_TESTS('test_priority_fee.mjs', 'test_security.mjs')),
+    # Security review 2026-10-09: what a built swap may carry, what a signer's
+    # environment holds, what the pre-open swap sells towards, what is masked.
+    'swap_checks': ('venues/jupiter/swap.mjs', ['verifyQuote', 'verifyTxShape', 'verifyInstructions'], NODE_TESTS('test_security.mjs')),
+    'secrets': ('db.py', ['secret_values', 'redact'], PY_TESTS('test_rpc_key')),
+    'bridge_secrets': ('book_format.mjs', ['secretValues', 'redact'], NODE_TESTS('test_telegram_bridge.mjs')),
     'audit_checks': ('audit.py', ['check_idle', 'check_gas', 'check_equity', 'lookalike', 'classify_tx', 'check_flows', 'check_harvest',
                                   'payout_received', 'check_positions', 'check_owed', 'check_empty', 'check_fee_reads',
                                   'keep_mints', 'known_signatures'], PY_TESTS('test_audit', 'test_audit_runner')),
@@ -136,7 +141,7 @@ TARGETS = {
     'deploy_all': ('rebalancer.py', ['deployable_usd', 'capital', 'side_target_fraction', 'deposit_caps', 'balance_wallet'],
                    PY_TESTS('test_reopen_shape', 'test_deploy_all', 'test_audit_more.QuoteFallbacks', 'test_rebalancer.DepositCaps', 'test_payout.SwapGate',
                             'test_payout.SwapRetry', 'test_multi_loop', 'test_scaled', 'test_review_edges', 'test_jupiter_gate', 'test_health',
-                            'test_deploy_idle')),
+                            'test_deploy_idle', 'test_hardening.SwapMints')),
     'loop_hooks': ('rebalancer.py', ['janitor', 'run_audits'], PY_TESTS('test_audit.Hooks', 'test_audit_more.Hooks', 'test_audit_more.JanitorKeepsWhatComesBack', 'test_audit_more.JanitorReplan', 'test_audit_more.JanitorUnsignedClose')),
     'janitor_js': ('chains/solana/janitor.mjs', ['planClose', 'closeInstructions', 'verifyCloseTx'], NODE_TESTS('test_janitor.mjs')),
     'book_format': ('book_format.mjs', ['equityLine', 'lpLine', 'sinceStartLine'], NODE_TESTS('test_book_format.mjs')),
@@ -316,6 +321,8 @@ SQL_TARGETS = {'deposit_db', 'unichain_book', 'unichain_quote', 'band_profile', 
 # The report prints each survivor's key: copy it here with a reason. The line
 # number is not in the key, so an edit above a mutant keeps its entry valid.
 EQUIVALENT = {
+    ('swap_checks', 'verifyTxShape', '\\?\\? -> ||', "if (pid === undefined || !ALLOWED_PROGRAMS.has(pid)) throw new Error(`transaction calls ${pid ?? 'a program from a lookup table'}; refusing`);", 0):
+        'the refusal text only: pid is a base58 key or undefined, never the empty string that ?? and || tell apart',
     ('swing_loop', 'sell_left_behind', 'drop operand 0', 'if (SWAP_FALLBACK and SWAP_FALLBACK in SIGNERS and (err or not out)', 0):
         "the fallback off is '', and '' in SIGNERS is False: the next operand alone gives the same answer",
     ('open_leftover', 'deploy_idle', 'drop operand 0', "if 'balanceA' not in wbal or wbal.get('walletUsd') is None:", 0):
@@ -1289,7 +1296,11 @@ def worker_setup(i):
         shutil.rmtree(base)
     base.mkdir(parents=True)
     shutil.copytree(ROOT, base / 'lp_bot', ignore=shutil.ignore_patterns('__pycache__', 'research', '*.jsonl'))
-    (base / 'node_modules').symlink_to(ROOT.parent / 'node_modules')
+    # The Solana packages live in the nearest node_modules above the tree that
+    # holds them: the parent's for the live checkout, further up for a git
+    # worktree under it (the tree's own node_modules, viem, is in the copy).
+    (base / 'node_modules').symlink_to(next((p / 'node_modules' for p in ROOT.parents
+                                             if (p / 'node_modules' / '@solana').is_dir()), ROOT.parent / 'node_modules'))
     dbname = f'{DB_PREFIX}{i}_test'
     subprocess.run(['dropdb', '--if-exists', dbname], capture_output=True)
     r = subprocess.run(['createdb', '-T', DB_TEMPLATE, dbname], capture_output=True, text=True)
