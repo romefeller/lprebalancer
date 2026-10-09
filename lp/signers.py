@@ -18,20 +18,21 @@ from venues import api as venue_api
 from venues.jupiter import prices as jupiter_api
 from lp import books, capital, paths, tuning
 
-# One signer per DEX. A DEX without an entry can be scanned and recommended
+# One signer per DEX (venues/<venue>/), plus the chain-wide scripts
+# (chains/<chain>/). A DEX without an entry can be scanned and recommended
 # but never opened; `execute_dexes` must not name it.
 SIGNERS = {'orca': str(paths.ROOT / 'venues/orca/signer.mjs'),
            'meteora-dlmm': str(paths.ROOT / 'venues/meteora_dlmm/signer.mjs'),
            'raydium-clmm': str(paths.ROOT / 'venues/raydium_clmm/signer.mjs'),
            'byreal': str(paths.ROOT / 'venues/byreal/signer.mjs'),
            'pancakeswap-v3-solana': str(paths.ROOT / 'venues/pancakeswap_v3/signer.mjs'),
-           'aerodrome-slipstream': str(paths.ROOT / 'venues/aerodrome/signer.mjs'),  # Base: positions, swaps, payouts
-           'uniswap-v3-unichain': str(paths.ROOT / 'venues/uniswap_v3/signer.mjs'),  # Unichain: positions, swaps, payouts
-           'uniswap-v3-polygon': str(paths.ROOT / 'venues/uniswap_v3/signer.mjs'),   # Polygon: same signer, LPBOT_CHAIN=polygon
-           'jupiter': str(paths.ROOT / 'venues/jupiter/swap.mjs'),                   # swaps, not positions
-           'orca-swap': str(paths.ROOT / 'venues/orca/swap.mjs'),                    # the fallback swap, on an Orca whirlpool
-           'payout': str(paths.ROOT / 'chains/solana/payout.mjs'),                   # transfers to the profit wallet only
-           'janitor': str(paths.ROOT / 'chains/solana/janitor.mjs')}                 # closes empty token accounts
+           'aerodrome-slipstream': str(paths.ROOT / 'venues/aerodrome/signer.mjs'),   # Base
+           'uniswap-v3-unichain': str(paths.ROOT / 'venues/uniswap_v3/signer.mjs'),   # Unichain
+           'uniswap-v3-polygon': str(paths.ROOT / 'venues/uniswap_v3/signer.mjs'),    # Polygon, LPBOT_CHAIN=polygon
+           'jupiter': str(paths.ROOT / 'venues/jupiter/swap.mjs'),                    # swaps, not positions
+           'orca-swap': str(paths.ROOT / 'venues/orca/swap.mjs'),                     # the fallback swap
+           'payout': str(paths.ROOT / 'chains/solana/payout.mjs'),                    # to the profit wallet only
+           'janitor': str(paths.ROOT / 'chains/solana/janitor.mjs')}                  # closes empty token accounts
 LAST_CHAIN_ERROR = {}             # {'args', 'text'}: the last signer failure in full, for the events table
 SIGNER_ENV_WITHHELD = ('TELEGRAM_',)     # environment prefixes no signer gets (_chain)
 

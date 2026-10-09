@@ -5,7 +5,8 @@ import time
 import config
 import db
 import scanner
-from lp import board, books, capital, harvest, housekeeping, moves, paths, pauses, polls, regime, signers, swaps, tape, tuning
+from lp import (board, books, capital, harvest, housekeeping, moves, paths, pauses, polls, regime, signers,
+                swaps, tape, tuning)
 
 def profile_enabled():
     """Whether this profile is enabled now (config.enabled, read every poll:
