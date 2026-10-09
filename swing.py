@@ -38,14 +38,6 @@ FEED = ROOT / 'run' / 'swing' / 'events.jsonl'
 STATE = ROOT / 'run' / 'swing' / 'state.json'
 
 TICK_S = 60
-# CALM on the open pool keeps the swing on the closed pool (owner, 2026-10-09:
-# DJT in CALM must never happen). The bot writes the open pool's mode each
-# poll (rebalancer.publish_swing_regime). The swing returns to the open pool
-# only after CALM_CLEAR_S without CALM, so a mode that flickers does not move
-# the money back and forth. A view older than REGIME_MAX_AGE_S is no view.
-REGIME_FILE = 'swing_regime.json'
-CALM_CLEAR_S = 1800
-REGIME_MAX_AGE_S = 900
 REQUEST_AGAIN_S = 900             # a request the loop has not acted on is written again after this
 SWITCH_DEADLINE_S = 900           # the wanted pool must hold a position by then
 LEFTOVER_DEADLINE_S = 1200        # and nothing the old pair left may remain
@@ -99,26 +91,9 @@ CALENDARS = {
 }
 
 
-def open_calm(now_s, view, open_pool):
-    """Whether the open pool counts as CALM at `now_s`: its mode is CALM, or
-    it was CALM less than CALM_CLEAR_S ago. `view` is the bot's
-    swing_regime.json ({'pool', 'mode', 'at', 'last_calm_at'}); one about
-    another pool or older than REGIME_MAX_AGE_S is no view (False). Pure."""
-    if not view or view.get('pool') != open_pool:
-        return False
-    if now_s - float(view.get('at') or 0) > REGIME_MAX_AGE_S:
-        return False
-    if view.get('mode') == 'CALM':
-        return True
-    last = view.get('last_calm_at')
-    return last is not None and now_s - float(last) < CALM_CLEAR_S
-
-
 def wanted(now_utc, row):
-    """(dex, pool) the swing row should hold at `now_utc`: the open pool in
-    its market's session unless that pool is CALM (row['open_calm']), else
-    the closed pool. Pure."""
-    if CALENDARS[row['calendar']].is_open(now_utc, row['lead_s']) and not row.get('open_calm'):
+    """(dex, pool) the swing row should hold at `now_utc`. Pure."""
+    if CALENDARS[row['calendar']].is_open(now_utc, row['lead_s']):
         return row['open_dex'], row['open_pool']
     return row['closed_dex'], row['closed_pool']
 
@@ -193,14 +168,6 @@ def left_behind(profile):
         return []
 
 
-def regime_view(profile):
-    """The bot's swing_regime.json for the profile, None when unreadable."""
-    try:
-        return json.loads((ROOT / 'run' / profile / REGIME_FILE).read_text())
-    except Exception:
-        return None
-
-
 def load_state():
     try:
         return json.loads(STATE.read_text())
@@ -223,7 +190,6 @@ def tick(row, state, now_utc, dry=False):
     db.set_context(profile, row['wallet_id'])
     if not row['profile_enabled']:
         return None
-    row = dict(row, open_calm=open_calm(now_utc.timestamp(), regime_view(profile), row['open_pool']))
     action, want = decide(now_utc, row, state.get('request'))
     if action == 'request':
         migrate = ROOT / 'run' / profile / 'MIGRATE'
@@ -234,9 +200,8 @@ def tick(row, state, now_utc, dry=False):
         migrate.write_text(f'{want[0]} {want[1]}\n')
         state.update(request={'pool': want[1], 'dex': want[0], 'at': now_utc.timestamp(), 'from': row['held_pool']},
                      told=[])
-        market_open = CALENDARS[row['calendar']].is_open(now_utc, row['lead_s'])
         feed(profile, 'SWING', to=f'{want[0]} {want[1]}', held=row['held_pool'],
-             market='open' if market_open else 'closed', calm=bool(row['open_calm']))
+             market='open' if want[1] == row['open_pool'] else 'closed')
         return action
     request = state.get('request')
     if not dry and request and not request.get('arrived') and row['position_pool'] == request['pool']:
@@ -246,8 +211,7 @@ def tick(row, state, now_utc, dry=False):
             state['told'].append(kind)
             feed(profile, kind, reason=why)
     if dry:
-        print(f'{profile}: hold {want[0]} {want[1]} (position on {row["position_pool"]}, '
-              f'open pool calm: {row["open_calm"]})', flush=True)
+        print(f'{profile}: hold {want[0]} {want[1]} (position on {row["position_pool"]})', flush=True)
     return action
 
 
