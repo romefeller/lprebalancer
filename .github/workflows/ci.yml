@@ -30,12 +30,12 @@ jobs:
       # libpq reads PGHOST, PGUSER and PGPASSWORD: the DSN names the database only
       LPBOT_TEST_DSN: dbname=rebalancer_test
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.13'
           cache: pip
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: '24'
           cache: npm

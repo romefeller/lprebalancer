@@ -2,3 +2,4 @@
 numpy==2.5.3
 psycopg2-binary==2.9.13
 hypothesis==6.168.2
+scipy==1.18.1          # tests only: the risk metrics are checked against it
