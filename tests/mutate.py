@@ -363,7 +363,7 @@ EQUIVALENT = {
         'token_a is never an empty string (same reason as pricedView)',
     ('pause_loop', 'macro_view', 'const 0->1', "if state is None or time.time() - state.get('macro_unread_told', 0) >= MACRO_UNREAD_TELL_S:", 0):
         'never told: the clock is decades past both 0 and 1, far beyond an hour',
-    ('pause_loop', 'macro_view', 'const 0->1', "if state is not None and time.time() - state.get('macro_calendar_checked', 0) >= 86400:", 0):
+    ('pause_loop', 'macro_view', 'const 0->1', "if state is not None and time.time() - state.get('macro_calendar_checked', 0) >= DAY_S:", 0):
         'never checked: the clock is decades past both 0 and 1, far beyond a day',
     ('pause_loop', 'hot_paused', 'const 0->1', "p['until'] = max(p.get('until') or 0, m['until'])", 0):
         'a window end is an epoch time, decades past both 0 and 1: max() picks it either way',
@@ -423,9 +423,9 @@ EQUIVALENT = {
         'an empty cache asked at t = 0 or t = 1: both are decades past the refresh',
     ('surrogate_overlay', '_with_surrogate', 'flip bool', "print(f'surrogate tape failed: {type(e).__name__}: {e}', flush=True)", 0):
         'print flush only',
-    ('surrogate_overlay', '_with_surrogate', 'swap GtE->Gt', 's = tuple(c[s[0] >= now - SURROGATE_LOOKBACK_S - 3600] for c in s)   # the last day only', 0):
+    ('surrogate_overlay', '_with_surrogate', 'swap GtE->Gt', 's = tuple(c[s[0] >= now - SURROGATE_LOOKBACK_S - HOUR_S] for c in s)   # the last day only', 0):
         'the trim is an hour beyond the fill window: a bar at its edge is never used',
-    ('surrogate_overlay', '_with_surrogate', 'const 3600->3601', 's = tuple(c[s[0] >= now - SURROGATE_LOOKBACK_S - 3600] for c in s)   # the last day only', 0):
+    ('surrogate_overlay', '_with_surrogate', 'const 3600->3601', 's = tuple(c[s[0] >= now - SURROGATE_LOOKBACK_S - HOUR_S] for c in s)   # the last day only', 0):
         'the trim is an hour beyond the fill window: a bar at its edge is never used',
     ('surrogate_overlay', 'regime_view', 'const 0->1', 'hold_left = 0', 0):
         'hold_left is read only in STALE mode on a fresh tape, where it is assigned first',
@@ -490,20 +490,20 @@ EQUIVALENT = {
     ('rewards_measured', 'distribute_rewards', 'const 0.0->1.0', "amt = min(float((out or {}).get('amount') or 0.0), float(due.get(m, 0.0)))", 1):
         'txfees.inflow answers every mint it is asked, so due holds every m of the loop: the default is never read',
     # Re-keyed 2026-10-02 (the multi-pool branch rewrote these lines; each reason checked again)
-    ('resilience', 'chain', 'const 420->421', 'def chain(*args, dex=None, timeout=420, extra_env=None, record=True):', 0):
+    ('resilience', 'chain', 'const 420->421', 'def chain(*args, dex=None, timeout=SIGNER_TIMEOUT_S, extra_env=None, record=True):', 0):
         'one second more on a 420 s signer timeout',
-    ('resilience', 'deploy_idle', 'swap Lt->LtE', "state['idle_deploys'] = [t for t in (state.get('idle_deploys') or []) if now - t < 86400] + [now]; save(state)", 0):
+    ('resilience', 'deploy_idle', 'swap Lt->LtE', "state['idle_deploys'] = [t for t in (state.get('idle_deploys') or []) if now - t < DAY_S] + [now]; save(state)", 0):
         'only a deploy exactly 86400.0 s old differs: a float clock never lands there',
     # Re-keyed 2026-10-05 (the window and the gap moved into move_gap_ok; each reason checked again)
-    ('replay', 'move_gap_ok', 'const 86400->86401', 'recent = [t for t in calm_times if now - t < 86400]', 0):
+    ('replay', 'move_gap_ok', 'const 86400->86401', 'recent = [t for t in calm_times if now - t < DAY_S]', 0):
         'a move older than a day passes the gap anyway: keeping it in the window changes nothing',
-    ('replay', 'move_gap_ok', 'const 86400->172800', 'recent = [t for t in calm_times if now - t < 86400]', 0):
+    ('replay', 'move_gap_ok', 'const 86400->172800', 'recent = [t for t in calm_times if now - t < DAY_S]', 0):
         'a move older than a day passes the gap anyway: keeping it in the window changes nothing',
-    ('replay', 'move_gap_ok', 'swap Lt->LtE', 'recent = [t for t in calm_times if now - t < 86400]', 0):
+    ('replay', 'move_gap_ok', 'swap Lt->LtE', 'recent = [t for t in calm_times if now - t < DAY_S]', 0):
         'only a move exactly 86400.0 s old differs: a float clock never lands there',
-    ('replay', 'poll_seen', 'swap Lt->LtE', "'gates': {'calm_times': [t for t in state.get('calm_times', []) if now - t < 86400],", 0):
+    ('replay', 'poll_seen', 'swap Lt->LtE', "'gates': {'calm_times': [t for t in state.get('calm_times', []) if now - t < DAY_S],", 0):
         'only a move exactly 86400.0 s old differs: a float clock never lands there',
-    ('replay', 'poll_seen', 'const 86400->86401', "'gates': {'calm_times': [t for t in state.get('calm_times', []) if now - t < 86400],", 0):
+    ('replay', 'poll_seen', 'const 86400->86401', "'gates': {'calm_times': [t for t in state.get('calm_times', []) if now - t < DAY_S],", 0):
         'a move one second past a day is past the gap and out of moves_left: recording it changes no verdict',
     ('resilience', 'voluntary_move_allowed', 'const 0->1', "return (move_gap_ok(state.get('calm_times', []), state.get('last_rebalance', 0), now, config.CALM_MIN_GAP)", 0):
         'a last rebalance at epoch 0 or 1 is decades past the gap',

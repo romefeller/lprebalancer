@@ -104,6 +104,27 @@ REOPT = RUN / 'REOPT'           # run the board and band review on the next poll
 MIGRATE = RUN / 'MIGRATE'       # "<dex> <pool>": move there on the next poll
 CLOSE = RUN / 'CLOSE'           # a disabled profile: harvest and close its position, open nothing
 engine.use_network(config.CAPS['gecko_network'])
+# --- time spans and tuning constants ---------------------------------------
+HOUR_S = 3600
+DAY_S = 86400
+SIGNER_TIMEOUT_S = 420           # one signer call, sends and confirmations included
+POOL_RECORD_TTL_S = HOUR_S       # a pool record is refetched after this (reward programs change)
+BARS_PER_DAY = 288               # five-minute bars
+GECKO_PAGE_BARS = 1000           # GeckoTerminal's OHLCV page
+TAPE_REORIENT_JUMP = 0.15        # a stored tape this far from the live price is the other orientation: rebuild
+REGIME_THETA_MIN, REGIME_THETA_MAX = 0.05, 0.40   # the touch threshold after the liquidity factor
+LIQ_WINDOW_BARS = 72             # six hours of five-minute bars
+TOUCH_CALIBRATION_EVERY_S = HOUR_S
+HOT_PAUSE_MIN_COVERAGE = 0.8     # fee samples must span this share of the hot-pause window
+PENDING_REOPEN_MAX_S = DAY_S     # a CALM reopen intent older than this is dropped
+PENDING_REOPEN_WIDE_S = 1800     # after this without fresh data, reopen at the widest width
+BALANCED_SIDE_SHARE = 0.97       # a side holding this share of its target needs no swap
+BALANCED_SPREAD = 0.04           # nor two sides this close in value
+REWARD_PRICE_MAX_AGE_S = 6 * HOUR_S
+REOPEN_MAX_BAR_AGE_S = 900       # a tight reopen needs a bar this fresh
+BUSY_HOUR_MAX_P_EXIT = 0.9       # in a busy hour, a proactive move waits unless the exit is this likely
+REOPT_RETRY_S = 1800             # a deferred re-optimisation comes back after this, not a full interval
+
 # One signer per DEX. A DEX without an entry can be scanned and recommended
 # but never opened; `execute_dexes` must not name it.
 SIGNERS = {'orca': str(ROOT / 'venues/orca/signer.mjs'),
@@ -441,7 +462,7 @@ def probe_breakers(now=None):
         return None
 
 
-def chain(*args, dex=None, timeout=420, extra_env=None, record=True):
+def chain(*args, dex=None, timeout=SIGNER_TIMEOUT_S, extra_env=None, record=True):
     """Call the signer for `dex` (the active pool's by default).
     Returns (parsed_json, tidy_error). Every write feeds its breaker
     (health.py): the venue's for open/close/harvest, 'swap' for the swap.
@@ -667,7 +688,7 @@ def locked_chain(*args, dex, timeout, extra_env):
         return None, why
 
 
-def _chain(*args, dex=None, timeout=420, extra_env=None):
+def _chain(*args, dex=None, timeout=SIGNER_TIMEOUT_S, extra_env=None):
     script = SIGNERS.get(dex or config.DEX)
     if not script or not pathlib.Path(script).exists():
         return None, f'no signer for {dex or config.DEX}'
@@ -1207,7 +1228,7 @@ def forecast_for(status):
     if not c:
         return None
     opened = db.position_opened(status['positionMint'])
-    hours = ((db.now() - opened).total_seconds() / 3600) if opened else None
+    hours = ((db.now() - opened).total_seconds() / HOUR_S) if opened else None
     return engine.band_forecast(c[1], status['price'], status['lowerPrice'], status['upperPrice'],
                                 open_price=db.position_open_price(status['positionMint']),
                                 hours_alive=hours, horizon=config.PROACTIVE_HORIZON,
@@ -1242,7 +1263,7 @@ def pool_record():
     """The held pool's record, cached for an hour (reward programs change)."""
     key = (config.DEX, config.POOL)
     t, rec = _POOL_REC.get(key, (0, None))
-    if rec is None or time.time() - t > 3600:
+    if rec is None or time.time() - t > POOL_RECORD_TTL_S:
         fresh = dexes.pool(config.DEX, config.POOL)
         if fresh:
             rec = fresh
@@ -1536,7 +1557,7 @@ TAPE5_REFRESH = 240             # one GeckoTerminal call per five-minute bar, at
 
 
 def tape_bars():
-    return max(288, int(config.REGIME_TAPE_DAYS) * 288)
+    return max(BARS_PER_DAY, int(config.REGIME_TAPE_DAYS) * BARS_PER_DAY)
 
 
 def _merge(bars_list):
@@ -1570,10 +1591,10 @@ def tape5(pool, price, pair=None):
         try:
             # an hour of slack: the newest stored bar can trail the clock, and
             # _merge trims to the window anyway
-            b = db.tape_load(pool, time.time() - window_s - 3600)
+            b = db.tape_load(pool, time.time() - window_s - HOUR_S)
         except Exception:
             b = None
-        if b is not None and abs(b[4][-1] / price - 1) > 0.15:
+        if b is not None and abs(b[4][-1] / price - 1) > TAPE_REORIENT_JUMP:
             b = None                           # another orientation or stale rows: rebuild
     scale = UI_SCALE.get(pool, 1.0)
     try:
@@ -1582,7 +1603,7 @@ def tape5(pool, price, pair=None):
         fresh = None
     merged = _merge([b, fresh])
     tries = 0
-    pages = int(np.ceil(tape_bars() / 1000)) + 1
+    pages = int(np.ceil(tape_bars() / GECKO_PAGE_BARS)) + 1
     while merged is not None and len(merged[0]) < tape_bars() and tries < pages:
         try:
             # The orientation of a historical page is checked against the bar
@@ -1607,7 +1628,7 @@ def tape5(pool, price, pair=None):
             # prunes, and keeping only its own cut the others' tapes to a day
             # (2026-10-02: mu-usdc's prune left sol-usdc 287 of 8640 bars,
             # so a restart would decide on a one-day tape).
-            db.tape_prune_other_pools(db.config_pools() | {pool}, time.time() - 86400)
+            db.tape_prune_other_pools(db.config_pools() | {pool}, time.time() - DAY_S)
         except Exception:
             pass
         # memory: this pool, and at most one other
@@ -1627,7 +1648,7 @@ def tape_source(ts, filled_ts, now, name, fresh, quiet_ts=()):
     """Where the last hour's bars came from, for the book: 'Gecko', 'Binance'
     (every bar of the hour), 'Gecko+Binance', or 'none' when the tape is
     stale. Pure."""
-    hour = [t for t in (ts if ts is not None else []) if t >= now - 3600 - calm.BAR_SECONDS]
+    hour = [t for t in (ts if ts is not None else []) if t >= now - HOUR_S - calm.BAR_SECONDS]
     filled = set(int(t) for t in filled_ts)
     n_s = sum(1 for t in hour if int(t) in filled)
     label = ('none' if not fresh else 'Gecko' if n_s == 0 else name if n_s == len(hour) else f'Gecko+{name}')
@@ -1750,7 +1771,7 @@ def _with_surrogate(pool, bars, price, pair=None):
             got_name, got = calm.surrogate_5m(pair, gaps[0], price, ref=bars)
             if got is not None:
                 name, s = got_name, _merge([s, got])
-                s = tuple(c[s[0] >= now - SURROGATE_LOOKBACK_S - 3600] for c in s)   # the last day only
+                s = tuple(c[s[0] >= now - SURROGATE_LOOKBACK_S - HOUR_S] for c in s)   # the last day only
             for other in [p for p in _SURR if p != pool]:
                 _SURR.pop(other, None)
             _SURR[pool] = (now, name, s)
@@ -1776,7 +1797,7 @@ IDLE_ADDS_PER_DAY = 24            # adds (signer `increase`) of idle money, at m
 def idle_deploys_left(times, now, per_day=IDLE_DEPLOYS_PER_DAY):
     """Idle deploys still allowed in the 24 h before `now`: `per_day` of them
     (re-centres by default; adds where the venue can add). Pure."""
-    return max(0, per_day - sum(1 for t in (times or []) if now - t < 86400))
+    return max(0, per_day - sum(1 for t in (times or []) if now - t < DAY_S))
 
 
 def adds_open_leftover():
@@ -1850,7 +1871,7 @@ def deploy_idle(state, status, wbal, rv, price):
             notify('deploy_idle_deferred', idle_usd=round(idle, 2), reason=why)
             db.event('deploy_idle_deferred', f'${idle:.2f} idle: {why}')
         return False
-    state['idle_deploys'] = [t for t in (state.get('idle_deploys') or []) if now - t < 86400] + [now]; save(state)
+    state['idle_deploys'] = [t for t in (state.get('idle_deploys') or []) if now - t < DAY_S] + [now]; save(state)
     if config.DEX in INCREASE_DEXES:
         return add_idle(state, status, wbal, idle, price)
     k = rv['choice'] if rv else math.sqrt(status['upperPrice'] / status['lowerPrice'])
@@ -2041,7 +2062,7 @@ def voluntary_move_allowed(state):
 def move_gap_ok(calm_times, last_rebalance, now, min_gap):
     """Whether `min_gap` seconds have passed since the last move: the last
     rebalance or a voluntary move of the last 24 h. Pure."""
-    recent = [t for t in calm_times if now - t < 86400]
+    recent = [t for t in calm_times if now - t < DAY_S]
     return now - max([last_rebalance] + recent) >= min_gap
 
 
@@ -2128,7 +2149,7 @@ def calm_budget_left(state):
 
 def moves_left(calm_times, now, max_moves):
     """Voluntary moves still allowed in the 24 h before `now`. Pure."""
-    used = [t for t in calm_times if now - t < 86400]
+    used = [t for t in calm_times if now - t < DAY_S]
     return max(max_moves - len(used), 0)
 
 
@@ -2178,6 +2199,13 @@ def track_tape_source(state, src):
     notify('TAPE_SOURCE', source=src['source'], was=was, kind=kind, detail=detail)
 
 
+def regime_theta(factor):
+    """The touch threshold for the regime's width choice: the configured one
+    times the pool's liquidity factor, kept inside [REGIME_THETA_MIN,
+    REGIME_THETA_MAX]."""
+    return min(max(config.REGIME_THRESHOLD * factor, REGIME_THETA_MIN), REGIME_THETA_MAX)
+
+
 def regime_view(state, status):
     """calm.regime_view for the held position, or None when regime mode is
     off or the five-minute tape is unavailable."""
@@ -2188,7 +2216,7 @@ def regime_view(state, status):
     if bars is None:
         return None
     lq = liquidity_view(pool, config.DEX, bars)
-    theta = min(max(config.REGIME_THRESHOLD * lq['factor'], 0.05), 0.40)
+    theta = regime_theta(lq['factor'])
     v = calm.regime_view(bars, status['price'], status['lowerPrice'], status['upperPrice'],
                          widths=config.REGIME_WIDTHS, horizon_minutes=config.REGIME_HORIZON,
                          threshold=theta)
@@ -2291,9 +2319,9 @@ def liquidity_view(pool, dex, bars):
         out['readings'] = summ['readings']
         if summ.get('tvl_then') and out['tvl_usd']:
             out['tvl_change_24h'] = round(float(out['tvl_usd']) / summ['tvl_then'] - 1, 4)
-    if bars is not None and len(bars[5]) >= 288:
+    if bars is not None and len(bars[5]) >= BARS_PER_DAY:
         v = np.asarray(bars[5], dtype=float)
-        w = 72                                   # six hours of five-minute bars
+        w = LIQ_WINDOW_BARS
         recent = float(v[-w:].sum())
         sums = np.convolve(v, np.ones(w), mode='valid')
         med = float(np.median(sums))            # 288 bars give 217 sums
@@ -2325,7 +2353,7 @@ def track_touch_forecasts(state, rv, status):
             db.record_touch_forecast(pool, status['price'], rv['horizon_minutes'], rv['threshold'],
                                      rv['choice'], rv['probs'])
             db.resolve_touch_forecasts(pool)
-        if time.time() - state.get('last_touch_calibration', 0) >= 3600:
+        if time.time() - state.get('last_touch_calibration', 0) >= TOUCH_CALIBRATION_EVERY_S:
             state['last_touch_calibration'] = time.time(); save(state)
             LAST_REGIME['calibration'] = db.touch_calibration(7, pool)
     except Exception as e:
@@ -2561,7 +2589,7 @@ def regime_choice_now(pool, price, pair=None):
         f = liquidity_view(pool, dex, bars)['factor'] if dex else 1.0
     except Exception:
         f = 1.0
-    theta = min(max(config.REGIME_THRESHOLD * f, 0.05), 0.40)
+    theta = regime_theta(f)
     v = calm.regime_view(bars, price, price / 1.01, price * 1.01, widths=config.REGIME_WIDTHS,
                          horizon_minutes=config.REGIME_HORIZON, threshold=theta)
     if not v or not calm.tape_fresh(bars[0], time.time()):
@@ -2637,7 +2665,7 @@ def hot_pause_view(pool, usd_a, usd_b, choice):
     hours = config.HOT_PAUSE_FG_HOURS
     try:
         span = db.fee_state_span(pool, hours=max(int(round(hours)), 1))
-        if not span or span[2] < 0.8 * hours * 3600:
+        if not span or span[2] < HOT_PAUSE_MIN_COVERAGE * hours * HOUR_S:
             return out
         first, last, _ = span
         t0, t1 = first['ts'].timestamp(), last['ts'].timestamp()
@@ -2680,10 +2708,10 @@ def macro_view(state=None):
     if not config.MACRO_PAUSE_ENABLED:
         return None
     try:
-        if state is not None and time.time() - state.get('macro_calendar_checked', 0) >= 86400:
+        if state is not None and time.time() - state.get('macro_calendar_checked', 0) >= DAY_S:
             state['macro_calendar_checked'] = time.time(); save(state)
             nxt = db.macro_next_ts()
-            if nxt is None or nxt - time.time() > MACRO_CALENDAR_DAYS * 86400:
+            if nxt is None or nxt - time.time() > MACRO_CALENDAR_DAYS * DAY_S:
                 notify('macro_calendar_empty', reason=f'no macro event listed in the next {MACRO_CALENDAR_DAYS} days: '
                                                       'add the next FOMC dates to rebalancer.macro_events')
         m = db.macro_event_near(config.MACRO_PAUSE_BEFORE_S, config.MACRO_PAUSE_AFTER_S)
@@ -2891,7 +2919,7 @@ def resume_reopen(state):
     pending = state.get('pending_reopen')
     if not pending:
         return False
-    if time.time() - pending.get('started_at', 0) > 86400:
+    if time.time() - pending.get('started_at', 0) > PENDING_REOPEN_MAX_S:
         state.pop('pending_reopen', None); save(state)
         notify('idle', reason='dropped a CALM reopen intent older than a day')
         return False
@@ -2907,7 +2935,7 @@ def resume_reopen(state):
             moves.append(pending['started_at'])
         pending['closed'] = True
         save(state)
-    if config.REGIME_ENABLED and time.time() - pending.get('started_at', 0) > 1800:
+    if config.REGIME_ENABLED and time.time() - pending.get('started_at', 0) > PENDING_REOPEN_WIDE_S:
         # Half an hour without fresh data: open at the widest regime width
         # rather than leave the capital idle for a day (review, 2026-09-26).
         reopen(state, pending['reason'], band=config.REGIME_WIDTHS[-1])
@@ -2986,7 +3014,7 @@ def balance_wallet(state, bal, rec, share_a=None):
     # token A and the rest in token B; a centred one each side's target.
     if share_a is None:
         frac_a = frac_b = side_target_fraction()
-        if min(usd_a, usd_b) >= C * frac_a * 0.97 or abs(usd_a - usd_b) <= 0.04 * (usd_a + usd_b):
+        if min(usd_a, usd_b) >= C * frac_a * BALANCED_SIDE_SHARE or abs(usd_a - usd_b) <= BALANCED_SPREAD * (usd_a + usd_b):
             return bal
     else:
         # within 2 points of the band's share: the swap script's own tolerance
@@ -3290,7 +3318,7 @@ def sample_v3_fee_growth(state):
 _REWARD_PX = {}                 # mint -> (fetched_at, usd): the last good price
 
 
-def reward_prices(mints, max_age=6 * 3600):
+def reward_prices(mints, max_age=REWARD_PRICE_MAX_AGE_S):
     """Jupiter prices for reward mints, falling back to the last good price
     (up to six hours old) when the free API rate-limits: a missing price
     valued PancakeSwap's CAKE at nothing in the first live ranking."""
@@ -3319,7 +3347,7 @@ def venue_income(pool, usd_a, usd_b, band=1.01):
     inc = dexes.band_income(first, last, secs, band, usd_a, usd_b, rw_usd)
     if not inc:
         return None
-    return dict(inc, total_pct_day=inc['fee_pct_day'] + inc['reward_pct_day'], hours=round(secs / 3600, 1))
+    return dict(inc, total_pct_day=inc['fee_pct_day'] + inc['reward_pct_day'], hours=round(secs / HOUR_S, 1))
 
 
 def venue_view(price, quote_usd=1.0):
@@ -3668,7 +3696,7 @@ def reopen(state, reason, band=None, recovering=False, exit_side=0):
             price = bal['price']
             v = calm_view(state, {'price': price, 'whirlpool': pool,
                                  'lowerPrice': price / band, 'upperPrice': price * band})
-            if not v or v['bar_age_s'] > 900 or v.get('p_touch_fresh') is None:
+            if not v or v['bar_age_s'] > REOPEN_MAX_BAR_AGE_S or v.get('p_touch_fresh') is None:
                 notify('idle', reason='CALM recovery waits for fresh five-minute data')
                 return False
             if not v['calm'] or v['p_touch_fresh'] >= config.CALM_THRESHOLD:
@@ -3787,8 +3815,8 @@ def rebalance(state, status, reason, target=None, band=None, calm_move=False, ex
     at the US open and close) never waits for the gap either; the ceilings
     hold."""
     now = time.time()
-    recent = [t for t in state['rebalance_times'] if now - t < 86400]
-    calm_recent = [t for t in state.get('calm_times', []) if now - t < 86400]
+    recent = [t for t in state['rebalance_times'] if now - t < DAY_S]
+    calm_recent = [t for t in state.get('calm_times', []) if now - t < DAY_S]
     last_any = max([state['last_rebalance']] + calm_recent)
     # An exit under regime mode never waits: out of range earns nothing.
     gap = 0 if (exit_move and config.REGIME_ENABLED) or operator else \
@@ -3966,7 +3994,7 @@ def poll_seen(state, status, rv, cv, fc):
             'regime': {k: rv.get(k) for k in SEEN_REGIME} if rv else None,
             'calm': {k: cv.get(k) for k in SEEN_CALM} if cv else None,
             'forecast': {'act': bool(fc.get('act')), 'p_exit_horizon': fc.get('p_exit_horizon')} if fc else None,
-            'gates': {'calm_times': [t for t in state.get('calm_times', []) if now - t < 86400],
+            'gates': {'calm_times': [t for t in state.get('calm_times', []) if now - t < DAY_S],
                       'last_rebalance': state.get('last_rebalance', 0),
                       'last_harvest': state.get('last_harvest', 0),
                       'breaker_ok': bool(health.allowed(f'venue:{config.DEX}', now)[0]),
@@ -4006,7 +4034,7 @@ def poll_verdict(seen):
     if cact and voluntary:
         return dict(out, act=CALM_ACTS[cact], band=None if cact == 'widen' else k['calm_band'])
     if fc and fc['act'] and k['proactive_threshold']:
-        if g['busy'] and (fc['p_exit_horizon'] or 0) < 0.9:
+        if g['busy'] and (fc['p_exit_horizon'] or 0) < BUSY_HOUR_MAX_P_EXIT:
             out['deferred'] = True
         else:
             return dict(out, act='proactive')
@@ -4458,7 +4486,7 @@ def main():
                                reason=f"hour {o['hour_utc']:02d} UTC runs {o['now_x']}x the average; "
                                       f"waiting for a quiet hour (trough {o['trough_hour_utc']:02d} UTC)")
                         # come back next poll cycle rather than in six hours
-                        state['last_reopt'] = time.time() - config.REOPT_INTERVAL + 1800; save(state)
+                        state['last_reopt'] = time.time() - config.REOPT_INTERVAL + REOPT_RETRY_S; save(state)
                     elif gain >= config.REOPT_MIN_GAIN:
                         notify('REBAND', improvement_pct=round(gain * 100),
                                old_band=f'+/-{held_pct}%',
