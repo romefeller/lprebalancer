@@ -222,7 +222,8 @@ class Gate(unittest.TestCase):
         sw = (ROOT / 'swap_jupiter.mjs').read_text()
         jf = sw[sw.index('async function jfetch'):]
         self.assertLess(jf.index('await waitTurn()'), jf.index('await fetch(url, init)'))
-        for f in ROOT.glob('*.mjs'):
+        not_ours = {'node_modules', '.git', '.claude'}             # dependencies and agent worktrees
+        for f in (f for f in ROOT.rglob('*.mjs') if not not_ours & set(f.relative_to(ROOT).parts)):
             src = f.read_text()
             if 'lite-api.jup.ag' in src and f.name not in ('jupiter_gate.mjs',):
                 self.assertIn('waitTurn', src, f'{f.name} talks to Jupiter without the gate')

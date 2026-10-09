@@ -38,3 +38,6 @@ node_modules/
 
 # --- migrated away, kept locally --------------------------------------------
 .archive/
+
+# --- agent worktrees ----------------------------------------------------------
+.claude/

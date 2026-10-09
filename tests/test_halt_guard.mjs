@@ -64,3 +64,34 @@ for (const [script, args] of Object.entries(WRITES)) {
     assert.match(r.stderr, /HALT present: operator: this profile only/, r.stderr);
   });
 }
+
+// The global HALT: the bot root's HALT stops every write script, wherever the
+// script lives in the tree. Run on a copy of the tree, never on the live one:
+// a HALT written there would stop the real bot.
+const WRITES_ALL = { ...WRITES, 'signer_uniswap.mjs': ['open', EVM, '1', '2', '1', '1', '--execute'] };
+const SKIP_IN_COPY = new Set(['node_modules', '.git', '.claude', 'run', 'tests', '__pycache__']);
+
+function treeCopy() {
+  const dest = tmp('halt-tree-');
+  for (const entry of fs.readdirSync(ROOT)) {
+    if (SKIP_IN_COPY.has(entry) || entry === 'HALT') continue;
+    fs.cpSync(path.join(ROOT, entry), path.join(dest, entry), { recursive: true });
+  }
+  fs.symlinkSync(path.join(ROOT, 'node_modules'), path.join(dest, 'node_modules'));
+  return dest;
+}
+
+test('the bot root HALT refuses every write script', () => {
+  const copy = treeCopy();
+  fs.writeFileSync(path.join(copy, 'HALT'), 'operator: every profile');
+  for (const [script, args] of Object.entries(WRITES_ALL)) {
+    const r = spawnSync('node', [path.join(copy, script), ...args], {
+      encoding: 'utf8', timeout: 60_000,
+      env: { PATH: process.env.PATH, WALLET_SECRET_PATH: '/nonexistent/key', LPBOT_CHAIN: 'polygon',
+             SOLANA_RPC_URL: 'http://127.0.0.1:9', LPBOT_RPC: 'http://127.0.0.1:9', LPBOT_POOL: POOL,
+             LPBOT_PROFIT_WALLET: USDC, LPBOT_PROFIT_WALLET_PIN: USDC },
+    });
+    assert.notEqual(r.status, 0, `${script}: ${r.stdout}`);
+    assert.match(r.stderr, /HALT present: operator: every profile/, `${script}: ${r.stderr}`);
+  }
+});
