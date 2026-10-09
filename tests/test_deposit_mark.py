@@ -17,7 +17,9 @@ from hypothesis import given, settings, strategies as hs
 import _fixtures
 import config      # noqa: E402
 import db          # noqa: E402
-import rebalancer  # noqa: E402
+import lp.moves  # noqa: E402
+import lp.paths  # noqa: E402
+import time  # noqa: E402
 
 
 class OpenedMark(unittest.TestCase):
@@ -28,9 +30,9 @@ class OpenedMark(unittest.TestCase):
         def read(mint=None):
             reads.append(mint)
             return next(seq), None
-        with mock.patch.object(rebalancer, 'read_status', read), \
-                mock.patch.object(rebalancer.time, 'sleep', lambda s: sleeps.append(s)):
-            return rebalancer.opened_mark('NEW'), reads, sleeps
+        with mock.patch.object(lp.signers, 'read_status', read), \
+                mock.patch.object(time, 'sleep', lambda s: sleeps.append(s)):
+            return lp.moves.opened_mark('NEW'), reads, sleeps
 
     def test_the_first_read_that_shows_the_position(self):
         usd, reads, sleeps = self.go([{'positionMint': 'NEW', 'positionUsd': 179.18}])
@@ -41,7 +43,7 @@ class OpenedMark(unittest.TestCase):
         for first in miss:
             usd, reads, sleeps = self.go([first, {'positionMint': 'NEW', 'positionUsd': 179.18}])
             self.assertEqual(usd, 179.18, first)
-            self.assertEqual(reads, ['NEW', 'NEW']); self.assertEqual(sleeps, [rebalancer.OPEN_MARK_PAUSE_S])
+            self.assertEqual(reads, ['NEW', 'NEW']); self.assertEqual(sleeps, [lp.moves.OPEN_MARK_PAUSE_S])
 
     def test_unpriced_is_asked_again(self):
         usd, reads, _ = self.go([{'positionMint': 'NEW'}, {'positionMint': 'NEW', 'positionUsd': 5.0}])
@@ -50,26 +52,26 @@ class OpenedMark(unittest.TestCase):
     def test_never_shown_is_none_after_the_tries(self):
         usd, reads, sleeps = self.go([None] * 10)
         self.assertIsNone(usd)
-        self.assertEqual(len(reads), rebalancer.OPEN_MARK_TRIES)
-        self.assertEqual(sleeps, [rebalancer.OPEN_MARK_PAUSE_S] * (rebalancer.OPEN_MARK_TRIES - 1))
+        self.assertEqual(len(reads), lp.moves.OPEN_MARK_TRIES)
+        self.assertEqual(sleeps, [lp.moves.OPEN_MARK_PAUSE_S] * (lp.moves.OPEN_MARK_TRIES - 1))
 
     @settings(max_examples=60, deadline=None)
     @given(hs.integers(min_value=0, max_value=5), hs.floats(min_value=0, max_value=1e4, allow_nan=False))
     def test_property_the_mark_after_k_misses(self, k, usd):
         got, reads, _ = self.go([None] * k + [{'positionMint': 'NEW', 'positionUsd': usd}])
-        if k < rebalancer.OPEN_MARK_TRIES:
+        if k < lp.moves.OPEN_MARK_TRIES:
             self.assertEqual((got, len(reads)), (usd, k + 1))
         else:
-            self.assertEqual((got, len(reads)), (None, rebalancer.OPEN_MARK_TRIES))
+            self.assertEqual((got, len(reads)), (None, lp.moves.OPEN_MARK_TRIES))
 
 
 class SettleDeposit(unittest.TestCase):
     def go(self, state, status):
         set_, told, saved = [], [], []
-        with mock.patch.object(rebalancer.db, 'set_deposit', lambda m, u: set_.append((m, u))), \
-                mock.patch.object(rebalancer, 'notify', lambda ev, **kw: told.append(ev)), \
-                mock.patch.object(rebalancer, 'save', lambda s: saved.append(dict(s))):
-            r = rebalancer.settle_deposit(state, status)
+        with mock.patch.object(db, 'set_deposit', lambda m, u: set_.append((m, u))), \
+                mock.patch.object(lp.books, 'notify', lambda ev, **kw: told.append(ev)), \
+                mock.patch.object(lp.paths, 'save', lambda s: saved.append(dict(s))):
+            r = lp.moves.settle_deposit(state, status)
         return r, set_, told, saved
 
     def test_books_the_first_mark_once(self):
@@ -81,7 +83,7 @@ class SettleDeposit(unittest.TestCase):
         self.assertIs(r, False); self.assertEqual(set_, [])
 
     def test_the_rent_counts_as_in_every_mark(self):
-        with mock.patch.object(rebalancer, 'rent_usd', lambda st: 0.25):
+        with mock.patch.object(lp.capital, 'rent_usd', lambda st: 0.25):
             _, set_, _, _ = self.go({'deposit_estimate': 'NEW'}, {'positionMint': 'NEW', 'positionUsd': 179.0})
         self.assertEqual(set_, [('NEW', 179.25)])
 
@@ -109,28 +111,28 @@ class OpenBooksTheMark(unittest.TestCase):
         self.stack = contextlib.ExitStack()
         self.addCleanup(self.stack.close)
         tmp = self.stack.enter_context(tempfile.TemporaryDirectory())
-        self.patch(rebalancer, 'STATE', pathlib.Path(tmp) / 'runtime.json')
-        self.patch(rebalancer.time, 'sleep', lambda _: None)
+        self.patch(lp.paths, 'STATE', pathlib.Path(tmp) / 'runtime.json')
+        self.patch(time, 'sleep', lambda _: None)
         self.events = []
-        self.patch(rebalancer, 'notify', lambda ev, **kw: self.events.append((ev, kw)))
-        self.patch(rebalancer, 'notify_book', lambda ev, **kw: self.events.append((ev, kw)))
+        self.patch(lp.books, 'notify', lambda ev, **kw: self.events.append((ev, kw)))
+        self.patch(lp.books, 'notify_book', lambda ev, **kw: self.events.append((ev, kw)))
         self.opened = mock.Mock()
-        self.patch(rebalancer.db, 'open_position', self.opened)
+        self.patch(db, 'open_position', self.opened)
         for name in ['close_position', 'snapshot', 'record_harvest', 'event']:
-            self.patch(rebalancer.db, name, mock.Mock())
-        self.patch(rebalancer.config, 'CALM_ENABLED', True)
-        self.patch(rebalancer.config, 'CALM_MAX_MOVES', 12)
-        self.patch(rebalancer.config, 'DEX', 'orca')
-        self.patch(rebalancer.config, 'EXECUTE_DEXES', ('orca',))
-        self.patch(rebalancer.config, 'CAPITAL_USD', 190)
-        self.patch(rebalancer.config, 'MAX_USD', 260)
+            self.patch(db, name, mock.Mock())
+        self.patch(config, 'CALM_ENABLED', True)
+        self.patch(config, 'CALM_MAX_MOVES', 12)
+        self.patch(config, 'DEX', 'orca')
+        self.patch(config, 'EXECUTE_DEXES', ('orca',))
+        self.patch(config, 'CAPITAL_USD', 190)
+        self.patch(config, 'MAX_USD', 260)
         self.bal = dict(price=100, quoteUsd=1, balanceA=1.2, balanceB=120, nativeSide='A', tokenA='SOL', tokenB='USDC')
-        self.patch(rebalancer, 'wallet', lambda _: dict(self.bal))
-        self.patch(rebalancer, 'balance_wallet', lambda *a, **k: dict(self.bal))
-        self.patch(rebalancer, 'best_band_for', lambda _: dict(band=1.08, price=100, record={}, net_day_pct=.2,
+        self.patch(lp.capital, 'wallet', lambda _: dict(self.bal))
+        self.patch(lp.swaps, 'balance_wallet', lambda *a, **k: dict(self.bal))
+        self.patch(lp.board, 'best_band_for', lambda _: dict(band=1.08, price=100, record={}, net_day_pct=.2,
                                                                rebal_per_day=.1))
-        self.patch(rebalancer, 'calm_view', lambda *a: dict(calm=True, bar_age_s=420, p_touch_fresh=.06))
-        self.patch(rebalancer, 'chain', lambda *a, **k: (dict(positionMint='new', signature='s', depositUsd=192.5), None)
+        self.patch(lp.regime, 'calm_view', lambda *a: dict(calm=True, bar_age_s=420, p_touch_fresh=.06))
+        self.patch(lp.signers, 'chain', lambda *a, **k: (dict(positionMint='new', signature='s', depositUsd=192.5), None)
                    if a[0] == 'open' else ({'signature': a[0]}, None))
         self.state = dict(last_rebalance=0, rebalance_times=[], calm_times=[], failures=0)
 
@@ -139,21 +141,21 @@ class OpenBooksTheMark(unittest.TestCase):
 
     def open_with(self, reads):
         seq = iter(reads)
-        self.patch(rebalancer, 'read_status', lambda *a: (next(seq, None), None))
-        self.assertTrue(rebalancer.reopen(self.state, 'x', band=1.01))
+        self.patch(lp.signers, 'read_status', lambda *a: (next(seq, None), None))
+        self.assertTrue(lp.moves.reopen(self.state, 'x', band=1.01))
         return self.opened.call_args.args[7]                         # deposit_usd
 
     def test_the_mark_not_the_estimate(self):
         dep = self.open_with([None, {'positionMint': 'new', 'positionUsd': 179.18}])
         self.assertEqual(dep, 179.18)
-        self.assertNotIn('deposit_estimate', rebalancer.load())
+        self.assertNotIn('deposit_estimate', lp.paths.load())
         self.assertNotIn('deposit_estimated', [e for e, _ in self.events])
         self.assertEqual(next(kw for e, kw in self.events if e == 'OPEN')['deposit_usd'], 179.18)
 
     def test_never_shown_books_the_estimate_and_settles_later(self):
         dep = self.open_with([])
         self.assertEqual(dep, 192.5)
-        self.assertEqual(rebalancer.load()['deposit_estimate'], 'new')
+        self.assertEqual(lp.paths.load()['deposit_estimate'], 'new')
         self.assertIn('deposit_estimated', [e for e, _ in self.events])
 
 

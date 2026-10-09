@@ -16,7 +16,21 @@ import calm        # noqa: E402
 import engine      # noqa: E402
 import fees        # noqa: E402
 import guards      # noqa: E402
-import rebalancer  # noqa: E402
+import config  # noqa: E402
+import db  # noqa: E402
+import dexes  # noqa: E402
+from venues.jupiter import prices as jupiter_api  # noqa: E402
+import subprocess  # noqa: E402
+import txfees  # noqa: E402
+import lp.board  # noqa: E402
+import lp.books  # noqa: E402
+import lp.harvest  # noqa: E402
+import lp.moves  # noqa: E402
+import lp.paths  # noqa: E402
+import lp.regime  # noqa: E402
+import lp.signers  # noqa: E402
+import lp.swaps  # noqa: E402
+import lp.tape  # noqa: E402
 
 SOL, USDC = fees.NATIVE_MINT, 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'
 PROFIT = '8funmDkPNBtjqfNkBEoBF16eBfyQ4vMAFrs4Nyys5D1h'
@@ -33,12 +47,12 @@ def tape(n=1200, sigma=0.0004, age_s=60, seed=2):
 class StaleTape(unittest.TestCase):
     def view(self, age):
         b = tape(age_s=age); p = float(b[4][-1])
-        with mock.patch.object(rebalancer.config, 'REGIME_ENABLED', True), \
-                mock.patch.object(rebalancer, 'tape5', lambda pool, price: b), \
-                mock.patch.object(rebalancer, 'liquidity_view', lambda *a: {'factor': 1.0}), \
-                mock.patch.object(rebalancer, 'save', lambda s: None), \
-                mock.patch.object(rebalancer.db, 'event', lambda *a: None):
-            return rebalancer.regime_view({}, {'price': p, 'lowerPrice': p / 1.05, 'upperPrice': p * 1.05})
+        with mock.patch.object(config, 'REGIME_ENABLED', True), \
+                mock.patch.object(lp.tape, 'tape5', lambda pool, price: b), \
+                mock.patch.object(lp.tape, 'liquidity_view', lambda *a: {'factor': 1.0}), \
+                mock.patch.object(lp.paths, 'save', lambda s: None), \
+                mock.patch.object(db, 'event', lambda *a: None):
+            return lp.regime.regime_view({}, {'price': p, 'lowerPrice': p / 1.05, 'upperPrice': p * 1.05})
 
     def test_a_stale_tape_chooses_the_widest_width(self):
         fresh, stale = self.view(60), self.view(6 * 3600)
@@ -50,9 +64,9 @@ class StaleTape(unittest.TestCase):
 class NoViewUnderRegime(unittest.TestCase):
     def test_the_exit_band_without_a_view_is_the_widest(self):
         # mirrors main(): regime on, rv None -> widest
-        with mock.patch.object(rebalancer.config, 'REGIME_ENABLED', True):
+        with mock.patch.object(config, 'REGIME_ENABLED', True):
             rv = None
-            k = rv['choice'] if rv else rebalancer.config.REGIME_WIDTHS[-1]
+            k = rv['choice'] if rv else config.REGIME_WIDTHS[-1]
         self.assertEqual(k, W[-1])
 
 
@@ -60,11 +74,11 @@ class UnscorablePool(unittest.TestCase):
     def test_no_move_when_the_held_pool_cannot_be_scored(self):
         moved, sent = [], []
         best = {'dex': 'orca', 'pair': 'SOL/USDC', 'band_pct': 8.0, 'net_day_pct': 0.9, 'address': 'X'}
-        with mock.patch.object(rebalancer, 'board_pick', lambda cur, ex: ({'id': 1}, best, None, 'held pool unscorable')), \
-                mock.patch.object(rebalancer.config, 'POOL_PINNED', False), \
-                mock.patch.object(rebalancer, 'rebalance', lambda *a, **k: moved.append(1)), \
-                mock.patch.object(rebalancer, 'notify', lambda ev, **kw: sent.append((ev, kw))):
-            self.assertFalse(rebalancer.consider_migration({}, {}, None))
+        with mock.patch.object(lp.board, 'board_pick', lambda cur, ex: ({'id': 1}, best, None, 'held pool unscorable')), \
+                mock.patch.object(config, 'POOL_PINNED', False), \
+                mock.patch.object(lp.moves, 'rebalance', lambda *a, **k: moved.append(1)), \
+                mock.patch.object(lp.books, 'notify', lambda ev, **kw: sent.append((ev, kw))):
+            self.assertFalse(lp.board.consider_migration({}, {}, None))
         self.assertEqual(moved, []); self.assertIn('could not be scored', sent[-1][1]['verdict'])
 
 
@@ -74,17 +88,17 @@ class Payouts(unittest.TestCase):
         bal = {'balanceA': 0.3, 'balanceB': held_b, 'sol': 0.3, 'price': 120.0, 'quoteUsd': 1.0}
         env = dict(os.environ, LPBOT_PROFIT_WALLET_PIN=pin) if pin else {k: v for k, v in os.environ.items() if k != 'LPBOT_PROFIT_WALLET_PIN'}
         with mock.patch.dict(os.environ, env, clear=True), \
-                mock.patch.object(rebalancer.config, 'PAYOUT_ENABLED', True), \
-                mock.patch.object(rebalancer.config, 'PAYOUT_MINT', USDC), \
-                mock.patch.object(rebalancer.config, 'PROFIT_WALLET', PROFIT), \
-                mock.patch.object(rebalancer.config, 'GAS_RESERVE_SOL', 0.05), \
-                mock.patch.object(rebalancer, 'pool_tokens', lambda: ((SOL, 'SOL'), (USDC, 'USDC'))), \
-                mock.patch.object(rebalancer, 'wallet', lambda p: bal), \
-                mock.patch.object(rebalancer, 'chain', lambda *a, **k: chain_result), \
-                mock.patch.object(rebalancer, 'save', lambda s: None), \
-                mock.patch.object(rebalancer, 'notify', lambda *a, **k: None), \
-                mock.patch.object(rebalancer.db, 'record_payout', lambda *a, **k: rows.append(a[6])):
-            rebalancer.distribute(state, 'M', 0.002, 0.3)
+                mock.patch.object(config, 'PAYOUT_ENABLED', True), \
+                mock.patch.object(config, 'PAYOUT_MINT', USDC), \
+                mock.patch.object(config, 'PROFIT_WALLET', PROFIT), \
+                mock.patch.object(config, 'GAS_RESERVE_SOL', 0.05), \
+                mock.patch.object(lp.capital, 'pool_tokens', lambda: ((SOL, 'SOL'), (USDC, 'USDC'))), \
+                mock.patch.object(lp.capital, 'wallet', lambda p: bal), \
+                mock.patch.object(lp.signers, 'chain', lambda *a, **k: chain_result), \
+                mock.patch.object(lp.paths, 'save', lambda s: None), \
+                mock.patch.object(lp.books, 'notify', lambda *a, **k: None), \
+                mock.patch.object(db, 'record_payout', lambda *a, **k: rows.append(a[6])):
+            lp.harvest.distribute(state, 'M', 0.002, 0.3)
         return rows, state
 
     def test_an_unconfirmed_send_is_never_owed(self):
@@ -99,7 +113,7 @@ class Payouts(unittest.TestCase):
 
     def test_the_pin_must_match_or_nothing_is_sent(self):
         sent = []
-        with mock.patch.object(rebalancer, 'chain', lambda *a, **k: sent.append(a)):
+        with mock.patch.object(lp.signers, 'chain', lambda *a, **k: sent.append(a)):
             pass
         rows, st = self.run_it(({'signature': 's'}, None), pin='11111111111111111111111111111112')
         self.assertIn('owed', rows); self.assertNotIn('paid', rows)
@@ -118,16 +132,16 @@ class FeesKeptWhenTheHarvestFails(unittest.TestCase):
         recorded, split = [], []
         results = iter([(None, 'RPC rate limited'), ({'closed': 'M', 'signature': 'c'}, None)])
         state = {'last_rebalance': 0, 'rebalance_times': [], 'calm_times': [], 'failures': 0}
-        with mock.patch.object(rebalancer, 'chain', lambda *a, **k: next(results)), \
-                mock.patch.object(rebalancer, 'notify', lambda *a, **k: None), \
-                mock.patch.object(rebalancer, 'notify_book', lambda *a, **k: None), \
-                mock.patch.object(rebalancer, 'save', lambda s: None), \
-                mock.patch.object(rebalancer, 'reopen', lambda *a, **k: None), \
-                mock.patch.object(rebalancer, 'distribute', lambda *a, **k: split.append(a[2:])), \
-                mock.patch.object(rebalancer.db, 'record_harvest', lambda *a: recorded.append(a)), \
-                mock.patch.object(rebalancer.db, 'close_position', lambda *a: None), \
-                mock.patch.object(rebalancer.db, 'event', lambda *a: None):
-            rebalancer.rebalance(state, {'positionMint': 'M', 'price': 100, 'feesAccruedA': 0.001,
+        with mock.patch.object(lp.signers, 'chain', lambda *a, **k: next(results)), \
+                mock.patch.object(lp.books, 'notify', lambda *a, **k: None), \
+                mock.patch.object(lp.books, 'notify_book', lambda *a, **k: None), \
+                mock.patch.object(lp.paths, 'save', lambda s: None), \
+                mock.patch.object(lp.moves, 'reopen', lambda *a, **k: None), \
+                mock.patch.object(lp.harvest, 'distribute', lambda *a, **k: split.append(a[2:])), \
+                mock.patch.object(db, 'record_harvest', lambda *a: recorded.append(a)), \
+                mock.patch.object(db, 'close_position', lambda *a: None), \
+                mock.patch.object(db, 'event', lambda *a: None):
+            lp.moves.rebalance(state, {'positionMint': 'M', 'price': 100, 'feesAccruedA': 0.001,
                                          'feesAccruedB': 0.2, 'feesAccrued_USD': 0.3}, 'price went below')
         self.assertEqual(len(recorded), 1); self.assertEqual(recorded[0][4], 'close:c')      # close-collected fees: marked (audit 2026-09-30)
         self.assertEqual(split, [(0.001, 0.2)])
@@ -137,33 +151,33 @@ class State(unittest.TestCase):
     def test_a_corrupt_runtime_file_is_set_aside(self):
         import tempfile, pathlib
         d = pathlib.Path(tempfile.mkdtemp()); f = d / 'runtime.json'; f.write_text('{not json')
-        with mock.patch.object(rebalancer, 'STATE', f):
-            s = rebalancer.load()
+        with mock.patch.object(lp.paths, 'STATE', f):
+            s = lp.paths.load()
         self.assertEqual(s['failures'], 0); self.assertTrue((d / 'runtime.json.corrupt').exists())
 
     def test_an_old_file_gets_every_key(self):
         import tempfile, pathlib
         f = pathlib.Path(tempfile.mkdtemp()) / 'runtime.json'
         f.write_text(json.dumps({'last_rebalance': 5, 'rebalance_times': [], 'failures': 1, 'read_failures': 0}))
-        with mock.patch.object(rebalancer, 'STATE', f):
-            s = rebalancer.load()
+        with mock.patch.object(lp.paths, 'STATE', f):
+            s = lp.paths.load()
         self.assertEqual(s['last_rebalance'], 5); self.assertEqual(s['calm_times'], [])
 
 
 class Labels(unittest.TestCase):
     def test_band_label(self):
-        self.assertEqual(rebalancer.band_label(1.015), '+/-1.5%')
-        self.assertEqual(rebalancer.band_label(1.01), '+/-1%')
-        self.assertEqual(rebalancer.band_label(1.0125), '+/-1.25%')
+        self.assertEqual(lp.books.band_label(1.015), '+/-1.5%')
+        self.assertEqual(lp.books.band_label(1.01), '+/-1%')
+        self.assertEqual(lp.books.band_label(1.0125), '+/-1.25%')
 
 
 class GapBeforeAnnounce(unittest.TestCase):
     def test_voluntary_move_allowed(self):
         now = time.time()
-        with mock.patch.object(rebalancer.config, 'CALM_MIN_GAP', 600):
-            self.assertFalse(rebalancer.voluntary_move_allowed({'calm_times': [now - 60]}))
-            self.assertTrue(rebalancer.voluntary_move_allowed({'calm_times': [now - 700]}))
-            self.assertTrue(rebalancer.voluntary_move_allowed({}))
+        with mock.patch.object(config, 'CALM_MIN_GAP', 600):
+            self.assertFalse(lp.regime.voluntary_move_allowed({'calm_times': [now - 60]}))
+            self.assertTrue(lp.regime.voluntary_move_allowed({'calm_times': [now - 700]}))
+            self.assertTrue(lp.regime.voluntary_move_allowed({}))
 
 
 class Security(unittest.TestCase):
@@ -184,12 +198,12 @@ class Security(unittest.TestCase):
     def test_operator_migrate_to_another_pair_is_refused_without_allow_swap(self):
         sent = []
         rec = {'pair': 'SOL/JUP', 'token_a': {'address': SOL}, 'token_b': {'address': 'JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN'}}
-        with mock.patch.object(rebalancer.config, 'ALLOW_SWAP', False), \
-                mock.patch.object(rebalancer.config, 'EXECUTE_DEXES', ('orca',)), \
-                mock.patch.object(rebalancer.dexes, 'pool', lambda d, p: rec), \
-                mock.patch.object(rebalancer, 'pool_tokens', lambda: ((SOL, 'SOL'), (USDC, 'USDC'))), \
-                mock.patch.object(rebalancer, 'notify', lambda ev, **kw: sent.append(kw.get('reason'))):
-            self.assertIsNone(rebalancer.operator_target(['orca', 'Czfq3xZZDmsdGdUyrNLtRhGc47cXcZtLG4crryfu44zE']))
+        with mock.patch.object(config, 'ALLOW_SWAP', False), \
+                mock.patch.object(config, 'EXECUTE_DEXES', ('orca',)), \
+                mock.patch.object(dexes, 'pool', lambda d, p: rec), \
+                mock.patch.object(lp.capital, 'pool_tokens', lambda: ((SOL, 'SOL'), (USDC, 'USDC'))), \
+                mock.patch.object(lp.books, 'notify', lambda ev, **kw: sent.append(kw.get('reason'))):
+            self.assertIsNone(lp.board.operator_target(['orca', 'Czfq3xZZDmsdGdUyrNLtRhGc47cXcZtLG4crryfu44zE']))
         self.assertIn('different pair', sent[-1])
 
     def test_reward_sweep_skips_non_addresses_and_holds_large_balances(self):
@@ -199,21 +213,21 @@ class Security(unittest.TestCase):
         def chain(*a, **k):
             calls.append(a[0])
             return ({'amount': 100.0}, None) if a[0] == 'balance' else (None, 'x')
-        with mock.patch.object(rebalancer.config, 'PAYOUT_ENABLED', True), \
-                mock.patch.object(rebalancer.config, 'REWARD_POLICY', 'payout'), \
-                mock.patch.object(rebalancer.config, 'REWARD_MIN_USD', 1.0), \
-                mock.patch.object(rebalancer.config, 'REWARD_MAX_USD', 25.0), \
-                mock.patch.object(rebalancer.config, 'PAYOUT_MINT', USDC), \
-                mock.patch.object(rebalancer, 'pool_record', lambda: rec), \
-                mock.patch.object(rebalancer, 'wallet', lambda p: {'sol': 0.3, 'owner': OWNER}), \
-                mock.patch.object(rebalancer.txfees, 'fetch', lambda rpc, s, **k: harvest_tx(
+        with mock.patch.object(config, 'PAYOUT_ENABLED', True), \
+                mock.patch.object(config, 'REWARD_POLICY', 'payout'), \
+                mock.patch.object(config, 'REWARD_MIN_USD', 1.0), \
+                mock.patch.object(config, 'REWARD_MAX_USD', 25.0), \
+                mock.patch.object(config, 'PAYOUT_MINT', USDC), \
+                mock.patch.object(lp.capital, 'pool_record', lambda: rec), \
+                mock.patch.object(lp.capital, 'wallet', lambda p: {'sol': 0.3, 'owner': OWNER}), \
+                mock.patch.object(txfees, 'fetch', lambda rpc, s, **k: harvest_tx(
                     '4qQeZ5LwSz6HuupUu8jCtgXyW1mYQcNbFAW1sWZp89HL', 100.0)), \
-                mock.patch.object(rebalancer.jupiter_api, 'jupiter_prices', lambda m: {'4qQeZ5LwSz6HuupUu8jCtgXyW1mYQcNbFAW1sWZp89HL': 2.76}), \
-                mock.patch.object(rebalancer, 'chain', chain), \
-                mock.patch.object(rebalancer, 'save', lambda s: None), \
-                mock.patch.object(rebalancer, 'notify', lambda ev, **kw: notes.append(ev)):
+                mock.patch.object(jupiter_api, 'jupiter_prices', lambda m: {'4qQeZ5LwSz6HuupUu8jCtgXyW1mYQcNbFAW1sWZp89HL': 2.76}), \
+                mock.patch.object(lp.signers, 'chain', chain), \
+                mock.patch.object(lp.paths, 'save', lambda s: None), \
+                mock.patch.object(lp.books, 'notify', lambda ev, **kw: notes.append(ev)):
             state = {}
-            rebalancer.distribute_rewards(state, 'M', ['H'])          # the harvest brought all 100
+            lp.harvest.distribute_rewards(state, 'M', ['H'])          # the harvest brought all 100
         self.assertNotIn('not a mint', state['reward_mints_seen'])
         self.assertNotIn('swap', calls)                                # $276 > $25 cap: held
         self.assertIn('reward_held', notes)
@@ -223,14 +237,14 @@ class Liquidity(unittest.TestCase):
     def lv(self, liq_now, med, vol_recent_x):
         n = 2000; v = np.full(n, 100.0); v[-72:] = 100.0 * vol_recent_x
         bars = (np.arange(n) * 300.0, np.ones(n), np.ones(n), np.ones(n), np.ones(n), v)
-        rebalancer._LIQ.clear()
-        with mock.patch.object(rebalancer.dexes, 'pool', lambda d, p: {'liquidity': liq_now, 'tvl_usd': 1e6}), \
-                mock.patch.object(rebalancer.db, 'record_pool_stats', lambda *a: None), \
-                mock.patch.object(rebalancer.db, 'pool_stats_summary', lambda p, **k: {'median_liquidity': med, 'readings': 10, 'tvl_then': 1e6}), \
-                mock.patch.object(rebalancer.config, 'REGIME_LIQ_SMOOTH_H', 0), \
-                mock.patch.object(rebalancer.config, 'REGIME_LIQ_MIN', 0.6), \
-                mock.patch.object(rebalancer.config, 'REGIME_LIQ_MAX', 1.25):
-            return rebalancer.liquidity_view('P', 'raydium-clmm', bars)
+        lp.tape._LIQ.clear()
+        with mock.patch.object(dexes, 'pool', lambda d, p: {'liquidity': liq_now, 'tvl_usd': 1e6}), \
+                mock.patch.object(db, 'record_pool_stats', lambda *a: None), \
+                mock.patch.object(db, 'pool_stats_summary', lambda p, **k: {'median_liquidity': med, 'readings': 10, 'tvl_then': 1e6}), \
+                mock.patch.object(config, 'REGIME_LIQ_SMOOTH_H', 0), \
+                mock.patch.object(config, 'REGIME_LIQ_MIN', 0.6), \
+                mock.patch.object(config, 'REGIME_LIQ_MAX', 1.25):
+            return lp.tape.liquidity_view('P', 'raydium-clmm', bars)
 
     def test_inflow_tightens_outflow_loosens_bounded_and_volume_is_only_reported(self):
         self.assertAlmostEqual(self.lv(100, 100, 1.0)['factor'], 1.0)
@@ -242,38 +256,38 @@ class Liquidity(unittest.TestCase):
         self.assertAlmostEqual(v['factor'], 1.0); self.assertAlmostEqual(v['volume_x'], 0.5, places=2)
 
     def test_missing_history_is_neutral(self):
-        rebalancer._LIQ.clear()
-        with mock.patch.object(rebalancer.dexes, 'pool', lambda d, p: None), \
-                mock.patch.object(rebalancer.db, 'pool_stats_summary', lambda p, **k: None):
-            self.assertEqual(rebalancer.liquidity_view('P', 'orca', None)['factor'], 1.0)
+        lp.tape._LIQ.clear()
+        with mock.patch.object(dexes, 'pool', lambda d, p: None), \
+                mock.patch.object(db, 'pool_stats_summary', lambda p, **k: None):
+            self.assertEqual(lp.tape.liquidity_view('P', 'orca', None)['factor'], 1.0)
 
 
 class LiquidityViewExact(unittest.TestCase):
     """liquidity_view's cache, reported figures and volume ratio, exactly."""
 
     def setUp(self):
-        rebalancer._LIQ.clear(); self.reads = []; self.recorded = []
+        lp.tape._LIQ.clear(); self.reads = []; self.recorded = []
 
     def call(self, rec, summ=False, bars=None, now=1000.0, smooth_h=0):
         def pool(d, p):
             self.reads.append(p); return rec
         summ = summ if summ is not False else {'median_liquidity': 100.0, 'readings': 9, 'tvl_then': 800.0,
                         'recent_liquidity': None, 'recent_readings': 0}
-        with mock.patch.object(rebalancer.dexes, 'pool', pool), \
-                mock.patch.object(rebalancer.db, 'record_pool_stats', lambda *a: self.recorded.append(a)), \
-                mock.patch.object(rebalancer.db, 'pool_stats_summary', lambda p, **k: summ), \
-                mock.patch.object(rebalancer.time, 'time', lambda: now), \
-                mock.patch.object(rebalancer.config, 'REGIME_LIQ_SMOOTH_H', smooth_h), \
-                mock.patch.object(rebalancer.config, 'REGIME_LIQ_MIN', 0.6), \
-                mock.patch.object(rebalancer.config, 'REGIME_LIQ_MAX', 1.25):
-            return rebalancer.liquidity_view('P', 'raydium-clmm', bars)
+        with mock.patch.object(dexes, 'pool', pool), \
+                mock.patch.object(db, 'record_pool_stats', lambda *a: self.recorded.append(a)), \
+                mock.patch.object(db, 'pool_stats_summary', lambda p, **k: summ), \
+                mock.patch.object(time, 'time', lambda: now), \
+                mock.patch.object(config, 'REGIME_LIQ_SMOOTH_H', smooth_h), \
+                mock.patch.object(config, 'REGIME_LIQ_MIN', 0.6), \
+                mock.patch.object(config, 'REGIME_LIQ_MAX', 1.25):
+            return lp.tape.liquidity_view('P', 'raydium-clmm', bars)
 
     def test_reads_once_per_refresh_and_again_after(self):
         rec = {'liquidity': 100.0, 'tvl_usd': 1000.0, 'volume_24h_usd': 5.0, 'price': 2.0}
         self.call(rec, now=1000.0)
-        self.call(rec, now=1000.0 + rebalancer.LIQ_REFRESH)          # not yet stale
+        self.call(rec, now=1000.0 + lp.tape.LIQ_REFRESH)          # not yet stale
         self.assertEqual(len(self.reads), 1)
-        out = self.call(rec, now=1000.0 + rebalancer.LIQ_REFRESH + 1)
+        out = self.call(rec, now=1000.0 + lp.tape.LIQ_REFRESH + 1)
         self.assertEqual(len(self.reads), 2)
         self.assertEqual(self.recorded[0], ('raydium-clmm', 'P', 100.0, 1000.0, 5.0, 2.0))
         self.assertEqual(out['readings'], 9)
@@ -290,18 +304,18 @@ class LiquidityViewExact(unittest.TestCase):
         out = self.call({'liquidity': None, 'active_bin_usd': 50.0, 'tvl_usd': 1.0})
         self.assertEqual(out['liquidity'], 50.0); self.assertEqual(self.recorded[0][2], 50.0)
         self.assertAlmostEqual(out['inflow'], 0.5)
-        rebalancer._LIQ.clear(); self.recorded.clear()
+        lp.tape._LIQ.clear(); self.recorded.clear()
         out = self.call({'liquidity': 70.0, 'active_bin_usd': 50.0, 'tvl_usd': 1.0})
         self.assertEqual(out['liquidity'], 70.0); self.assertEqual(self.recorded[0][2], 70.0)
 
     def test_tvl_change_exact_and_absent_without_history(self):
         out = self.call({'liquidity': 100.0, 'tvl_usd': 1000.0})
         self.assertAlmostEqual(out['tvl_change_24h'], 0.25)
-        rebalancer._LIQ.clear()
+        lp.tape._LIQ.clear()
         out = self.call({'liquidity': 100.0, 'tvl_usd': 1000.0},
                         summ={'median_liquidity': 100.0, 'readings': 9, 'tvl_then': None})
         self.assertIsNone(out['tvl_change_24h'])
-        rebalancer._LIQ.clear()
+        lp.tape._LIQ.clear()
         out = self.call({'liquidity': 100.0, 'tvl_usd': None})
         self.assertIsNone(out['tvl_change_24h'])
 
@@ -309,10 +323,10 @@ class LiquidityViewExact(unittest.TestCase):
         out = self.call(None)
         self.assertIsNone(out['inflow']); self.assertEqual(out['readings'], 0); self.assertEqual(out['factor'], 1.0)
         self.assertIsNone(out['inflow_raw'])
-        rebalancer._LIQ.clear()
+        lp.tape._LIQ.clear()
         out = self.call({'liquidity': 100.0, 'tvl_usd': 1.0}, summ={'median_liquidity': 0.0, 'readings': 9, 'tvl_then': None})
         self.assertIsNone(out['inflow_raw'])
-        rebalancer._LIQ.clear()
+        lp.tape._LIQ.clear()
         out = self.call({'liquidity': 50.0, 'tvl_usd': 1.0}, summ={'median_liquidity': 0.5, 'readings': 9, 'tvl_then': None})
         self.assertAlmostEqual(out['inflow_raw'], 100.0)
 
@@ -322,13 +336,13 @@ class LiquidityViewExact(unittest.TestCase):
             return (np.zeros(n),) * 5 + (v,)
         rec = {'liquidity': 100.0, 'tvl_usd': 1.0}
         self.assertIsNone(self.call(rec, bars=bars(287, 30.0))['volume_x'])
-        rebalancer._LIQ.clear()
+        lp.tape._LIQ.clear()
         self.assertAlmostEqual(self.call(rec, bars=bars(288, 30.0))['volume_x'], 3.0)  # 2160 / median 720
-        rebalancer._LIQ.clear()
+        lp.tape._LIQ.clear()
         self.assertIsNone(self.call(rec, bars=(np.zeros(300),) * 6)['volume_x'])          # no volume: no ratio
-        rebalancer._LIQ.clear()
+        lp.tape._LIQ.clear()
         self.assertIsNone(self.call(rec, bars=None)['volume_x'])
-        rebalancer._LIQ.clear()
+        lp.tape._LIQ.clear()
         small = (np.zeros(288),) * 5 + (np.full(288, 0.001),)
         self.assertAlmostEqual(self.call(rec, bars=small)['volume_x'], 1.0)   # a thin pool still has a ratio
 
@@ -341,17 +355,17 @@ class LiquiditySmoothed(unittest.TestCase):
     """sql/028: the factor reads the window's geometric mean, not one reading."""
 
     def lv(self, liq_now, summ, smooth_h=2.0, fresh=True):
-        rebalancer._LIQ.clear(); asked = {}
+        lp.tape._LIQ.clear(); asked = {}
 
         def summary(p, **k):
             asked.update(k); return summ
-        with mock.patch.object(rebalancer.dexes, 'pool', lambda d, p: {'liquidity': liq_now, 'tvl_usd': 1e6} if fresh else None), \
-                mock.patch.object(rebalancer.db, 'record_pool_stats', lambda *a: None), \
-                mock.patch.object(rebalancer.db, 'pool_stats_summary', summary), \
-                mock.patch.object(rebalancer.config, 'REGIME_LIQ_SMOOTH_H', smooth_h), \
-                mock.patch.object(rebalancer.config, 'REGIME_LIQ_MIN', 0.6), \
-                mock.patch.object(rebalancer.config, 'REGIME_LIQ_MAX', 1.25):
-            out = rebalancer.liquidity_view('P', 'raydium-clmm', None)
+        with mock.patch.object(dexes, 'pool', lambda d, p: {'liquidity': liq_now, 'tvl_usd': 1e6} if fresh else None), \
+                mock.patch.object(db, 'record_pool_stats', lambda *a: None), \
+                mock.patch.object(db, 'pool_stats_summary', summary), \
+                mock.patch.object(config, 'REGIME_LIQ_SMOOTH_H', smooth_h), \
+                mock.patch.object(config, 'REGIME_LIQ_MIN', 0.6), \
+                mock.patch.object(config, 'REGIME_LIQ_MAX', 1.25):
+            out = lp.tape.liquidity_view('P', 'raydium-clmm', None)
         return out, asked
 
     @staticmethod
@@ -420,10 +434,10 @@ class SignerEnvironment(unittest.TestCase):
             seen.update(kw['env'])
             return R()
         with mock.patch.dict(os.environ, {'TELEGRAM_BOT_TOKEN': '1:abc', 'TELEGRAM_CHAT_ID': '42', 'KAMINO_RPC_KEY': 'k'}), \
-                mock.patch.object(rebalancer.subprocess, 'run', run), \
-                mock.patch.object(rebalancer.guards, 'inside', lambda *a: None), \
-                mock.patch.dict(rebalancer.SIGNERS, {'jupiter': str(rebalancer.ROOT / 'venues/jupiter/swap.mjs')}):
-            out, err = rebalancer._chain('balance', dex='jupiter')
+                mock.patch.object(subprocess, 'run', run), \
+                mock.patch.object(guards, 'inside', lambda *a: None), \
+                mock.patch.dict(lp.signers.SIGNERS, {'jupiter': str(lp.paths.ROOT / 'venues/jupiter/swap.mjs')}):
+            out, err = lp.signers._chain('balance', dex='jupiter')
         self.assertEqual((out, err), ({'ok': True}, None))
         self.assertNotIn('TELEGRAM_BOT_TOKEN', seen); self.assertNotIn('TELEGRAM_CHAT_ID', seen)
         self.assertEqual(seen.get('KAMINO_RPC_KEY'), 'k')          # the rest of the environment passes through
@@ -439,23 +453,23 @@ class SwapMints(unittest.TestCase):
 
     def run_it(self, b, rec=None, chain_name='solana'):
         calls, notes = [], []
-        with mock.patch.object(rebalancer.config, 'REBALANCE_SWAP', True), \
-                mock.patch.object(rebalancer.config, 'DEPLOY_ALL', True), \
-                mock.patch.object(rebalancer.config, 'MAX_USD', 300.0), \
-                mock.patch.object(rebalancer.config, 'SIDE_CAP_FRACTION', 0.55), \
-                mock.patch.object(rebalancer.config, 'GAS_RESERVE_SOL', 0.05), \
-                mock.patch.object(rebalancer.config, 'CAPITAL_USD', 190.0), \
-                mock.patch.object(rebalancer.config, 'PAYOUT_ENABLED', False), \
-                mock.patch.object(rebalancer.config, 'WALLET_ID', None), \
-                mock.patch.object(rebalancer.config, 'CHAIN', chain_name), \
-                mock.patch.object(rebalancer, 'SWAP_FALLBACK', ''), \
-                mock.patch.object(rebalancer, 'chain', lambda *a, **k: (calls.append(a) or ({'sent': True, 'signature': 's'}, None))), \
-                mock.patch.object(rebalancer, 'notify', lambda ev, **kw: notes.append((ev, kw))), \
-                mock.patch.object(rebalancer, 'record_health', lambda *a, **k: None), \
-                mock.patch.object(rebalancer, 'save', lambda s: None), \
-                mock.patch.object(rebalancer.db, 'event', lambda *a: None), \
-                mock.patch.object(rebalancer.time, 'sleep', lambda s: None):
-            out = rebalancer.balance_wallet({'failures': 0}, dict(b), rec or self.REC)
+        with mock.patch.object(config, 'REBALANCE_SWAP', True), \
+                mock.patch.object(config, 'DEPLOY_ALL', True), \
+                mock.patch.object(config, 'MAX_USD', 300.0), \
+                mock.patch.object(config, 'SIDE_CAP_FRACTION', 0.55), \
+                mock.patch.object(config, 'GAS_RESERVE_SOL', 0.05), \
+                mock.patch.object(config, 'CAPITAL_USD', 190.0), \
+                mock.patch.object(config, 'PAYOUT_ENABLED', False), \
+                mock.patch.object(config, 'WALLET_ID', None), \
+                mock.patch.object(config, 'CHAIN', chain_name), \
+                mock.patch.object(lp.swaps, 'SWAP_FALLBACK', ''), \
+                mock.patch.object(lp.signers, 'chain', lambda *a, **k: (calls.append(a) or ({'sent': True, 'signature': 's'}, None))), \
+                mock.patch.object(lp.books, 'notify', lambda ev, **kw: notes.append((ev, kw))), \
+                mock.patch.object(lp.signers, 'record_health', lambda *a, **k: None), \
+                mock.patch.object(lp.paths, 'save', lambda s: None), \
+                mock.patch.object(db, 'event', lambda *a: None), \
+                mock.patch.object(time, 'sleep', lambda s: None):
+            out = lp.swaps.balance_wallet({'failures': 0}, dict(b), rec or self.REC)
         return out, calls, notes
 
     def lopsided(self, **more):

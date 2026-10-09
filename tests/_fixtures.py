@@ -56,10 +56,10 @@ txfees.fetch = lambda rpc, signature, **kw: None
 # 2026-09-27 test rows ("fee_read_rejected", "$1,000 rejected") did. Every
 # notify() in a test goes to a scratch file instead.
 import tempfile  # noqa: E402
-import rebalancer  # noqa: E402
+import lp.paths  # noqa: E402
 FEED = pathlib.Path(tempfile.mkdtemp(prefix='lp_bot_test_feed_')) / 'events.jsonl'
-rebalancer.FEED = FEED
+lp.paths.FEED = FEED
 # The same for the state file and the profile's HALT: run/<profile>/ in the
 # code directory is the live bot's once deployed, never a test's.
-rebalancer.STATE = FEED.parent / 'runtime.json'
-rebalancer.HALT = FEED.parent / 'HALT'
+lp.paths.STATE = FEED.parent / 'runtime.json'
+lp.paths.HALT = FEED.parent / 'HALT'

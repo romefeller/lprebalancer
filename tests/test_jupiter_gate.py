@@ -23,6 +23,11 @@ import db          # noqa: E402
 import health      # noqa: E402
 import jupgate     # noqa: E402
 import rebalancer  # noqa: E402
+import lp.board  # noqa: E402
+import lp.moves  # noqa: E402
+import lp.signers  # noqa: E402
+import lp.swaps  # noqa: E402
+import audit  # noqa: E402
 from test_deploy_all import bal, SOL, USDC  # noqa: E402
 from venues import api as venue_api
 from venues.jupiter import prices as jupiter_api
@@ -244,7 +249,7 @@ class OneOutcomePerSwap(unittest.TestCase):
 
     def setUp(self):
         clear()
-        p = mock.patch.object(rebalancer, 'SWAP_FALLBACK', self.FALLBACK); p.start(); self.addCleanup(p.stop)
+        p = mock.patch.object(lp.swaps, 'SWAP_FALLBACK', self.FALLBACK); p.start(); self.addCleanup(p.stop)
         for n, v in (('DEPLOY_ALL', True), ('MAX_USD', 300.0), ('SIDE_CAP_FRACTION', 0.55), ('GAS_RESERVE_SOL', 0.05),
                      ('CAPITAL_USD', 190.0), ('PAYOUT_ENABLED', False), ('REBALANCE_SWAP', True)):
             p = mock.patch.object(config, n, v); p.start(); self.addCleanup(p.stop)
@@ -260,16 +265,16 @@ class OneOutcomePerSwap(unittest.TestCase):
         def fake(*a, **k):
             calls.append(k); out, err = next(it)
             if k.get('record', True):                                  # what the real chain would do
-                rebalancer.record_health(rebalancer.health_key(a, k.get('dex')), out, err)
+                lp.signers.record_health(lp.signers.health_key(a, k.get('dex')), out, err)
             return out, err
-        with mock.patch.object(rebalancer, 'chain', fake), \
-                mock.patch.object(rebalancer, 'wallet', lambda p: b), \
-                mock.patch.object(rebalancer, 'notify', lambda *a, **k: None), \
-                mock.patch.object(rebalancer, 'save', lambda s: None), \
-                mock.patch.object(rebalancer.db, 'event', lambda *a: None), \
+        with mock.patch.object(lp.signers, 'chain', fake), \
+                mock.patch.object(lp.capital, 'wallet', lambda p: b), \
+                mock.patch.object(lp.books, 'notify', lambda *a, **k: None), \
+                mock.patch.object(lp.paths, 'save', lambda s: None), \
+                mock.patch.object(db, 'event', lambda *a: None), \
                 mock.patch('builtins.print'), \
-                mock.patch.object(rebalancer.time, 'sleep', lambda s: sleeps.append(s)):
-            rebalancer.balance_wallet({'failures': 0}, dict(b), self.REC)
+                mock.patch.object(time, 'sleep', lambda s: sleeps.append(s)):
+            lp.swaps.balance_wallet({'failures': 0}, dict(b), self.REC)
         return calls, sleeps
 
     def test_replay_2026_10_01_three_refusals_are_one_failure(self):
@@ -279,7 +284,7 @@ class OneOutcomePerSwap(unittest.TestCase):
         self.assertEqual(db.health_get('jupiter')['fails'], 1)
         self.assertEqual(db.health_get('swap')['fails'], 1)
         self.assertEqual(health.verdict(db.health_get('swap'), time.time())[0], health.BACKOFF)   # yellow, not red
-        self.assertEqual(sleeps, list(rebalancer.SWAP_RATE_LIMIT_PAUSES))
+        self.assertEqual(sleeps, list(lp.swaps.SWAP_RATE_LIMIT_PAUSES))
 
     def test_a_late_success_is_a_success(self):
         health.record_failure('swap', 'earlier', now=time.time() - 3600)
@@ -288,7 +293,7 @@ class OneOutcomePerSwap(unittest.TestCase):
 
     def test_other_transport_errors_keep_the_short_pauses(self):
         _, sleeps = self.go([(None, 'RPC timeout')] * 3)
-        self.assertEqual(sleeps, list(rebalancer.SWAP_RETRY_PAUSES))
+        self.assertEqual(sleeps, list(lp.swaps.SWAP_RETRY_PAUSES))
         self.assertEqual(db.health_get('swap')['fails'], 1)
 
     def test_a_refusal_after_a_rate_limit_still_counts_once(self):
@@ -296,8 +301,8 @@ class OneOutcomePerSwap(unittest.TestCase):
         self.assertEqual(db.health_get('swap')['fails'], 1)
 
     def test_the_pauses_wait_out_a_minute_window(self):
-        self.assertGreaterEqual(sum(rebalancer.SWAP_RATE_LIMIT_PAUSES), 60)
-        self.assertGreater(sum(rebalancer.SWAP_RATE_LIMIT_PAUSES), sum(rebalancer.SWAP_RETRY_PAUSES))
+        self.assertGreaterEqual(sum(lp.swaps.SWAP_RATE_LIMIT_PAUSES), 60)
+        self.assertGreater(sum(lp.swaps.SWAP_RATE_LIMIT_PAUSES), sum(lp.swaps.SWAP_RETRY_PAUSES))
 
 
 
@@ -353,15 +358,15 @@ class OrcaFallback(OneOutcomePerSwap):
     def test_a_route_error_falls_back_at_once(self):
         calls, sleeps = self.go([(None, 'simulation failed: {"InstructionError":[5,{"Custom":11}]}'), self.OK])
         self.assertEqual(self.dexes(calls), ['jupiter', 'orca-swap'])
-        self.assertFalse(set(sleeps) & set(rebalancer.SWAP_RETRY_PAUSES + rebalancer.SWAP_RATE_LIMIT_PAUSES))   # no retry wait
+        self.assertFalse(set(sleeps) & set(lp.swaps.SWAP_RETRY_PAUSES + lp.swaps.SWAP_RATE_LIMIT_PAUSES))   # no retry wait
 
     def test_off_means_jupiter_alone(self):
-        with mock.patch.object(rebalancer, 'SWAP_FALLBACK', ''):
+        with mock.patch.object(lp.swaps, 'SWAP_FALLBACK', ''):
             calls, _ = self.go([self.J429] * 3)
         self.assertEqual(self.dexes(calls), ['jupiter'] * 3)
 
     def test_a_fallback_that_is_no_signer_is_never_called(self):
-        with mock.patch.object(rebalancer, 'SWAP_FALLBACK', 'no-such-signer'):
+        with mock.patch.object(lp.swaps, 'SWAP_FALLBACK', 'no-such-signer'):
             calls, _ = self.go([self.J429] * 3)
         self.assertEqual(self.dexes(calls), ['jupiter'] * 3)
 
@@ -379,8 +384,8 @@ class OrcaFallback(OneOutcomePerSwap):
         self.assertEqual(self.dexes(calls), ['jupiter'])                       # part of it may have landed
 
     def test_the_fallback_script_is_a_registered_signer(self):
-        self.assertTrue(rebalancer.SIGNERS['orca-swap'].endswith('venues/orca/swap.mjs'))
-        self.assertNotIn('orca-swap', rebalancer.config.EXECUTE_DEXES)                # never a venue
+        self.assertTrue(lp.signers.SIGNERS['orca-swap'].endswith('venues/orca/swap.mjs'))
+        self.assertNotIn('orca-swap', config.EXECUTE_DEXES)                # never a venue
 
 
 class OneOutcomePerClose(unittest.TestCase):
@@ -398,27 +403,27 @@ class OneOutcomePerClose(unittest.TestCase):
         def fake(*a, **k):
             calls.append((a[0], k)); out, err = next(it)
             if k.get('record', True):
-                rebalancer.record_health(rebalancer.health_key(a, k.get('dex') or config.DEX), out, err)
+                lp.signers.record_health(lp.signers.health_key(a, k.get('dex') or config.DEX), out, err)
             return out, err
-        with mock.patch.object(rebalancer, 'chain', fake), \
-                mock.patch.object(rebalancer, 'read_status', lambda *a: (after_close, None)), \
-                mock.patch.object(rebalancer, 'notify', lambda *a, **k: None), \
-                mock.patch.object(rebalancer, 'notify_book', lambda *a, **k: None), \
-                mock.patch.object(rebalancer, 'save', lambda s: None), \
-                mock.patch.object(rebalancer, 'reopen', lambda *a, **k: None), \
-                mock.patch.object(rebalancer, 'halt', lambda r: None), \
-                mock.patch.object(rebalancer, 'distribute', lambda *a, **k: None), \
-                mock.patch.object(rebalancer.db, 'record_harvest', lambda *a: None), \
-                mock.patch.object(rebalancer.db, 'close_position', lambda *a: None), \
-                mock.patch.object(rebalancer.db, 'event', lambda *a: None), \
-                mock.patch.object(rebalancer.db, 'snapshot', lambda *a, **k: None), \
-                mock.patch.object(rebalancer, 'wallet', lambda p: {'walletUsd': 10.0}), \
-                mock.patch.object(rebalancer, 'band_profile', lambda *a, **k: None), \
-                mock.patch.object(rebalancer, 'measured_fees', lambda out, st, a, b, u: (a, b, u)), \
-                mock.patch.object(rebalancer, 'distribute_rewards', lambda *a, **k: None), \
+        with mock.patch.object(lp.signers, 'chain', fake), \
+                mock.patch.object(lp.signers, 'read_status', lambda *a: (after_close, None)), \
+                mock.patch.object(lp.books, 'notify', lambda *a, **k: None), \
+                mock.patch.object(lp.books, 'notify_book', lambda *a, **k: None), \
+                mock.patch.object(lp.paths, 'save', lambda s: None), \
+                mock.patch.object(lp.moves, 'reopen', lambda *a, **k: None), \
+                mock.patch.object(lp.books, 'halt', lambda r: None), \
+                mock.patch.object(lp.harvest, 'distribute', lambda *a, **k: None), \
+                mock.patch.object(db, 'record_harvest', lambda *a: None), \
+                mock.patch.object(db, 'close_position', lambda *a: None), \
+                mock.patch.object(db, 'event', lambda *a: None), \
+                mock.patch.object(db, 'snapshot', lambda *a, **k: None), \
+                mock.patch.object(lp.capital, 'wallet', lambda p: {'walletUsd': 10.0}), \
+                mock.patch.object(lp.harvest, 'band_profile', lambda *a, **k: None), \
+                mock.patch.object(lp.harvest, 'measured_fees', lambda out, st, a, b, u: (a, b, u)), \
+                mock.patch.object(lp.harvest, 'distribute_rewards', lambda *a, **k: None), \
                 mock.patch('builtins.print'), \
-                mock.patch.object(rebalancer.time, 'sleep', lambda s: None):
-            rebalancer.rebalance(state, {'positionMint': 'M', 'whirlpool': 'P', 'price': 100, 'feesAccruedA': 0.0,
+                mock.patch.object(time, 'sleep', lambda s: None):
+            lp.moves.rebalance(state, {'positionMint': 'M', 'whirlpool': 'P', 'price': 100, 'feesAccruedA': 0.0,
                                          'feesAccruedB': 0.0, 'feesAccrued_USD': 0.0}, 'price went below')
         return [k for c, k in calls if c == 'close']
 
@@ -450,23 +455,23 @@ class RecordHealth(unittest.TestCase):
         clear()
 
     def test_no_key_records_nothing(self):
-        rebalancer.record_health(None, None, 'boom')
+        lp.signers.record_health(None, None, 'boom')
         self.assertEqual(db.health_all(), [])
 
     def test_chain_records_unless_told_not_to(self):
-        with mock.patch.object(rebalancer, '_chain', lambda *a, **k: (None, 'boom')), mock.patch('builtins.print'):
-            rebalancer.chain('open', 'M', dex='orca')
-            rebalancer.chain('open', 'M', dex='orca', record=False)
+        with mock.patch.object(lp.signers, '_chain', lambda *a, **k: (None, 'boom')), mock.patch('builtins.print'):
+            lp.signers.chain('open', 'M', dex='orca')
+            lp.signers.chain('open', 'M', dex='orca', record=False)
         self.assertEqual(db.health_get('venue:orca')['fails'], 1)
 
 
     def test_an_empty_key_feeds_no_breaker(self):
         seen = []
-        with mock.patch.object(rebalancer.health, 'record_failure', lambda *a, **k: seen.append('f')), \
-                mock.patch.object(rebalancer.health, 'record_success', lambda *a, **k: seen.append('s')):
+        with mock.patch.object(health, 'record_failure', lambda *a, **k: seen.append('f')), \
+                mock.patch.object(health, 'record_success', lambda *a, **k: seen.append('s')):
             for key in (None, ''):
-                rebalancer.record_health(key, None, 'boom')
-                rebalancer.record_health(key, {'signature': 'S'}, None)
+                lp.signers.record_health(key, None, 'boom')
+                lp.signers.record_health(key, {'signature': 'S'}, None)
         self.assertEqual(seen, [])
 
     def earlier(self, key='k'):
@@ -474,7 +479,7 @@ class RecordHealth(unittest.TestCase):
 
     def outcome(self, out, err, key='k'):
         with mock.patch('builtins.print'):
-            rebalancer.record_health(key, out, err)
+            lp.signers.record_health(key, out, err)
         return db.health_get(key) or {}
 
     def test_no_answer_and_no_error_is_a_failure_with_no_result(self):
@@ -503,9 +508,9 @@ class RecordHealth(unittest.TestCase):
         seen = []
         def fake(*a, **k):
             seen.append(k); return {'signature': 'S'}, None
-        with mock.patch.object(rebalancer, '_chain', fake), mock.patch.object(config, 'DEX', 'raydium-clmm'):
-            rebalancer.chain('open', 'M')
-            rebalancer.chain('open', 'M', dex='orca', timeout=7)
+        with mock.patch.object(lp.signers, '_chain', fake), mock.patch.object(config, 'DEX', 'raydium-clmm'):
+            lp.signers.chain('open', 'M')
+            lp.signers.chain('open', 'M', dex='orca', timeout=7)
         self.assertEqual((seen[0]['dex'], seen[0]['timeout']), ('raydium-clmm', 420))
         self.assertEqual((seen[1]['dex'], seen[1]['timeout']), ('orca', 7))
         self.assertIsNotNone(db.health_get('venue:raydium-clmm'))
@@ -545,13 +550,13 @@ class LessJupiterTraffic(unittest.TestCase):
         asked = []
         accounts = [{'mint': 'DUST', 'amount': 5, 'decimals': 6}, {'mint': 'RICH', 'amount': 3_000_000, 'decimals': 6},
                     {'mint': 'NOPRICE', 'amount': 10 ** 9, 'decimals': 6}]
-        with mock.patch.object(rebalancer, 'pool_tokens', lambda: (('SOLM', 'SOL'), ('USDCM', 'USDC'))), \
-                mock.patch.object(rebalancer.audit, 'token_accounts', lambda url, owner: accounts), \
-                mock.patch.object(rebalancer.jupiter_api, 'jupiter_prices', lambda ms: {'DUST': 1.0, 'RICH': 1.0}), \
-                mock.patch.object(rebalancer.jupiter_api, 'jupiter_token', lambda m: asked.append(m) or {'verified': False}), \
-                mock.patch.object(rebalancer, 'save', lambda s: None), \
-                mock.patch.object(rebalancer, 'notify', lambda *a, **k: None):
-            rebalancer.sweep_foreign({'last_sweep': 0}, {'owner': 'OWNER', 'balanceA': 1, 'price': 100})
+        with mock.patch.object(lp.capital, 'pool_tokens', lambda: (('SOLM', 'SOL'), ('USDCM', 'USDC'))), \
+                mock.patch.object(audit, 'token_accounts', lambda url, owner: accounts), \
+                mock.patch.object(jupiter_api, 'jupiter_prices', lambda ms: {'DUST': 1.0, 'RICH': 1.0}), \
+                mock.patch.object(jupiter_api, 'jupiter_token', lambda m: asked.append(m) or {'verified': False}), \
+                mock.patch.object(lp.paths, 'save', lambda s: None), \
+                mock.patch.object(lp.books, 'notify', lambda *a, **k: None):
+            lp.swaps.sweep_foreign({'last_sweep': 0}, {'owner': 'OWNER', 'balanceA': 1, 'price': 100})
         self.assertEqual(asked, ['RICH'])
 
 
@@ -576,8 +581,8 @@ class BreakerProbe(unittest.TestCase):
             if isinstance(answer, Exception):
                 raise answer
             return answer
-        with mock.patch.object(rebalancer, 'jupiter_answers', fake), mock.patch('builtins.print'):
-            out = rebalancer.probe_breakers(now)
+        with mock.patch.object(lp.signers, 'jupiter_answers', fake), mock.patch('builtins.print'):
+            out = lp.signers.probe_breakers(now)
         return out, len(seen)
 
     def test_the_light_follows_the_cooldown(self):
@@ -620,32 +625,32 @@ class BreakerProbe(unittest.TestCase):
         t = 1_000_000.0
         self.trip('swap', t)
         self.assertIsNone(self.probe(RuntimeError('boom'), t + 2401)[0])
-        with mock.patch.object(rebalancer.health, 'allowed', side_effect=RuntimeError('db')), mock.patch('builtins.print'):
-            self.assertIsNone(rebalancer.probe_breakers(t))
+        with mock.patch.object(health, 'allowed', side_effect=RuntimeError('db')), mock.patch('builtins.print'):
+            self.assertIsNone(lp.signers.probe_breakers(t))
 
     def test_jupiter_answers_reads_the_quote(self):
         for d, ok in (({'outAmount': '1180000'}, True), ({'outAmount': '0'}, False), ({'error': 'Rate limit'}, False),
                       (None, False), ([], False), ({'outAmount': 'x'}, False)):
-            with mock.patch.object(rebalancer.venue_api, '_get', lambda url, **k: d):
-                self.assertEqual(rebalancer.jupiter_answers()[0], ok, d)
-        with mock.patch.object(rebalancer.venue_api, '_get', side_effect=ValueError('bad json')):
-            self.assertEqual(rebalancer.jupiter_answers()[0], False)
-        self.assertIn('/swap/v1/quote?', rebalancer.PROBE_QUOTE); self.assertIn('amount=10000000', rebalancer.PROBE_QUOTE)
+            with mock.patch.object(venue_api, '_get', lambda url, **k: d):
+                self.assertEqual(lp.signers.jupiter_answers()[0], ok, d)
+        with mock.patch.object(venue_api, '_get', side_effect=ValueError('bad json')):
+            self.assertEqual(lp.signers.jupiter_answers()[0], False)
+        self.assertIn('/swap/v1/quote?', lp.signers.PROBE_QUOTE); self.assertIn('amount=10000000', lp.signers.PROBE_QUOTE)
 
     def test_failover_still_follows_the_failure_count(self):
         t = time.time()
         self.trip('venue:raydium-clmm', t - 10 * 3600)                                   # long cooled: yellow
-        with mock.patch.object(rebalancer.config, 'DEX', 'raydium-clmm'), \
-                mock.patch.object(rebalancer, 'venue_view', lambda p, q=1.0: []), \
-                mock.patch.object(rebalancer, 'notify', lambda ev, **kw: self.__dict__.setdefault('ev', []).append(ev)), \
-                mock.patch.object(rebalancer, 'save', lambda s: None), mock.patch.object(rebalancer.db, 'event', lambda *a: None):
-            rebalancer.venue_failover({}, None, price=120.0, quote=1.0)    # an unknown quote price moves nothing
+        with mock.patch.object(config, 'DEX', 'raydium-clmm'), \
+                mock.patch.object(lp.board, 'venue_view', lambda p, q=1.0: []), \
+                mock.patch.object(lp.books, 'notify', lambda ev, **kw: self.__dict__.setdefault('ev', []).append(ev)), \
+                mock.patch.object(lp.paths, 'save', lambda s: None), mock.patch.object(db, 'event', lambda *a: None):
+            lp.board.venue_failover({}, None, price=120.0, quote=1.0)    # an unknown quote price moves nothing
         self.assertIn('failover_none', self.ev)                                          # it looked for a target
 
     def test_the_loop_probes_every_poll(self):
-        src = (ROOT / 'rebalancer.py').read_text()
-        i = src.index('        run_audits(state)\n')
-        self.assertEqual(src[i:i + 60].split('\n')[1].strip(), 'probe_breakers()')
+        src = (ROOT / 'lp/loop.py').read_text()
+        i = src.index('        housekeeping.run_audits(state)\n')
+        self.assertEqual(src[i:i + 80].split('\n')[1].strip(), 'signers.probe_breakers()')
 
 
 if __name__ == '__main__':

@@ -26,6 +26,7 @@ import calm
 import config
 import db
 import rebalancer
+import lp.tape
 
 B = calm.BAR_SECONDS
 FIX = json.loads((pathlib.Path(__file__).parent / 'fixtures_quiet_20261002.json').read_text())
@@ -257,20 +258,20 @@ class WithSurrogateMore(unittest.TestCase):
     def test_the_tail_compares_the_last_close_not_another_column(self):
         have = [slot(self.now, k) for k in (8, 7, 6, 5, 4)]
         bars = tape(have, [1000.0, 1000.0, 1000.0, 1000.0, 1080.0])
-        out = rebalancer.with_surrogate(self.MU_POOL, bars, 1080.5, 'MU/USDC')
+        out = lp.tape.with_surrogate(self.MU_POOL, bars, 1080.5, 'MU/USDC')
         self.assertEqual(list(out[0]), [slot(self.now, k) for k in range(8, -1, -1)])
         self.assertTrue(np.all(out[4][5:] == 1080.0))                  # flat at the last close
         self.assertTrue(np.all(out[5][5:] == 0.0))
-        self.assertIsNone(rebalancer._QUIET_MISMATCH[self.MU_POOL])
-        rebalancer.with_surrogate(self.MU_POOL, bars, 1000.0, 'MU/USDC')
-        self.assertIsNotNone(rebalancer._QUIET_MISMATCH[self.MU_POOL])  # 1000 is not the last close
+        self.assertIsNone(lp.tape._QUIET_MISMATCH[self.MU_POOL])
+        lp.tape.with_surrogate(self.MU_POOL, bars, 1000.0, 'MU/USDC')
+        self.assertIsNotNone(lp.tape._QUIET_MISMATCH[self.MU_POOL])  # 1000 is not the last close
 
     def test_the_filled_tape_is_trimmed_to_the_window(self):
         with mock.patch.object(config, 'REGIME_TAPE_DAYS', 1):         # tape_bars() = 288: one day
-            w = rebalancer.tape_bars() * B
+            w = lp.tape.tape_bars() * B
             newest = slot(self.now, 0)
             have = [newest - w - B, newest - w, newest - w + B, newest - 3 * B, newest - 2 * B, newest - B, newest]
-            out = rebalancer.with_surrogate(self.MU_POOL, tape(have), 102.0 + 4, 'MU/USDC')
+            out = lp.tape.with_surrogate(self.MU_POOL, tape(have), 102.0 + 4, 'MU/USDC')
         self.assertEqual(out[0][0], newest - w)                          # the edge stays, older goes
         self.assertEqual(out[0][-1], newest)
         self.assertTrue(set(have[1:]) <= set(out[0]))
@@ -278,19 +279,19 @@ class WithSurrogateMore(unittest.TestCase):
 
     def test_a_failed_surrogate_overlay_still_gets_the_quiet_fill(self):
         have = [slot(self.now, k) for k in (12, 11, 10, 6, 5)]
-        with mock.patch.object(rebalancer.calm, 'missing_slots', side_effect=RuntimeError('x')):
-            out = rebalancer.with_surrogate(self.MU_POOL, tape(have, [104.0] * 5), 104.0, 'MU/USDC')
+        with mock.patch.object(calm, 'missing_slots', side_effect=RuntimeError('x')):
+            out = lp.tape.with_surrogate(self.MU_POOL, tape(have, [104.0] * 5), 104.0, 'MU/USDC')
         self.assertEqual(list(out[0]), [slot(self.now, k) for k in range(12, -1, -1)])
-        src = rebalancer.LAST_SURROGATE[self.MU_POOL]
+        src = lp.tape.LAST_SURROGATE[self.MU_POOL]
         self.assertEqual((src['surrogate'], src['filled_1h'], src['quiet_1h']), (None, 0, 8))
 
     def test_a_surrogate_and_a_quiet_fill_together(self):
         have = [slot(self.now, k) for k in (12, 11, 10, 9, 8)]
         sur = [slot(self.now, k) for k in (3, 2)]
         got = tape(sur, [104.0, 104.0])
-        with mock.patch.object(rebalancer.calm, 'surrogate_5m', lambda *a, **k: ('Binance', got)):
-            out = rebalancer.with_surrogate(self.MU_POOL, tape(have), 104.0, 'MU/USDC')
-        src = rebalancer.LAST_SURROGATE[self.MU_POOL]
+        with mock.patch.object(calm, 'surrogate_5m', lambda *a, **k: ('Binance', got)):
+            out = lp.tape.with_surrogate(self.MU_POOL, tape(have), 104.0, 'MU/USDC')
+        src = lp.tape.LAST_SURROGATE[self.MU_POOL]
         self.assertEqual(list(out[0]), [slot(self.now, k) for k in range(12, -1, -1)])
         self.assertEqual((src['surrogate'], src['filled_1h'], src['quiet_1h']), ('Binance', 2, 6))
         self.assertEqual(src['source'], 'Gecko+Binance')
@@ -316,20 +317,20 @@ class WithSurrogate(unittest.TestCase):
         self.now = time.time()
         ref = [slot(self.now, k) for k in range(40)]
         db.tape_store(self.SOL_POOL, tape(ref), ref[-1] - B)
-        for p in (mock.patch.dict(rebalancer._QUIET_REF, clear=True),
-                  mock.patch.dict(rebalancer._QUIET_MISMATCH, clear=True),
-                  mock.patch.dict(rebalancer._SURR, clear=True),
-                  mock.patch.dict(rebalancer.LAST_SURROGATE, clear=True),
-                  mock.patch.object(rebalancer.calm, 'surrogate_5m', lambda *a, **k: (None, None))):
+        for p in (mock.patch.dict(lp.tape._QUIET_REF, clear=True),
+                  mock.patch.dict(lp.tape._QUIET_MISMATCH, clear=True),
+                  mock.patch.dict(lp.tape._SURR, clear=True),
+                  mock.patch.dict(lp.tape.LAST_SURROGATE, clear=True),
+                  mock.patch.object(calm, 'surrogate_5m', lambda *a, **k: (None, None))):
             p.start(); self.addCleanup(p.stop)
 
     def test_the_quiet_pool_reads_fresh_and_says_so(self):
         have = [slot(self.now, k) for k in (12, 11, 10, 6, 5)]
         bars = tape(have, [1080.0] * len(have))
-        out = rebalancer.with_surrogate(self.MU_POOL, bars, 1080.5, 'MU/USDC')
+        out = lp.tape.with_surrogate(self.MU_POOL, bars, 1080.5, 'MU/USDC')
         self.assertEqual(list(out[0]), [slot(self.now, k) for k in range(12, -1, -1)])
         self.assertTrue(calm.tape_fresh(out[0], time.time()))
-        src = rebalancer.LAST_SURROGATE[self.MU_POOL]
+        src = lp.tape.LAST_SURROGATE[self.MU_POOL]
         self.assertEqual((src['source'], src['filled_1h']), ('Gecko', 0))
         self.assertEqual(src['quiet_1h'], 8)
         for real in have:
@@ -338,28 +339,28 @@ class WithSurrogate(unittest.TestCase):
     def test_a_price_that_moved_without_a_bar_ends_the_tail_fill(self):
         have = [slot(self.now, k) for k in (8, 7, 6, 5, 4)]
         bars = tape(have, [1080.0] * len(have))
-        self.assertEqual(len(rebalancer.with_surrogate(self.MU_POOL, bars, 1100.0, 'MU/USDC')[0]), 9)  # waits
-        rebalancer._QUIET_MISMATCH[self.MU_POOL] = time.time() - calm.QUIET_MISMATCH_S - 1
-        out = rebalancer.with_surrogate(self.MU_POOL, bars, 1100.0, 'MU/USDC')
+        self.assertEqual(len(lp.tape.with_surrogate(self.MU_POOL, bars, 1100.0, 'MU/USDC')[0]), 9)  # waits
+        lp.tape._QUIET_MISMATCH[self.MU_POOL] = time.time() - calm.QUIET_MISMATCH_S - 1
+        out = lp.tape.with_surrogate(self.MU_POOL, bars, 1100.0, 'MU/USDC')
         self.assertEqual(list(out[0]), have)
         self.assertFalse(calm.tape_fresh(out[0], time.time()))
 
     def test_the_canary_pool_cannot_vouch_for_itself(self):
         have = [slot(self.now, k) for k in (12, 11, 10, 6, 5)]
-        out = rebalancer.with_surrogate(self.SOL_POOL, tape(have), 104.0, 'SOL/USDC')
+        out = lp.tape.with_surrogate(self.SOL_POOL, tape(have), 104.0, 'SOL/USDC')
         self.assertEqual(list(out[0]), have)
-        self.assertIsNone(rebalancer.quiet_ref_ts(self.SOL_POOL, time.time() + 999))
+        self.assertIsNone(lp.tape.quiet_ref_ts(self.SOL_POOL, time.time() + 999))
 
     def test_a_database_failure_leaves_the_tape_as_it_was(self):
         have = [slot(self.now, k) for k in (12, 11, 10, 6, 5)]
         with mock.patch.object(db, 'tape_ref_pool', side_effect=RuntimeError('db')):
-            out = rebalancer.with_surrogate(self.MU_POOL, tape(have), 104.0, 'MU/USDC')
+            out = lp.tape.with_surrogate(self.MU_POOL, tape(have), 104.0, 'MU/USDC')
         self.assertEqual(list(out[0]), have)
 
     def test_a_fill_failure_returns_the_real_tape(self):
         have = [slot(self.now, k) for k in (12, 11, 10, 6, 5)]
         with mock.patch.object(calm, 'quiet_fill', side_effect=ValueError('x')):
-            out = rebalancer.with_surrogate(self.MU_POOL, tape(have), 104.0, 'MU/USDC')
+            out = lp.tape.with_surrogate(self.MU_POOL, tape(have), 104.0, 'MU/USDC')
         self.assertEqual(list(out[0]), have)
 
     def test_the_canary_is_read_once_a_minute(self):
@@ -367,17 +368,17 @@ class WithSurrogate(unittest.TestCase):
         real = db.tape_load
         with mock.patch.object(db, 'tape_load', lambda *a: calls.append(a) or real(*a)):
             for _ in range(3):
-                rebalancer.quiet_ref_ts(self.MU_POOL, self.now)
-            rebalancer.quiet_ref_ts(self.MU_POOL, self.now + rebalancer.QUIET_REF_REFRESH + 1)
+                lp.tape.quiet_ref_ts(self.MU_POOL, self.now)
+            lp.tape.quiet_ref_ts(self.MU_POOL, self.now + lp.tape.QUIET_REF_REFRESH + 1)
         self.assertEqual(len(calls), 2)
 
     def test_the_cache_is_per_pool_holds_its_answer_and_expires_on_time(self):
-        first = rebalancer.quiet_ref_ts(self.MU_POOL, self.now)
+        first = lp.tape.quiet_ref_ts(self.MU_POOL, self.now)
         self.assertEqual(len(first), 40)
         with mock.patch.object(db, 'tape_load', side_effect=AssertionError('read')):
-            self.assertIs(rebalancer.quiet_ref_ts(self.MU_POOL, self.now + rebalancer.QUIET_REF_REFRESH), first)
-        self.assertIsNone(rebalancer.quiet_ref_ts(self.SOL_POOL, self.now))       # another pool: asked again
-        self.assertEqual(len(rebalancer.quiet_ref_ts(self.MU_POOL, self.now)), 40)
+            self.assertIs(lp.tape.quiet_ref_ts(self.MU_POOL, self.now + lp.tape.QUIET_REF_REFRESH), first)
+        self.assertIsNone(lp.tape.quiet_ref_ts(self.SOL_POOL, self.now))       # another pool: asked again
+        self.assertEqual(len(lp.tape.quiet_ref_ts(self.MU_POOL, self.now)), 40)
 
     def test_the_canary_is_a_native_stable_pool_not_this_one(self):
         self.assertEqual(db.tape_ref_pool(self.SOL, [self.USDC], self.MU_POOL), self.SOL_POOL)
@@ -395,30 +396,30 @@ class FeeTolerance(unittest.TestCase):
     setUp = None                                                        # set below from WithSurrogate
 
     def liq(self, rec):
-        p = mock.patch.dict(rebalancer._LIQ, {self.MU_POOL: (time.time(), rec)} if rec is not None else {}, clear=True)
+        p = mock.patch.dict(lp.tape._LIQ, {self.MU_POOL: (time.time(), rec)} if rec is not None else {}, clear=True)
         p.start(); self.addCleanup(p.stop)
 
     def test_the_fee_is_added(self):
         self.liq({'fee': 0.003})
-        self.assertAlmostEqual(rebalancer.quiet_tolerance(self.MU_POOL), calm.QUIET_TOL + 0.003)
+        self.assertAlmostEqual(lp.tape.quiet_tolerance(self.MU_POOL), calm.QUIET_TOL + 0.003)
 
     def test_no_record_or_no_usable_fee_is_the_plain_tolerance(self):
         for rec in (None, {}, {'fee': None}, {'fee': 'x'}, {'fee': -0.01}, {'fee': float('nan')},
                     {'fee': float('inf')}, {'fee': [1]}):
             with self.subTest(rec=rec):
                 self.liq(rec)
-                self.assertEqual(rebalancer.quiet_tolerance(self.MU_POOL), calm.QUIET_TOL)
+                self.assertEqual(lp.tape.quiet_tolerance(self.MU_POOL), calm.QUIET_TOL)
 
     def test_a_large_fee_is_capped_and_the_cap_is_inclusive(self):
         self.liq({'fee': 0.25})
-        self.assertAlmostEqual(rebalancer.quiet_tolerance(self.MU_POOL), calm.QUIET_TOL + rebalancer.QUIET_FEE_MAX)
-        self.liq({'fee': rebalancer.QUIET_FEE_MAX})
-        self.assertAlmostEqual(rebalancer.quiet_tolerance(self.MU_POOL), calm.QUIET_TOL + rebalancer.QUIET_FEE_MAX)
+        self.assertAlmostEqual(lp.tape.quiet_tolerance(self.MU_POOL), calm.QUIET_TOL + lp.tape.QUIET_FEE_MAX)
+        self.liq({'fee': lp.tape.QUIET_FEE_MAX})
+        self.assertAlmostEqual(lp.tape.quiet_tolerance(self.MU_POOL), calm.QUIET_TOL + lp.tape.QUIET_FEE_MAX)
 
     def test_another_pools_record_does_not_count(self):
-        p = mock.patch.dict(rebalancer._LIQ, {self.SOL_POOL: (time.time(), {'fee': 0.003})}, clear=True)
+        p = mock.patch.dict(lp.tape._LIQ, {self.SOL_POOL: (time.time(), {'fee': 0.003})}, clear=True)
         p.start(); self.addCleanup(p.stop)
-        self.assertEqual(rebalancer.quiet_tolerance(self.MU_POOL), calm.QUIET_TOL)
+        self.assertEqual(lp.tape.quiet_tolerance(self.MU_POOL), calm.QUIET_TOL)
 
     def test_the_djt_case_fills_with_the_fee_and_not_without(self):
         # the live price 0.30% above the last trade-price close, past the mismatch wait
@@ -426,14 +427,14 @@ class FeeTolerance(unittest.TestCase):
         bars = tape(have, [8.6446] * len(have))
         live = 8.6446 * 1.00301
         self.liq({'fee': 0.003})
-        rebalancer._QUIET_MISMATCH[self.MU_POOL] = time.time() - calm.QUIET_MISMATCH_S - 1
-        out = rebalancer.with_surrogate(self.MU_POOL, bars, live, 'DJT/USDC')
+        lp.tape._QUIET_MISMATCH[self.MU_POOL] = time.time() - calm.QUIET_MISMATCH_S - 1
+        out = lp.tape.with_surrogate(self.MU_POOL, bars, live, 'DJT/USDC')
         self.assertEqual(list(out[0]), [slot(self.now, k) for k in range(8, -1, -1)])
         self.assertTrue(calm.tape_fresh(out[0], time.time()))
-        self.assertIsNone(rebalancer._QUIET_MISMATCH[self.MU_POOL])
+        self.assertIsNone(lp.tape._QUIET_MISMATCH[self.MU_POOL])
         self.liq({})
-        rebalancer._QUIET_MISMATCH[self.MU_POOL] = time.time() - calm.QUIET_MISMATCH_S - 1
-        out = rebalancer.with_surrogate(self.MU_POOL, bars, live, 'DJT/USDC')
+        lp.tape._QUIET_MISMATCH[self.MU_POOL] = time.time() - calm.QUIET_MISMATCH_S - 1
+        out = lp.tape.with_surrogate(self.MU_POOL, bars, live, 'DJT/USDC')
         self.assertEqual(list(out[0]), have)                              # the old rule: STALE
         self.assertFalse(calm.tape_fresh(out[0], time.time()))
 
@@ -441,8 +442,8 @@ class FeeTolerance(unittest.TestCase):
         have = [slot(self.now, k) for k in (8, 7, 6, 5, 4)]
         bars = tape(have, [8.6446] * len(have))
         self.liq({'fee': 0.003})
-        rebalancer._QUIET_MISMATCH[self.MU_POOL] = time.time() - calm.QUIET_MISMATCH_S - 1
-        out = rebalancer.with_surrogate(self.MU_POOL, bars, 8.6446 * 1.0061, 'DJT/USDC')
+        lp.tape._QUIET_MISMATCH[self.MU_POOL] = time.time() - calm.QUIET_MISMATCH_S - 1
+        out = lp.tape.with_surrogate(self.MU_POOL, bars, 8.6446 * 1.0061, 'DJT/USDC')
         self.assertEqual(list(out[0]), have)
 
 

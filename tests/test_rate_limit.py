@@ -12,6 +12,7 @@ from hypothesis import given, settings, strategies as st
 
 import _fixtures  # noqa: F401
 import engine
+import calm
 
 JSON = st.recursive(st.none() | st.booleans() | st.integers() | st.floats(allow_nan=False) | st.text(max_size=8),
                     lambda c: st.lists(c, max_size=4) | st.dictionaries(st.sampled_from(

@@ -10,7 +10,12 @@ import _fixtures
 _fixtures.ensure_profile()
 
 import calm        # noqa: E402
-import rebalancer  # noqa: E402
+import config  # noqa: E402
+import db  # noqa: E402
+import lp.books  # noqa: E402
+import lp.moves  # noqa: E402
+import lp.regime  # noqa: E402
+import lp.tape  # noqa: E402
 
 W = calm.WIDTHS
 
@@ -91,57 +96,57 @@ class Loop(unittest.TestCase):
     def test_an_exit_under_regime_does_not_wait_for_the_gap(self):
         now = time.time(); sent = []
         state = {'last_rebalance': 0, 'rebalance_times': [], 'calm_times': [now - 30], 'failures': 0}
-        with mock.patch.object(rebalancer.config, 'REGIME_ENABLED', True), \
-                mock.patch.object(rebalancer.config, 'CALM_MIN_GAP', 600), \
-                mock.patch.object(rebalancer.config, 'CALM_MAX_MOVES', 48), \
-                mock.patch.object(rebalancer.config, 'MAX_REBALANCES_PER_DAY', 6), \
-                mock.patch.object(rebalancer, 'notify', lambda ev, **kw: sent.append(ev)), \
-                mock.patch.object(rebalancer, 'chain', lambda *a, **k: (_ for _ in ()).throw(RuntimeError('reached the harvest'))):
+        with mock.patch.object(config, 'REGIME_ENABLED', True), \
+                mock.patch.object(config, 'CALM_MIN_GAP', 600), \
+                mock.patch.object(config, 'CALM_MAX_MOVES', 48), \
+                mock.patch.object(config, 'MAX_REBALANCES_PER_DAY', 6), \
+                mock.patch.object(lp.books, 'notify', lambda ev, **kw: sent.append(ev)), \
+                mock.patch.object(lp.signers, 'chain', lambda *a, **k: (_ for _ in ()).throw(RuntimeError('reached the harvest'))):
             with self.assertRaises(RuntimeError):
-                rebalancer.rebalance(state, {'positionMint': 'M'}, 'price went above', band=1.01,
+                lp.moves.rebalance(state, {'positionMint': 'M'}, 'price went above', band=1.01,
                                      calm_move=True, exit_move=True)
-            rebalancer.rebalance(state, {'positionMint': 'M'}, 'regime WARM', band=1.02, calm_move=True)
+            lp.moves.rebalance(state, {'positionMint': 'M'}, 'regime WARM', band=1.02, calm_move=True)
         self.assertEqual(sent[-1], 'rebalance_deferred')                        # a voluntary move still waits
 
     def test_regime_off_never_reads_the_tape(self):
-        with mock.patch.object(rebalancer.config, 'REGIME_ENABLED', False), \
-                mock.patch.object(rebalancer, 'tape5', side_effect=AssertionError('read')):
-            self.assertIsNone(rebalancer.regime_view({}, {'price': 1, 'lowerPrice': 0.9, 'upperPrice': 1.1}))
-            self.assertIsNone(rebalancer.regime_choice_now('P', 1.0))
+        with mock.patch.object(config, 'REGIME_ENABLED', False), \
+                mock.patch.object(lp.tape, 'tape5', side_effect=AssertionError('read')):
+            self.assertIsNone(lp.regime.regime_view({}, {'price': 1, 'lowerPrice': 0.9, 'upperPrice': 1.1}))
+            self.assertIsNone(lp.regime.regime_choice_now('P', 1.0))
 
     def test_choice_now_refuses_a_stale_tape(self):
         b = tape()
         old = tuple(list(b[:1]) and [b[0] - 3600]) + b[1:]
-        with mock.patch.object(rebalancer.config, 'REGIME_ENABLED', True), \
-                mock.patch.object(rebalancer, 'tape5', lambda pool, price, pair=None: old):
-            self.assertIsNone(rebalancer.regime_choice_now('P', float(b[4][-1])))
-        with mock.patch.object(rebalancer.config, 'REGIME_ENABLED', True), \
-                mock.patch.object(rebalancer, 'tape5', lambda pool, price, pair=None: b):
-            self.assertIn(rebalancer.regime_choice_now('P', float(b[4][-1])), W)
+        with mock.patch.object(config, 'REGIME_ENABLED', True), \
+                mock.patch.object(lp.tape, 'tape5', lambda pool, price, pair=None: old):
+            self.assertIsNone(lp.regime.regime_choice_now('P', float(b[4][-1])))
+        with mock.patch.object(config, 'REGIME_ENABLED', True), \
+                mock.patch.object(lp.tape, 'tape5', lambda pool, price, pair=None: b):
+            self.assertIn(lp.regime.regime_choice_now('P', float(b[4][-1])), W)
 
     def test_view_records_mode_changes_and_the_guard(self):
         b = tape(sigma=0.0004); p = float(b[4][-1]); events = []
         state = {'calm_times': [time.time() - 10] * 3}
-        with mock.patch.object(rebalancer.config, 'REGIME_ENABLED', True), \
-                mock.patch.object(rebalancer.config, 'CALM_MAX_MOVES', 48), \
-                mock.patch.object(rebalancer, 'tape5', lambda pool, price, pair=None: b), \
-                mock.patch.object(rebalancer, 'save', lambda s: None), \
-                mock.patch.object(rebalancer.db, 'event', lambda *a: events.append(a)):
-            v = rebalancer.regime_view(state, {'price': p, 'lowerPrice': p / 1.01, 'upperPrice': p * 1.01})
+        with mock.patch.object(config, 'REGIME_ENABLED', True), \
+                mock.patch.object(config, 'CALM_MAX_MOVES', 48), \
+                mock.patch.object(lp.tape, 'tape5', lambda pool, price, pair=None: b), \
+                mock.patch.object(lp.paths, 'save', lambda s: None), \
+                mock.patch.object(db, 'event', lambda *a: events.append(a)):
+            v = lp.regime.regime_view(state, {'price': p, 'lowerPrice': p / 1.01, 'upperPrice': p * 1.01})
         self.assertEqual(v['moves_24h'], 3); self.assertEqual(v['guard'], 48)
         self.assertEqual(state['regime_mode'], 'CALM'); self.assertEqual(events[0][0], 'REGIME')
-        self.assertIs(rebalancer.LAST_REGIME['view'], v)
+        self.assertIs(lp.books.LAST_REGIME['view'], v)
 
 
 class RollingTape(unittest.TestCase):
     def test_merge_dedupes_by_timestamp_keeps_newest_and_caps_the_length(self):
         a = (np.array([0., 300, 600]), np.ones(3), np.ones(3), np.ones(3), np.array([1., 2, 3]), np.ones(3))
         b = (np.array([600., 900]), np.ones(2), np.ones(2), np.ones(2), np.array([30., 4]), np.ones(2))
-        m = rebalancer._merge([a, b])
+        m = lp.tape._merge([a, b])
         self.assertEqual(list(m[0]), [0, 300, 600, 900]); self.assertEqual(list(m[4]), [1, 2, 30, 4])
-        with mock.patch.object(rebalancer, 'tape_bars', lambda: 2):
-            self.assertEqual(list(rebalancer._merge([a, b])[0]), [600, 900])
-        self.assertIsNone(rebalancer._merge([None, None]))
+        with mock.patch.object(lp.tape, 'tape_bars', lambda: 2):
+            self.assertEqual(list(lp.tape._merge([a, b])[0]), [600, 900])
+        self.assertIsNone(lp.tape._merge([None, None]))
 
     def fake_gecko(self, now, calls=None, slope=0.0):
         def fake(pool, live_price=None, before=None):
@@ -156,49 +161,49 @@ class RollingTape(unittest.TestCase):
         return fake
 
     def setUp(self):
-        rebalancer._TAPE5.clear()
-        with rebalancer.db.cursor(commit=True) as cur:
+        lp.tape._TAPE5.clear()
+        with db.cursor(commit=True) as cur:
             cur.execute('truncate tape5')
 
     def tearDown(self):
-        rebalancer._TAPE5.clear()
+        lp.tape._TAPE5.clear()
 
     def test_thirty_days_in_the_database_and_nothing_older(self):
         now = int(time.time()) // 300 * 300; calls = []
-        with mock.patch.object(rebalancer.calm, 'tape_5m', self.fake_gecko(now, calls)), \
-                mock.patch.object(rebalancer.config, 'REGIME_TAPE_DAYS', 30):
-            b = rebalancer.tape5('POOLADDRESS2', 100.0)
+        with mock.patch.object(calm, 'tape_5m', self.fake_gecko(now, calls)), \
+                mock.patch.object(config, 'REGIME_TAPE_DAYS', 30):
+            b = lp.tape.tape5('POOLADDRESS2', 100.0)
         self.assertEqual(len(b[0]), 8640); self.assertEqual(len(calls), 9)       # newest + 8 pages back
-        with rebalancer.db.cursor() as cur:
+        with db.cursor() as cur:
             cur.execute("select count(*) n, min(ts) lo, max(ts) hi from tape5 where pool = 'POOLADDRESS2'")
             r = cur.fetchone()
         self.assertEqual(r['n'], 8640); self.assertGreaterEqual(r['lo'], r['hi'] - 30 * 86400)
 
     def test_a_restart_reads_the_database_and_fetches_one_page(self):
         now = int(time.time()) // 300 * 300; calls = []
-        with mock.patch.object(rebalancer.calm, 'tape_5m', self.fake_gecko(now, calls)), \
-                mock.patch.object(rebalancer.config, 'REGIME_TAPE_DAYS', 10):
-            rebalancer.tape5('POOLADDRESS1', 100.0)
-            rebalancer._TAPE5.clear(); calls.clear()
-            b2 = rebalancer.tape5('POOLADDRESS1', 100.0)
+        with mock.patch.object(calm, 'tape_5m', self.fake_gecko(now, calls)), \
+                mock.patch.object(config, 'REGIME_TAPE_DAYS', 10):
+            lp.tape.tape5('POOLADDRESS1', 100.0)
+            lp.tape._TAPE5.clear(); calls.clear()
+            b2 = lp.tape.tape5('POOLADDRESS1', 100.0)
         self.assertEqual(calls, [None]); self.assertEqual(len(b2[0]), 2880)
 
     def test_older_pages_are_oriented_against_the_bar_they_join(self):
         now = int(time.time()) // 300 * 300
-        with mock.patch.object(rebalancer.calm, 'tape_5m', self.fake_gecko(now, slope=0.3)), \
-                mock.patch.object(rebalancer.config, 'REGIME_TAPE_DAYS', 30):
-            b = rebalancer.tape5('POOLADDRESS3', 100.0)
+        with mock.patch.object(calm, 'tape_5m', self.fake_gecko(now, slope=0.3)), \
+                mock.patch.object(config, 'REGIME_TAPE_DAYS', 30):
+            b = lp.tape.tape5('POOLADDRESS3', 100.0)
         self.assertEqual(len(b[0]), 8640)
 
     def test_memory_holds_at_most_two_pools_and_old_pools_leave_the_table(self):
         now = int(time.time()) // 300 * 300
-        with rebalancer.db.cursor(commit=True) as cur:
+        with db.cursor(commit=True) as cur:
             cur.execute("insert into tape5 values ('GONE', %s, 1, 1, 1, 1, 1)", (now - 3 * 86400,))
-        with mock.patch.object(rebalancer.calm, 'tape_5m', self.fake_gecko(now)), \
-                mock.patch.object(rebalancer.config, 'REGIME_TAPE_DAYS', 3):
+        with mock.patch.object(calm, 'tape_5m', self.fake_gecko(now)), \
+                mock.patch.object(config, 'REGIME_TAPE_DAYS', 3):
             for p in ('P1', 'P2', 'P3'):
-                rebalancer.tape5(p, 100.0)
-        self.assertLessEqual(len(rebalancer._TAPE5), 2); self.assertIn('P3', rebalancer._TAPE5)
-        with rebalancer.db.cursor() as cur:
+                lp.tape.tape5(p, 100.0)
+        self.assertLessEqual(len(lp.tape._TAPE5), 2); self.assertIn('P3', lp.tape._TAPE5)
+        with db.cursor() as cur:
             cur.execute("select count(*) n from tape5 where pool = 'GONE'")
             self.assertEqual(cur.fetchone()['n'], 0)

@@ -24,6 +24,15 @@ import _fixtures  # noqa: F401  (first: it puts lp_bot on the path)
 import config
 import db
 import rebalancer
+import lp.board
+import lp.capital
+import lp.moves
+import lp.paths
+import lp.regime
+import lp.swaps
+import dexes
+import guards
+from venues.jupiter import prices as jupiter_api
 import swing
 import test_multi_loop as tml
 import wallets
@@ -277,9 +286,9 @@ class Tick(unittest.TestCase):
 class LeftBehind(unittest.TestCase):
     def test_the_old_pools_mints_the_new_one_lacks(self):
         old, new = ((tml.SOL, 'SOL'), (tml.USDC, 'USDC')), ((DJT, 'DJT'), (tml.USDC, 'USDC'))
-        self.assertEqual(rebalancer.left_behind(old, new), [tml.SOL])
-        self.assertEqual(rebalancer.left_behind(new, old), [DJT])
-        self.assertEqual(rebalancer.left_behind(old, old), [])
+        self.assertEqual(lp.swaps.left_behind(old, new), [tml.SOL])
+        self.assertEqual(lp.swaps.left_behind(new, old), [DJT])
+        self.assertEqual(lp.swaps.left_behind(old, old), [])
 
 
 POOLS = dict(tml.POOLS, **{DJT_POOL: {'dex': 'orca', 'a': DJT, 'b': tml.USDC, 'sa': 'DJT', 'sb': 'USDC',
@@ -306,10 +315,10 @@ class Loop(tml.Fixture):
                         "signer_env = '{\"LPBOT_ORCA_ADAPTIVE\": \"1\"}' where name = 'e2e-swing'")
         self.addCleanup(self.drop_wallet)
         band = {'band': 1.05, 'net_day_pct': 0.1, 'rebal_per_day': 0.1}
-        for p in (mock.patch.object(rebalancer.dexes, 'pool', lambda dex, pool: dict(tml.pool_record_for(pool),
+        for p in (mock.patch.object(dexes, 'pool', lambda dex, pool: dict(tml.pool_record_for(pool),
                                                                                        adaptive_fee=(dex == 'orca'))),
-                  mock.patch.object(rebalancer.jupiter_api, 'jupiter_prices', lambda ms: {m: USD.get(m, 0.0) for m in ms}),
-                  mock.patch.object(rebalancer, 'best_band_for', lambda pool, dex=None: dict(
+                  mock.patch.object(jupiter_api, 'jupiter_prices', lambda ms: {m: USD.get(m, 0.0) for m in ms}),
+                  mock.patch.object(lp.board, 'best_band_for', lambda pool, dex=None: dict(
                       band, price=POOLS[pool]['price'], record=tml.pool_record_for(pool), all_runs=[band])),
                   mock.patch.object(config, 'reload', self.reload)):
             p.start(); self.addCleanup(p.stop)
@@ -375,17 +384,17 @@ class Loop(tml.Fixture):
         self.move('orca', DJT_POOL)                                        # the bell
         self.assertNotIn(tml.SOL_POOL, self.chain.positions)
         self.assertIn(DJT_POOL, self.chain.positions)
-        self.assertAlmostEqual(self.chain.wallet[tml.SOL], 0.05 + rebalancer.open_headroom('orca') + rebalancer.LEFT_BEHIND_GAS_MARGIN, places=6)  # reserve + rent
+        self.assertAlmostEqual(self.chain.wallet[tml.SOL], 0.05 + lp.capital.open_headroom('orca') + lp.swaps.LEFT_BEHIND_GAS_MARGIN, places=6)  # reserve + rent
         pos = self.chain.positions[DJT_POOL]
         self.assertGreater(pos['a'] * 9.0 + pos['b'], 190.0)              # the capital is in the DJT band
         ev = self.events('e2e-swing')
         self.assertIn('LEFT_BEHIND_SOLD', ev)
         with self.as_profile('e2e-swing'):
-            self.assertEqual(json.loads((rebalancer.STATE).read_text()).get('left_behind'), [])
+            self.assertEqual(json.loads((lp.paths.STATE).read_text()).get('left_behind'), [])
         self.move('raydium-clmm', tml.SOL_POOL)                           # the close
         self.assertIn(tml.SOL_POOL, self.chain.positions)
         self.assertNotIn(DJT_POOL, self.chain.positions)
-        self.assertLess(self.chain.wallet[DJT] * 9.0, rebalancer.SWEEP_MIN_USD)   # DJT sold, not idle
+        self.assertLess(self.chain.wallet[DJT] * 9.0, lp.swaps.SWEEP_MIN_USD)   # DJT sold, not idle
         with db.cursor() as cur:
             cur.execute("select pool from positions where config_name = 'e2e-swing' order by opened_at")
             self.assertEqual([r['pool'] for r in cur.fetchall()], [tml.SOL_POOL, DJT_POOL, tml.SOL_POOL])
@@ -398,9 +407,9 @@ class Loop(tml.Fixture):
         self.assertIn(DJT_POOL, self.chain.positions)
         self.assertNotIn('rebalance_deferred', self.events('e2e-swing'))
         with self.as_profile('e2e-swing'):
-            st_ = json.loads(rebalancer.STATE.read_text())
+            st_ = json.loads(lp.paths.STATE.read_text())
             st_['rebalance_times'] = [time.time()] * 6                     # at max_rebalances_per_day
-            rebalancer.STATE.write_text(json.dumps(st_))
+            lp.paths.STATE.write_text(json.dumps(st_))
         self.move('raydium-clmm', tml.SOL_POOL)
         self.assertIn(DJT_POOL, self.chain.positions)                      # the ceiling halts it
         self.assertIn('BREAKER', self.events('e2e-swing'))
@@ -413,7 +422,7 @@ class Loop(tml.Fixture):
         self.assertEqual([c for c in self.chain.calls if '--execute' in c['args']], [])
         self.assertEqual(self.events('e2e-swing').count('gas_short'), 1)        # said once
         with self.as_profile('e2e-swing'):
-            st_ = json.loads(rebalancer.STATE.read_text())
+            st_ = json.loads(lp.paths.STATE.read_text())
         self.assertEqual(st_.get('failures', 0), 0)
         self.chain.wallet[tml.SOL] = 0.06                                         # gas arrives
         with self.pins():
@@ -436,7 +445,7 @@ class Loop(tml.Fixture):
         self.chain.wallet.update({tml.SOL: 1.4, tml.USDC: 0.0})            # all of it in SOL, nothing held
         self.move('orca', DJT_POOL)
         self.assertIn(DJT_POOL, self.chain.positions)
-        self.assertAlmostEqual(self.chain.wallet[tml.SOL], 0.05 + rebalancer.open_headroom('orca') + rebalancer.LEFT_BEHIND_GAS_MARGIN, places=6)
+        self.assertAlmostEqual(self.chain.wallet[tml.SOL], 0.05 + lp.capital.open_headroom('orca') + lp.swaps.LEFT_BEHIND_GAS_MARGIN, places=6)
         with db.cursor() as cur:
             cur.execute("select kind from events where profile = 'e2e-swing' and kind = 'MIGRATE_REQUESTED'")
             self.assertEqual(len(cur.fetchall()), 1)
@@ -445,9 +454,9 @@ class Loop(tml.Fixture):
         with self.as_profile('e2e-mu') as run:
             state = {'left_behind': [tml.SOL]}
             calls = []
-            with mock.patch.object(rebalancer, 'chain', lambda *a, **k: calls.append(a) or (None, None)), \
-                    mock.patch.object(rebalancer, 'save', lambda s: None):
-                self.assertFalse(rebalancer.sell_left_behind(state, force=True))
+            with mock.patch.object(lp.signers, 'chain', lambda *a, **k: calls.append(a) or (None, None)), \
+                    mock.patch.object(lp.paths, 'save', lambda s: None):
+                self.assertFalse(lp.swaps.sell_left_behind(state, force=True))
             self.assertEqual(calls, [])
             self.assertEqual(state['left_behind'], [tml.SOL])
         self.assertIn('left_behind_held', self.events('e2e-mu'))
@@ -455,14 +464,14 @@ class Loop(tml.Fixture):
     def test_an_unsold_leftover_waits_its_retry_time(self):
         with self.as_profile('e2e-swing'):
             state = {'left_behind': [DJT], 'left_behind_at': time.time()}
-            with mock.patch.object(rebalancer, 'save', lambda s: None), \
-                    mock.patch.object(rebalancer.wallets, 'read_balances', side_effect=AssertionError('read')):
-                self.assertFalse(rebalancer.sell_left_behind(state))
-            state['left_behind_at'] = time.time() - rebalancer.LEFT_BEHIND_RETRY_S - 1
-            fail = mock.patch.object(rebalancer, 'chain', lambda *a, **k: (None, 'jupiter 429'))
+            with mock.patch.object(lp.paths, 'save', lambda s: None), \
+                    mock.patch.object(wallets, 'read_balances', side_effect=AssertionError('read')):
+                self.assertFalse(lp.swaps.sell_left_behind(state))
+            state['left_behind_at'] = time.time() - lp.swaps.LEFT_BEHIND_RETRY_S - 1
+            fail = mock.patch.object(lp.signers, 'chain', lambda *a, **k: (None, 'jupiter 429'))
             self.chain.wallet[DJT] = 5.0
-            with mock.patch.object(rebalancer, 'save', lambda s: None), fail:
-                self.assertFalse(rebalancer.sell_left_behind(state))
+            with mock.patch.object(lp.paths, 'save', lambda s: None), fail:
+                self.assertFalse(lp.swaps.sell_left_behind(state))
             self.assertEqual(state['left_behind'], [DJT])                 # kept for the next try
         self.assertIn('left_behind_unsold', self.events('e2e-swing'))
 
@@ -470,9 +479,9 @@ class Loop(tml.Fixture):
         with self.as_profile('e2e-swing'):
             self.chain.wallet[DJT] = 0.01                                  # $0.09
             state = {'left_behind': [DJT]}
-            with mock.patch.object(rebalancer, 'save', lambda s: None), \
-                    mock.patch.object(rebalancer, 'chain', side_effect=AssertionError('swapped dust')):
-                self.assertFalse(rebalancer.sell_left_behind(state, force=True))
+            with mock.patch.object(lp.paths, 'save', lambda s: None), \
+                    mock.patch.object(lp.signers, 'chain', side_effect=AssertionError('swapped dust')):
+                self.assertFalse(lp.swaps.sell_left_behind(state, force=True))
             self.assertEqual(state['left_behind'], [])
 
 
@@ -483,12 +492,12 @@ class Gates(unittest.TestCase):
         rec = dict(tml.pool_record_for(tml.SOL_POOL), address=pool, pair='DJT/USDC', adaptive_fee=adaptive,
                    token_a={'address': DJT, 'symbol': 'DJT', 'decimals': 6})
         told = []
-        with mock.patch.object(rebalancer.dexes, 'pool', lambda d, p: rec), \
-                mock.patch.object(rebalancer, 'pool_tokens', lambda: ((tml.SOL, 'SOL'), (tml.USDC, 'USDC'))), \
-                mock.patch.object(rebalancer, 'notify', lambda ev, **kw: told.append(kw.get('reason'))), \
+        with mock.patch.object(dexes, 'pool', lambda d, p: rec), \
+                mock.patch.object(lp.capital, 'pool_tokens', lambda: ((tml.SOL, 'SOL'), (tml.USDC, 'USDC'))), \
+                mock.patch.object(lp.books, 'notify', lambda ev, **kw: told.append(kw.get('reason'))), \
                 mock.patch.multiple(config, ALLOW_SWAP=allow, SWING_POOLS=tuple(pins), EXECUTE_DEXES=('orca',),
                                     SIGNER_ENV={'LPBOT_ORCA_ADAPTIVE': '1'} if adaptive_opt else {}):
-            return rebalancer.operator_target(['orca', pool]), told
+            return lp.board.operator_target(['orca', pool]), told
 
     def test_a_pinned_pool_with_allow_swap_and_the_opt_in_is_a_target(self):
         t, told = self.target()
@@ -538,16 +547,16 @@ class SellLeftBehind(unittest.TestCase):
         def chain(*a, **k):
             calls.append((a, json.loads(k['extra_env']['LPBOT_SLEEVE'])))
             return answers.get(a[1], ({'signature': f'sig-{a[1][:3]}'}, None))
-        with mock.patch.object(rebalancer, 'claim_mints', lambda: (None if mints is None else list(mints), 'why', shared)), \
-                mock.patch.object(rebalancer, 'pool_tokens', lambda: tokens), \
-                mock.patch.object(rebalancer.wallets, 'read_balances', lambda *a: None if have is None else (have, 1)), \
-                mock.patch.object(rebalancer.jupiter_api, 'jupiter_prices', lambda ms: px if px is not None else {}), \
-                mock.patch.object(rebalancer, 'chain', chain), mock.patch.object(rebalancer, 'save', lambda s: None), \
-                mock.patch.object(rebalancer.db, 'event', lambda *a: None), \
-                mock.patch.object(rebalancer, 'notify', lambda ev, **kw: told.append((ev, kw))), \
+        with mock.patch.object(lp.signers, 'claim_mints', lambda: (None if mints is None else list(mints), 'why', shared)), \
+                mock.patch.object(lp.capital, 'pool_tokens', lambda: tokens), \
+                mock.patch.object(wallets, 'read_balances', lambda *a: None if have is None else (have, 1)), \
+                mock.patch.object(jupiter_api, 'jupiter_prices', lambda ms: px if px is not None else {}), \
+                mock.patch.object(lp.signers, 'chain', chain), mock.patch.object(lp.paths, 'save', lambda s: None), \
+                mock.patch.object(db, 'event', lambda *a: None), \
+                mock.patch.object(lp.books, 'notify', lambda ev, **kw: told.append((ev, kw))), \
                 mock.patch.multiple(config, CAPS=dict(config.CAPS, native_mint=self.NATIVE), DEX='orca',
                                     GAS_RESERVE_SOL=0.05):
-            out = rebalancer.sell_left_behind(state, force=force)
+            out = lp.swaps.sell_left_behind(state, force=force)
         return out, state, calls, told
 
     def test_nothing_on_the_list_reads_nothing(self):
@@ -558,7 +567,7 @@ class SellLeftBehind(unittest.TestCase):
         now = time.time()
         out, st_, calls, _ = self.run_it([DJT], {DJT: 5.0}, {DJT: 9.0}, force=False, at=now - 10)
         self.assertIs(out, False); self.assertEqual(calls, []); self.assertEqual(st_['left_behind_at'], now - 10)
-        with mock.patch.object(rebalancer.time, 'time', return_value=now + rebalancer.LEFT_BEHIND_RETRY_S):
+        with mock.patch.object(time, 'time', return_value=now + lp.swaps.LEFT_BEHIND_RETRY_S):
             out, _, calls, _ = self.run_it([DJT], {DJT: 5.0}, {DJT: 9.0}, force=False, at=now)
         self.assertIs(out, True); self.assertEqual(len(calls), 1)
         out, _, calls, _ = self.run_it([DJT], {DJT: 5.0}, {DJT: 9.0}, force=False)      # never tried: now
@@ -588,7 +597,7 @@ class SellLeftBehind(unittest.TestCase):
         have = 1.0
         _, st_, calls, _ = self.run_it([self.NATIVE], {self.NATIVE: have}, {self.NATIVE: 150.0},
                                        tokens=((DJT, 'DJT'), (tml.USDC, 'USDC')))
-        cap = have - rebalancer.open_headroom('orca') - rebalancer.LEFT_BEHIND_GAS_MARGIN
+        cap = have - lp.capital.open_headroom('orca') - lp.swaps.LEFT_BEHIND_GAS_MARGIN
         self.assertEqual(calls[0][1], {self.NATIVE: cap, tml.USDC: 0.0})
         self.assertEqual(calls[0][0][5:], ('--execute',))
         self.assertEqual(st_['left_behind'], [])
@@ -602,12 +611,12 @@ class SellLeftBehind(unittest.TestCase):
         self.assertEqual((out, st_['left_behind'], calls), (False, [], []))
         out, st_, calls, _ = self.run_it([DJT], {DJT: 0.5}, {})                   # no price: sold anyway
         self.assertEqual((out, len(calls)), (True, 1))
-        min_amt = rebalancer.SWEEP_MIN_USD / 9.0
+        min_amt = lp.swaps.SWEEP_MIN_USD / 9.0
         out, _, calls, _ = self.run_it([DJT], {DJT: min_amt}, {DJT: 9.0})          # exactly the minimum: sold
         self.assertEqual(len(calls), 1)
         out, st_, calls, _ = self.run_it([DJT], {}, {DJT: 9.0})                   # nothing held: off the list
         self.assertEqual((out, st_['left_behind'], calls), (False, [], []))
-        native_low = rebalancer.open_headroom('orca') + rebalancer.LEFT_BEHIND_GAS_MARGIN + 0.05
+        native_low = lp.capital.open_headroom('orca') + lp.swaps.LEFT_BEHIND_GAS_MARGIN + 0.05
         out, st_, calls, _ = self.run_it([self.NATIVE], {self.NATIVE: native_low}, {self.NATIVE: 150.0})
         self.assertEqual((out, st_['left_behind'], calls), (False, [], []))       # only the reserve left
 
@@ -649,11 +658,11 @@ class RepointLeftovers(unittest.TestCase):
     def test_new_leftovers_join_the_unsold_ones(self):
         state = {'left_behind': [tml.MU], 'left_behind_at': 5}
         seq = iter([((tml.SOL, 'SOL'), (tml.USDC, 'USDC')), ((DJT, 'DJT'), (tml.USDC, 'USDC'))])
-        with mock.patch.object(rebalancer, 'pool_tokens', lambda: next(seq)), \
-                mock.patch.object(rebalancer, 'repoint', lambda t: None), \
-                mock.patch.object(rebalancer, 'save', lambda s: None), \
-                mock.patch.object(rebalancer, 'notify', lambda *a, **k: None):
-            rebalancer.repoint_with_leftovers(state, {'dex': 'orca'})
+        with mock.patch.object(lp.capital, 'pool_tokens', lambda: next(seq)), \
+                mock.patch.object(lp.board, 'repoint', lambda t: None), \
+                mock.patch.object(lp.paths, 'save', lambda s: None), \
+                mock.patch.object(lp.books, 'notify', lambda *a, **k: None):
+            lp.board.repoint_with_leftovers(state, {'dex': 'orca'})
         self.assertEqual(state['left_behind'], sorted([tml.MU, tml.SOL]))
         self.assertNotIn('left_behind_at', state)                                  # the next sale is now
 
@@ -668,17 +677,17 @@ class RepointLeftovers(unittest.TestCase):
 
         def repoint(t):
             config.POOL, config.DEX = t['address'], t['dex']
-        with mock.patch.object(rebalancer, 'pool_tokens', lambda: next(seq)), \
-                mock.patch.object(rebalancer, 'repoint', repoint), \
-                mock.patch.object(rebalancer, 'save', lambda s: saved.append(dict(s.get('pending_reopen') or {}))), \
-                mock.patch.object(rebalancer, 'notify', lambda *a, **k: None), \
+        with mock.patch.object(lp.capital, 'pool_tokens', lambda: next(seq)), \
+                mock.patch.object(lp.board, 'repoint', repoint), \
+                mock.patch.object(lp.paths, 'save', lambda s: saved.append(dict(s.get('pending_reopen') or {}))), \
+                mock.patch.object(lp.books, 'notify', lambda *a, **k: None), \
                 mock.patch.object(config, 'POOL', 'DJTPOOL'), mock.patch.object(config, 'DEX', 'orca'):
-            rebalancer.repoint_with_leftovers(state, {'dex': 'raydium-clmm', 'address': 'SOLPOOL'})
+            lp.board.repoint_with_leftovers(state, {'dex': 'raydium-clmm', 'address': 'SOLPOOL'})
             self.assertEqual(saved[-1]['pool'], 'SOLPOOL')                         # saved, not only in memory
             reopened = []
-            with mock.patch.object(rebalancer, 'halt', lambda why: halted.append(why)), \
-                    mock.patch.object(rebalancer, 'reopen', lambda *a, **k: reopened.append(k.get('band'))):
-                self.assertIs(rebalancer.resume_reopen(state), True)
+            with mock.patch.object(lp.books, 'halt', lambda why: halted.append(why)), \
+                    mock.patch.object(lp.moves, 'reopen', lambda *a, **k: reopened.append(k.get('band'))):
+                self.assertIs(lp.regime.resume_reopen(state), True)
         self.assertEqual(halted, []); self.assertEqual(reopened, [1.01])        # reopened on the new pool, its band
         self.assertEqual({k: v for k, v in state.get('pending_reopen', pending).items() if k not in ('pool', 'dex')},
                          {k: v for k, v in pending.items() if k not in ('pool', 'dex')})
@@ -686,11 +695,11 @@ class RepointLeftovers(unittest.TestCase):
     def test_no_intent_stays_no_intent(self):
         seq = iter([((DJT, 'DJT'), (tml.USDC, 'USDC')), ((tml.SOL, 'SOL'), (tml.USDC, 'USDC'))])
         state = {}
-        with mock.patch.object(rebalancer, 'pool_tokens', lambda: next(seq)), \
-                mock.patch.object(rebalancer, 'repoint', lambda t: None), \
-                mock.patch.object(rebalancer, 'save', lambda s: None), \
-                mock.patch.object(rebalancer, 'notify', lambda *a, **k: None):
-            rebalancer.repoint_with_leftovers(state, {'dex': 'orca'})
+        with mock.patch.object(lp.capital, 'pool_tokens', lambda: next(seq)), \
+                mock.patch.object(lp.board, 'repoint', lambda t: None), \
+                mock.patch.object(lp.paths, 'save', lambda s: None), \
+                mock.patch.object(lp.books, 'notify', lambda *a, **k: None):
+            lp.board.repoint_with_leftovers(state, {'dex': 'orca'})
         self.assertNotIn('pending_reopen', state)
 
 
@@ -710,10 +719,10 @@ class OperatorTarget(unittest.TestCase):
             return tokens
         conf = dict(ALLOW_SWAP=False, SWING_POOLS=(), EXECUTE_DEXES=('orca', 'raydium-clmm'), SIGNER_ENV={})
         conf.update(cfg)
-        with mock.patch.object(rebalancer.dexes, 'pool', pool), mock.patch.object(rebalancer, 'pool_tokens', toks), \
-                mock.patch.object(rebalancer, 'notify', lambda ev, **kw: told.append(kw.get('reason'))), \
+        with mock.patch.object(dexes, 'pool', pool), mock.patch.object(lp.capital, 'pool_tokens', toks), \
+                mock.patch.object(lp.books, 'notify', lambda ev, **kw: told.append(kw.get('reason'))), \
                 mock.patch.multiple(config, **conf):
-            return rebalancer.operator_target(spec), told
+            return lp.board.operator_target(spec), told
 
     def test_a_same_pair_move_needs_no_allow_swap(self):
         t, told = self.call(['orca', tml.SOL_POOL])
@@ -751,12 +760,12 @@ class OperatorTarget(unittest.TestCase):
                'token_a': {'address': '0x4200000000000000000000000000000000000006', 'symbol': 'WETH'},
                'token_b': {'address': '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913', 'symbol': 'USDC'}}
         held = (('0x4200000000000000000000000000000000000006', 'WETH'), ('0x833589fcd6edb6e08f4c7c32d4f71b54bda02913', 'USDC'))
-        with mock.patch.object(rebalancer.guards, 'is_address', lambda s: True):
+        with mock.patch.object(guards, 'is_address', lambda s: True):
             t, told = self.call(['orca', evm['address']], rec=evm, tokens=held)
         self.assertIsNotNone(t, told)
         for side in ('token_a', 'token_b'):
             missing = dict(evm, **{side: None})
-            with mock.patch.object(rebalancer.guards, 'is_address', lambda s: True):
+            with mock.patch.object(guards, 'is_address', lambda s: True):
                 t, told = self.call(['orca', evm['address']], rec=missing, tokens=held)
             self.assertIsNone(t, side); self.assertIn('different pair', told[0])
 
@@ -783,11 +792,11 @@ class GapRule(unittest.TestCase):
     def go(self, **kw):
         told = []
         state = {'rebalance_times': [], 'calm_times': [], 'last_rebalance': time.time() - 10, 'failures': 0}
-        with mock.patch.object(rebalancer, 'notify', lambda ev, **k: told.append(ev)), \
-                mock.patch.object(rebalancer, 'chain', side_effect=AssertionError('no write past the gap')), \
+        with mock.patch.object(lp.books, 'notify', lambda ev, **k: told.append(ev)), \
+                mock.patch.object(lp.signers, 'chain', side_effect=AssertionError('no write past the gap')), \
                 mock.patch.multiple(config, MIN_REBALANCE_GAP=3600, CALM_MIN_GAP=600, REGIME_ENABLED=kw.pop('regime')):
             try:
-                rebalancer.rebalance(state, {'positionMint': 'M'}, 'test', **kw)
+                lp.moves.rebalance(state, {'positionMint': 'M'}, 'test', **kw)
             except AssertionError:
                 return 'moved'
         return 'deferred' if 'rebalance_deferred' in told else told
@@ -883,11 +892,11 @@ class GasForOpen(unittest.TestCase):
     be in the wallet before any write (every signer refuses below it)."""
 
     def ok(self, **bal):
-        with mock.patch.object(rebalancer, 'save', lambda s: None), \
-                mock.patch.object(rebalancer, 'notify', lambda *a, **k: None), \
-                mock.patch.object(rebalancer.db, 'event', lambda *a: None), \
+        with mock.patch.object(lp.paths, 'save', lambda s: None), \
+                mock.patch.object(lp.books, 'notify', lambda *a, **k: None), \
+                mock.patch.object(db, 'event', lambda *a: None), \
                 mock.patch.object(config, 'GAS_RESERVE_SOL', 0.05):
-            return rebalancer.gas_for_open({}, bal)
+            return lp.capital.gas_for_open({}, bal)
 
     def test_the_wallets_sol_decides_when_it_is_read(self):
         self.assertFalse(self.ok(nativeSide='A', sol=0.01, balanceA=5.0, balanceB=100.0))

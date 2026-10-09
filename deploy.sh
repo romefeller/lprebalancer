@@ -358,7 +358,7 @@ preflight() {
     [ -e "$LIVE/$f" ] || die "$LIVE/$f missing: merge the multi-pool branch into main first"
   done
   [ ! -e "$LIVE/HALT" ] || die "$LIVE/HALT exists: the operator halted the bot; deploy after it is lifted"
-  python3 -m py_compile "$LIVE"/*.py || die 'python does not compile'
+  python3 -m py_compile "$LIVE"/*.py "$LIVE"/lp/*.py $(find "$LIVE/venues" -name '*.py') || die 'python does not compile'
   # every script of the bot, in its venue, chain or shared folder too
   while IFS= read -r f; do node --check "$f" || die "$f does not parse"; done \
     < <(find "$LIVE" -name '*.mjs' -not -path '*/node_modules/*' -not -path '*/tests/*' -not -path '*/.claude/*')

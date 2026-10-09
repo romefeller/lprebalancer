@@ -14,7 +14,10 @@ _fixtures.ensure_profile()
 import config      # noqa: E402
 import db          # noqa: E402
 import health      # noqa: E402
-import rebalancer  # noqa: E402
+import lp.board  # noqa: E402
+import lp.regime  # noqa: E402
+import lp.signers  # noqa: E402
+import lp.swaps  # noqa: E402
 
 
 def clear():
@@ -123,7 +126,7 @@ class ChainFeedsTheBreakers(unittest.TestCase):
     tearDown = setUp
 
     def test_keys(self):
-        k = rebalancer.health_key
+        k = lp.signers.health_key
         self.assertEqual(k(('rebalance', 'A', 'B'), 'jupiter'), 'swap')
         self.assertIsNone(k(('quote',), 'jupiter'))
         for cmd in ('open', 'close', 'harvest'):
@@ -133,15 +136,15 @@ class ChainFeedsTheBreakers(unittest.TestCase):
         self.assertIsNone(k((), 'orca'))
 
     def test_what_counts(self):
-        f = rebalancer.counts_as_failure
+        f = lp.signers.counts_as_failure
         self.assertTrue(f('RPC endpoint refuses indexed reads (403: needs a personal token)'))
         self.assertTrue(f('custom program error: 0x1'))
         for e in ('refused: bad arg', 'HALT present: x', 'no signer for jupiter', '', None):
             self.assertFalse(f(e), e)
 
     def run_chain(self, answer, args=('open', 'M'), dex='raydium-clmm'):
-        with mock.patch.object(rebalancer, '_chain', lambda *a, **k: answer):
-            return rebalancer.chain(*args, dex=dex)
+        with mock.patch.object(lp.signers, '_chain', lambda *a, **k: answer):
+            return lp.signers.chain(*args, dex=dex)
 
     def test_a_failure_and_a_success(self):
         self.run_chain((None, 'custom program error: 0x1'))
@@ -188,16 +191,16 @@ class IdleWaitsForSwaps(unittest.TestCase):
         moves, sent = [], []
         import datetime as dt
         opened = dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=opened_age)
-        with mock.patch.object(rebalancer.time, 'time', lambda: now), \
-                mock.patch.object(rebalancer.db, 'position_opened', lambda m: opened), \
-                mock.patch.object(rebalancer.db, 'event', lambda *a: None), \
-                mock.patch.object(rebalancer, 'calm_budget_left', lambda s: 40), \
-                mock.patch.object(rebalancer, 'voluntary_move_allowed', lambda s: True), \
-                mock.patch.object(rebalancer, 'save', lambda s: None), \
-                mock.patch.object(rebalancer, 'notify', lambda ev, **kw: sent.append(ev)), \
-                mock.patch.object(rebalancer, 'notify_book', lambda ev, **kw: sent.append(ev)), \
-                mock.patch.object(rebalancer, 'rebalance', lambda *a, **k: moves.append(k)):
-            rebalancer.deploy_idle(state, dict(self.STATUS), dict(self.WALLET), {'choice': 1.025}, 119.6)
+        with mock.patch.object(time, 'time', lambda: now), \
+                mock.patch.object(db, 'position_opened', lambda m: opened), \
+                mock.patch.object(db, 'event', lambda *a: None), \
+                mock.patch.object(lp.regime, 'calm_budget_left', lambda s: 40), \
+                mock.patch.object(lp.regime, 'voluntary_move_allowed', lambda s: True), \
+                mock.patch.object(lp.paths, 'save', lambda s: None), \
+                mock.patch.object(lp.books, 'notify', lambda ev, **kw: sent.append(ev)), \
+                mock.patch.object(lp.books, 'notify_book', lambda ev, **kw: sent.append(ev)), \
+                mock.patch.object(lp.moves, 'rebalance', lambda *a, **k: moves.append(k)):
+            lp.swaps.deploy_idle(state, dict(self.STATUS), dict(self.WALLET), {'choice': 1.025}, 119.6)
         return moves, sent
 
     def test_a_day_of_failing_swaps(self):
@@ -210,7 +213,7 @@ class IdleWaitsForSwaps(unittest.TestCase):
                 moves += 1
                 health.record_failure('swap', 'RPC endpoint refuses indexed reads', now=now)   # the reopen's swap fails
             deferred += sent.count('deploy_idle_deferred')
-        self.assertLessEqual(moves, rebalancer.IDLE_DEPLOYS_PER_DAY)
+        self.assertLessEqual(moves, lp.swaps.IDLE_DEPLOYS_PER_DAY)
         self.assertGreater(moves, 0)
         self.assertLessEqual(deferred, moves + 1)                 # one message per new failure, not per poll
         self.assertEqual(db.health_get('swap')['fails'], moves)
@@ -229,8 +232,8 @@ class IdleWaitsForSwaps(unittest.TestCase):
         self.assertEqual(self.poll(state, now)[0], [])
         state['idle_deploys'] = [now - 86401] * 3
         self.assertEqual(len(self.poll(state, now)[0]), 1)
-        self.assertEqual(rebalancer.idle_deploys_left([now - 10, now - 86400, now - 86399], now), 1)
-        self.assertEqual(rebalancer.idle_deploys_left(None, now), 3)
+        self.assertEqual(lp.swaps.idle_deploys_left([now - 10, now - 86400, now - 86399], now), 1)
+        self.assertEqual(lp.swaps.idle_deploys_left(None, now), 3)
 
 
 def venue(dex, pct, hours=24, held=False, row=True):
@@ -244,7 +247,7 @@ SIGS = {d: 'x' for d in ARMED}
 
 class Pick(unittest.TestCase):
     def pick(self, venues, allowed=lambda d: True, held='raydium-clmm'):
-        return rebalancer.failover_pick(held, venues, allowed, execute_dexes=ARMED, signers=SIGS, min_hours=6)
+        return lp.board.failover_pick(held, venues, allowed, execute_dexes=ARMED, signers=SIGS, min_hours=6)
 
     def test_the_best_similar_venue(self):
         vs = [venue('raydium-clmm', 1.0, held=True), venue('orca', 0.85), venue('byreal', 0.95), venue('meteora-dlmm', 0.5)]
@@ -297,22 +300,22 @@ class Failover(unittest.TestCase):
 
     def go(self, state, status, venues, pinned=False):
         calls = {'rebalance': [], 'repoint': [], 'reopen': [], 'notify': []}
-        with mock.patch.object(rebalancer.config, 'DEX', 'raydium-clmm'), \
-                mock.patch.object(rebalancer.config, 'POOL', 'POOL_raydium-clmm'), \
-                mock.patch.object(rebalancer.config, 'POOL_PINNED', pinned), \
-                mock.patch.object(rebalancer.config, 'EXECUTE_DEXES', ARMED), \
-                mock.patch.object(rebalancer.config, 'REGIME_ENABLED', False), \
-                mock.patch.object(rebalancer, 'SIGNERS', SIGS), \
-                mock.patch.object(rebalancer, 'venue_view', lambda p, q=1.0: venues), \
-                mock.patch.object(rebalancer, 'save', lambda s: None), \
-                mock.patch.object(rebalancer.db, 'event', lambda *a: None), \
-                mock.patch.object(rebalancer, 'notify', lambda ev, **kw: calls['notify'].append(ev)), \
-                mock.patch.object(rebalancer, 'rebalance', lambda *a, **k: calls['rebalance'].append(k)), \
-                mock.patch.object(rebalancer, 'repoint', lambda row: (calls['repoint'].append(row),
-                                                                      setattr(rebalancer.config, 'POOL', row['address']),
-                                                                      setattr(rebalancer.config, 'DEX', row['dex']))), \
-                mock.patch.object(rebalancer, 'reopen', lambda s, r, band=None, recovering=False: calls['reopen'].append(r)):
-            out = rebalancer.venue_failover(state, status, price=119.6, quote=1.0)
+        with mock.patch.object(config, 'DEX', 'raydium-clmm'), \
+                mock.patch.object(config, 'POOL', 'POOL_raydium-clmm'), \
+                mock.patch.object(config, 'POOL_PINNED', pinned), \
+                mock.patch.object(config, 'EXECUTE_DEXES', ARMED), \
+                mock.patch.object(config, 'REGIME_ENABLED', False), \
+                mock.patch.object(lp.signers, 'SIGNERS', SIGS), \
+                mock.patch.object(lp.board, 'venue_view', lambda p, q=1.0: venues), \
+                mock.patch.object(lp.paths, 'save', lambda s: None), \
+                mock.patch.object(db, 'event', lambda *a: None), \
+                mock.patch.object(lp.books, 'notify', lambda ev, **kw: calls['notify'].append(ev)), \
+                mock.patch.object(lp.moves, 'rebalance', lambda *a, **k: calls['rebalance'].append(k)), \
+                mock.patch.object(lp.board, 'repoint', lambda row: (calls['repoint'].append(row),
+                                                                      setattr(config, 'POOL', row['address']),
+                                                                      setattr(config, 'DEX', row['dex']))), \
+                mock.patch.object(lp.moves, 'reopen', lambda s, r, band=None, recovering=False: calls['reopen'].append(r)):
+            out = lp.board.venue_failover(state, status, price=119.6, quote=1.0)
         return out, calls
 
     VENUES = [venue('raydium-clmm', 1.0, held=True), venue('byreal', 0.9)]
@@ -361,8 +364,8 @@ class Failover(unittest.TestCase):
 
     def test_no_price_no_move(self):
         self.trip()
-        with mock.patch.object(rebalancer, 'venue_view', side_effect=AssertionError('read')):
-            self.assertFalse(rebalancer.venue_failover({}, None, price=None))
+        with mock.patch.object(lp.board, 'venue_view', side_effect=AssertionError('read')):
+            self.assertFalse(lp.board.venue_failover({}, None, price=None))
 
 
 class VoluntaryMovesRespectTheVenue(unittest.TestCase):
@@ -373,12 +376,12 @@ class VoluntaryMovesRespectTheVenue(unittest.TestCase):
 
     def test_backoff_blocks_voluntary_moves(self):
         state = {'calm_times': [], 'last_rebalance': 0}
-        with mock.patch.object(rebalancer.config, 'DEX', 'raydium-clmm'):
-            self.assertTrue(rebalancer.voluntary_move_allowed(state))
+        with mock.patch.object(config, 'DEX', 'raydium-clmm'):
+            self.assertTrue(lp.regime.voluntary_move_allowed(state))
             health.record_failure('venue:raydium-clmm', 'x')
-            self.assertFalse(rebalancer.voluntary_move_allowed(state))
+            self.assertFalse(lp.regime.voluntary_move_allowed(state))
             health.record_success('venue:raydium-clmm')
-            self.assertTrue(rebalancer.voluntary_move_allowed(state))
+            self.assertTrue(lp.regime.voluntary_move_allowed(state))
 
 
 if __name__ == '__main__':

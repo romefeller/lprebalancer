@@ -10,7 +10,8 @@ from unittest import mock
 import _fixtures  # noqa: F401  (first: it puts lp_bot on the path)
 import audit
 import db
-import rebalancer
+import lp.capital
+import lp.swaps
 from test_audit import reset, tx, tb, OWNER, PROFIT, POOL, SOL, USDC
 
 
@@ -56,9 +57,9 @@ class Base(unittest.TestCase):
     def bot(self):
         return types.SimpleNamespace(
             wallet=lambda pool: dict(self.bal), read_status=lambda *a: (dict(self.status) if self.status else None, None),
-            deployable_usd=rebalancer.deployable_usd, pool_tokens=lambda: ((SOL, 'SOL'), (USDC, 'USDC')),
-            position_usd=rebalancer.position_usd, plan_sweep=rebalancer.plan_sweep, FEED=self.feed.name,
-            dexes=types.SimpleNamespace(jupiter_prices=lambda mints: {m: self.prices.get(m, 0.0) for m in mints},
+            deployable_usd=lp.capital.deployable_usd, pool_tokens=lambda: ((SOL, 'SOL'), (USDC, 'USDC')),
+            position_usd=lp.capital.position_usd, plan_sweep=lp.swaps.plan_sweep, FEED=self.feed.name,
+            prices=types.SimpleNamespace(jupiter_prices=lambda mints: {m: self.prices.get(m, 0.0) for m in mints},
                                         jupiter_token=lambda m: self.facts.get(m)),
             load=lambda: {'reward_mints_seen': []})
 

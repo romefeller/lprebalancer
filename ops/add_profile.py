@@ -32,6 +32,7 @@ import dexes  # noqa: E402
 import engine  # noqa: E402
 import guards  # noqa: E402
 import rebalancer  # noqa: E402
+import lp.signers  # noqa: E402
 import swing  # noqa: E402
 import wallets  # noqa: E402
 
@@ -41,7 +42,7 @@ SKIP = {'id', 'name', 'active', 'pool', 'pair_label', 'token_a', 'token_b', 'dex
         'wallet_id', 'enabled', 'deposit_mint', 'residual_owner', 'mints', 'pool_pinned', 'regime_enabled',
         'rebalance_swap', 'execute_dexes', 'signer_env', 'allow_swap'}
 # Venues a position can be held on: every signer but the routes.
-VENUES = tuple(d for d in rebalancer.SIGNERS if d not in ('jupiter', 'orca-swap', 'payout', 'janitor'))
+VENUES = tuple(d for d in lp.signers.SIGNERS if d not in ('jupiter', 'orca-swap', 'payout', 'janitor'))
 WALLET_ID = re.compile(r'^[a-z0-9][a-z0-9-]{1,40}$')
 SECRET_ENV = re.compile(r'^[A-Z][A-Z0-9_]{2,63}$')
 # An address on each chain the wallets table allows (its wallets_check).

@@ -12,7 +12,8 @@ from hypothesis import given, settings, HealthCheck, strategies as st
 
 import _fixtures
 import db
-import rebalancer
+import config
+import lp.books
 
 DAY = dt.date(2026, 9, 27)
 T = lambda h: dt.datetime.combine(DAY, dt.time(0), tzinfo=dt.timezone.utc) + dt.timedelta(hours=h)
@@ -206,12 +207,12 @@ class Report(unittest.TestCase):
             @classmethod
             def now(cls, tz=None):
                 return dt.datetime.combine(today, dt.time(0, 10), tzinfo=dt.timezone.utc)
-        with mock.patch.object(rebalancer, 'datetime', FakeDT), \
-                mock.patch.object(rebalancer.db, 'daily_line', lambda d: (seen.append(('asked', d)) or line)), \
-                mock.patch.object(rebalancer.db, 'event', lambda *a: events.append(a)), \
-                mock.patch.object(rebalancer, 'save', lambda s: saved.append(dict(s))), \
-                mock.patch.object(rebalancer, 'notify', lambda ev, **kw: seen.append((ev, kw))):
-            out = rebalancer.daily_report(state)
+        with mock.patch.object(lp.books, 'datetime', FakeDT), \
+                mock.patch.object(db, 'daily_line', lambda d: (seen.append(('asked', d)) or line)), \
+                mock.patch.object(db, 'event', lambda *a: events.append(a)), \
+                mock.patch.object(lp.paths, 'save', lambda s: saved.append(dict(s))), \
+                mock.patch.object(lp.books, 'notify', lambda ev, **kw: seen.append((ev, kw))):
+            out = lp.books.daily_report(state)
         return out, seen, events, saved
 
     LINE = {'day': '2026-09-27', 'recentres': 9, 'fees_usd': 1.98, 'vs_hold_usd': -0.34}
@@ -236,10 +237,10 @@ class Report(unittest.TestCase):
 
     def test_a_failure_is_reported_and_swallowed(self):
         seen = []
-        with mock.patch.object(rebalancer.db, 'daily_line', side_effect=RuntimeError('db down')), \
-                mock.patch.object(rebalancer, 'save', lambda s: None), \
-                mock.patch.object(rebalancer, 'notify', lambda ev, **kw: seen.append(ev)):
-            self.assertIsNone(rebalancer.daily_report({}))
+        with mock.patch.object(db, 'daily_line', side_effect=RuntimeError('db down')), \
+                mock.patch.object(lp.paths, 'save', lambda s: None), \
+                mock.patch.object(lp.books, 'notify', lambda ev, **kw: seen.append(ev)):
+            self.assertIsNone(lp.books.daily_report({}))
         self.assertEqual(seen, ['daily_report_failed'])
 
 
@@ -359,18 +360,18 @@ class Average(unittest.TestCase):
 class ReportCompare(Report):
     def test_the_line_carries_the_period_average_when_configured(self):
         avg = {'days': 6, 'from': '2026-09-27', 'to': '2026-10-02', 'fees_earned_usd': 3.56}
-        with mock.patch.object(rebalancer.config, 'DAILY_COMPARE', (dt.date(2026, 9, 27), dt.date(2026, 10, 2))), \
-             mock.patch.object(rebalancer.db, 'day_average', lambda a, b: avg if (a, b) == (dt.date(2026, 9, 27), dt.date(2026, 10, 2)) else None):
+        with mock.patch.object(config, 'DAILY_COMPARE', (dt.date(2026, 9, 27), dt.date(2026, 10, 2))), \
+             mock.patch.object(db, 'day_average', lambda a, b: avg if (a, b) == (dt.date(2026, 9, 27), dt.date(2026, 10, 2)) else None):
             out, seen, _, _ = self.run_it({}, dict(self.LINE))
         self.assertEqual(seen[1][1]['compare'], avg)
         self.assertEqual(out['compare'], avg)
 
     def test_off_or_a_failure_sends_the_line_without_it(self):
-        with mock.patch.object(rebalancer.config, 'DAILY_COMPARE', None):
+        with mock.patch.object(config, 'DAILY_COMPARE', None):
             out, seen, _, _ = self.run_it({}, dict(self.LINE))
         self.assertNotIn('compare', seen[1][1])
-        with mock.patch.object(rebalancer.config, 'DAILY_COMPARE', (DAY, DAY)), \
-             mock.patch.object(rebalancer.db, 'day_average', side_effect=RuntimeError('db')):
+        with mock.patch.object(config, 'DAILY_COMPARE', (DAY, DAY)), \
+             mock.patch.object(db, 'day_average', side_effect=RuntimeError('db')):
             out, seen, _, _ = self.run_it({}, dict(self.LINE))
         evs = [e for e, _ in seen if e != 'asked']
         self.assertEqual(evs, ['daily_compare_failed', 'DAILY'])

@@ -26,7 +26,8 @@ import db
 from venues import evm
 from venues import solana_state
 from venues.uniswap_v3 import pools as uniswap_pools
-import rebalancer
+import lp.board
+import lp.pauses
 
 POOL = '0x9B08288C3Be4F62bbf8d1C20Ac9C5e6f9467d8B7'
 WPOL = '0x0d500b1d8e8ef31e21c99d1db9a6444d3adf1270'
@@ -133,12 +134,12 @@ class Sampler(unittest.TestCase):
             return {'g0': 1}
         with mock.patch.object(config, 'CAPS', chains.caps(chain)), mock.patch.object(config, 'DEX', dex), \
                 mock.patch.object(config, 'POOL', POOL), mock.patch.object(config, 'VENUE_SAMPLE_S', 600), \
-                mock.patch.object(rebalancer.uniswap_pools, 'uniswap_v3_fee_state', fee_state), \
-                mock.patch.object(rebalancer.db, 'record_fee_state', lambda *a: recorded.append(a)), \
-                mock.patch.object(rebalancer, 'save', lambda s: None), \
-                mock.patch.object(rebalancer, 'notify', lambda ev, **kw: told.append(ev)):
+                mock.patch.object(uniswap_pools, 'uniswap_v3_fee_state', fee_state), \
+                mock.patch.object(db, 'record_fee_state', lambda *a: recorded.append(a)), \
+                mock.patch.object(lp.paths, 'save', lambda s: None), \
+                mock.patch.object(lp.books, 'notify', lambda ev, **kw: told.append(ev)):
             for _ in range(polls):
-                rebalancer.sample_fee_growth(state)
+                lp.board.sample_fee_growth(state)
                 state['last_fee_sample'] -= 601 if polls > 1 else 0
         return recorded, told, read, state
 
@@ -157,15 +158,15 @@ class Sampler(unittest.TestCase):
 
     def test_exactly_the_interval_samples_one_second_less_does_not(self):
         now = 1_800_000_000.0
-        with mock.patch.object(rebalancer.time, 'time', lambda: now):
+        with mock.patch.object(time, 'time', lambda: now):
             self.assertEqual(self.go(last=now - 599)[2], [])
             self.assertEqual(len(self.go(last=now - 600)[2]), 1)
 
     def test_unichain_too_and_not_aerodrome_nor_solana(self):
         self.assertEqual(len(self.go(chain='unichain', dex='uniswap-v3-unichain')[0]), 1)
         self.assertEqual(self.go(chain='base', dex='aerodrome-slipstream')[2], [])
-        with mock.patch.object(rebalancer, 'venue_candidates', lambda: []), \
-                mock.patch.object(rebalancer.solana_state, 'fee_states', lambda pools: {}):
+        with mock.patch.object(lp.board, 'venue_candidates', lambda: []), \
+                mock.patch.object(solana_state, 'fee_states', lambda pools: {}):
             self.assertEqual(self.go(chain='solana', dex='raydium-clmm')[2], [])   # the Solana path, not this one
 
     def test_a_failed_read_is_said_once_records_nothing_and_never_raises(self):
@@ -180,10 +181,10 @@ class Sampler(unittest.TestCase):
         self.assertIn('fee_sample_failed_told', state)
         state['last_fee_sample'] = 0
         with mock.patch.object(config, 'CAPS', chains.caps('polygon')), mock.patch.object(config, 'DEX', DEX), \
-                mock.patch.object(rebalancer.uniswap_pools, 'uniswap_v3_fee_state', lambda p, dex=None: {'g0': 1}), \
-                mock.patch.object(rebalancer.db, 'record_fee_state', lambda *a: None), \
-                mock.patch.object(rebalancer, 'save', lambda s: None):
-            rebalancer.sample_fee_growth(state)
+                mock.patch.object(uniswap_pools, 'uniswap_v3_fee_state', lambda p, dex=None: {'g0': 1}), \
+                mock.patch.object(db, 'record_fee_state', lambda *a: None), \
+                mock.patch.object(lp.paths, 'save', lambda s: None):
+            lp.board.sample_fee_growth(state)
         self.assertNotIn('fee_sample_failed_told', state)
 
 
@@ -194,15 +195,15 @@ class SolanaSampler(unittest.TestCase):
         recorded, viewed, told = [], [], []
         cands = [('raydium-clmm', 'A1', None), ('orca', 'B2', None)]
         with mock.patch.object(config, 'CAPS', chains.caps('solana')), mock.patch.object(config, 'DEX', 'raydium-clmm'), \
-                mock.patch.object(config, 'VENUE_SAMPLE_S', 600), mock.patch.object(rebalancer.time, 'time', lambda: now), \
-                mock.patch.object(rebalancer, 'venue_candidates', lambda: cands), \
-                mock.patch.object(rebalancer.solana_state, 'fee_states', lambda pools: {'A1': {'g0': 1}} if states is None else states), \
-                mock.patch.object(rebalancer.db, 'record_fee_state', lambda *a: recorded.append(a)), \
-                mock.patch.object(rebalancer, 'venue_view', lambda px, q: viewed.append((px, q))), \
-                mock.patch.object(rebalancer, 'save', lambda s: None), \
-                mock.patch.object(rebalancer, 'notify', lambda ev, **kw: told.append(ev)):
+                mock.patch.object(config, 'VENUE_SAMPLE_S', 600), mock.patch.object(time, 'time', lambda: now), \
+                mock.patch.object(lp.board, 'venue_candidates', lambda: cands), \
+                mock.patch.object(solana_state, 'fee_states', lambda pools: {'A1': {'g0': 1}} if states is None else states), \
+                mock.patch.object(db, 'record_fee_state', lambda *a: recorded.append(a)), \
+                mock.patch.object(lp.board, 'venue_view', lambda px, q: viewed.append((px, q))), \
+                mock.patch.object(lp.paths, 'save', lambda s: None), \
+                mock.patch.object(lp.books, 'notify', lambda ev, **kw: told.append(ev)):
             state = {'last_fee_sample': last}
-            rebalancer.sample_fee_growth(state, status)
+            lp.board.sample_fee_growth(state, status)
         return recorded, viewed, told, state
 
     def test_exactly_the_interval_samples_one_second_less_does_not(self):
@@ -259,7 +260,7 @@ class ViewOnTheDatabase(unittest.TestCase):
     def view(self):
         with mock.patch.object(config, 'HOT_PAUSE_HOT_PCT', 2.0), mock.patch.object(config, 'HOT_PAUSE_FG_HOURS', 6.0), \
                 mock.patch.object(config, 'HOT_PAUSE_FG_THRESHOLD', 0.8):
-            return rebalancer.hot_pause_view(self.KEY, 0.0971, 1.0, 1.05)
+            return lp.pauses.hot_pause_view(self.KEY, 0.0971, 1.0, 1.05)
 
     def test_a_polygon_pool_with_samples_has_a_ratio_and_a_verdict(self):
         self.seed(fee_x128_per_side=10 ** 33)

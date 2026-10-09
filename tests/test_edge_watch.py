@@ -12,6 +12,9 @@ import calm
 import config
 from venues import solana_state
 import rebalancer
+import lp.regime
+import lp.tape
+import time
 
 STATUS = {'price': 100.0, 'lowerPrice': 99.0, 'upperPrice': 101.0, 'whirlpool': 'POOL'}
 
@@ -62,8 +65,8 @@ class Sleep(unittest.TestCase):
     def run_watch(self, prices, status=STATUS, total=120, pct=0.25, step=15):
         c, seq = Clock(), iter(prices)
         with mock.patch.multiple(config, EDGE_WATCH_PCT=pct, EDGE_WATCH_S=step), \
-             mock.patch.object(rebalancer, 'notify') as note:
-            out = rebalancer.edge_sleep(total, status, read=lambda: next(seq), sleep=c.sleep, clock=c.now)
+             mock.patch.object(lp.books, 'notify') as note:
+            out = lp.regime.edge_sleep(total, status, read=lambda: next(seq), sleep=c.sleep, clock=c.now)
         return out, c, note
 
     def test_off_or_away_from_the_edges_sleeps_the_poll(self):
@@ -102,16 +105,16 @@ class Sleep(unittest.TestCase):
     def test_the_default_reader_reads_this_pool(self):
         c = Clock()
         with mock.patch.multiple(config, EDGE_WATCH_PCT=0.25, EDGE_WATCH_S=15, DEX='raydium-clmm', POOL='CFG'), \
-             mock.patch.object(rebalancer, 'pool_price_now', return_value=101.5) as read, \
-             mock.patch.object(rebalancer, 'notify'):
-            self.assertEqual(rebalancer.edge_sleep(120, dict(STATUS, price=100.8), sleep=c.sleep, clock=c.now), 'exit')
+             mock.patch.object(lp.tape, 'pool_price_now', return_value=101.5) as read, \
+             mock.patch.object(lp.books, 'notify'):
+            self.assertEqual(lp.regime.edge_sleep(120, dict(STATUS, price=100.8), sleep=c.sleep, clock=c.now), 'exit')
         read.assert_called_once_with('raydium-clmm', 'POOL')
 
 
 class Defaults(unittest.TestCase):
     def test_the_module_s_sleep_is_used_when_none_is_given(self):
-        with mock.patch.multiple(config, EDGE_WATCH_PCT=0), mock.patch.object(rebalancer.time, 'sleep') as sl:
-            self.assertEqual(rebalancer.edge_sleep(42, STATUS), 'off')
+        with mock.patch.multiple(config, EDGE_WATCH_PCT=0), mock.patch.object(time, 'sleep') as sl:
+            self.assertEqual(lp.regime.edge_sleep(42, STATUS), 'off')
         sl.assert_called_once_with(42)
 
 
@@ -132,16 +135,16 @@ class Boundaries(unittest.TestCase):
 
     def test_a_read_exactly_at_the_match_limit_is_kept(self):
         c = Clock()
-        with mock.patch.multiple(config, EDGE_WATCH_PCT=5, EDGE_WATCH_S=15), mock.patch.object(rebalancer, 'notify'):
-            out = rebalancer.edge_sleep(30, {'price': 100.0, 'lowerPrice': 97.0, 'upperPrice': 101.0},
+        with mock.patch.multiple(config, EDGE_WATCH_PCT=5, EDGE_WATCH_S=15), mock.patch.object(lp.books, 'notify'):
+            out = lp.regime.edge_sleep(30, {'price': 100.0, 'lowerPrice': 97.0, 'upperPrice': 101.0},
                                         read=lambda: 102.0, sleep=c.sleep, clock=c.now)
         self.assertEqual((out, c.slept), ('exit', [15]))               # 2% away is the same price, and outside
 
     def test_without_a_pool_in_the_status_the_profile_s_pool_is_read(self):
         c = Clock()
         with mock.patch.multiple(config, EDGE_WATCH_PCT=0.25, EDGE_WATCH_S=15, DEX='orca', POOL='CFG'), \
-             mock.patch.object(rebalancer, 'pool_price_now', return_value=100.0) as read:
-            rebalancer.edge_sleep(30, {'price': 100.8, 'lowerPrice': 99.0, 'upperPrice': 101.0}, sleep=c.sleep, clock=c.now)
+             mock.patch.object(lp.tape, 'pool_price_now', return_value=100.0) as read:
+            lp.regime.edge_sleep(30, {'price': 100.8, 'lowerPrice': 99.0, 'upperPrice': 101.0}, sleep=c.sleep, clock=c.now)
         read.assert_called_with('orca', 'CFG')
 
     def test_the_module_s_clock_is_used_when_none_is_given(self):
@@ -149,10 +152,10 @@ class Boundaries(unittest.TestCase):
         def fake_sleep(s):
             t[0] += s
         with mock.patch.multiple(config, EDGE_WATCH_PCT=0.25, EDGE_WATCH_S=15), \
-             mock.patch.object(rebalancer.time, 'sleep', side_effect=fake_sleep), \
-             mock.patch.object(rebalancer.time, 'monotonic', side_effect=lambda: t[0]), \
-             mock.patch.object(rebalancer, 'notify'):
-            out = rebalancer.edge_sleep(60, dict(STATUS, price=100.8), read=lambda: 100.9)
+             mock.patch.object(time, 'sleep', side_effect=fake_sleep), \
+             mock.patch.object(time, 'monotonic', side_effect=lambda: t[0]), \
+             mock.patch.object(lp.books, 'notify'):
+            out = lp.regime.edge_sleep(60, dict(STATUS, price=100.8), read=lambda: 100.9)
         self.assertEqual((out, t[0]), ('slept', 60.0))
 
 
@@ -160,13 +163,13 @@ class PoolPrice(unittest.TestCase):
     def test_the_price_from_the_sqrt_price(self):
         sp = int((120.0 * 1e-3) ** 0.5 * solana_state.Q64)
         with mock.patch.object(solana_state, 'fee_states', return_value={'P': {'sqrt_price': sp, 'dec_a': 9, 'dec_b': 6}}):
-            self.assertAlmostEqual(rebalancer.pool_price_now('raydium-clmm', 'P'), 120.0, places=6)
+            self.assertAlmostEqual(lp.tape.pool_price_now('raydium-clmm', 'P'), 120.0, places=6)
 
     def test_no_state_or_a_failure_is_none(self):
         with mock.patch.object(solana_state, 'fee_states', return_value={}):
-            self.assertIsNone(rebalancer.pool_price_now('meteora-dlmm', 'P'))
+            self.assertIsNone(lp.tape.pool_price_now('meteora-dlmm', 'P'))
         with mock.patch.object(solana_state, 'fee_states', side_effect=OSError('rpc')):
-            self.assertIsNone(rebalancer.pool_price_now('raydium-clmm', 'P'))
+            self.assertIsNone(lp.tape.pool_price_now('raydium-clmm', 'P'))
 
 
 class Config(unittest.TestCase):

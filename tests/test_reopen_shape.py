@@ -2,6 +2,7 @@
 exit (calm.offset_band, calm.band_share_a; the pre-open swap and the deposit
 caps follow its share of token A) and one band one rung wider when a touch
 soon is likely (calm.p_touch_width, rebalancer.reopen_width)."""
+import pathlib
 import math
 import unittest
 from unittest import mock
@@ -13,9 +14,19 @@ import _fixtures  # noqa: F401  (first: it puts lp_bot on the path)
 import calm
 import config
 import rebalancer
+import lp.capital
+import lp.loop
+import lp.moves
+import lp.paths
+import lp.polls
+import lp.regime
+import lp.swaps
+import db
+import guards
+import time
 from test_deploy_all import Patched, bal, SOL, USDC, RES
 
-ORIGINAL_BW = rebalancer.balance_wallet
+ORIGINAL_BW = lp.swaps.balance_wallet
 
 
 class Offset(unittest.TestCase):
@@ -122,11 +133,11 @@ class Widen(unittest.TestCase):
         base.update(cfg)
         seen = []
         with mock.patch.multiple(config, **base), \
-             mock.patch.object(rebalancer, 'tape5', side_effect=boom, return_value=bars if bars != ('none',) else None), \
-             mock.patch.object(rebalancer.calm, 'tape_fresh', return_value=fresh), \
-             mock.patch.object(rebalancer.calm, 'p_touch_width', return_value=p) as pt, \
-             mock.patch.object(rebalancer, 'notify', lambda ev, **kw: seen.append((ev, kw))):
-            return rebalancer.reopen_width(k, 'POOL', 120.0), seen, pt
+             mock.patch.object(lp.tape, 'tape5', side_effect=boom, return_value=bars if bars != ('none',) else None), \
+             mock.patch.object(calm, 'tape_fresh', return_value=fresh), \
+             mock.patch.object(calm, 'p_touch_width', return_value=p) as pt, \
+             mock.patch.object(lp.books, 'notify', lambda ev, **kw: seen.append((ev, kw))):
+            return lp.regime.reopen_width(k, 'POOL', 120.0), seen, pt
 
     def test_a_likely_touch_widens_this_band(self):
         k, seen, pt = self.go()
@@ -158,20 +169,20 @@ class SwapTarget(Patched):
 
     def run_it(self, b, share_a):
         calls = []
-        with mock.patch.object(rebalancer, 'chain', lambda *a, **k: (calls.append(a) or ({'sent': True, 'signature': 's'}, None))), \
-                mock.patch.object(rebalancer, 'wallet', lambda p: b), \
-                mock.patch.object(rebalancer, 'notify', lambda *a, **k: None), \
-                mock.patch.object(rebalancer, 'save', lambda s: None), \
-                mock.patch.object(rebalancer.db, 'event', lambda *a: None), \
-                mock.patch.object(rebalancer.time, 'sleep', lambda s: None):
-            rebalancer.balance_wallet({'failures': 0}, dict(b), self.REC, share_a=share_a)
+        with mock.patch.object(lp.signers, 'chain', lambda *a, **k: (calls.append(a) or ({'sent': True, 'signature': 's'}, None))), \
+                mock.patch.object(lp.capital, 'wallet', lambda p: b), \
+                mock.patch.object(lp.books, 'notify', lambda *a, **k: None), \
+                mock.patch.object(lp.paths, 'save', lambda s: None), \
+                mock.patch.object(db, 'event', lambda *a: None), \
+                mock.patch.object(time, 'sleep', lambda s: None):
+            lp.swaps.balance_wallet({'failures': 0}, dict(b), self.REC, share_a=share_a)
         return calls
 
     def test_an_off_centre_band_swaps_to_its_share(self):
         b = bal(0.2, 200.0, price=120.0)
-        C = rebalancer.deployable_usd(b)
+        C = lp.capital.deployable_usd(b)
         _, _, _, ta, tb, *_ = self.run_it(b, 0.425)[0]
-        self.assertAlmostEqual(float(ta), C * 0.425 + rebalancer.OPEN_RENT_HEADROOM_SOL * 120.0, places=2)
+        self.assertAlmostEqual(float(ta), C * 0.425 + lp.capital.OPEN_RENT_HEADROOM_SOL * 120.0, places=2)
         self.assertAlmostEqual(float(tb), C * 0.575, places=2)
 
     def test_a_wallet_already_at_the_share_does_not_swap(self):
@@ -202,24 +213,24 @@ class SwapBoundary(Patched):
 
     def test_a_kept_wallet_is_returned_as_it_is(self):
         w = bal(27.0 / 128.0, 73.0, price=128.0, native=None)
-        with mock.patch.object(rebalancer, 'chain', side_effect=AssertionError('no swap')):
-            self.assertEqual(rebalancer.balance_wallet({'failures': 0}, dict(w), self.REC, share_a=0.25), w)
+        with mock.patch.object(lp.signers, 'chain', side_effect=AssertionError('no swap')):
+            self.assertEqual(lp.swaps.balance_wallet({'failures': 0}, dict(w), self.REC, share_a=0.25), w)
 
 
 class Caps(Patched):
     def test_an_off_centre_band_may_take_more_of_its_bigger_side(self):
         b = bal(5.0, 1000.0, price=120.0)
-        C = rebalancer.capital(b)
-        a0, b0 = rebalancer.deposit_caps(b)
+        C = lp.capital.capital(b)
+        a0, b0 = lp.capital.deposit_caps(b)
         self.assertAlmostEqual(b0, C * 0.55); self.assertAlmostEqual(a0 * 120.0, C * 0.55)
-        a1, b1 = rebalancer.deposit_caps(b, share_a=0.40)
+        a1, b1 = lp.capital.deposit_caps(b, share_a=0.40)
         self.assertAlmostEqual(b1, C * (0.60 + 0.05))
         self.assertAlmostEqual(a1 * 120.0, C * 0.55)                      # the smaller side keeps the side cap
-        a2, b2 = rebalancer.deposit_caps(b, share_a=0.62)
+        a2, b2 = lp.capital.deposit_caps(b, share_a=0.62)
         self.assertAlmostEqual(a2 * 120.0, C * 0.67); self.assertAlmostEqual(b2, C * 0.55)
         with mock.patch.object(config, 'SIDE_CAP_FRACTION', 0.9):
-            a3, b3 = rebalancer.deposit_caps(bal(50.0, 9000.0, price=120.0), share_a=0.8)
-            C3 = rebalancer.capital(bal(50.0, 9000.0, price=120.0))
+            a3, b3 = lp.capital.deposit_caps(bal(50.0, 9000.0, price=120.0), share_a=0.8)
+            C3 = lp.capital.capital(bal(50.0, 9000.0, price=120.0))
             self.assertAlmostEqual(a3 * 120.0, C3 * 1.0)                  # 0.8 + 0.4 capped at the whole capital
             self.assertAlmostEqual(b3, C3 * 0.9)
 
@@ -232,9 +243,9 @@ class OffIsTheOldBehaviour(Patched):
     def test_caps(self, a, b, price, cap):
         with mock.patch.object(config, 'SIDE_CAP_FRACTION', cap):
             w = bal(a, b, price=price)
-            ca, cb = rebalancer.deposit_caps(w)
-            cq = rebalancer.capital(w) / w['quoteUsd']
-            res = rebalancer.native_reserve(w)
+            ca, cb = lp.capital.deposit_caps(w)
+            cq = lp.capital.capital(w) / w['quoteUsd']
+            res = lp.capital.native_reserve(w)
             self.assertEqual(ca, min(max(w['balanceA'] - res, 0), cq * cap / price))
             self.assertEqual(cb, min(max(w['balanceB'], 0), cq * cap))
 
@@ -242,9 +253,9 @@ class OffIsTheOldBehaviour(Patched):
     @given(a=st.floats(0.06, 4), b=st.floats(0, 500), price=st.floats(50, 300))
     def test_swap_decision(self, a, b, price):
         w = bal(a, b, price=price)
-        res = rebalancer.native_reserve(w)
-        usd_a, usd_b, C = max(a - res, 0) * price, b, rebalancer.capital(w)
-        need = C * rebalancer.side_target_fraction() * 0.97
+        res = lp.capital.native_reserve(w)
+        usd_a, usd_b, C = max(a - res, 0) * price, b, lp.capital.capital(w)
+        need = C * lp.capital.side_target_fraction() * 0.97
         old_swaps = not (min(usd_a, usd_b) >= need or abs(usd_a - usd_b) <= 0.04 * (usd_a + usd_b))
         self.assertEqual(bool(SwapTarget.run_it(self, w, None)), old_swaps)
 
@@ -257,8 +268,8 @@ class ShareProperty(Patched):
         with mock.patch.object(config, 'SIDE_CAP_FRACTION', cap):
             w = bal(a, b, price=price)
             lo, hi = calm.offset_band(price, k, side, frac)
-            ca, cb = rebalancer.deposit_caps(w, share_a=calm.band_share_a(price, lo, hi))
-            C = rebalancer.capital(w)
+            ca, cb = lp.capital.deposit_caps(w, share_a=calm.band_share_a(price, lo, hi))
+            C = lp.capital.capital(w)
             if C <= 0:
                 return
             self.assertLessEqual((ca * price + cb) * w['quoteUsd'], 2.0 * C + 1e-6)
@@ -268,14 +279,14 @@ class ShareProperty(Patched):
 class MainLoopExit(unittest.TestCase):
     """The loop's exit hands rebalance the right side and the widened band."""
     def test_side_and_width(self):
-        src = open(rebalancer.__file__, encoding='utf-8').read()      # the file: other tests patch main
+        src = pathlib.Path(lp.loop.__file__).read_text(encoding='utf-8')   # the file: other tests patch main
         i = src.index("if not status.get('inRange'):")
         block = src[i:i + 1600]
-        self.assertIn("k = reopen_width(verdict['band'], status.get('whirlpool') or config.POOL, price)", block)
+        self.assertIn("k = regime.reopen_width(verdict['band'], status.get('whirlpool') or config.POOL, price)", block)
         self.assertIn("exit_side=1 if side == 'above' else -1", block)
         self.assertIn("side = verdict['side']", block)
-        self.assertEqual(rebalancer.poll_verdict(
-            {'at': 0, 'knobs': rebalancer.poll_knobs(), 'regime': None, 'calm': None, 'forecast': None,
+        self.assertEqual(lp.polls.poll_verdict(
+            {'at': 0, 'knobs': lp.polls.poll_knobs(), 'regime': None, 'calm': None, 'forecast': None,
              'band': {'price': 103.0, 'lower': 98.0, 'upper': 102.0, 'in_range': False, 'fees_usd': 0},
              'gates': {'calm_times': [], 'last_rebalance': 0, 'last_harvest': 0, 'breaker_ok': True, 'busy': None}}
         )['side'], 'above')
@@ -284,7 +295,7 @@ class MainLoopExit(unittest.TestCase):
 class Reopen(unittest.TestCase):
     """reopen() opens the offset band after an exit, and only then."""
     def bw(self, shares):
-        inner = rebalancer.balance_wallet
+        inner = lp.swaps.balance_wallet
         def f(s, bb, r, share_a=None):
             shares.append(share_a)
             return bb if inner is ORIGINAL_BW else inner(s, bb, r, share_a=share_a)
@@ -300,21 +311,21 @@ class Reopen(unittest.TestCase):
             raise AssertionError(a)
         with mock.patch.object(config, 'REOPEN_OFFSET', frac), mock.patch.object(config, 'REGIME_ENABLED', False), \
              mock.patch.object(config, 'CALM_ENABLED', True), \
-             mock.patch.object(rebalancer, 'best_band_for', return_value={'band': band, 'price': 120.0, 'record': {}}), \
-             mock.patch.object(rebalancer, 'wallet', return_value=dict(b)), \
-             mock.patch.object(rebalancer, 'quote_known', return_value=True), \
-             mock.patch.object(rebalancer, 'gas_for_open', return_value=True), \
-             mock.patch.object(rebalancer, 'calm_view', return_value={'calm': True, 'bar_age_s': 1, 'p_touch_fresh': 0.0}), \
-             mock.patch.object(rebalancer, 'balance_wallet', self.bw(shares)), \
-             mock.patch.object(rebalancer, 'deposit_caps', lambda bb, share_a=None: (caps.append(share_a) or (0.9, 100.0))), \
-             mock.patch.object(rebalancer, 'capital', return_value=200.0), \
-             mock.patch.object(rebalancer.guards, 'open_request', return_value=True), \
-             mock.patch.object(rebalancer, 'chain', chain), \
-             mock.patch.object(rebalancer, 'read_status', return_value=(None, None)), \
-             mock.patch.object(rebalancer, 'notify'), mock.patch.object(rebalancer, 'save'), \
-             mock.patch.object(rebalancer, 'halt'), mock.patch.object(rebalancer.db, 'event'), \
-             mock.patch.object(rebalancer.time, 'sleep'):
-            rebalancer.reopen({'failures': 0}, 'price went above', band=band, recovering=recovering, exit_side=exit_side)
+             mock.patch.object(lp.board, 'best_band_for', return_value={'band': band, 'price': 120.0, 'record': {}}), \
+             mock.patch.object(lp.capital, 'wallet', return_value=dict(b)), \
+             mock.patch.object(lp.capital, 'quote_known', return_value=True), \
+             mock.patch.object(lp.capital, 'gas_for_open', return_value=True), \
+             mock.patch.object(lp.regime, 'calm_view', return_value={'calm': True, 'bar_age_s': 1, 'p_touch_fresh': 0.0}), \
+             mock.patch.object(lp.swaps, 'balance_wallet', self.bw(shares)), \
+             mock.patch.object(lp.capital, 'deposit_caps', lambda bb, share_a=None: (caps.append(share_a) or (0.9, 100.0))), \
+             mock.patch.object(lp.capital, 'capital', return_value=200.0), \
+             mock.patch.object(guards, 'open_request', return_value=True), \
+             mock.patch.object(lp.signers, 'chain', chain), \
+             mock.patch.object(lp.signers, 'read_status', return_value=(None, None)), \
+             mock.patch.object(lp.books, 'notify'), mock.patch.object(lp.paths, 'save'), \
+             mock.patch.object(lp.books, 'halt'), mock.patch.object(db, 'event'), \
+             mock.patch.object(time, 'sleep'):
+            lp.moves.reopen({'failures': 0}, 'price went above', band=band, recovering=recovering, exit_side=exit_side)
         self.caps = caps
         return opened, shares
 
@@ -339,7 +350,7 @@ class Reopen(unittest.TestCase):
         self.assertAlmostEqual(opened[0][0], lo, places=5); self.assertAlmostEqual(opened[0][1], hi, places=5)
 
     def go_after(self, live):
-        with mock.patch.object(rebalancer, 'balance_wallet', lambda s, bb, r, share_a=None: dict(bb, price=live)):
+        with mock.patch.object(lp.swaps, 'balance_wallet', lambda s, bb, r, share_a=None: dict(bb, price=live)):
             return self.go()
 
 
@@ -348,23 +359,23 @@ class ExitSide(unittest.TestCase):
     def go(self, exit_side=1, target=None):
         import _fixtures as fx
         got = []
-        state = dict(rebalancer.STATE_DEFAULTS)
+        state = dict(lp.paths.STATE_DEFAULTS)
         status = {'positionMint': 'M', 'whirlpool': 'P', 'price': 100.0, 'inRange': False, 'liquidity': '1',
                   'feesAccruedA': 0.0, 'feesAccruedB': 0.0, 'feesAccrued_USD': 0.0, 'positionUsd': 190.0,
                   'lowerPrice': 99.0, 'upperPrice': 101.0}
         def chain(cmd, *a, **k):
             return ({'signature': 's'}, None) if cmd == 'close' else (None, 'nothing to claim')
-        with mock.patch.object(rebalancer, 'chain', chain), \
-                mock.patch.object(rebalancer, 'save', lambda s: None), \
-                mock.patch.object(rebalancer, 'notify', lambda ev, **kw: None), \
-                mock.patch.object(rebalancer, 'notify_book', lambda ev, **kw: None), \
-                mock.patch.object(rebalancer.db, 'close_position', lambda *a: None), \
-                mock.patch.object(rebalancer.db, 'record_band_profile', lambda *a: None), \
-                mock.patch.object(rebalancer, 'repoint_with_leftovers', lambda *a: None), \
-                mock.patch.object(rebalancer, 'sell_left_behind', lambda *a, **k: None), \
-                mock.patch.object(rebalancer, 'reopen', lambda s, r, band=None, exit_side=0: got.append(exit_side)), \
-                mock.patch.object(rebalancer.time, 'sleep', lambda s: None):
-            rebalancer.rebalance(state, status, 'price went above', band=1.01, calm_move=True, exit_move=True,
+        with mock.patch.object(lp.signers, 'chain', chain), \
+                mock.patch.object(lp.paths, 'save', lambda s: None), \
+                mock.patch.object(lp.books, 'notify', lambda ev, **kw: None), \
+                mock.patch.object(lp.books, 'notify_book', lambda ev, **kw: None), \
+                mock.patch.object(db, 'close_position', lambda *a: None), \
+                mock.patch.object(db, 'record_band_profile', lambda *a: None), \
+                mock.patch.object(lp.board, 'repoint_with_leftovers', lambda *a: None), \
+                mock.patch.object(lp.swaps, 'sell_left_behind', lambda *a, **k: None), \
+                mock.patch.object(lp.moves, 'reopen', lambda s, r, band=None, exit_side=0: got.append(exit_side)), \
+                mock.patch.object(time, 'sleep', lambda s: None):
+            lp.moves.rebalance(state, status, 'price went above', band=1.01, calm_move=True, exit_move=True,
                                  exit_side=exit_side, target=target)
         return got
 

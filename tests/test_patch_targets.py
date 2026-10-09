@@ -18,8 +18,10 @@ ALIASES = {'dexes': 'dexes', 'venue_api': 'venues.api', 'solana_state': 'venues.
            'orca_pools': 'venues.orca.pools', 'raydium_pools': 'venues.raydium_clmm.pools',
            'byreal_pools': 'venues.byreal.pools', 'pancake_pools': 'venues.pancakeswap_v3.pools',
            'meteora_pools': 'venues.meteora_dlmm.pools', 'aerodrome_pools': 'venues.aerodrome.pools',
-           'uniswap_pools': 'venues.uniswap_v3.pools'}
-PATCH = re.compile(r"patch\.object\(([\w.]+), '(\w+)'")
+           'uniswap_pools': 'venues.uniswap_v3.pools',
+           **{m: f'lp.{m}' for m in ('paths', 'tuning', 'books', 'signers', 'capital', 'tape', 'regime', 'pauses',
+                                     'harvest', 'swaps', 'board', 'moves', 'polls', 'housekeeping', 'loop')}}
+PATCH = re.compile(r"(?:patch\.object|self\.patch)\(([\w.]+), '(\w+)'")
 
 
 def own_names(module):
@@ -34,6 +36,8 @@ def own_names(module):
                 out |= {e.id for e in ast.walk(t) if isinstance(e, ast.Name)}
         elif isinstance(node, ast.Import):          # a module the code calls through (subprocess, urllib)
             out |= {(a.asname or a.name).split('.')[0] for a in node.names}
+        elif isinstance(node, ast.ImportFrom):      # a name the module's own code looks up (datetime)
+            out |= {a.asname or a.name for a in node.names}
     return out
 
 
@@ -46,6 +50,15 @@ class PatchTargets(unittest.TestCase):
                 if module and name not in own_names(module):
                     wrong.append(f'{f.name}: {target}, {name!r} is not defined in {module}')
         self.assertEqual(wrong, [])
+
+
+class AuditBotView(unittest.TestCase):
+    def test_the_view_has_everything_the_audits_read(self):
+        import lp.housekeeping
+        src = (_fixtures.ROOT / 'audit.py').read_text()
+        wanted = set(re.findall(r'\bbot\.([A-Za-z_]+)', src))
+        view = lp.housekeeping.bot_view()
+        self.assertEqual(sorted(n for n in wanted if not hasattr(view, n)), [])
 
 
 if __name__ == '__main__':

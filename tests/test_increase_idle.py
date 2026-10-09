@@ -11,6 +11,10 @@ import calm
 import config
 import db
 import rebalancer
+import lp.capital
+import lp.signers
+import lp.swaps
+import time
 from test_deploy_all import Patched, bal
 from test_deploy_idle import Hook, NOW
 
@@ -27,21 +31,21 @@ class AddIdle(Patched):
         self.read = []
         wb = wb or dict(bal(0.3, 12.0, price=119.5), walletUsd=0.3 * 119.5 + 12.0)
         after = bal(0.06, 0.4, price=119.5) if after is None else after
-        with mock.patch.object(rebalancer, 'balance_wallet', lambda s, b, r, share_a=None: (calls.append(('swap', share_a)) or b)), \
-             mock.patch.object(rebalancer, 'pool_record', return_value={'token_a': {}, 'token_b': {}}), \
-             mock.patch.object(rebalancer, 'quote_known', return_value=True), \
-             mock.patch.object(rebalancer, 'deposit_caps', lambda b, share_a=None: (calls.append(('caps', share_a)) or caps)), \
-             mock.patch.object(rebalancer, 'chain', lambda *a, **k: (calls.append(('chain',) + a + (k,)) or answer)), \
-             mock.patch.object(rebalancer, 'read_status', lambda m=None: (calls.append(('read', m)) or (next(reread) if hasattr(reread, '__next__') else reread, None))), \
-             mock.patch.object(rebalancer, 'wallet', lambda p: (self.read.append(p) or after)), \
+        with mock.patch.object(lp.swaps, 'balance_wallet', lambda s, b, r, share_a=None: (calls.append(('swap', share_a)) or b)), \
+             mock.patch.object(lp.capital, 'pool_record', return_value={'token_a': {}, 'token_b': {}}), \
+             mock.patch.object(lp.capital, 'quote_known', return_value=True), \
+             mock.patch.object(lp.capital, 'deposit_caps', lambda b, share_a=None: (calls.append(('caps', share_a)) or caps)), \
+             mock.patch.object(lp.signers, 'chain', lambda *a, **k: (calls.append(('chain',) + a + (k,)) or answer)), \
+             mock.patch.object(lp.signers, 'read_status', lambda m=None: (calls.append(('read', m)) or (next(reread) if hasattr(reread, '__next__') else reread, None))), \
+             mock.patch.object(lp.capital, 'wallet', lambda p: (self.read.append(p) or after)), \
              mock.patch.object(config, 'POOL', 'CFGPOOL'), \
-             mock.patch.object(rebalancer.db, 'add_deposit', lambda m, u: deps.append((m, u))), \
-             mock.patch.object(rebalancer.db, 'event', lambda *a: events.append(a)), \
-             mock.patch.object(rebalancer, 'notify', lambda ev, **kw: seen.append((ev, kw))), \
-             mock.patch.object(rebalancer, 'notify_book', lambda ev, **kw: books.append((ev, kw))), \
-             mock.patch.object(rebalancer, 'save', lambda s: None), \
-             mock.patch.object(rebalancer.time, 'sleep', lambda x: calls.append(('sleep', x))):
-            out = rebalancer.add_idle(state, dict(STATUS if status is None else status), wb, 25.0, 119.5)
+             mock.patch.object(db, 'add_deposit', lambda m, u: deps.append((m, u))), \
+             mock.patch.object(db, 'event', lambda *a: events.append(a)), \
+             mock.patch.object(lp.books, 'notify', lambda ev, **kw: seen.append((ev, kw))), \
+             mock.patch.object(lp.books, 'notify_book', lambda ev, **kw: books.append((ev, kw))), \
+             mock.patch.object(lp.paths, 'save', lambda s: None), \
+             mock.patch.object(time, 'sleep', lambda x: calls.append(('sleep', x))):
+            out = lp.swaps.add_idle(state, dict(STATUS if status is None else status), wb, 25.0, 119.5)
         return out, calls, deps, seen, books, events, state
 
     def test_the_idle_cash_is_swapped_to_the_band_share_and_added(self):
@@ -58,7 +62,7 @@ class AddIdle(Patched):
         self.assertEqual(books[0][0], 'INCREASE'); self.assertEqual(books[0][1]['added_usd'], round(want, 4))
         self.assertEqual(books[0][1]['signature'], 'S')
         self.assertEqual(events[0][0], 'INCREASE')
-        left = rebalancer.deployable_usd(bal(0.06, 0.4, price=119.5))
+        left = lp.capital.deployable_usd(bal(0.06, 0.4, price=119.5))
         self.assertEqual(state['idle_baseline'], {'mint': 'M', 'usd': round(left, 4)})
         self.assertEqual(books[0][1]['left_usd'], round(left, 2))
 
@@ -144,11 +148,11 @@ class AddIdle(Patched):
     def test_a_failed_swap_or_unknown_quote_stops_before_the_add(self):
         for bw, qk in ((lambda s, b, r, share_a=None: None, True), (lambda s, b, r, share_a=None: b, False)):
             sent = []
-            with mock.patch.object(rebalancer, 'balance_wallet', bw), \
-                 mock.patch.object(rebalancer, 'pool_record', return_value={}), \
-                 mock.patch.object(rebalancer, 'quote_known', return_value=qk), \
-                 mock.patch.object(rebalancer, 'chain', lambda *a, **k: sent.append(a)):
-                self.assertIs(rebalancer.add_idle({}, dict(STATUS), dict(bal(0.3, 12.0, price=119.5), walletUsd=50.0), 25.0, 119.5), False)
+            with mock.patch.object(lp.swaps, 'balance_wallet', bw), \
+                 mock.patch.object(lp.capital, 'pool_record', return_value={}), \
+                 mock.patch.object(lp.capital, 'quote_known', return_value=qk), \
+                 mock.patch.object(lp.signers, 'chain', lambda *a, **k: sent.append(a)):
+                self.assertIs(lp.swaps.add_idle({}, dict(STATUS), dict(bal(0.3, 12.0, price=119.5), walletUsd=50.0), 25.0, 119.5), False)
             self.assertEqual(sent, [])
 
     def test_an_unreadable_wallet_after_leaves_no_excuse(self):
@@ -159,9 +163,9 @@ class AddIdle(Patched):
 
 class Added(unittest.TestCase):
     def test_the_new_share_of_the_mark(self):
-        self.assertAlmostEqual(rebalancer.added_usd('100', {'liquidity': '125', 'positionUsd': 250.0, 'rentUsd': 0.0}), 50.0)
+        self.assertAlmostEqual(lp.swaps.added_usd('100', {'liquidity': '125', 'positionUsd': 250.0, 'rentUsd': 0.0}), 50.0)
         # the rent in the mark is left out of the add
-        self.assertAlmostEqual(rebalancer.added_usd('100', {'liquidity': '125', 'positionUsd': 250.0, 'rentUsd': 0.63}),
+        self.assertAlmostEqual(lp.swaps.added_usd('100', {'liquidity': '125', 'positionUsd': 250.0, 'rentUsd': 0.63}),
                                (250.63 - 0.63) * 25 / 125)
 
     def test_no_growth_no_read_or_bad_figures_is_none(self):
@@ -169,17 +173,17 @@ class Added(unittest.TestCase):
                        ('100', None), ('100', {}), ('x', {'liquidity': '125', 'positionUsd': 250.0}),
                        (None, {'liquidity': '125', 'positionUsd': 250.0}), ('-5', {'liquidity': '125', 'positionUsd': 250.0}),
                        ('100', {'liquidity': '125'})):
-            self.assertIsNone(rebalancer.added_usd(l0, st), (l0, st))
+            self.assertIsNone(lp.swaps.added_usd(l0, st), (l0, st))
 
     def test_zero_before_is_the_whole_mark(self):
-        self.assertAlmostEqual(rebalancer.added_usd('0', {'liquidity': '10', 'positionUsd': 30.0, 'rentUsd': 0.0}), 30.0)
+        self.assertAlmostEqual(lp.swaps.added_usd('0', {'liquidity': '10', 'positionUsd': 30.0, 'rentUsd': 0.0}), 30.0)
 
 
 class Routing(Hook):
     def go_dex(self, dex):
         added = []
         with mock.patch.object(config, 'DEX', dex), \
-             mock.patch.object(rebalancer, 'add_idle', lambda *a: (added.append(a) or 'added')):
+             mock.patch.object(lp.swaps, 'add_idle', lambda *a: (added.append(a) or 'added')):
             out, moves, books, events = self.go(self.WALLET, rv={'choice': 1.03})
         return out, moves, added
 
@@ -200,10 +204,10 @@ class Routing(Hook):
             self.assertTrue(out); self.assertEqual(len(moves), 1); self.assertEqual(added, [])
 
     def test_the_venue_breaker_covers_the_add(self):
-        self.assertIn('increase', rebalancer.WRITE_COMMANDS)
-        self.assertEqual(rebalancer.INCREASE_DEXES, {'raydium-clmm', 'uniswap-v3-polygon'})
-        for dex in rebalancer.INCREASE_DEXES:                            # every listed venue's signer has the command
-            self.assertIn("'increase'", open(rebalancer.SIGNERS[dex]).read(), dex)
+        self.assertIn('increase', lp.signers.WRITE_COMMANDS)
+        self.assertEqual(lp.swaps.INCREASE_DEXES, {'raydium-clmm', 'uniswap-v3-polygon'})
+        for dex in lp.swaps.INCREASE_DEXES:                            # every listed venue's signer has the command
+            self.assertIn("'increase'", open(lp.signers.SIGNERS[dex]).read(), dex)
 
 
 class AddDeposit(unittest.TestCase):

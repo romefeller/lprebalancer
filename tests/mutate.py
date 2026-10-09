@@ -51,47 +51,49 @@ TARGETS = {
     'guards': ('guards.py', ['_nonneg', 'fee_read_problem'], PY_TESTS('test_money_paths.FeeReadBounds', 'test_fee_integrity.FeeReadGuard')),
     'txfees': ('txfees.py', ['_raw', 'outflow', 'parse', 'fetch', 'harvested'],
                PY_TESTS('test_money_paths.TxParse', 'test_money_paths.TxFetch', 'test_fee_integrity.TxFees', 'test_fee_integrity.Replay')),
-    'distribute': ('rebalancer.py', ['distribute'],
-                   PY_TESTS('test_money_paths.Distribute', 'test_fee_integrity.DistributeProperties', 'test_fee_integrity.Replay', 'test_payout',
+    'distribute': ('lp/harvest.py', ['distribute'], PY_TESTS('test_money_paths.Distribute', 'test_fee_integrity.DistributeProperties', 'test_fee_integrity.Replay', 'test_payout',
                             'test_polygon_loop')),
-    'read_status': ('rebalancer.py', ['read_status', 'fee_problem', 'sanitised'],
-                    PY_TESTS('test_money_paths.Status', 'test_fee_integrity.ReadStatus', 'test_fee_integrity.Replay')),
-    'measured': ('rebalancer.py', ['measured_fees'], PY_TESTS('test_money_paths.Measured', 'test_fee_integrity.Replay')),
+    'read_status': ('lp/signers.py', ['read_status', 'fee_problem', 'sanitised'], PY_TESTS('test_money_paths.Status', 'test_fee_integrity.ReadStatus', 'test_fee_integrity.Replay')),
+    'measured': ('lp/harvest.py', ['measured_fees'], PY_TESTS('test_money_paths.Measured', 'test_fee_integrity.Replay')),
     'risk': ('calm.py', ['chi2_sf_even', 'arch_lm', '_rms', 'risk_metrics'],
              PY_TESTS('test_money_paths.RiskMath', 'test_fee_integrity.RiskMetrics')),
     'risk_db': ('db.py', ['risk_row', 'record_risk_profile', 'last_fees'],
                 PY_TESTS('test_money_paths.RiskRecord', 'test_fee_integrity.RiskProfileRecord', 'test_fee_integrity.Replay')),
-    'record_risk': ('rebalancer.py', ['record_risk'], PY_TESTS('test_money_paths.RiskRecord', 'test_fee_integrity.RiskProfileRecord')),
+    'record_risk': ('lp/regime.py', ['record_risk'], PY_TESTS('test_money_paths.RiskRecord', 'test_fee_integrity.RiskProfileRecord')),
     'rate_limit': ('engine.py', ['rate_limited', 'curl'], PY_TESTS('test_rate_limit')),
     'band_profile': ('db.py', ['record_band_profile'], PY_TESTS('test_band_profile')),
-    'band_hooks': ('rebalancer.py', ['band_profile'], PY_TESTS('test_band_profile.Hooks')),
+    'band_hooks': ('lp/harvest.py', ['band_profile'], PY_TESTS('test_band_profile.Hooks')),
     'daily': ('db.py', ['daily_line', 'daily_lines', '_daily_or_none'],
               PY_TESTS('test_daily', 'test_stats.TwoSolanaWallets', 'test_unichain_loop')),
     'health': ('health.py', ['cooldown', 'after_failure', 'after_success', 'verdict', 'load', 'record_failure',
                              'record_success', 'allowed', 'summary'], PY_TESTS('test_health', 'test_edges_0930')),
     'jupgate': ('jupgate.py', ['_take', 'reserve', 'wait_turn'], PY_TESTS('test_jupiter_gate.Gate')),
     'jupiter_gate_js': ('venues/jupiter/gate.mjs', ['take', 'reserve', 'waitTurn'], NODE_TESTS('test_jupiter_gate.mjs')),
-    'one_outcome': ('rebalancer.py', ['record_health', 'chain', 'balance_wallet', 'sweep_foreign'],
-                    PY_TESTS('test_jupiter_gate', 'test_health', 'test_deploy_all', 'test_deploy_idle', 'test_sweep',
+    'one_outcome_signers': ('lp/signers.py', ['record_health', 'chain'], PY_TESTS('test_jupiter_gate', 'test_health', 'test_deploy_all', 'test_deploy_idle', 'test_sweep',
+                             'test_multi_loop', 'test_scaled', 'test_review_edges', 'test_orca_fallback_pool')),
+    'one_outcome_swaps': ('lp/swaps.py', ['balance_wallet', 'sweep_foreign'], PY_TESTS('test_jupiter_gate', 'test_health', 'test_deploy_all', 'test_deploy_idle', 'test_sweep',
                              'test_multi_loop', 'test_scaled', 'test_review_edges', 'test_orca_fallback_pool')),
     # 2026-10-09 DJT halt: the Orca fallback's pool, the left-behind sale's fallback, the one-side hold.
-    'orca_fallback': ('rebalancer.py', ['fallback_pool_args', 'one_side_short'], PY_TESTS('test_orca_fallback_pool')),
+    'orca_fallback': ('lp/swaps.py', ['fallback_pool_args', 'one_side_short'], PY_TESTS('test_orca_fallback_pool')),
     'token_facts': ('venues/jupiter/prices.py', ['jupiter_token'], PY_TESTS('test_jupiter_gate.LessJupiterTraffic', 'test_jupiter_gate.Gate')),
     'venue_get': ('venues/api.py', ['_get'], PY_TESTS('test_jupiter_gate.LessJupiterTraffic', 'test_jupiter_gate.Gate')),
     'swap_orca': ('venues/orca/swap.mjs', ['guard', 'toRaw', 'parseHints', 'checkPool', 'direction', 'planSwap', 'spotOutPerIn',
                                     'priceImpact', 'valueLossOk', 'verifyQuote', 'checkImpact', 'chooseCuPrice', 'cuLimit',
                                     'withWsolClose', 'decodeSwapV2', 'verifyTxShape', 'checkDeltas', 'noopReport', 'sendLanded'],
                   NODE_TESTS('test_swap_orca.mjs')),
-    'resilience': ('rebalancer.py', ['health_key', 'counts_as_failure', 'chain', 'failover_pick', 'venue_failover',
-                                     'voluntary_move_allowed', 'idle_deploys_left', 'deploy_idle'],
-                   PY_TESTS('test_health', 'test_deploy_idle', 'test_edges_0930', 'test_multi_loop', 'test_scaled', 'test_review_edges',
+    'resilience_signers': ('lp/signers.py', ['health_key', 'counts_as_failure', 'chain'], PY_TESTS('test_health', 'test_deploy_idle', 'test_edges_0930', 'test_multi_loop', 'test_scaled', 'test_review_edges',
                             'test_increase_idle', 'test_replay')),
-    'replay': ('rebalancer.py', ['poll_verdict', 'poll_seen', 'record_poll', 'poll_knobs', 'move_gap_ok', 'moves_left',
-                                 'tight_reopen', 'harvest_ready', '_plain'],
-               PY_TESTS('test_replay', 'test_rebalancer.Proactive', 'test_calm', 'test_edges_0930')),
+    'resilience_board': ('lp/board.py', ['failover_pick', 'venue_failover'], PY_TESTS('test_health', 'test_deploy_idle', 'test_edges_0930', 'test_multi_loop', 'test_scaled', 'test_review_edges',
+                            'test_increase_idle', 'test_replay')),
+    'resilience_regime': ('lp/regime.py', ['voluntary_move_allowed'], PY_TESTS('test_health', 'test_deploy_idle', 'test_edges_0930', 'test_multi_loop', 'test_scaled', 'test_review_edges',
+                            'test_increase_idle', 'test_replay')),
+    'resilience_swaps': ('lp/swaps.py', ['idle_deploys_left', 'deploy_idle'], PY_TESTS('test_health', 'test_deploy_idle', 'test_edges_0930', 'test_multi_loop', 'test_scaled', 'test_review_edges',
+                            'test_increase_idle', 'test_replay')),
+    'replay_polls': ('lp/polls.py', ['poll_verdict', 'poll_seen', 'record_poll', 'poll_knobs', '_plain'], PY_TESTS('test_replay', 'test_rebalancer.Proactive', 'test_calm', 'test_edges_0930')),
+    'replay_regime': ('lp/regime.py', ['move_gap_ok', 'moves_left', 'tight_reopen'], PY_TESTS('test_replay', 'test_rebalancer.Proactive', 'test_calm', 'test_edges_0930')),
+    'replay_harvest': ('lp/harvest.py', ['harvest_ready'], PY_TESTS('test_replay', 'test_rebalancer.Proactive', 'test_calm', 'test_edges_0930')),
     'replay_db': ('db.py', ['record_replay_poll'], PY_TESTS('test_replay.Recording')),
-    'books': ('rebalancer.py', ['regime_at_move', 'notify_book', 'emoji_for', 'tidy'],
-              PY_TESTS('test_move_books', 'test_observability', 'test_rebalancer', 'test_edges_0930')),
+    'books': ('lp/books.py', ['regime_at_move', 'notify_book', 'emoji_for', 'tidy'], PY_TESTS('test_move_books', 'test_observability', 'test_rebalancer', 'test_edges_0930')),
     'deployment': ('db.py', ['_pct', '_deployment', 'deployment_now', '_pnl'], PY_TESTS('test_move_books', 'test_audit_more', 'test_edges_0930', 'test_db')),
     'rpc_policy': ('shared/rpc_policy.mjs', ['endpoints', 'errorKind', 'overEndpoints', 'isEntry'], NODE_TESTS('test_rpc_policy.mjs', 'test_signer_rpc.mjs')),
     'rpc_raydium': ('venues/raydium_clmm/signer.mjs', ['withRpc', 'sendAll'], NODE_TESTS('test_signer_rpc.mjs')),
@@ -110,18 +112,20 @@ TARGETS = {
     'book_lines': ('book_format.mjs', ['shareAgrees', 'lpLine', 'emojiFor', 'healthLine'], NODE_TESTS('test_book_format.mjs')),
     'surrogate': ('calm.py', ['pair_tokens', 'clean_bars', 'fit_surrogate', 'binance_5m', 'surrogate_5m',
                               'missing_slots', 'tape_fresh'], PY_TESTS('test_tape_surrogate')),
-    'surrogate_overlay': ('rebalancer.py', ['with_surrogate', '_with_surrogate', 'tape_source', 'track_tape_source', 'regime_view'],
-                          PY_TESTS('test_tape_surrogate', 'test_regime', 'test_hardening.StaleTape',
+    'surrogate_overlay_tape': ('lp/tape.py', ['with_surrogate', '_with_surrogate', 'tape_source'], PY_TESTS('test_tape_surrogate', 'test_regime', 'test_hardening.StaleTape',
                                    'test_quiet_pool')),
-    'daily_report': ('rebalancer.py', ['daily_report'], PY_TESTS('test_daily.Report', 'test_daily.ReportCompare')),
+    'surrogate_overlay_regime': ('lp/regime.py', ['track_tape_source', 'regime_view'], PY_TESTS('test_tape_surrogate', 'test_regime', 'test_hardening.StaleTape',
+                                   'test_quiet_pool')),
+    'daily_report': ('lp/books.py', ['daily_report'], PY_TESTS('test_daily.Report', 'test_daily.ReportCompare')),
     'day_average': ('db.py', ['day_average'], PY_TESTS('test_daily.Average')),
     'edge_watch': ('calm.py', ['near_edge', 'watch_verdict'], PY_TESTS('test_edge_watch')),
-    'edge_sleep': ('rebalancer.py', ['edge_sleep', 'pool_price_now'], PY_TESTS('test_edge_watch')),
+    'edge_sleep_regime': ('lp/regime.py', ['edge_sleep'], PY_TESTS('test_edge_watch')),
+    'edge_sleep_tape': ('lp/tape.py', ['pool_price_now'], PY_TESTS('test_edge_watch')),
     'reopen_shape': ('calm.py', ['offset_band', 'band_share_a', 'p_touch_width', 'touch_state'], PY_TESTS('test_reopen_shape', 'test_regime', 'test_calm')),
-    'reopen_shape_loop': ('rebalancer.py', ['reopen_width'], PY_TESTS('test_reopen_shape')),
-    'add_idle': ('rebalancer.py', ['add_idle', 'added_usd'], PY_TESTS('test_increase_idle')),
+    'reopen_shape_loop': ('lp/regime.py', ['reopen_width'], PY_TESTS('test_reopen_shape')),
+    'add_idle': ('lp/swaps.py', ['add_idle', 'added_usd'], PY_TESTS('test_increase_idle')),
     'add_deposit': ('db.py', ['add_deposit'], PY_TESTS('test_increase_idle.AddDeposit')),
-    'unsettled_guard': ('rebalancer.py', ['unsettled_guard', 'settle_mark', 'wallet'], PY_TESTS('test_unsettled_guard')),
+    'unsettled_guard': ('lp/capital.py', ['unsettled_guard', 'settle_mark', 'wallet'], PY_TESTS('test_unsettled_guard')),
     'priority_fee': ('venues/jupiter/swap.mjs', ['swapRequestBody', 'priorityFeeLamports', 'verifyPriorityFee'],
                      NODE_TESTS('test_priority_fee.mjs', 'test_security.mjs')),
     # Security review 2026-10-09: what a built swap may carry, what a signer's
@@ -139,17 +143,17 @@ TARGETS = {
                                                       'test_db', 'test_multi_loop', 'test_scaled', 'test_since_start_scope',
                                                       'test_stats.TwoSolanaWallets', 'test_shared_wallet_books.Replay',
                                                       'test_unichain_loop')),
-    'deploy_all': ('rebalancer.py', ['deployable_usd', 'capital', 'side_target_fraction', 'deposit_caps', 'balance_wallet'],
-                   PY_TESTS('test_reopen_shape', 'test_deploy_all', 'test_audit_more.QuoteFallbacks', 'test_rebalancer.DepositCaps', 'test_payout.SwapGate',
+    'deploy_all_capital': ('lp/capital.py', ['deployable_usd', 'capital', 'side_target_fraction', 'deposit_caps'], PY_TESTS('test_reopen_shape', 'test_deploy_all', 'test_audit_more.QuoteFallbacks', 'test_rebalancer.DepositCaps', 'test_payout.SwapGate',
                             'test_payout.SwapRetry', 'test_multi_loop', 'test_scaled', 'test_review_edges', 'test_jupiter_gate', 'test_health',
                             'test_deploy_idle', 'test_hardening.SwapMints')),
-    'loop_hooks': ('rebalancer.py', ['janitor', 'run_audits'], PY_TESTS('test_audit.Hooks', 'test_audit_more.Hooks', 'test_audit_more.JanitorKeepsWhatComesBack', 'test_audit_more.JanitorReplan', 'test_audit_more.JanitorUnsignedClose')),
+    'deploy_all_swaps': ('lp/swaps.py', ['balance_wallet'], PY_TESTS('test_reopen_shape', 'test_deploy_all', 'test_audit_more.QuoteFallbacks', 'test_rebalancer.DepositCaps', 'test_payout.SwapGate',
+                            'test_payout.SwapRetry', 'test_multi_loop', 'test_scaled', 'test_review_edges', 'test_jupiter_gate', 'test_health',
+                            'test_deploy_idle', 'test_hardening.SwapMints')),
+    'loop_hooks': ('lp/housekeeping.py', ['janitor', 'run_audits'], PY_TESTS('test_audit.Hooks', 'test_audit_more.Hooks', 'test_audit_more.JanitorKeepsWhatComesBack', 'test_audit_more.JanitorReplan', 'test_audit_more.JanitorUnsignedClose')),
     'janitor_js': ('chains/solana/janitor.mjs', ['planClose', 'closeInstructions', 'verifyCloseTx'], NODE_TESTS('test_janitor.mjs')),
     'book_format': ('book_format.mjs', ['equityLine', 'lpLine', 'sinceStartLine'], NODE_TESTS('test_book_format.mjs')),
-    'deploy_idle': ('rebalancer.py', ['idle_to_deploy', 'deploy_idle', 'balance_wallet'],
-                    PY_TESTS('test_deploy_idle', 'test_deploy_all', 'test_multi_loop', 'test_scaled', 'test_review_edges', 'test_jupiter_gate', 'test_health', 'test_edges_0930')),
-    'idle_capital': ('rebalancer.py', ['idle_to_deploy', 'deploy_idle', 'plan_sweep', 'sweep_foreign'],
-                     PY_TESTS('test_deploy_idle', 'test_sweep', 'test_multi_loop', 'test_scaled', 'test_review_edges', 'test_health', 'test_edges_0930')),
+    'deploy_idle': ('lp/swaps.py', ['idle_to_deploy', 'deploy_idle', 'balance_wallet'], PY_TESTS('test_deploy_idle', 'test_deploy_all', 'test_multi_loop', 'test_scaled', 'test_review_edges', 'test_jupiter_gate', 'test_health', 'test_edges_0930')),
+    'idle_capital': ('lp/swaps.py', ['idle_to_deploy', 'deploy_idle', 'plan_sweep', 'sweep_foreign'], PY_TESTS('test_deploy_idle', 'test_sweep', 'test_multi_loop', 'test_scaled', 'test_review_edges', 'test_health', 'test_edges_0930')),
     'orca_fees': ('venues/orca/fees.mjs', ['growthInside', 'ownFees', 'checkOrca', 'transferFeeOf', 'feesFromOrcaSnapshot',
                                     'snapshotAddresses', 'consistentOrcaFees'], NODE_TESTS('test_orca_fees.mjs')),
     'book_scope': ('db.py', ['book_profiles', 'book_scope', 'open_by_profile', 'flow_totals', '_uncounted_usd'],
@@ -191,30 +195,27 @@ TARGETS = {
                                   'set_pending', 'book', 'wallet_lock', '_solana_balance', '_evm_call', '_evm_balance',
                                   '_evm_head', 'read_balances', '_solana_write_slot', '_evm_write_slot', 'write_slot'],
                    PY_TESTS('test_wallets', 'test_multi_loop', 'test_claims_units')),
-    'claims_loop': ('rebalancer.py', ['me_row', 'claim_mints', 'tries_in', 'measure', 'signatures_of', 'settle_pending',
-                                      'unmeasurable', 'locked_chain', 'held', 'profile_enabled', 'disabled_hold', 'sleeve_of',
-                                      'is_stable_mint', 'quote_known', 'dormant', 'halted', 'route', 'housekeeper',
-                                      'wallet_mints', 'wallet_book', 'portfolio_report', 'record_baseline'],
-                    PY_TESTS('test_multi_loop', 'test_claims_units', 'test_unichain_loop')),
+    'claims_loop_signers': ('lp/signers.py', ['me_row', 'claim_mints', 'tries_in', 'measure', 'signatures_of', 'settle_pending', 'unmeasurable', 'locked_chain', 'held', 'route', 'housekeeper'], PY_TESTS('test_multi_loop', 'test_claims_units', 'test_unichain_loop')),
+    'claims_loop_loop': ('lp/loop.py', ['profile_enabled', 'disabled_hold', 'dormant'], PY_TESTS('test_multi_loop', 'test_claims_units', 'test_unichain_loop')),
+    'claims_loop_capital': ('lp/capital.py', ['sleeve_of', 'is_stable_mint', 'quote_known', 'wallet_book', 'record_baseline'], PY_TESTS('test_multi_loop', 'test_claims_units', 'test_unichain_loop')),
+    'claims_loop_paths': ('lp/paths.py', ['halted'], PY_TESTS('test_multi_loop', 'test_claims_units', 'test_unichain_loop')),
+    'claims_loop_swaps': ('lp/swaps.py', ['wallet_mints'], PY_TESTS('test_multi_loop', 'test_claims_units', 'test_unichain_loop')),
+    'claims_loop_books': ('lp/books.py', ['portfolio_report'], PY_TESTS('test_multi_loop', 'test_claims_units', 'test_unichain_loop')),
     # 2026-10-02: rent and fees one profile pays from another's native token, and rent priced as $0
     'shared_books': ('wallets.py', ['native_giver', 'internal_flows', 'book'],
                      PY_TESTS('test_shared_wallet_books', 'test_wallets', 'test_claims_units')),
-    'shared_books_loop': ('rebalancer.py', ['native_giver', 'native_flows', 'settle_pending', 'locked_chain',
-                                            'note_native_px', 'native_usd', 'rent_usd', 'position_usd',
-                                            'record_baseline'],
-                          PY_TESTS('test_shared_wallet_books', 'test_claims_units', 'test_multi_loop')),
+    'shared_books_loop_signers': ('lp/signers.py', ['native_giver', 'native_flows', 'settle_pending', 'locked_chain'], PY_TESTS('test_shared_wallet_books', 'test_claims_units', 'test_multi_loop')),
+    'shared_books_loop_capital': ('lp/capital.py', ['note_native_px', 'native_usd', 'rent_usd', 'position_usd', 'record_baseline'], PY_TESTS('test_shared_wallet_books', 'test_claims_units', 'test_multi_loop')),
     'shared_books_db': ('db.py', ['since_start', 'native_price'],
                         PY_TESTS('test_shared_wallet_books', 'test_since_start_scope', 'test_audit.SinceStart',
                                  'test_audit_more.SinceStartEdges', 'test_db', 'test_scaled', 'test_stats.TwoSolanaWallets')),
     'quiet_pool': ('calm.py', ['quiet_tail_ok', 'quiet_fill'], PY_TESTS('test_quiet_pool')),
-    'quiet_overlay': ('rebalancer.py', ['quiet_ref_ts', 'with_surrogate', '_surrogate_ts', '_merge_all', 'tape_source',
-                                        'quiet_tolerance'],
-                      PY_TESTS('test_quiet_pool', 'test_tape_surrogate')),
+    'quiet_overlay': ('lp/tape.py', ['quiet_ref_ts', 'with_surrogate', '_surrogate_ts', '_merge_all', 'tape_source', 'quiet_tolerance'], PY_TESTS('test_quiet_pool', 'test_tape_surrogate')),
     'quiet_db': ('db.py', ['tape_ref_pool'], PY_TESTS('test_quiet_pool')),
     # 2026-10-02: a payout's priority fee, and the send loop that proves an expired one never landed
     'payout_send': ('chains/solana/payout.mjs', ['payoutCuPrice'], NODE_TESTS('test_payout_send.mjs')),
     'tx_send': ('shared/tx_send.mjs', ['sendUntilLanded'], NODE_TESTS('test_payout_send.mjs')),
-    'deposit_mark': ('rebalancer.py', ['opened_mark', 'settle_deposit'], PY_TESTS('test_deposit_mark')),
+    'deposit_mark': ('lp/moves.py', ['opened_mark', 'settle_deposit'], PY_TESTS('test_deposit_mark')),
     'deposit_db': ('db.py', ['set_deposit'], PY_TESTS('test_deposit_mark')),
     'tx_send_price': ('shared/tx_send.mjs', ['priorityCuPrice'], NODE_TESTS('test_payout_send.mjs', 'test_raydium_landing.mjs')),
     'raydium_landing': ('venues/raydium_clmm/signer.mjs', ['sendLanded', 'sendAll', 'rebuildOnRefusal'], NODE_TESTS('test_raydium_landing.mjs')),
@@ -224,26 +225,24 @@ TARGETS = {
                        PY_TESTS('test_swing.Calendar', 'test_swing.Decide', 'test_swing.Audit', 'test_swing.TickMore')),
     'swing_tick': ('swing.py', ['tick', 'tick_all', 'main', 'feed', 'rows', 'left_behind'],
                    PY_TESTS('test_swing.Tick', 'test_swing.TickMore')),
-    'swing_loop': ('rebalancer.py', ['left_behind', 'repoint_with_leftovers', 'sell_left_behind', 'operator_target'],
-                   PY_TESTS('test_swing', 'test_multi_loop', 'test_rebalancer', 'test_orca_fallback_pool')),
+    'swing_loop_swaps': ('lp/swaps.py', ['left_behind', 'sell_left_behind'], PY_TESTS('test_swing', 'test_multi_loop', 'test_rebalancer', 'test_orca_fallback_pool')),
+    'swing_loop_board': ('lp/board.py', ['repoint_with_leftovers', 'operator_target'], PY_TESTS('test_swing', 'test_multi_loop', 'test_rebalancer', 'test_orca_fallback_pool')),
     # rebalance() as a whole: 2026-10-02, 38 survivors in lines older than the swing (harvest, close retries,
     # the 24 h windows, failure counts) are open work, not equivalents.
-    'swing_rebalance': ('rebalancer.py', ['rebalance'],
-                        PY_TESTS('test_swing', 'test_multi_loop', 'test_calm', 'test_regime', 'test_band_profile',
+    'swing_rebalance': ('lp/moves.py', ['rebalance'], PY_TESTS('test_swing', 'test_multi_loop', 'test_calm', 'test_regime', 'test_band_profile',
                                  'test_fee_integrity', 'test_hardening', 'test_rewards', 'test_jupiter_gate',
                                  'test_rebalancer', 'test_money_paths', 'test_move_books', 'test_edges_0930')),
     'add_profile': ('ops/add_profile.py', ['pool_spec', 'signer_env', 'build', 'drop_in', 'main'],
                     PY_TESTS('test_add_profile', 'test_unichain.AddProfile')),
     'tape_prune': ('db.py', ['config_pools', 'tape_prune_other_pools'], PY_TESTS('test_tape_prune')),
-    'gas_open': ('rebalancer.py', ['gas_for_open'], PY_TESTS('test_swing.Loop', 'test_swing.GasForOpen', 'test_multi_loop', 'test_scaled')),
-    'stock_loop': ('rebalancer.py', ['ui_price', 'open_headroom', 'native_reserve', 'deployable_usd', 'deposit_caps',
-                                     'position_usd', 'note_scale', 'native_bars', 'mint_refusal', 'note_mint_refusal',
-                                     'gas_for_open'],
-                   PY_TESTS('test_scaled', 'test_multi_loop', 'test_deploy_all', 'test_rebalancer.DepositCaps')),
+    'gas_open': ('lp/capital.py', ['gas_for_open'], PY_TESTS('test_swing.Loop', 'test_swing.GasForOpen', 'test_multi_loop', 'test_scaled')),
+    'stock_loop_capital': ('lp/capital.py', ['ui_price', 'open_headroom', 'native_reserve', 'deployable_usd', 'deposit_caps', 'position_usd', 'note_scale', 'gas_for_open'], PY_TESTS('test_scaled', 'test_multi_loop', 'test_deploy_all', 'test_rebalancer.DepositCaps')),
+    'stock_loop_tape': ('lp/tape.py', ['native_bars'], PY_TESTS('test_scaled', 'test_multi_loop', 'test_deploy_all', 'test_rebalancer.DepositCaps')),
+    'stock_loop_signers': ('lp/signers.py', ['mint_refusal', 'note_mint_refusal'], PY_TESTS('test_scaled', 'test_multi_loop', 'test_deploy_all', 'test_rebalancer.DepositCaps')),
     'stock_audit': ('audit.py', ['ui_amount', 'mint_scale', 'human', 'classify_tx', 'payout_received', 'check_positions',
                                  'flow_owner'],
                     PY_TESTS('test_scaled', 'test_audit', 'test_audit_edges')),
-    'rewards_measured': ('rebalancer.py', ['distribute_rewards'], PY_TESTS('test_rewards', 'test_hardening', 'test_reward_payout')),
+    'rewards_measured': ('lp/harvest.py', ['distribute_rewards'], PY_TESTS('test_rewards', 'test_hardening', 'test_reward_payout')),
     'reward_inflow': ('txfees.py', ['_ui', 'inflow'], PY_TESTS('test_rewards', 'test_hardening', 'test_reward_payout')),
     'halt_guard': ('shared/halt_guard.mjs', ['haltFiles', 'assertNotHalted'], NODE_TESTS('test_halt_guard.mjs')),
     'swap_sleeve': ('venues/jupiter/swap.mjs', ['parseSleeve', 'sleeveCap', 'uiOf', 'amountToRaw'], NODE_TESTS('test_sleeve.mjs')),
@@ -263,23 +262,19 @@ TARGETS = {
     # the hot pause's fee side on Uniswap v3 venues (2026-10-08)
     'v3_fee_pool': ('venues/uniswap_v3/pools.py', ['v3_fee_state', 'uniswap_v3_fee_state'], PY_TESTS('test_polygon_hot_pause', 'test_hot_pause')),
     # an open's leftover into the position where the venue can add (2026-10-08)
-    'open_leftover': ('rebalancer.py', ['adds_open_leftover', 'deploy_idle', 'idle_deploys_left'],
-                      PY_TESTS('test_deploy_leftover', 'test_deploy_idle', 'test_increase_idle')),
-    'v3_fee_loop': ('rebalancer.py', ['sample_fee_growth', 'sample_v3_fee_growth'],
-                    PY_TESTS('test_polygon_hot_pause', 'test_hot_pause', 'test_venues')),
+    'open_leftover': ('lp/swaps.py', ['adds_open_leftover', 'deploy_idle', 'idle_deploys_left'], PY_TESTS('test_deploy_leftover', 'test_deploy_idle', 'test_increase_idle')),
+    'v3_fee_loop': ('lp/board.py', ['sample_fee_growth', 'sample_v3_fee_growth'], PY_TESTS('test_polygon_hot_pause', 'test_hot_pause', 'test_venues')),
     'evm_signer': ('venues/aerodrome/signer.mjs', ['guard', 'marketRefusals', 'spendable', 'positionView', 'simulateSequence',
                                             'runSteps', 'planOpen', 'closeCalls', 'checkRecipient', 'isNative',
                                             'deploymentOf', 'describe', 'ownPositions'],
                    NODE_TESTS('test_aerodrome.mjs')),
     'evm_rpc': ('chains/evm/rpc.mjs', ['baseEndpoints', 'isLoopback', 'evmErrorKind', 'overBase'], NODE_TESTS('test_aerodrome.mjs')),
-    'liq_factor': ('rebalancer.py', ['liquidity_view'],
-                   PY_TESTS('test_hardening.Liquidity', 'test_hardening.LiquiditySmoothed',
+    'liq_factor': ('lp/tape.py', ['liquidity_view'], PY_TESTS('test_hardening.Liquidity', 'test_hardening.LiquiditySmoothed',
                             'test_hardening.LiquidityViewExact')),
     'liq_window': ('db.py', ['pool_stats_summary'], PY_TESTS('test_db.PoolStatsWindow', 'test_hardening.LiquiditySmoothed')),
     'pause_math': ('calm.py', ['fee_loss_ratio', 'hot_pause_step'], PY_TESTS('test_hot_pause')),
     'pause_yield': ('venues/solana_state.py', ['fee_yield'], PY_TESTS('test_hot_pause')),
-    'pause_loop': ('rebalancer.py', ['hot_pause_on', 'hot_pause_view', 'hot_pause_swap', 'hot_pause', 'hot_pause_close', 'hot_paused',
-                                     'macro_view', 'macro_hold'], PY_TESTS('test_hot_pause')),
+    'pause_loop': ('lp/pauses.py', ['hot_pause_on', 'hot_pause_view', 'hot_pause_swap', 'hot_pause', 'hot_pause_close', 'hot_paused', 'macro_view', 'macro_hold'], PY_TESTS('test_hot_pause')),
     'macro_db': ('db.py', ['macro_event_near', 'macro_next_ts'], PY_TESTS('test_hot_pause')),
     'pause_db': ('db.py', ['position_closed'], PY_TESTS('test_hot_pause')),
     'evm_key': ('chains/evm/keyfile.mjs', ['validKey', 'writeNewKey', 'readKey'], NODE_TESTS('test_evm_wallet.mjs')),
@@ -290,8 +285,7 @@ TARGETS = {
                                    'uniswap_v3_polygon_pool'],
                       PY_TESTS('test_unichain', 'test_polygon')),
     'unichain_config': ('config.py', ['public_rpc'], PY_TESTS('test_unichain.ConfigEndpoint')),
-    'unichain_quote': ('rebalancer.py', ['stable_quote_usd', 'quote_price', 'sleeve_of'],
-                       PY_TESTS('test_unichain_loop', 'test_multi_loop', 'test_claims_units', 'test_money_paths',
+    'unichain_quote': ('lp/capital.py', ['stable_quote_usd', 'quote_price', 'sleeve_of'], PY_TESTS('test_unichain_loop', 'test_multi_loop', 'test_claims_units', 'test_money_paths',
                                 'test_audit_more.QuoteFallbacks', 'test_fee_integrity')),
     'unichain_engine': ('engine.py', ['stable_quote', 'pool_quote_price'],
                         PY_TESTS('test_unichain_loop.StableFirst', 'test_engine')),
@@ -309,7 +303,7 @@ TARGETS = {
     'polygon_registry': ('chains/evm/polygon.mjs', ['polygonEndpoints', 'simulationEndpoints'], NODE_TESTS('test_uniswap_polygon.mjs')),
     'evm_chains': ('chains/evm/chains.mjs', ['chainModule'], NODE_TESTS('test_uniswap_polygon.mjs', 'test_uniswap.mjs')),
     # native POL above native_keep into WPOL (owner, 2026-10-08)
-    'native_wrap': ('rebalancer.py', ['native_to_wrap', 'wrap_native'], PY_TESTS('test_polygon', 'test_polygon_loop')),
+    'native_wrap': ('lp/capital.py', ['native_to_wrap', 'wrap_native'], PY_TESTS('test_polygon', 'test_polygon_loop')),
     'book_inverted': ('book_format.mjs', ['pricedView', 'shownPrice', 'shownBand', 'shownMovePct', 'shownSide', 'equityLine', 'sinceStartLine'],
                       NODE_TESTS('test_book_format.mjs', 'test_telegram_bridge.mjs')),
 }
@@ -324,7 +318,7 @@ SQL_TARGETS = {'deposit_db', 'unichain_book', 'unichain_quote', 'band_profile', 
 EQUIVALENT = {
     ('swap_checks', 'verifyTxShape', '\\?\\? -> ||', "if (pid === undefined || !ALLOWED_PROGRAMS.has(pid)) throw new Error(`transaction calls ${pid ?? 'a program from a lookup table'}; refusing`);", 0):
         'the refusal text only: pid is a base58 key or undefined, never the empty string that ?? and || tell apart',
-    ('swing_loop', 'sell_left_behind', 'drop operand 0', 'if (SWAP_FALLBACK and SWAP_FALLBACK in SIGNERS and (err or not out)', 0):
+    ('swing_loop_swaps', 'sell_left_behind', 'drop operand 0', 'if (SWAP_FALLBACK and SWAP_FALLBACK in signers.SIGNERS and (err or not out)', 0):
         "the fallback off is '', and '' in SIGNERS is False: the next operand alone gives the same answer",
     ('open_leftover', 'deploy_idle', 'drop operand 0', "if 'balanceA' not in wbal or wbal.get('walletUsd') is None:", 0):
         'deployable_usd returns None for a read without balanceA, and deploy_idle returns False on it two lines later',
@@ -364,7 +358,7 @@ EQUIVALENT = {
         'token_a is never an empty string (same reason as pricedView)',
     ('pause_loop', 'macro_view', 'const 0->1', "if state is None or time.time() - state.get('macro_unread_told', 0) >= MACRO_UNREAD_TELL_S:", 0):
         'never told: the clock is decades past both 0 and 1, far beyond an hour',
-    ('pause_loop', 'macro_view', 'const 0->1', "if state is not None and time.time() - state.get('macro_calendar_checked', 0) >= DAY_S:", 0):
+    ('pause_loop', 'macro_view', 'const 0->1', "if state is not None and time.time() - state.get('macro_calendar_checked', 0) >= tuning.DAY_S:", 0):
         'never checked: the clock is decades past both 0 and 1, far beyond a day',
     ('pause_loop', 'hot_paused', 'const 0->1', "p['until'] = max(p.get('until') or 0, m['until'])", 0):
         'a window end is an epoch time, decades past both 0 and 1: max() picks it either way',
@@ -403,34 +397,34 @@ EQUIVALENT = {
         'print flush only',
     ('swing_tick', 'main', 'flip bool', "print(f'swing tick failed: {type(e).__name__}: {e}', flush=True)", 0):
         'print flush only',
-    ('swing_loop', 'operator_target', 'drop operand 0', 'if held is None or want != held:', 0):
+    ('swing_loop_board', 'operator_target', 'drop operand 0', 'if held is None or want != held:', 0):
         'held None makes want != held true anyway: want is a set, never None',
-    ('swing_loop', 'sell_left_behind', 'const 0->1', "if not force and time.time() - float(state.get('left_behind_at') or 0) < LEFT_BEHIND_RETRY_S:", 0):
+    ('swing_loop_swaps', 'sell_left_behind', 'const 0->1', "if not force and time.time() - float(state.get('left_behind_at') or 0) < LEFT_BEHIND_RETRY_S:", 0):
         'a leftover never tried is read at epoch 0 or 1: decades past LEFT_BEHIND_RETRY_S either way',
     ('add_profile', 'build', 'drop operand 1', "if not (WALLET_ID.match(args.wallet) and ADDRESS[chain](args.address or '')", 1):
         'ADDRESS[chain] checks isinstance(str) first: None and empty are both refused',
-    ('swing_rebalance', 'rebalance', 'flip bool', 'sell_left_behind(state, force=True)', 0):
+    ('swing_rebalance', 'rebalance', 'flip bool', 'swaps.sell_left_behind(state, force=True)', 0):
         'repoint_with_leftovers pops left_behind_at just before: the retry wait is already over',
     ('payout_send', 'payoutCuPrice', '\\?\\? -> ||', 'const fees = (recent ?? []).map(r => Number(r?.prioritizationFee ?? r)).filter(f => f > 0).sort((a, b) => a - b);', 0):
         'recent is an array, null or undefined (a failed read gives []): || and ?? agree on all three',
     ('payout_send', 'payoutCuPrice', '\\?\\? -> ||', 'const fees = (recent ?? []).map(r => Number(r?.prioritizationFee ?? r)).filter(f => f > 0).sort((a, b) => a - b);', 1):
         'they differ only for a fee of 0, where || gives the row object; Number(object) is NaN and f > 0 drops it as it drops 0',
     # the surrogate overlay's body, renamed _with_surrogate on 2026-10-02 (reasons as before)
-    ('surrogate_overlay', '_with_surrogate', 'skip if body', 'if bars is None:', 0):
+    ('surrogate_overlay_tape', '_with_surrogate', 'skip if body', 'if bars is None:', 0):
         'None[0] raises inside the try, which returns bars (None) either way',
-    ('surrogate_overlay', '_with_surrogate', 'swap Gt->GtE', 'if any(g not in have for g in gaps) and now - t > SURROGATE_REFRESH:', 0):
+    ('surrogate_overlay_tape', '_with_surrogate', 'swap Gt->GtE', 'if any(g not in have for g in gaps) and now - t > SURROGATE_REFRESH:', 0):
         'only an ask exactly SURROGATE_REFRESH later differs: a float clock never lands there',
-    ('surrogate_overlay', '_with_surrogate', 'const 0->1', 't, name, s = _SURR.get(pool, (0, None, None))', 0):
+    ('surrogate_overlay_tape', '_with_surrogate', 'const 0->1', 't, name, s = _SURR.get(pool, (0, None, None))', 0):
         'an empty cache asked at t = 0 or t = 1: both are decades past the refresh',
-    ('surrogate_overlay', '_with_surrogate', 'flip bool', "print(f'surrogate tape failed: {type(e).__name__}: {e}', flush=True)", 0):
+    ('surrogate_overlay_tape', '_with_surrogate', 'flip bool', "print(f'surrogate tape failed: {type(e).__name__}: {e}', flush=True)", 0):
         'print flush only',
-    ('surrogate_overlay', '_with_surrogate', 'swap GtE->Gt', 's = tuple(c[s[0] >= now - SURROGATE_LOOKBACK_S - HOUR_S] for c in s)   # the last day only', 0):
+    ('surrogate_overlay_tape', '_with_surrogate', 'swap GtE->Gt', 's = tuple(c[s[0] >= now - SURROGATE_LOOKBACK_S - tuning.HOUR_S] for c in s)   # the last day only', 0):
         'the trim is an hour beyond the fill window: a bar at its edge is never used',
-    ('surrogate_overlay', '_with_surrogate', 'const 3600->3601', 's = tuple(c[s[0] >= now - SURROGATE_LOOKBACK_S - HOUR_S] for c in s)   # the last day only', 0):
+    ('surrogate_overlay_tape', '_with_surrogate', 'const 3600->3601', 's = tuple(c[s[0] >= now - SURROGATE_LOOKBACK_S - tuning.HOUR_S] for c in s)   # the last day only', 0):
         'the trim is an hour beyond the fill window: a bar at its edge is never used',
-    ('surrogate_overlay', 'regime_view', 'const 0->1', 'hold_left = 0', 0):
+    ('surrogate_overlay_regime', 'regime_view', 'const 0->1', 'hold_left = 0', 0):
         'hold_left is read only in STALE mode on a fresh tape, where it is assigned first',
-    ('surrogate_overlay', 'regime_view', 'drop operand 0', 'if v and not fresh:', 0):
+    ('surrogate_overlay_regime', 'regime_view', 'drop operand 0', 'if v and not fresh:', 0):
         'calm.regime_view returns None only for no bars, which returned before',
     # the quiet-pool fill (2026-10-02)
     ('quiet_pool', 'quiet_fill', 'swap LtE->Lt', 'while j + 1 < len(t_arr) and t_arr[j + 1] <= s:', 0):
@@ -447,9 +441,9 @@ EQUIVALENT = {
         '_merge_all over None raises inside the try, whose except returns out either way',
     ('quiet_overlay', 'with_surrogate', 'flip bool', "print(f'quiet fill failed: {type(e).__name__}: {e}', flush=True)", 0):
         'print flush only',
-    ('shared_books_loop', 'settle_pending', 'const 0.0->1.0', 'def settle_pending(wait_s=0.0):', 0):
+    ('shared_books_loop_signers', 'settle_pending', 'const 0.0->1.0', 'def settle_pending(wait_s=0.0):', 0):
         'as claims_loop: tries_in(1.0) == tries_in(0.0) == 1 (1.0 // CLAIM_POLL_S is 0): one read either way',
-    ('shared_books_loop', 'settle_pending', 'const 0->1', "if at is None and time.time() - float(p.get('sent_at') or 0) <= PENDING_EXPIRE_S:", 0):
+    ('shared_books_loop_signers', 'settle_pending', 'const 0->1', "if at is None and time.time() - float(p.get('sent_at') or 0) <= PENDING_EXPIRE_S:", 0):
         'as claims_loop: a missing sent_at at 0 or 1 is decades older than PENDING_EXPIRE_S either way',
     ('shared_books', 'internal_flows', 'swap Lt->LtE', 'out_p, in_p = (giver, taker) if delta < 0 else (taker, giver)', 0):
         'delta == 0 never reaches this line: |delta| <= DUST returns [] first',
@@ -473,48 +467,48 @@ EQUIVALENT = {
         'a None block number raises TypeError in int(None, 16); the only caller, write_slot, turns every exception into None: the same answer as the `return None`',
     ('rewards_measured', 'distribute_rewards', 'const 0.0->1.0', 'due[m] = max(float(due.get(m, 0.0)) - amt, 0.0)', 1):
         'txfees.inflow answers every mint it is asked, so due holds every m of the loop: the default is never read',
-    ('resilience', 'venue_failover', 'const 0->1', "if int(rec.get('fails') or 0) < health.TRIP_FAILS:    # failover follows the count, not the light", 0):
+    ('resilience_board', 'venue_failover', 'const 0->1', "if int(rec.get('fails') or 0) < health.TRIP_FAILS:    # failover follows the count, not the light", 0):
         'no failure on record reads as 0 or 1: both are under TRIP_FAILS (3), so neither fails over',
     # The claims core and the measured rewards (review fixes, 2026-10-02)
-    ('claims_loop', 'claim_mints', 'flip bool', "return None, f'mints unknown: {type(e).__name__}: {tidy(e)}', True", 0):
+    ('claims_loop_signers', 'claim_mints', 'flip bool', "return None, f'mints unknown: {type(e).__name__}: {books.tidy(e)}', True", 0):
         'its one caller (locked_chain) refuses on mints None before it reads `shared`',
-    ('claims_loop', 'measure', 'const 0.0->1.0', 'def measure(mints, min_slot=0, wait_s=0.0):', 0):
+    ('claims_loop_signers', 'measure', 'const 0.0->1.0', 'def measure(mints, min_slot=0, wait_s=0.0):', 0):
         'tries_in(1.0) == tries_in(0.0) == 1 (1.0 // CLAIM_POLL_S is 0): one read either way',
-    ('claims_loop', 'settle_pending', 'const 0.0->1.0', 'def settle_pending(wait_s=0.0):', 0):
+    ('claims_loop_signers', 'settle_pending', 'const 0.0->1.0', 'def settle_pending(wait_s=0.0):', 0):
         'tries_in(1.0) == tries_in(0.0) == 1 (1.0 // CLAIM_POLL_S is 0): one read either way',
-    ('claims_loop', 'settle_pending', 'const 0->1', "if at is None and time.time() - float(p.get('sent_at') or 0) <= PENDING_EXPIRE_S:", 0):
+    ('claims_loop_signers', 'settle_pending', 'const 0->1', "if at is None and time.time() - float(p.get('sent_at') or 0) <= PENDING_EXPIRE_S:", 0):
         'a missing sent_at reads as epoch 0 or 1: both are decades past PENDING_EXPIRE_S',
-    ('claims_loop', 'held', 'drop operand 0', 'return mint_refusal(err) or (bool(err) and bool(WAIT_REFUSAL.match(str(err))))', 1):
+    ('claims_loop_signers', 'held', 'drop operand 0', 'return mint_refusal(err) or (bool(err) and bool(WAIT_REFUSAL.match(str(err))))', 1):
         "a falsy err is None or '': str() of it never matches the anchored '^refused: ' pattern",
     ('rewards_measured', 'distribute_rewards', 'swap Gt->GtE', 'got = min(measured, quoted) if measured > 0 else 0.0', 0):
         'at measured == 0 the mutant gives min(0, quoted) <= 0: `got <= 0` refuses it, as it refuses 0.0',
     ('rewards_measured', 'distribute_rewards', 'const 0.0->1.0', "amt = min(float((out or {}).get('amount') or 0.0), float(due.get(m, 0.0)))", 1):
         'txfees.inflow answers every mint it is asked, so due holds every m of the loop: the default is never read',
     # Re-keyed 2026-10-02 (the multi-pool branch rewrote these lines; each reason checked again)
-    ('resilience', 'chain', 'const 420->421', 'def chain(*args, dex=None, timeout=SIGNER_TIMEOUT_S, extra_env=None, record=True):', 0):
+    ('resilience_signers', 'chain', 'const 420->421', 'def chain(*args, dex=None, timeout=tuning.SIGNER_TIMEOUT_S, extra_env=None, record=True):', 0):
         'one second more on a 420 s signer timeout',
-    ('resilience', 'deploy_idle', 'swap Lt->LtE', "state['idle_deploys'] = [t for t in (state.get('idle_deploys') or []) if now - t < DAY_S] + [now]; save(state)", 0):
+    ('resilience_swaps', 'deploy_idle', 'swap Lt->LtE', "state['idle_deploys'] = [t for t in (state.get('idle_deploys') or []) if now - t < tuning.DAY_S] + [now]; paths.save(state)", 0):
         'only a deploy exactly 86400.0 s old differs: a float clock never lands there',
     # Re-keyed 2026-10-05 (the window and the gap moved into move_gap_ok; each reason checked again)
-    ('replay', 'move_gap_ok', 'const 86400->86401', 'recent = [t for t in calm_times if now - t < DAY_S]', 0):
+    ('replay_regime', 'move_gap_ok', 'const 86400->86401', 'recent = [t for t in calm_times if now - t < tuning.DAY_S]', 0):
         'a move older than a day passes the gap anyway: keeping it in the window changes nothing',
-    ('replay', 'move_gap_ok', 'const 86400->172800', 'recent = [t for t in calm_times if now - t < DAY_S]', 0):
+    ('replay_regime', 'move_gap_ok', 'const 86400->172800', 'recent = [t for t in calm_times if now - t < tuning.DAY_S]', 0):
         'a move older than a day passes the gap anyway: keeping it in the window changes nothing',
-    ('replay', 'move_gap_ok', 'swap Lt->LtE', 'recent = [t for t in calm_times if now - t < DAY_S]', 0):
+    ('replay_regime', 'move_gap_ok', 'swap Lt->LtE', 'recent = [t for t in calm_times if now - t < tuning.DAY_S]', 0):
         'only a move exactly 86400.0 s old differs: a float clock never lands there',
-    ('replay', 'poll_seen', 'swap Lt->LtE', "'gates': {'calm_times': [t for t in state.get('calm_times', []) if now - t < DAY_S],", 0):
+    ('replay_polls', 'poll_seen', 'swap Lt->LtE', "'gates': {'calm_times': [t for t in state.get('calm_times', []) if now - t < tuning.DAY_S],", 0):
         'only a move exactly 86400.0 s old differs: a float clock never lands there',
-    ('replay', 'poll_seen', 'const 86400->86401', "'gates': {'calm_times': [t for t in state.get('calm_times', []) if now - t < DAY_S],", 0):
+    ('replay_polls', 'poll_seen', 'const 86400->86401', "'gates': {'calm_times': [t for t in state.get('calm_times', []) if now - t < tuning.DAY_S],", 0):
         'a move one second past a day is past the gap and out of moves_left: recording it changes no verdict',
-    ('resilience', 'voluntary_move_allowed', 'const 0->1', "return (move_gap_ok(state.get('calm_times', []), state.get('last_rebalance', 0), now, config.CALM_MIN_GAP)", 0):
+    ('resilience_regime', 'voluntary_move_allowed', 'const 0->1', "return (move_gap_ok(state.get('calm_times', []), state.get('last_rebalance', 0), now, config.CALM_MIN_GAP)", 0):
         'a last rebalance at epoch 0 or 1 is decades past the gap',
     ('quiet_overlay', 'quiet_tolerance', 'swap Lt->LtE', 'if not math.isfinite(fee) or fee < 0:', 0):
         'a fee of exactly 0 becomes 0 either way: the tolerance is the same',
-    ('resilience', 'failover_pick', 'drop operand 0', "if not v.get('held') and v.get('dex') != held_dex and v.get('row')", 0):
+    ('resilience_board', 'failover_pick', 'drop operand 0', "if not v.get('held') and v.get('dex') != held_dex and v.get('row')", 0):
         'the held venue is the held dex (config.POOL is on config.DEX): `dex != held_dex` excludes it too',
-    ('one_outcome', 'balance_wallet', 'drop operand 0', "if (SWAP_FALLBACK and SWAP_FALLBACK in SIGNERS and swap_dex == 'jupiter'", 0):
+    ('one_outcome_swaps', 'balance_wallet', 'drop operand 0', "if (SWAP_FALLBACK and SWAP_FALLBACK in signers.SIGNERS and swap_dex == 'jupiter'", 0):
         "an empty fallback name is never a SIGNERS key: '' in SIGNERS is False, as `SWAP_FALLBACK and` is",
-    ('one_outcome', 'balance_wallet', 'const 0.0->1.0', "(head * q if bal.get('nativeSide') == 'B' else 0.0)", 0):
+    ('one_outcome_swaps', 'balance_wallet', 'const 0.0->1.0', "(head * q if bal.get('nativeSide') == 'B' else 0.0)", 0):
         'with no native side neither target adds head_usd: its value is never read',
     # wallets.py, the loop's sleeves (CORE, 2026-10-01)
     ('wallets', 'claim_after', 'swap GtE->Gt', 'return (v, 0.0) if v >= 0 else (0.0, -v)', 0):
@@ -552,21 +546,21 @@ EQUIVALENT = {
         'float(None) raises TypeError, which returns None: the same answer as a price of 0',
     ('add_profile', 'build', 'drop operand 1', "if cross and not ADDRESS[chain](template.get('profit_wallet') or ''):", 1):
         'ADDRESS[chain] checks isinstance(str) first: None and empty are both refused',
-    ('claims_loop', 'wallet_mints', 'skip if body', 'if not config.WALLET_ID:', 0):
+    ('claims_loop_swaps', 'wallet_mints', 'skip if body', 'if not config.WALLET_ID:', 0):
         'a NULL wallet id matches no profile row: the query returns none, set() either way',
-    ('claims_loop', 'portfolio_report', 'drop operand 0', "if not (config.WALLET_ID and config.RESIDUAL_OWNER) or state.get('last_portfolio') == today:", 1):
+    ('claims_loop_books', 'portfolio_report', 'drop operand 0', "if not (config.WALLET_ID and config.RESIDUAL_OWNER) or state.get('last_portfolio') == today:", 1):
         'without a wallet id the first wallet by id is never this one: the next guard returns None before any write',
-    ('claims_loop', 'dormant', 'skip if body', "if 'balanceA' not in bal:", 0):
+    ('claims_loop_loop', 'dormant', 'skip if body', "if 'balanceA' not in bal:", 0):
         'an empty read has no quoteUsd: deployable_usd is None and the next guard returns the same `was`',
-    ('stock_loop', 'note_scale', 'drop operand 1', 'if pool and px and ui and float(px) > 0 and float(ui) > 0:', 0):
+    ('stock_loop_capital', 'note_scale', 'drop operand 1', 'if pool and px and ui and float(px) > 0 and float(ui) > 0:', 0):
         'a missing price raises in float() (caught) and a zero one fails > 0: no update either way',
-    ('stock_loop', 'note_scale', 'drop operand 2', 'if pool and px and ui and float(px) > 0 and float(ui) > 0:', 0):
+    ('stock_loop_capital', 'note_scale', 'drop operand 2', 'if pool and px and ui and float(px) > 0 and float(ui) > 0:', 0):
         'a missing uiPrice raises in float() (caught) and a zero one fails > 0: no update either way',
-    ('stock_loop', 'note_scale', 'swap Gt->GtE', 'if pool and px and ui and float(px) > 0 and float(ui) > 0:', 0):
+    ('stock_loop_capital', 'note_scale', 'swap Gt->GtE', 'if pool and px and ui and float(px) > 0 and float(ui) > 0:', 0):
         'a zero price is already refused by `px and`: > and >= differ only at 0',
-    ('stock_loop', 'note_scale', 'swap Gt->GtE', 'if pool and px and ui and float(px) > 0 and float(ui) > 0:', 1):
+    ('stock_loop_capital', 'note_scale', 'swap Gt->GtE', 'if pool and px and ui and float(px) > 0 and float(ui) > 0:', 1):
         'a zero uiPrice is already refused by `ui and`: > and >= differ only at 0',
-    ('stock_loop', 'mint_refusal', 'drop operand 0', 'return bool(err) and bool(REFUSED_MINT.match(str(err)))', 0):
+    ('stock_loop_signers', 'mint_refusal', 'drop operand 0', 'return bool(err) and bool(REFUSED_MINT.match(str(err)))', 0):
         "str(None) is 'None', which the refusal pattern never matches: False either way",
     ('swap_sleeve', 'uiOf', '\\?\\? -> ||', 'const m = info.multiplier ?? 1;', 0):
         'a multiplier is never 0 (token2022.mintFacts refuses it): ?? and || agree',
@@ -759,25 +753,25 @@ EQUIVALENT = {
     ('jupgate', 'reserve', 'drop operand 1', 'last = float(fh.read().strip() or 0.0)', 0):
         "float('') raises ValueError, which the except turns into last = 0.0: the same slot",
     # record_health, balance_wallet (one outcome per operation, 2026-10-01)
-    ('one_outcome', 'record_health', 'flip bool', 'f"retry in {wait / 60:.0f} min: {err}", flush=True)', 0):
+    ('one_outcome_signers', 'record_health', 'flip bool', 'f"retry in {wait / 60:.0f} min: {err}", flush=True)', 0):
         'print flush only',
-    ('one_outcome', 'balance_wallet', 'drop operand 0', "if out and out.get('noop'):", 0):
+    ('one_outcome_swaps', 'balance_wallet', 'drop operand 0', "if out and out.get('noop'):", 0):
         'out is truthy here: a falsy out took the nothing-sent return above',
-    ('one_outcome', 'balance_wallet', 'drop operand 1', "if err or not out or out.get('partial') or not out.get('sent'):", 0):
+    ('one_outcome_swaps', 'balance_wallet', 'drop operand 1', "if err or not out or out.get('partial') or not out.get('sent'):", 0):
         'out is truthy here: a falsy out took the nothing-sent return above',
-    ('one_outcome', 'balance_wallet', 'drop operand 1', "ra, rb = rec.get('token_a') or {}, rec.get('token_b') or {}", 0):
+    ('one_outcome_swaps', 'balance_wallet', 'drop operand 1', "ra, rb = rec.get('token_a') or {}, rec.get('token_b') or {}", 0):
         'token_a is a dict here: the mint guard above returned unless it holds a valid address',
-    ('one_outcome', 'balance_wallet', 'drop operand 1', "ra, rb = rec.get('token_a') or {}, rec.get('token_b') or {}", 1):
+    ('one_outcome_swaps', 'balance_wallet', 'drop operand 1', "ra, rb = rec.get('token_a') or {}, rec.get('token_b') or {}", 1):
         'token_b is a dict here: the mint guard above returned unless it holds a valid address',
-    ('one_outcome', 'balance_wallet', 'and<->or', "if ra.get('decimals') is not None and rb.get('decimals') is not None:", 0):
+    ('one_outcome_swaps', 'balance_wallet', 'and<->or', "if ra.get('decimals') is not None and rb.get('decimals') is not None:", 0):
         'a missing or None decimal makes int(...) raise KeyError or TypeError, which the except turns into hints = {}',
-    ('one_outcome', 'balance_wallet', 'drop operand 0', "if ra.get('decimals') is not None and rb.get('decimals') is not None:", 0):
+    ('one_outcome_swaps', 'balance_wallet', 'drop operand 0', "if ra.get('decimals') is not None and rb.get('decimals') is not None:", 0):
         'a missing or None decimal makes int(...) raise KeyError or TypeError, which the except turns into hints = {}',
-    ('one_outcome', 'balance_wallet', 'drop operand 1', "if ra.get('decimals') is not None and rb.get('decimals') is not None:", 0):
+    ('one_outcome_swaps', 'balance_wallet', 'drop operand 1', "if ra.get('decimals') is not None and rb.get('decimals') is not None:", 0):
         'a missing or None decimal makes int(...) raise KeyError or TypeError, which the except turns into hints = {}',
-    ('one_outcome', 'balance_wallet', 'drop operand 0', "if not ((err or not out) and not (out or {}).get('signature') and not (out or {}).get('partial')", 0):
+    ('one_outcome_swaps', 'balance_wallet', 'drop operand 0', "if not ((err or not out) and not (out or {}).get('signature') and not (out or {}).get('partial')", 0):
         "(err or not out) is false only for a falsy err, and str() of a falsy err ('None', '') never matches the transport regex",
-    ('one_outcome', 'balance_wallet', 'drop operand 1', "if not ((err or not out) and not (out or {}).get('signature') and not (out or {}).get('partial')", 1):
+    ('one_outcome_swaps', 'balance_wallet', 'drop operand 1', "if not ((err or not out) and not (out or {}).get('signature') and not (out or {}).get('partial')", 1):
         "err alone differs only for a falsy err, and str() of a falsy err ('None', '') never matches the transport regex",
     # Base / Aerodrome Slipstream (EVM). Each is a boundary where both sides compute the same value.
     ('evm_math', 'sqrtRatioAtTick', '(?<![<>=!])<(?![<=]) -> <=', 'const t = BigInt(tick < 0 ? -tick : tick);', 0):
@@ -865,9 +859,9 @@ def share_equivalents(table, function, source, targets):
                 table.setdefault((other, f, d, line, occ), why)
 
 
-share_equivalents(EQUIVALENT, 'balance_wallet', 'one_outcome', ('deploy_all', 'deploy_idle'))
-share_equivalents(EQUIVALENT, 'deploy_idle', 'resilience', ('deploy_idle', 'idle_capital'))
-share_equivalents(EQUIVALENT, 'with_surrogate', 'quiet_overlay', ('surrogate_overlay',))
+share_equivalents(EQUIVALENT, 'balance_wallet', 'one_outcome_swaps', ('deploy_all_swaps', 'deploy_idle'))
+share_equivalents(EQUIVALENT, 'deploy_idle', 'resilience_swaps', ('deploy_idle', 'idle_capital'))
+share_equivalents(EQUIVALENT, 'with_surrogate', 'quiet_overlay', ('surrogate_overlay_tape',))
 
 # Old-style entries (target, function, 'description @L<line>'). They did not
 # resolve to exactly one mutant when the keys were migrated on 2026-09-30:

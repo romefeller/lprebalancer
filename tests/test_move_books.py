@@ -13,7 +13,10 @@ import _fixtures
 _fixtures.ensure_profile()
 
 import db          # noqa: E402
-import rebalancer  # noqa: E402
+import lp.books  # noqa: E402
+import lp.moves  # noqa: E402
+import lp.paths  # noqa: E402
+import config  # noqa: E402
 from test_audit import reset  # noqa: E402
 
 money = st.floats(min_value=0, max_value=1e6, allow_nan=False, allow_infinity=False)
@@ -85,8 +88,8 @@ class MoveBooks(unittest.TestCase):
 
     def book(self, event, **kw):
         sent = []
-        with mock.patch.object(rebalancer, 'notify', lambda ev, **p: sent.append(p)):
-            rebalancer.notify_book(event, **kw)
+        with mock.patch.object(lp.books, 'notify', lambda ev, **p: sent.append(p)):
+            lp.books.notify_book(event, **kw)
         return sent[0]
 
     def test_the_open_book_shows_the_new_position(self):
@@ -112,15 +115,16 @@ class EveryMoveBookCarriesItsMark(unittest.TestCase):
     new move path cannot bring the stale "0%" back."""
 
     def test_scan(self):
-        src = (pathlib.Path(rebalancer.__file__)).read_text()
         found = []
-        for node in ast.walk(ast.parse(src)):
-            if isinstance(node, ast.Call) and getattr(node.func, 'id', None) == 'notify_book' and node.args \
-                    and isinstance(node.args[0], ast.Constant) and node.args[0].value in ('OPEN', 'CLOSE'):
-                found.append((node.args[0].value, node.lineno, {k.arg for k in node.keywords}))
+        for f in sorted(pathlib.Path(lp.paths.ROOT / 'lp').glob('*.py')):
+            for node in ast.walk(ast.parse(f.read_text())):
+                name = getattr(node.func, 'attr', None) or getattr(node.func, 'id', None) if isinstance(node, ast.Call) else None
+                if name == 'notify_book' and node.args \
+                        and isinstance(node.args[0], ast.Constant) and node.args[0].value in ('OPEN', 'CLOSE'):
+                    found.append((node.args[0].value, f'{f.name}:{node.lineno}', {k.arg for k in node.keywords}))
         self.assertGreaterEqual(len(found), 2)
-        for ev, line, kws in found:
-            self.assertIn('lp_now_usd', kws, f'{ev} book at rebalancer.py:{line}')
+        for ev, where, kws in found:
+            self.assertIn('lp_now_usd', kws, f'{ev} book at lp/{where}')
 
 
 
@@ -132,32 +136,32 @@ class RegimeAtMove(unittest.TestCase):
             'moves_24h': 7}
 
     def test_open_describes_the_new_band(self):
-        v = rebalancer.regime_at_move(self.VIEW, 120 / 1.03, 120 * 1.03, 8)
+        v = lp.books.regime_at_move(self.VIEW, 120 / 1.03, 120 * 1.03, 8)
         self.assertEqual((v['held'], v['held_pct'], v['inside'], v['p_held'], v['moves_24h']), (1.03, 3.0, True, 0.081, 8))
         self.assertEqual(self.VIEW['held'], 1.025)                                  # the poll's view is untouched
 
     def test_close_holds_nothing(self):
-        v = rebalancer.regime_at_move(self.VIEW, None, None, 8)
+        v = lp.books.regime_at_move(self.VIEW, None, None, 8)
         self.assertEqual((v['held'], v['held_pct'], v['p_held'], v['inside'], v['moves_24h']), (None, None, None, False, 8))
-        self.assertEqual(rebalancer.regime_at_move(self.VIEW, None, None)['moves_24h'], 7)
+        self.assertEqual(lp.books.regime_at_move(self.VIEW, None, None)['moves_24h'], 7)
 
     @settings(max_examples=300, deadline=None)
     @given(st.floats(50, 500), st.floats(1.001, 1.08))
     def test_property_held_pct_is_the_band(self, price, half):
-        v = rebalancer.regime_at_move(self.VIEW, price / half, price * half)
+        v = lp.books.regime_at_move(self.VIEW, price / half, price * half)
         self.assertAlmostEqual(v['held_pct'], (half - 1) * 100, delta=0.01)
-        self.assertIn(v['held'], rebalancer.config.REGIME_WIDTHS)
-        self.assertEqual(v['held'], min(rebalancer.config.REGIME_WIDTHS, key=lambda k: abs(k - half)))
+        self.assertIn(v['held'], config.REGIME_WIDTHS)
+        self.assertEqual(v['held'], min(config.REGIME_WIDTHS, key=lambda k: abs(k - half)))
 
     def test_the_book_uses_it_at_a_move_only(self):
         sent = []
-        with mock.patch.object(rebalancer.config, 'REGIME_ENABLED', True), \
-                mock.patch.dict(rebalancer.LAST_REGIME, {'view': self.VIEW}), \
-                mock.patch.object(rebalancer.db, 'stats', lambda: {'equity_usd': 239.33}), \
-                mock.patch.object(rebalancer, 'notify', lambda ev, **p: sent.append(p)):
-            rebalancer.notify_book('OPEN', lp_now_usd=219.0, lower=120 / 1.03, upper=120 * 1.03, moves_24h_now=8)
-            rebalancer.notify_book('CLOSE', lp_now_usd=0.0, lower=118.0, upper=122.0, moves_24h_now=8)
-            rebalancer.notify_book('in_band', lower=118.0, upper=122.0)
+        with mock.patch.object(config, 'REGIME_ENABLED', True), \
+                mock.patch.dict(lp.books.LAST_REGIME, {'view': self.VIEW}), \
+                mock.patch.object(db, 'stats', lambda: {'equity_usd': 239.33}), \
+                mock.patch.object(lp.books, 'notify', lambda ev, **p: sent.append(p)):
+            lp.books.notify_book('OPEN', lp_now_usd=219.0, lower=120 / 1.03, upper=120 * 1.03, moves_24h_now=8)
+            lp.books.notify_book('CLOSE', lp_now_usd=0.0, lower=118.0, upper=122.0, moves_24h_now=8)
+            lp.books.notify_book('in_band', lower=118.0, upper=122.0)
         self.assertEqual((sent[0]['regime']['held_pct'], sent[0]['regime']['moves_24h']), (3.0, 8))
         self.assertIsNone(sent[1]['regime']['held']); self.assertEqual(sent[1]['regime']['moves_24h'], 8)
         self.assertIs(sent[2]['regime'], self.VIEW)
@@ -167,7 +171,7 @@ class RegimeAtMove(unittest.TestCase):
 
 class CloseCountsItsMove(unittest.TestCase):
     def test_calm_times_is_recorded_before_the_close_book(self):
-        src = pathlib.Path(rebalancer.__file__).read_text()
+        src = pathlib.Path(lp.moves.__file__).read_text()
         i_book = src.index("notify_book('CLOSE'")
         i_times = src.rindex("state['calm_times'] = calm_recent + [now]", 0, i_book)
         self.assertLess(i_times, i_book)

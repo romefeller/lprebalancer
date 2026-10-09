@@ -373,7 +373,7 @@ class Run(Base):
 
     def bot(self):
         b = super().bot()
-        b.dexes = types.SimpleNamespace(
+        b.prices = types.SimpleNamespace(
             jupiter_prices=lambda mints: (self.priced.append(list(mints)) or {m: self.prices[m] for m in mints if m in self.prices}),
             jupiter_token=lambda m: (self.faced.append(m) or self.facts.get(m)))
         b.load = lambda: self.load

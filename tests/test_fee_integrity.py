@@ -28,7 +28,14 @@ import calm
 import db
 import fees
 import guards
-import rebalancer
+import config
+import time
+import stats
+import lp.harvest
+import lp.moves
+import lp.paths
+import lp.regime
+import lp.signers
 import txfees
 
 SOL = fees.NATIVE_MINT
@@ -155,12 +162,12 @@ class ReadStatus(unittest.TestCase):
     def run_it(self, answers, last=None):
         seen, events = [], []
         it = iter(answers)
-        with mock.patch.object(rebalancer, 'chain', lambda *a, **k: (next(it), None)), \
-                mock.patch.object(rebalancer.time, 'sleep', lambda s: None), \
-                mock.patch.object(rebalancer.db, 'last_fees', lambda m: last), \
-                mock.patch.object(rebalancer.db, 'event', lambda *a: events.append(a)), \
-                mock.patch.object(rebalancer, 'notify', lambda ev, **kw: seen.append(ev)):
-            out, _ = rebalancer.read_status()
+        with mock.patch.object(lp.signers, 'chain', lambda *a, **k: (next(it), None)), \
+                mock.patch.object(time, 'sleep', lambda s: None), \
+                mock.patch.object(db, 'last_fees', lambda m: last), \
+                mock.patch.object(db, 'event', lambda *a: events.append(a)), \
+                mock.patch.object(lp.books, 'notify', lambda ev, **kw: seen.append(ev)):
+            out, _ = lp.signers.read_status()
         return out, seen, events
 
     def test_good_read_passes_untouched(self):
@@ -291,18 +298,18 @@ class DistributeProperties(unittest.TestCase):
         rows, calls = [], []
         bal = {'balanceA': sol, 'balanceB': usdc, 'sol': sol, 'price': 120.0, 'quoteUsd': 1.0}
         with mock.patch.dict(os.environ, {'LPBOT_PROFIT_WALLET_PIN': PROFIT}), \
-                mock.patch.object(rebalancer.config, 'PAYOUT_ENABLED', True), \
-                mock.patch.object(rebalancer.config, 'PAYOUT_MINT', USDC), \
-                mock.patch.object(rebalancer.config, 'PROFIT_WALLET', PROFIT), \
-                mock.patch.object(rebalancer.config, 'GAS_RESERVE_SOL', 0.05), \
-                mock.patch.object(rebalancer, 'pool_tokens', lambda: ((SOL, 'SOL'), (USDC, 'USDC'))), \
-                mock.patch.object(rebalancer, 'wallet', lambda p: bal), \
-                mock.patch.object(rebalancer, 'chain', lambda *a, **k: (calls.append(a) or ({'signature': 's'}, None))), \
-                mock.patch.object(rebalancer, 'save', lambda s: None), \
-                mock.patch.object(rebalancer, 'notify', lambda ev, **kw: None), \
-                mock.patch.object(rebalancer.db, 'record_payout',
+                mock.patch.object(config, 'PAYOUT_ENABLED', True), \
+                mock.patch.object(config, 'PAYOUT_MINT', USDC), \
+                mock.patch.object(config, 'PROFIT_WALLET', PROFIT), \
+                mock.patch.object(config, 'GAS_RESERVE_SOL', 0.05), \
+                mock.patch.object(lp.capital, 'pool_tokens', lambda: ((SOL, 'SOL'), (USDC, 'USDC'))), \
+                mock.patch.object(lp.capital, 'wallet', lambda p: bal), \
+                mock.patch.object(lp.signers, 'chain', lambda *a, **k: (calls.append(a) or ({'signature': 's'}, None))), \
+                mock.patch.object(lp.paths, 'save', lambda s: None), \
+                mock.patch.object(lp.books, 'notify', lambda ev, **kw: None), \
+                mock.patch.object(db, 'record_payout',
                                   lambda *a, **k: rows.append({'mint': a[2], 'amount': a[4], 'kind': a[6]})):
-            rebalancer.distribute({}, 'M', fa, fb)
+            lp.harvest.distribute({}, 'M', fa, fb)
         return rows, calls
 
     @FAST
@@ -361,18 +368,18 @@ class Replay(unittest.TestCase):
                 return dict(BOGUS), None
             return None, f'unexpected {cmd}'
         return [mock.patch.dict(os.environ, {'LPBOT_PROFIT_WALLET_PIN': PROFIT}),
-                mock.patch.object(rebalancer.config, 'PAYOUT_ENABLED', True),
-                mock.patch.object(rebalancer.config, 'PAYOUT_MINT', USDC),
-                mock.patch.object(rebalancer.config, 'PROFIT_WALLET', PROFIT),
-                mock.patch.object(rebalancer.config, 'GAS_RESERVE_SOL', 0.05),
-                mock.patch.object(rebalancer.config, 'REWARD_POLICY', 'hold'),
-                mock.patch.object(rebalancer, 'pool_tokens', lambda: ((SOL, 'SOL'), (USDC, 'USDC'))),
-                mock.patch.object(rebalancer, 'wallet', lambda p: bal),
-                mock.patch.object(rebalancer, 'chain', chain),
-                mock.patch.object(rebalancer, 'save', lambda s: None),
-                mock.patch.object(rebalancer.time, 'sleep', lambda s: None),
-                mock.patch.object(rebalancer, 'notify', lambda ev, **kw: self.notes.append((ev, kw))),
-                mock.patch.object(rebalancer, 'notify_book', lambda ev, **kw: self.notes.append((ev, kw))),
+                mock.patch.object(config, 'PAYOUT_ENABLED', True),
+                mock.patch.object(config, 'PAYOUT_MINT', USDC),
+                mock.patch.object(config, 'PROFIT_WALLET', PROFIT),
+                mock.patch.object(config, 'GAS_RESERVE_SOL', 0.05),
+                mock.patch.object(config, 'REWARD_POLICY', 'hold'),
+                mock.patch.object(lp.capital, 'pool_tokens', lambda: ((SOL, 'SOL'), (USDC, 'USDC'))),
+                mock.patch.object(lp.capital, 'wallet', lambda p: bal),
+                mock.patch.object(lp.signers, 'chain', chain),
+                mock.patch.object(lp.paths, 'save', lambda s: None),
+                mock.patch.object(time, 'sleep', lambda s: None),
+                mock.patch.object(lp.books, 'notify', lambda ev, **kw: self.notes.append((ev, kw))),
+                mock.patch.object(lp.books, 'notify_book', lambda ev, **kw: self.notes.append((ev, kw))),
                 mock.patch.object(txfees, 'fetch', fetch)]
 
     def run_with(self, fn, **kw):
@@ -408,25 +415,25 @@ class Replay(unittest.TestCase):
         self.assertLess(t['reinvested_usd'] + t['paid_usd'], 1.0)
 
     def test_dividend_books_the_transaction_not_the_read(self):
-        self.run_with(lambda: rebalancer.dividend({}, dict(BOGUS)))
+        self.run_with(lambda: lp.harvest.dividend({}, dict(BOGUS)))
         self.assert_true_book()
         self.assertIn('harvest_measured', [e for e, _ in self.notes])
 
     def test_rebalance_harvest_books_the_transaction_not_the_read(self):
-        state = dict(rebalancer.STATE_DEFAULTS)
-        self.run_with(lambda: rebalancer.rebalance(state, dict(BOGUS), 'price went below', band=1.015,
+        state = dict(lp.paths.STATE_DEFAULTS)
+        self.run_with(lambda: lp.moves.rebalance(state, dict(BOGUS), 'price went below', band=1.015,
                                                    calm_move=True, exit_move=True))
         self.assert_true_book()
 
     def test_main_loop_read_never_lets_the_bogus_figure_through(self):
-        out, _ = self.run_with(rebalancer.read_status)
+        out, _ = self.run_with(lp.signers.read_status)
         self.assertEqual(out['feesAccrued_USD'], 0.165123)
         with db.cursor() as cur:
             cur.execute("select count(*) n from events where kind = 'fee_read_rejected'")
             self.assertEqual(cur.fetchone()['n'], 1)
 
     def test_unreadable_transaction_and_bogus_read_books_the_last_snapshot(self):
-        self.run_with(lambda: rebalancer.dividend({}, dict(BOGUS)), fetch=lambda rpc, s, **k: None)
+        self.run_with(lambda: lp.harvest.dividend({}, dict(BOGUS)), fetch=lambda rpc, s, **k: None)
         h, p = self.book()
         self.assertEqual([round(x, 9) for x in h[0]], [0.000695184, 0.079703, 0.165123])
         self.assertNotIn('gas', [k for _, _, k in p])
@@ -434,7 +441,7 @@ class Replay(unittest.TestCase):
 
     def test_unreadable_transaction_and_sane_read_books_the_read(self):
         sane = dict(BOGUS, feesAccruedA=0.0007, feesAccruedB=0.08, feesAccrued_USD=0.1657)
-        self.run_with(lambda: rebalancer.dividend({}, sane), fetch=lambda rpc, s, **k: None)
+        self.run_with(lambda: lp.harvest.dividend({}, sane), fetch=lambda rpc, s, **k: None)
         h, _ = self.book()
         self.assertEqual([round(x, 6) for x in h[0]], [0.0007, 0.08, 0.1657])
         self.assertIn('harvest_unmeasured', [e for e, _ in self.notes])
@@ -585,12 +592,12 @@ class RiskProfileRecord(unittest.TestCase):
 
     def test_the_loop_records_each_poll_and_never_raises(self):
         seen = []
-        with mock.patch.object(rebalancer, 'LAST_REGIME', {'risk': {'rms_1h_pct': 0.1}}):
-            rebalancer.record_risk({'whirlpool': POOL, 'positionMint': MINT, 'price': PRICE}, self.view(), {})
-            with mock.patch.object(rebalancer.db, 'record_risk_profile', side_effect=RuntimeError('db down')), \
-                    mock.patch.object(rebalancer, 'notify', lambda ev, **kw: seen.append(ev)):
-                rebalancer.record_risk({'whirlpool': POOL, 'positionMint': MINT, 'price': PRICE}, self.view(), {})
-            rebalancer.record_risk({'whirlpool': POOL, 'price': PRICE}, None, {})     # no view: nothing
+        with mock.patch.object(lp.books, 'LAST_REGIME', {'risk': {'rms_1h_pct': 0.1}}):
+            lp.regime.record_risk({'whirlpool': POOL, 'positionMint': MINT, 'price': PRICE}, self.view(), {})
+            with mock.patch.object(db, 'record_risk_profile', side_effect=RuntimeError('db down')), \
+                    mock.patch.object(lp.books, 'notify', lambda ev, **kw: seen.append(ev)):
+                lp.regime.record_risk({'whirlpool': POOL, 'positionMint': MINT, 'price': PRICE}, self.view(), {})
+            lp.regime.record_risk({'whirlpool': POOL, 'price': PRICE}, None, {})     # no view: nothing
         self.assertEqual(seen, ['risk_record_failed'])
         with db.cursor() as cur:
             cur.execute('select rms_1h_pct from risk_profile')

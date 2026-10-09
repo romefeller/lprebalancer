@@ -2,6 +2,7 @@
 (solana_state.fee_yield, calm.fee_loss_ratio), the pause's state machine
 (calm.hot_pause_step), the signal (rebalancer.hot_pause_view), the close
 (rebalancer.hot_pause) and the wait (rebalancer.hot_paused)."""
+import pathlib
 import datetime as dt
 import math
 import time
@@ -15,7 +16,13 @@ import _fixtures  # noqa: F401  (first: it puts lp_bot on the path)
 import calm
 import config
 from venues import solana_state
+import db
 import rebalancer
+import lp.loop
+import lp.moves
+import lp.paths
+import lp.pauses
+import health
 
 Q64 = 2 ** 64
 NOW = 1_800_000_000.0
@@ -143,15 +150,15 @@ class View(unittest.TestCase):
 
         def tape_f(pool, since):
             reads.append(('tape', pool, since)); return bars
-        with mock.patch.object(rebalancer.db, 'fee_state_span', span_f), \
-                mock.patch.object(rebalancer.db, 'tape_load', tape_f), \
-                mock.patch.object(rebalancer.solana_state, 'fee_yield',
+        with mock.patch.object(db, 'fee_state_span', span_f), \
+                mock.patch.object(db, 'tape_load', tape_f), \
+                mock.patch.object(solana_state, 'fee_yield',
                                   lambda f, l, a, b: (reads.append(('yield', a, b)) or ratio_y)), \
-                mock.patch.object(rebalancer, 'notify', lambda ev, **kw: told.append(ev)), \
+                mock.patch.object(lp.books, 'notify', lambda ev, **kw: told.append(ev)), \
                 mock.patch.object(config, 'HOT_PAUSE_HOT_PCT', 2.0), \
                 mock.patch.object(config, 'HOT_PAUSE_FG_HOURS', 6.0), \
                 mock.patch.object(config, 'HOT_PAUSE_FG_THRESHOLD', 0.8):
-            out = rebalancer.hot_pause_view('P', 120.0, 1.0, choice)
+            out = lp.pauses.hot_pause_view('P', 120.0, 1.0, choice)
         return out, reads, told, c
 
     def g(self, c):
@@ -194,19 +201,19 @@ class View(unittest.TestCase):
 
     def test_no_tape_is_not_bad(self):
         told = []
-        with mock.patch.object(rebalancer.db, 'fee_state_span',
+        with mock.patch.object(db, 'fee_state_span',
                                lambda p, hours: (sample(0, 0, ts=NOW - 21600), sample(1, 1), 21600)), \
-                mock.patch.object(rebalancer.db, 'tape_load', lambda p, s: None), \
-                mock.patch.object(rebalancer, 'notify', lambda ev, **kw: told.append(ev)), \
+                mock.patch.object(db, 'tape_load', lambda p, s: None), \
+                mock.patch.object(lp.books, 'notify', lambda ev, **kw: told.append(ev)), \
                 mock.patch.object(config, 'HOT_PAUSE_FG_HOURS', 6.0):
-            out = rebalancer.hot_pause_view('P', 1.0, 1.0, 1.05)
+            out = lp.pauses.hot_pause_view('P', 1.0, 1.0, 1.05)
         self.assertFalse(out['bad']); self.assertIsNone(out['ratio']); self.assertEqual(told, [])
 
     def test_fractional_hours_ask_whole_hours(self):
         seen = []
-        with mock.patch.object(rebalancer.db, 'fee_state_span', lambda p, hours: seen.append(hours)), \
+        with mock.patch.object(db, 'fee_state_span', lambda p, hours: seen.append(hours)), \
                 mock.patch.object(config, 'HOT_PAUSE_FG_HOURS', 0.4):
-            rebalancer.hot_pause_view('P', 1.0, 1.0, 1.05)
+            lp.pauses.hot_pause_view('P', 1.0, 1.0, 1.05)
         self.assertEqual(seen, [1])
 
 
@@ -224,27 +231,27 @@ class Pause(unittest.TestCase):
             if rec_boom:
                 raise RuntimeError('x')
             return {'rec': 1}
-        with mock.patch.object(rebalancer, 'hot_pause_view', lambda *a: (calls.append(('view',) + a) or v)), \
-                mock.patch.object(rebalancer, 'rebalance', reb), \
-                mock.patch.object(rebalancer.db, 'position_closed', lambda m: (calls.append(('closed?', m)) or closed)), \
-                mock.patch.object(rebalancer, 'wallet',
+        with mock.patch.object(lp.pauses, 'hot_pause_view', lambda *a: (calls.append(('view',) + a) or v)), \
+                mock.patch.object(lp.moves, 'rebalance', reb), \
+                mock.patch.object(db, 'position_closed', lambda m: (calls.append(('closed?', m)) or closed)), \
+                mock.patch.object(lp.capital, 'wallet',
                                   lambda p: ({'balanceA': 1.0, 'price': 120.0} if bal_ok else {})), \
-                mock.patch.object(rebalancer, 'pool_record', record), \
-                mock.patch.object(rebalancer, 'balance_wallet',
+                mock.patch.object(lp.capital, 'pool_record', record), \
+                mock.patch.object(lp.swaps, 'balance_wallet',
                                   lambda s, b, r, share_a=None: calls.append(('swap', r, share_a))), \
-                mock.patch.object(rebalancer, 'calm_budget_left', lambda s: budget), \
-                mock.patch.object(rebalancer, 'voluntary_move_allowed', lambda s: allowed), \
-                mock.patch.object(rebalancer, 'position_usd', lambda st: 210.0), \
-                mock.patch.object(rebalancer, 'notify_book', lambda ev, **kw: calls.append(('book', ev))), \
-                mock.patch.object(rebalancer.db, 'event', lambda *a: calls.append(('event', a[0]))), \
-                mock.patch.object(rebalancer, 'save', lambda s: saved.append(dict(s))), \
-                mock.patch.object(rebalancer.time, 'time', lambda: now), \
+                mock.patch.object(lp.regime, 'calm_budget_left', lambda s: budget), \
+                mock.patch.object(lp.regime, 'voluntary_move_allowed', lambda s: allowed), \
+                mock.patch.object(lp.capital, 'position_usd', lambda st: 210.0), \
+                mock.patch.object(lp.books, 'notify_book', lambda ev, **kw: calls.append(('book', ev))), \
+                mock.patch.object(db, 'event', lambda *a: calls.append(('event', a[0]))), \
+                mock.patch.object(lp.paths, 'save', lambda s: saved.append(dict(s))), \
+                mock.patch.object(time, 'time', lambda: now), \
                 mock.patch.object(config, 'HOT_PAUSE_COOLDOWN_S', 3600), \
                 mock.patch.object(config, 'HOT_PAUSE_ENABLED', True), \
                 mock.patch.object(config, 'HOT_PAUSE_POOLS', frozenset(pools)), \
                 mock.patch.object(config, 'MACRO_PAUSE_ENABLED', False), \
                 mock.patch.object(config, 'POOL', 'P'):
-            r = rebalancer.hot_pause(state, status(quoteUsd=quote),
+            r = lp.pauses.hot_pause(state, status(quoteUsd=quote),
                                      rv if rv is not None else {'choice': 1.03, 'choice_pct': 3.0, 'stale': False})
         return r, calls, state, saved
 
@@ -317,12 +324,12 @@ class Pause(unittest.TestCase):
         for st_kw, pools, want in (({'whirlpool': 'W'}, {'W'}, True), ({'whirlpool': 'W'}, {'P'}, False),
                                    ({'whirlpool': None}, {'P'}, True)):
             seen = []
-            with mock.patch.object(rebalancer, 'hot_pause_view', lambda *a: (seen.append(a[0]) or {'bad': False})), \
+            with mock.patch.object(lp.pauses, 'hot_pause_view', lambda *a: (seen.append(a[0]) or {'bad': False})), \
                     mock.patch.object(config, 'HOT_PAUSE_ENABLED', True), \
                     mock.patch.object(config, 'HOT_PAUSE_POOLS', frozenset(pools)), \
                     mock.patch.object(config, 'MACRO_PAUSE_ENABLED', False), \
                     mock.patch.object(config, 'POOL', 'P'):
-                rebalancer.hot_pause({}, status(**st_kw), {'choice': 1.03})
+                lp.pauses.hot_pause({}, status(**st_kw), {'choice': 1.03})
             self.assertEqual(bool(seen), want, (st_kw, pools))
 
     def test_one_move_left_is_enough(self):
@@ -331,11 +338,11 @@ class Pause(unittest.TestCase):
     def test_the_status_pool_or_the_profile_pool(self):
         seen = []
         for st_kw, want in (({'whirlpool': 'W'}, 'W'), ({'whirlpool': None}, 'P')):
-            with mock.patch.object(rebalancer, 'hot_pause_view', lambda *a: (seen.append(a[0]) or {'bad': False})), \
+            with mock.patch.object(lp.pauses, 'hot_pause_view', lambda *a: (seen.append(a[0]) or {'bad': False})), \
                     mock.patch.object(config, 'HOT_PAUSE_ENABLED', True), \
                     mock.patch.object(config, 'MACRO_PAUSE_ENABLED', False), \
                     mock.patch.object(config, 'POOL', 'P'):
-                self.assertIs(rebalancer.hot_pause({}, status(**st_kw), {'choice': 1.03}), False)
+                self.assertIs(lp.pauses.hot_pause({}, status(**st_kw), {'choice': 1.03}), False)
             self.assertEqual(seen[-1], want)
 
     def test_token_a_usd_is_the_pool_price_times_the_quote(self):
@@ -352,21 +359,21 @@ class Paused(unittest.TestCase):
         with mock.patch.object(config, 'HOT_PAUSE_ENABLED', enabled), mock.patch.object(config, 'POOL', pool), \
                 mock.patch.object(config, 'HOT_PAUSE_POOLS', frozenset(pools)), \
                 mock.patch.object(config, 'HOT_PAUSE_RESUME_S', 1800), mock.patch.object(config, 'HOT_PAUSE_MAX_S', 43200), \
-                mock.patch.object(rebalancer, 'sample_fee_growth', lambda s: sampled.append('fg')), \
-                mock.patch.object(rebalancer, 'daily_report', lambda s: sampled.append('daily')), \
-                mock.patch.object(rebalancer, 'run_audits', lambda s: sampled.append('audit')), \
-                mock.patch.object(rebalancer, 'hot_pause_swap', lambda s, pp: (books.append('swap'), pp.update(swapped=True))), \
-                mock.patch.object(rebalancer.db, 'position_closed', lambda m: closed), \
-                mock.patch.object(rebalancer.db, 'close_position', lambda *a: books.append(('close',) + a)), \
-                mock.patch.object(rebalancer, 'band_profile', lambda *a: books.append(('profile',) + a)), \
-                mock.patch.object(rebalancer, 'wallet', lambda pl: b), \
-                mock.patch.object(rebalancer, 'regime_choice_now', lambda pl, px: choice), \
-                mock.patch.object(rebalancer, 'hot_pause_view', lambda *a: (told.append(('view',) + a) or v)), \
-                mock.patch.object(rebalancer, 'notify', lambda ev, **kw: told.append((ev, kw))), \
-                mock.patch.object(rebalancer.db, 'event', lambda *a: events.append(a)), \
-                mock.patch.object(rebalancer, 'save', lambda s: None), \
-                mock.patch.object(rebalancer.time, 'time', lambda: now):
-            r = rebalancer.hot_paused(state)
+                mock.patch.object(lp.board, 'sample_fee_growth', lambda s: sampled.append('fg')), \
+                mock.patch.object(lp.books, 'daily_report', lambda s: sampled.append('daily')), \
+                mock.patch.object(lp.housekeeping, 'run_audits', lambda s: sampled.append('audit')), \
+                mock.patch.object(lp.pauses, 'hot_pause_swap', lambda s, pp: (books.append('swap'), pp.update(swapped=True))), \
+                mock.patch.object(db, 'position_closed', lambda m: closed), \
+                mock.patch.object(db, 'close_position', lambda *a: books.append(('close',) + a)), \
+                mock.patch.object(lp.harvest, 'band_profile', lambda *a: books.append(('profile',) + a)), \
+                mock.patch.object(lp.capital, 'wallet', lambda pl: b), \
+                mock.patch.object(lp.regime, 'regime_choice_now', lambda pl, px: choice), \
+                mock.patch.object(lp.pauses, 'hot_pause_view', lambda *a: (told.append(('view',) + a) or v)), \
+                mock.patch.object(lp.books, 'notify', lambda ev, **kw: told.append((ev, kw))), \
+                mock.patch.object(db, 'event', lambda *a: events.append(a)), \
+                mock.patch.object(lp.paths, 'save', lambda s: None), \
+                mock.patch.object(time, 'time', lambda: now):
+            r = lp.pauses.hot_paused(state)
         self.books = books
         return r, state, told, events, sampled
 
@@ -459,32 +466,32 @@ class Swap(unittest.TestCase):
     def test_marks_then_swaps_half_and_half(self):
         calls, saved = [], []
         state = {'hot_pause': {'swapped': False}}
-        with mock.patch.object(rebalancer, 'save', lambda s: saved.append(dict(s['hot_pause']))), \
-                mock.patch.object(rebalancer, 'wallet', lambda p: {'balanceA': 1.0}), \
-                mock.patch.object(rebalancer, 'pool_record', lambda: {'r': 1}), \
-                mock.patch.object(rebalancer, 'balance_wallet', lambda s, b, r, share_a=None: calls.append((b, r, share_a))):
-            rebalancer.hot_pause_swap(state, state['hot_pause'])
+        with mock.patch.object(lp.paths, 'save', lambda s: saved.append(dict(s['hot_pause']))), \
+                mock.patch.object(lp.capital, 'wallet', lambda p: {'balanceA': 1.0}), \
+                mock.patch.object(lp.capital, 'pool_record', lambda: {'r': 1}), \
+                mock.patch.object(lp.swaps, 'balance_wallet', lambda s, b, r, share_a=None: calls.append((b, r, share_a))):
+            lp.pauses.hot_pause_swap(state, state['hot_pause'])
         self.assertEqual(saved, [{'swapped': True}]); self.assertEqual(calls, [({'balanceA': 1.0}, {'r': 1}, 0.5)])
 
 
 class CloseOnly(unittest.TestCase):
     """A pause's close (calm move, close only) leaves no reopen intent behind."""
     def go(self, close_only):
-        state = dict(rebalancer.STATE_DEFAULTS)
+        state = dict(lp.paths.STATE_DEFAULTS)
         reopened = []
         st = {'positionMint': 'M', 'whirlpool': 'P', 'price': 100.0, 'inRange': True, 'liquidity': '1',
               'feesAccruedA': 0.0, 'feesAccruedB': 0.0, 'feesAccrued_USD': 0.0, 'positionUsd': 190.0,
               'lowerPrice': 99.0, 'upperPrice': 101.0}
-        with mock.patch.object(rebalancer, 'chain',
+        with mock.patch.object(lp.signers, 'chain',
                                lambda cmd, *a, **k: ({'signature': 's'}, None) if cmd == 'close' else (None, 'nothing')), \
-                mock.patch.object(rebalancer, 'save', lambda s: None), \
-                mock.patch.object(rebalancer, 'notify', lambda ev, **kw: None), \
-                mock.patch.object(rebalancer, 'notify_book', lambda ev, **kw: None), \
-                mock.patch.object(rebalancer.db, 'close_position', lambda *a: None), \
-                mock.patch.object(rebalancer.db, 'record_band_profile', lambda *a: None), \
-                mock.patch.object(rebalancer, 'reopen', lambda *a, **k: reopened.append(1)), \
-                mock.patch.object(rebalancer.time, 'sleep', lambda s: None):
-            rebalancer.rebalance(state, st, 'hot pause', calm_move=True, exit_move=True, close_only=close_only)
+                mock.patch.object(lp.paths, 'save', lambda s: None), \
+                mock.patch.object(lp.books, 'notify', lambda ev, **kw: None), \
+                mock.patch.object(lp.books, 'notify_book', lambda ev, **kw: None), \
+                mock.patch.object(db, 'close_position', lambda *a: None), \
+                mock.patch.object(db, 'record_band_profile', lambda *a: None), \
+                mock.patch.object(lp.moves, 'reopen', lambda *a, **k: reopened.append(1)), \
+                mock.patch.object(time, 'sleep', lambda s: None):
+            lp.moves.rebalance(state, st, 'hot pause', calm_move=True, exit_move=True, close_only=close_only)
         return state, reopened
 
     def test_no_intent_and_no_reopen(self):
@@ -499,24 +506,24 @@ class CloseOnly(unittest.TestCase):
 
 class Loop(unittest.TestCase):
     """Where the loop calls the pause (read from the file: other tests patch main)."""
-    src = open(rebalancer.__file__, encoding='utf-8').read()
+    src = (pathlib.Path(lp.loop.__file__)).read_text(encoding='utf-8')
 
     def test_held_band_checks_before_the_exit(self):
-        i = self.src.index('if (config.HOT_PAUSE_ENABLED or config.MACRO_PAUSE_ENABLED) and hot_pause(state, status, rv):')
-        j = self.src.index("if not status.get('inRange'):\n            seen = poll_seen(")
-        k = self.src.index('fo = venue_failover(state, status)')
+        i = self.src.index('if (config.HOT_PAUSE_ENABLED or config.MACRO_PAUSE_ENABLED) and pauses.hot_pause(state, status, rv):')
+        j = self.src.index("if not status.get('inRange'):\n            seen = polls.poll_seen(")
+        k = self.src.index('fo = board.venue_failover(state, status)')
         self.assertLess(k, i); self.assertLess(i, j)
         self.assertIn("state.pop('hot_pause', None)", self.src[i:j])
 
     def test_no_position_waits_before_dormant_and_reopen(self):
-        i = self.src.index("if state.get('hot_pause') and hot_paused(state):")
-        j = self.src.index('if macro_hold(state):')
+        i = self.src.index("if state.get('hot_pause') and pauses.hot_paused(state):")
+        j = self.src.index('if pauses.macro_hold(state):')
         self.assertLess(self.src.index('if dormant(state, b0):'), j)
         self.assertLess(j, self.src.index("notify('no_position'"))
-        self.assertLess(j, self.src.index('if resume_reopen(state):'))
-        self.assertLess(self.src.index('            sell_left_behind(state)\n            if state.get'), i)
+        self.assertLess(j, self.src.index('if regime.resume_reopen(state):'))
+        self.assertLess(self.src.index('            swaps.sell_left_behind(state)\n            if state.get'), i)
         self.assertLess(i, self.src.index('if dormant(state, b0):'))
-        self.assertLess(i, self.src.index('if resume_reopen(state):'))
+        self.assertLess(i, self.src.index('if regime.resume_reopen(state):'))
 
 
 class PositionClosed(unittest.TestCase):
@@ -539,7 +546,7 @@ class PauseOn(unittest.TestCase):
                                            (True, {'P'}, 'Q', False), (True, {'P', 'Q'}, 'Q', True)):
             with mock.patch.object(config, 'HOT_PAUSE_ENABLED', enabled), \
                     mock.patch.object(config, 'HOT_PAUSE_POOLS', frozenset(pools)):
-                self.assertIs(rebalancer.hot_pause_on(pool), want, (enabled, pools, pool))
+                self.assertIs(lp.pauses.hot_pause_on(pool), want, (enabled, pools, pool))
 
 
 class Config(unittest.TestCase):
@@ -590,12 +597,12 @@ class MacroView(unittest.TestCase):
         state = st if st is not None else {}
         with mock.patch.object(config, 'MACRO_PAUSE_ENABLED', enabled), \
                 mock.patch.object(config, 'MACRO_PAUSE_BEFORE_S', 900), mock.patch.object(config, 'MACRO_PAUSE_AFTER_S', 7200), \
-                mock.patch.object(rebalancer.db, 'macro_event_near', near_f), \
-                mock.patch.object(rebalancer.db, 'macro_next_ts', lambda: nxt), \
-                mock.patch.object(rebalancer, 'notify', lambda ev, **kw: told.append(ev)), \
-                mock.patch.object(rebalancer, 'save', lambda s: None), \
-                mock.patch.object(rebalancer.time, 'time', lambda: now):
-            r = rebalancer.macro_view(state)
+                mock.patch.object(db, 'macro_event_near', near_f), \
+                mock.patch.object(db, 'macro_next_ts', lambda: nxt), \
+                mock.patch.object(lp.books, 'notify', lambda ev, **kw: told.append(ev)), \
+                mock.patch.object(lp.paths, 'save', lambda s: None), \
+                mock.patch.object(time, 'time', lambda: now):
+            r = lp.pauses.macro_view(state)
         return r, told, asked, state
 
     def test_off_reads_nothing(self):
@@ -626,10 +633,10 @@ class MacroView(unittest.TestCase):
     def test_no_state_skips_the_calendar_check(self):
         told = []
         with mock.patch.object(config, 'MACRO_PAUSE_ENABLED', True), \
-                mock.patch.object(rebalancer.db, 'macro_event_near', lambda b, a: None), \
-                mock.patch.object(rebalancer.db, 'macro_next_ts', side_effect=AssertionError('read')), \
-                mock.patch.object(rebalancer, 'notify', lambda ev, **kw: told.append(ev)):
-            self.assertIsNone(rebalancer.macro_view(None))
+                mock.patch.object(db, 'macro_event_near', lambda b, a: None), \
+                mock.patch.object(db, 'macro_next_ts', side_effect=AssertionError('read')), \
+                mock.patch.object(lp.books, 'notify', lambda ev, **kw: told.append(ev)):
+            self.assertIsNone(lp.pauses.macro_view(None))
         self.assertEqual(told, [])
 
 
@@ -647,22 +654,22 @@ class MacroPause(unittest.TestCase):
     def go(self, m=M, budget=5, venue_ok=True, rv=None, hot_enabled=False, st=None):
         calls = []
         state = st if st is not None else {}
-        with mock.patch.object(rebalancer, 'macro_view', lambda s: m), \
-                mock.patch.object(rebalancer, 'hot_pause_view', side_effect=AssertionError('no HOT read')), \
-                mock.patch.object(rebalancer, 'hot_pause_close',
+        with mock.patch.object(lp.pauses, 'macro_view', lambda s: m), \
+                mock.patch.object(lp.pauses, 'hot_pause_view', side_effect=AssertionError('no HOT read')), \
+                mock.patch.object(lp.pauses, 'hot_pause_close',
                                   lambda s, st, why, now, **kw: (calls.append(('close', why, now, kw)) or True)), \
-                mock.patch.object(rebalancer, 'calm_budget_left', lambda s: budget), \
-                mock.patch.object(rebalancer, 'voluntary_move_allowed', side_effect=AssertionError('no gap check')), \
-                mock.patch.object(rebalancer.health, 'allowed', lambda key, now: (calls.append(('breaker', key)) or (venue_ok, 0))), \
-                mock.patch.object(rebalancer, 'notify_book', book_fake(calls)), \
-                mock.patch.object(rebalancer, 'notify', lambda ev, **kw: calls.append(('notify', ev, kw))), \
-                mock.patch.object(rebalancer, 'save', lambda s: None), \
-                mock.patch.object(rebalancer.db, 'event', lambda *a: calls.append(('event', a[0]))), \
+                mock.patch.object(lp.regime, 'calm_budget_left', lambda s: budget), \
+                mock.patch.object(lp.regime, 'voluntary_move_allowed', side_effect=AssertionError('no gap check')), \
+                mock.patch.object(health, 'allowed', lambda key, now: (calls.append(('breaker', key)) or (venue_ok, 0))), \
+                mock.patch.object(lp.books, 'notify_book', book_fake(calls)), \
+                mock.patch.object(lp.books, 'notify', lambda ev, **kw: calls.append(('notify', ev, kw))), \
+                mock.patch.object(lp.paths, 'save', lambda s: None), \
+                mock.patch.object(db, 'event', lambda *a: calls.append(('event', a[0]))), \
                 mock.patch.object(config, 'HOT_PAUSE_ENABLED', hot_enabled), \
                 mock.patch.object(config, 'DEX', 'raydium-clmm'), \
                 mock.patch.object(config, 'MACRO_PAUSE_AFTER_S', 7200), \
-                mock.patch.object(rebalancer.time, 'time', lambda: NOW):
-            r = rebalancer.hot_pause(state, status(), rv)
+                mock.patch.object(time, 'time', lambda: NOW):
+            r = lp.pauses.hot_pause(state, status(), rv)
         return r, calls, state
 
     def test_a_window_closes_whatever_the_market_or_the_hot_switch(self):
@@ -679,15 +686,15 @@ class MacroPause(unittest.TestCase):
 
     def test_the_real_notify_book_accepts_the_payload(self):
         sent = []
-        with mock.patch.object(rebalancer, 'macro_view', lambda s: self.M), \
-                mock.patch.object(rebalancer, 'hot_pause_close', lambda *a, **k: True), \
-                mock.patch.object(rebalancer, 'calm_budget_left', lambda s: 5), \
-                mock.patch.object(rebalancer.health, 'allowed', lambda key, now: (True, 0)), \
-                mock.patch.object(rebalancer.health, 'summary', lambda: []), \
-                mock.patch.object(rebalancer.db, 'stats', lambda: {'equity_usd': 1.0}), \
-                mock.patch.object(rebalancer, 'notify', lambda ev, **kw: sent.append((ev, kw))), \
-                mock.patch.object(rebalancer.db, 'event', lambda *a: None):
-            self.assertIs(rebalancer.hot_pause({}, status(), None), True)
+        with mock.patch.object(lp.pauses, 'macro_view', lambda s: self.M), \
+                mock.patch.object(lp.pauses, 'hot_pause_close', lambda *a, **k: True), \
+                mock.patch.object(lp.regime, 'calm_budget_left', lambda s: 5), \
+                mock.patch.object(health, 'allowed', lambda key, now: (True, 0)), \
+                mock.patch.object(health, 'summary', lambda: []), \
+                mock.patch.object(db, 'stats', lambda: {'equity_usd': 1.0}), \
+                mock.patch.object(lp.books, 'notify', lambda ev, **kw: sent.append((ev, kw))), \
+                mock.patch.object(db, 'event', lambda *a: None):
+            self.assertIs(lp.pauses.hot_pause({}, status(), None), True)
         self.assertEqual(sent[0][0], 'MACRO_PAUSE'); self.assertEqual(sent[0][1]['kind'], 'FOMC')
 
     def test_budget_or_breaker_hold_the_close_and_say_so_once(self):
@@ -710,13 +717,13 @@ class MacroPause(unittest.TestCase):
 class MacroHold(unittest.TestCase):
     def go(self, m):
         calls, state = [], {'pending_reopen': {'x': 1}}
-        with mock.patch.object(rebalancer, 'macro_view', lambda s: m), \
-                mock.patch.object(rebalancer, 'notify_book', book_fake(calls)), \
-                mock.patch.object(rebalancer.db, 'event', lambda *a: calls.append(('event', a[0]))), \
-                mock.patch.object(rebalancer, 'save', lambda s: None), \
+        with mock.patch.object(lp.pauses, 'macro_view', lambda s: m), \
+                mock.patch.object(lp.books, 'notify_book', book_fake(calls)), \
+                mock.patch.object(db, 'event', lambda *a: calls.append(('event', a[0]))), \
+                mock.patch.object(lp.paths, 'save', lambda s: None), \
                 mock.patch.object(config, 'POOL', 'P'), \
-                mock.patch.object(rebalancer.time, 'time', lambda: NOW):
-            r = rebalancer.macro_hold(state)
+                mock.patch.object(time, 'time', lambda: NOW):
+            r = lp.pauses.macro_hold(state)
         return r, calls, state
 
     def test_no_window_holds_nothing(self):
@@ -741,20 +748,20 @@ class MacroUnread(unittest.TestCase):
         state = {'macro_calendar_checked': NOW}
         for t, want in ((NOW, 1), (NOW + 3599, 1), (NOW + 3600, 2)):
             with mock.patch.object(config, 'MACRO_PAUSE_ENABLED', True), \
-                    mock.patch.object(rebalancer.db, 'macro_event_near', side_effect=RuntimeError('no table')), \
-                    mock.patch.object(rebalancer, 'notify', lambda ev, **kw: told.append(ev)), \
-                    mock.patch.object(rebalancer, 'save', lambda s: None), \
-                    mock.patch.object(rebalancer.time, 'time', lambda: t):
-                self.assertIsNone(rebalancer.macro_view(state))
+                    mock.patch.object(db, 'macro_event_near', side_effect=RuntimeError('no table')), \
+                    mock.patch.object(lp.books, 'notify', lambda ev, **kw: told.append(ev)), \
+                    mock.patch.object(lp.paths, 'save', lambda s: None), \
+                    mock.patch.object(time, 'time', lambda: t):
+                self.assertIsNone(lp.pauses.macro_view(state))
             self.assertEqual(len(told), want, t)
         self.assertEqual(state['macro_unread_told'], NOW + 3600)
 
     def test_no_state_still_tells_and_never_raises(self):
         told = []
         with mock.patch.object(config, 'MACRO_PAUSE_ENABLED', True), \
-                mock.patch.object(rebalancer.db, 'macro_event_near', side_effect=RuntimeError('no table')), \
-                mock.patch.object(rebalancer, 'notify', lambda ev, **kw: told.append(ev)):
-            self.assertIsNone(rebalancer.macro_view(None))
+                mock.patch.object(db, 'macro_event_near', side_effect=RuntimeError('no table')), \
+                mock.patch.object(lp.books, 'notify', lambda ev, **kw: told.append(ev)):
+            self.assertIsNone(lp.pauses.macro_view(None))
         self.assertEqual(told, ['macro_unread'])
 
 
@@ -762,13 +769,13 @@ class Close(unittest.TestCase):
     def test_records_kind_and_until_before_the_close(self):
         seen, saved = [], []
         state = {}
-        with mock.patch.object(rebalancer, 'rebalance', lambda s, st, why, **kw: seen.append(dict(s['hot_pause']))), \
-                mock.patch.object(rebalancer.db, 'position_closed', lambda m: True), \
-                mock.patch.object(rebalancer, 'hot_pause_swap', lambda s, p: None), \
-                mock.patch.object(rebalancer, 'position_usd', lambda st: 5.0), \
-                mock.patch.object(rebalancer, 'save', lambda s: saved.append(1)), \
+        with mock.patch.object(lp.moves, 'rebalance', lambda s, st, why, **kw: seen.append(dict(s['hot_pause']))), \
+                mock.patch.object(db, 'position_closed', lambda m: True), \
+                mock.patch.object(lp.pauses, 'hot_pause_swap', lambda s, p: None), \
+                mock.patch.object(lp.capital, 'position_usd', lambda st: 5.0), \
+                mock.patch.object(lp.paths, 'save', lambda s: saved.append(1)), \
                 mock.patch.object(config, 'POOL', 'P'):
-            self.assertIs(rebalancer.hot_pause_close(state, status(), 'why', NOW, kind='macro', until=NOW + 9), True)
+            self.assertIs(lp.pauses.hot_pause_close(state, status(), 'why', NOW, kind='macro', until=NOW + 9), True)
         self.assertEqual(seen[0]['kind'], 'macro'); self.assertEqual(seen[0]['until'], NOW + 9)
         self.assertIsNone(seen[0]['ratio']); self.assertIs(state['hot_pause']['booked'], True)
         self.assertEqual(seen[0]['since'], NOW); self.assertEqual(seen[0]['withdraw_usd'], 5.0)
@@ -783,22 +790,22 @@ class MacroPaused(unittest.TestCase):
         def swap(s, pp):
             self.swaps += 1; pp['swapped'] = True
         with mock.patch.object(config, 'MACRO_PAUSE_ENABLED', macro), mock.patch.object(config, 'HOT_PAUSE_ENABLED', hot), \
-                mock.patch.object(rebalancer, 'hot_pause_swap', swap), \
+                mock.patch.object(lp.pauses, 'hot_pause_swap', swap), \
                 mock.patch.object(config, 'POOL', 'P'), \
                 mock.patch.object(config, 'HOT_PAUSE_RESUME_S', 1800), mock.patch.object(config, 'HOT_PAUSE_MAX_S', 43200), \
-                mock.patch.object(rebalancer, 'macro_view', lambda s: m), \
-                mock.patch.object(rebalancer, 'sample_fee_growth', lambda s: None), \
-                mock.patch.object(rebalancer, 'daily_report', lambda s: None), \
-                mock.patch.object(rebalancer, 'run_audits', lambda s: None), \
-                mock.patch.object(rebalancer, 'wallet', lambda pl: {'balanceA': 1.0, 'price': 120.0, 'quoteUsd': 1.0}), \
-                mock.patch.object(rebalancer, 'regime_choice_now', lambda pl, px: 1.03), \
-                mock.patch.object(rebalancer, 'hot_pause_view',
+                mock.patch.object(lp.pauses, 'macro_view', lambda s: m), \
+                mock.patch.object(lp.board, 'sample_fee_growth', lambda s: None), \
+                mock.patch.object(lp.books, 'daily_report', lambda s: None), \
+                mock.patch.object(lp.housekeeping, 'run_audits', lambda s: None), \
+                mock.patch.object(lp.capital, 'wallet', lambda pl: {'balanceA': 1.0, 'price': 120.0, 'quoteUsd': 1.0}), \
+                mock.patch.object(lp.regime, 'regime_choice_now', lambda pl, px: 1.03), \
+                mock.patch.object(lp.pauses, 'hot_pause_view',
                                   lambda *a: (told.append(('view',)) or (view or {'hot': True, 'ratio': 0.5, 'bad': True}))), \
-                mock.patch.object(rebalancer, 'notify', lambda ev, **kw: told.append((ev, kw))), \
-                mock.patch.object(rebalancer.db, 'event', lambda *a: events.append(a)), \
-                mock.patch.object(rebalancer, 'save', lambda s: None), \
-                mock.patch.object(rebalancer.time, 'time', lambda: now):
-            r = rebalancer.hot_paused(state)
+                mock.patch.object(lp.books, 'notify', lambda ev, **kw: told.append((ev, kw))), \
+                mock.patch.object(db, 'event', lambda *a: events.append(a)), \
+                mock.patch.object(lp.paths, 'save', lambda s: None), \
+                mock.patch.object(time, 'time', lambda: now):
+            r = lp.pauses.hot_paused(state)
         return r, state, told, events
 
     P = {'since': NOW - 1200, 'last_bad': NOW - 1200, 'pool': 'P', 'told': NOW - 60, 'booked': True, 'swapped': True,

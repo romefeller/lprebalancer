@@ -430,8 +430,8 @@ def run(bot, db, config, txfees, notify, now=None, wallet=None):
         # the sweep would convert: all of it belongs in the LP
         others = [a['mint'] for a in accts if a['amount'] > 0 and a['mint'] not in ours]
         sweep = bot.plan_sweep(accts, ours, keep - ours - {NATIVE, USDC},
-                               bot.dexes.jupiter_prices(others) if others else {},
-                               {m: bot.dexes.jupiter_token(m) for m in others}) if others else []
+                               bot.prices.jupiter_prices(others) if others else {},
+                               {m: bot.prices.jupiter_token(m) for m in others}) if others else []
         deployable = bot.deployable_usd(dict(bal, quoteUsd=q)) if q is not None else None
         if deployable is None:
             return 'warn', {'note': 'quote price unknown: idle money not valued'}
@@ -460,14 +460,14 @@ def run(bot, db, config, txfees, notify, now=None, wallet=None):
         px = {mint_a: bal['price'] * q, mint_b: q}
         extra = sorted(capital - set(px) - {NATIVE})
         if extra:
-            px.update({m: p for m, p in bot.dexes.jupiter_prices(extra).items() if m in extra})
-        sol_usd = px[NATIVE] if NATIVE in px else bot.dexes.jupiter_prices([NATIVE]).get(NATIVE, 0.0)
+            px.update({m: p for m, p in bot.prices.jupiter_prices(extra).items() if m in extra})
+        sol_usd = px[NATIVE] if NATIVE in px else bot.prices.jupiter_prices([NATIVE]).get(NATIVE, 0.0)
         # the profiles' SPL tokens are equity; wrapped SOL, reward dust and
         # other tokens are not counted by equity and go to `uncounted`
         pool_usd = sum(human(a) * px[a['mint']] for a in accts if a['mint'] in px and a['mint'] != NATIVE)
         others = [a for a in accts if a['amount'] > 0 and (a['mint'] not in px or a['mint'] == NATIVE)
                   and not (a['decimals'] == 0 and a['amount'] == 1)]            # position NFTs are in the position mark
-        prices = dict(bot.dexes.jupiter_prices([a['mint'] for a in others if a['mint'] != NATIVE]) if others else {})
+        prices = dict(bot.prices.jupiter_prices([a['mint'] for a in others if a['mint'] != NATIVE]) if others else {})
         prices[NATIVE] = sol_usd
         dust_usd = sum(human(a) * prices.get(a['mint'], 0.0) for a in others)
         rent_usd = sum(a['lamports'] for a in empty) / 1e9 * sol_usd
@@ -517,7 +517,7 @@ def run(bot, db, config, txfees, notify, now=None, wallet=None):
             if kind in ('deposit', 'withdrawal'):
                 px = bal['price'] * q
                 moved = d.get('amounts') or {}
-                tok_px = bot.dexes.jupiter_prices(sorted(moved)) if moved else {}
+                tok_px = bot.prices.jupiter_prices(sorted(moved)) if moved else {}
                 usd = abs(d['sol']) * px + abs(d['usdc']) + sum(abs(v) * tok_px.get(m, 0.0) for m, v in moved.items())
                 ts = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(tx.get('blockTime') or time.time()))
                 detail = f"found by the flows audit; other tokens {d['other_tokens']}"

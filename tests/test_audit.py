@@ -16,7 +16,9 @@ from hypothesis import given, settings, strategies as st
 import _fixtures
 import audit
 import db
-import rebalancer
+import lp.capital
+import lp.housekeeping
+import lp.swaps
 
 OWNER = '83HxMUUC7cn5oWKgNvUYCv52MVLUWmaUPFdCrgC4tV2f'
 PROFIT = '8funmDkPNBtjqfNkBEoBF16eBfyQ4vMAFrs4Nyys5D1h'
@@ -318,9 +320,9 @@ class Runner(unittest.TestCase):
     def bot(self):
         return types.SimpleNamespace(
             wallet=lambda pool: dict(self.bal), read_status=lambda *a: (dict(self.status), None),
-            deployable_usd=rebalancer.deployable_usd, pool_tokens=lambda: ((SOL, 'SOL'), (USDC, 'USDC')),
-            position_usd=rebalancer.position_usd, plan_sweep=rebalancer.plan_sweep, FEED=self.feed.name,
-            dexes=types.SimpleNamespace(jupiter_prices=lambda mints: {m: 0.0 for m in mints}, jupiter_token=lambda m: None),
+            deployable_usd=lp.capital.deployable_usd, pool_tokens=lambda: ((SOL, 'SOL'), (USDC, 'USDC')),
+            position_usd=lp.capital.position_usd, plan_sweep=lp.swaps.plan_sweep, FEED=self.feed.name,
+            prices=types.SimpleNamespace(jupiter_prices=lambda mints: {m: 0.0 for m in mints}, jupiter_token=lambda m: None),
             load=lambda: {'reward_mints_seen': []})
 
     def run_audit(self):
@@ -438,19 +440,19 @@ class Hooks(unittest.TestCase):
 
     def patches(self, answers):
         it = iter(answers)
-        return [mock.patch.object(rebalancer, 'chain', lambda *a, **k: (self.calls.append((a, k)) or next(it))),
-                mock.patch.object(rebalancer, 'pool_tokens', lambda: ((SOL, 'SOL'), (USDC, 'USDC'))),
-                mock.patch.object(rebalancer, 'save', lambda s: None),
-                mock.patch.object(rebalancer, 'load', lambda: {'reward_mints_seen': ['R1']}),
-                mock.patch.object(rebalancer.db, 'event', lambda *a: self.events.append(a)),
-                mock.patch.object(rebalancer, 'notify', lambda ev, **kw: self.seen.append((ev, kw)))]
+        return [mock.patch.object(lp.signers, 'chain', lambda *a, **k: (self.calls.append((a, k)) or next(it))),
+                mock.patch.object(lp.capital, 'pool_tokens', lambda: ((SOL, 'SOL'), (USDC, 'USDC'))),
+                mock.patch.object(lp.paths, 'save', lambda s: None),
+                mock.patch.object(lp.paths, 'load', lambda: {'reward_mints_seen': ['R1']}),
+                mock.patch.object(db, 'event', lambda *a: self.events.append(a)),
+                mock.patch.object(lp.books, 'notify', lambda ev, **kw: self.seen.append((ev, kw)))]
 
     def go(self, state, answers):
         ps = self.patches(answers)
         for p in ps:
             p.start()
         try:
-            return rebalancer.janitor(state)
+            return lp.housekeeping.janitor(state)
         finally:
             for p in reversed(ps):
                 p.stop()
@@ -485,19 +487,19 @@ class Hooks(unittest.TestCase):
 
     def test_run_audits_is_hourly_and_never_raises(self):
         runs = []
-        with mock.patch.object(rebalancer.audit, 'run', lambda *a, **k: runs.append(a) or {'idle': 'ok'}), \
-                mock.patch.object(rebalancer, 'save', lambda s: None):
+        with mock.patch.object(audit, 'run', lambda *a, **k: runs.append(a) or {'idle': 'ok'}), \
+                mock.patch.object(lp.paths, 'save', lambda s: None):
             state = {}
-            self.assertEqual(rebalancer.run_audits(state), {'idle': 'ok'})
-            self.assertIsNone(rebalancer.run_audits(state))
+            self.assertEqual(lp.housekeeping.run_audits(state), {'idle': 'ok'})
+            self.assertIsNone(lp.housekeeping.run_audits(state))
             state['last_audit'] = 0
-            rebalancer.run_audits(state)
+            lp.housekeeping.run_audits(state)
         self.assertEqual(len(runs), 2)
         seen = []
-        with mock.patch.object(rebalancer.audit, 'run', side_effect=RuntimeError('x')), \
-                mock.patch.object(rebalancer, 'save', lambda s: None), \
-                mock.patch.object(rebalancer, 'notify', lambda ev, **kw: seen.append(ev)):
-            self.assertIsNone(rebalancer.run_audits({}))
+        with mock.patch.object(audit, 'run', side_effect=RuntimeError('x')), \
+                mock.patch.object(lp.paths, 'save', lambda s: None), \
+                mock.patch.object(lp.books, 'notify', lambda ev, **kw: seen.append(ev)):
+            self.assertIsNone(lp.housekeeping.run_audits({}))
         self.assertEqual(seen, ['audit_failed'])
 
 

@@ -7,7 +7,10 @@ from unittest import mock
 import _fixtures
 import config
 import db
-import rebalancer
+import time
+import audit
+import lp.capital
+import lp.housekeeping
 from test_audit import reset
 
 SOL, USDC = 'So11111111111111111111111111111111111111112', 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'
@@ -100,13 +103,13 @@ class Hooks(unittest.TestCase):
     def go(self, answers, state=None):
         seen, calls = [], []
         it = iter(answers)
-        with mock.patch.object(rebalancer, 'chain', lambda *a, **k: (calls.append(a) or next(it))), \
-                mock.patch.object(rebalancer, 'pool_tokens', lambda: ((SOL, 'SOL'), (USDC, 'USDC'))), \
-                mock.patch.object(rebalancer, 'save', lambda s: None), \
-                mock.patch.object(rebalancer, 'load', lambda: {}), \
-                mock.patch.object(rebalancer.db, 'event', lambda *a: None), \
-                mock.patch.object(rebalancer, 'notify', lambda ev, **kw: seen.append(ev)):
-            out = rebalancer.janitor({} if state is None else state)
+        with mock.patch.object(lp.signers, 'chain', lambda *a, **k: (calls.append(a) or next(it))), \
+                mock.patch.object(lp.capital, 'pool_tokens', lambda: ((SOL, 'SOL'), (USDC, 'USDC'))), \
+                mock.patch.object(lp.paths, 'save', lambda s: None), \
+                mock.patch.object(lp.paths, 'load', lambda: {}), \
+                mock.patch.object(db, 'event', lambda *a: None), \
+                mock.patch.object(lp.books, 'notify', lambda ev, **kw: seen.append(ev)):
+            out = lp.housekeeping.janitor({} if state is None else state)
         return out, calls, seen
 
     PLAN = {'closable': [{'mint': 'M', 'lamports': 2039280}], 'reclaimSol': 0.00203928}
@@ -122,21 +125,21 @@ class Hooks(unittest.TestCase):
         self.assertIsNone(out); self.assertEqual(seen, ['janitor_failed'])
 
     def test_a_crash_is_reported(self):
-        with mock.patch.object(rebalancer, 'pool_tokens', side_effect=RuntimeError('api')), \
-                mock.patch.object(rebalancer, 'save', lambda s: None):
+        with mock.patch.object(lp.capital, 'pool_tokens', side_effect=RuntimeError('api')), \
+                mock.patch.object(lp.paths, 'save', lambda s: None):
             seen = []
-            with mock.patch.object(rebalancer, 'notify', lambda ev, **kw: seen.append(ev)):
-                self.assertIsNone(rebalancer.janitor({}))
+            with mock.patch.object(lp.books, 'notify', lambda ev, **kw: seen.append(ev)):
+                self.assertIsNone(lp.housekeeping.janitor({}))
         self.assertEqual(seen, ['janitor_failed'])
 
     def test_the_audit_runs_again_after_exactly_an_hour(self):
         runs = []
-        with mock.patch.object(rebalancer.audit, 'run', lambda *a, **k: runs.append(1) or {}), \
-                mock.patch.object(rebalancer, 'save', lambda s: None), \
-                mock.patch.object(rebalancer.time, 'time', lambda: 10_000.0):
-            rebalancer.run_audits({'last_audit': 10_000.0 - 3600})
-            rebalancer.run_audits({'last_audit': 10_000.0 - 3599})
-            rebalancer.run_audits({})
+        with mock.patch.object(audit, 'run', lambda *a, **k: runs.append(1) or {}), \
+                mock.patch.object(lp.paths, 'save', lambda s: None), \
+                mock.patch.object(time, 'time', lambda: 10_000.0):
+            lp.housekeeping.run_audits({'last_audit': 10_000.0 - 3600})
+            lp.housekeeping.run_audits({'last_audit': 10_000.0 - 3599})
+            lp.housekeeping.run_audits({})
         self.assertEqual(len(runs), 2)
 
 
@@ -147,16 +150,16 @@ class QuoteFallbacks(unittest.TestCase):
         with mock.patch.object(config, 'DEPLOY_ALL', True), mock.patch.object(config, 'MAX_USD', 300.0), \
                 mock.patch.object(config, 'SIDE_CAP_FRACTION', 0.55), mock.patch.object(config, 'GAS_RESERVE_SOL', 0.05):
             b = {'balanceA': 1.0, 'balanceB': 100.0, 'price': 120.0, 'quoteUsd': None, 'nativeSide': 'A'}
-            res = 0.05 + rebalancer.OPEN_RENT_HEADROOM_SOL
-            self.assertIsNone(rebalancer.deployable_usd(b))
-            self.assertRaises(ValueError, rebalancer.capital, b)
-            self.assertRaises(TypeError, rebalancer.deposit_caps, b)
-            self.assertIsNone(rebalancer.position_usd({'closeEstA': 1.0, 'closeEstB': 5.0, 'price': 120.0}))
+            res = 0.05 + lp.capital.OPEN_RENT_HEADROOM_SOL
+            self.assertIsNone(lp.capital.deployable_usd(b))
+            self.assertRaises(ValueError, lp.capital.capital, b)
+            self.assertRaises(TypeError, lp.capital.deposit_caps, b)
+            self.assertIsNone(lp.capital.position_usd({'closeEstA': 1.0, 'closeEstB': 5.0, 'price': 120.0}))
             b1 = dict(b, quoteUsd=1.0)
-            a, bb = rebalancer.deposit_caps(b1)
+            a, bb = lp.capital.deposit_caps(b1)
             self.assertAlmostEqual(a, 1.0 - res); self.assertAlmostEqual(bb, 100.0)
             b2 = dict(b, quoteUsd=2.0)
-            self.assertAlmostEqual(rebalancer.deployable_usd(b2), ((1.0 - res) * 120.0 + 100.0) * 2.0)
+            self.assertAlmostEqual(lp.capital.deployable_usd(b2), ((1.0 - res) * 120.0 + 100.0) * 2.0)
 
 
 if __name__ == '__main__':
@@ -207,13 +210,13 @@ class JanitorKeepsWhatComesBack(unittest.TestCase):
                         ({'closable': [{'mint': 'MSOL', 'lamports': 2039280}], 'reclaimSol': 0.00204}, None),
                         ({'closable': [{'mint': 'MSOL', 'lamports': 2039280}], 'reclaimSol': 0.00204, 'signature': 'J'}, None)])
         state = {'janitor_closed': ['RAY']}
-        with mock.patch.object(rebalancer, 'chain', lambda *a, **k: (calls.append(a) or next(answers))), \
-                mock.patch.object(rebalancer, 'pool_tokens', lambda: ((SOL, 'SOL'), (USDC, 'USDC'))), \
-                mock.patch.object(rebalancer, 'save', lambda s: None), \
-                mock.patch.object(rebalancer, 'load', lambda: state), \
-                mock.patch.object(rebalancer.db, 'event', lambda *a: None), \
-                mock.patch.object(rebalancer, 'notify', lambda ev, **kw: seen.append(ev)):
-            out = rebalancer.janitor(state)
+        with mock.patch.object(lp.signers, 'chain', lambda *a, **k: (calls.append(a) or next(answers))), \
+                mock.patch.object(lp.capital, 'pool_tokens', lambda: ((SOL, 'SOL'), (USDC, 'USDC'))), \
+                mock.patch.object(lp.paths, 'save', lambda s: None), \
+                mock.patch.object(lp.paths, 'load', lambda: state), \
+                mock.patch.object(db, 'event', lambda *a: None), \
+                mock.patch.object(lp.books, 'notify', lambda ev, **kw: seen.append(ev)):
+            out = lp.housekeeping.janitor(state)
         self.assertEqual(state['janitor_keep'], ['RAY'])
         self.assertIn('RAY', calls[1]); self.assertIn('RAY', calls[2])        # kept in the re-plan and the close
         self.assertEqual(out['signature'], 'J')
@@ -226,13 +229,13 @@ class JanitorReplan(unittest.TestCase):
     def go(self, answers, state):
         calls, seen = [], []
         it = iter(answers)
-        with mock.patch.object(rebalancer, 'chain', lambda *a, **k: (calls.append(a) or next(it))), \
-                mock.patch.object(rebalancer, 'pool_tokens', lambda: ((SOL, 'SOL'), (USDC, 'USDC'))), \
-                mock.patch.object(rebalancer, 'save', lambda s: None), \
-                mock.patch.object(rebalancer, 'load', lambda: state), \
-                mock.patch.object(rebalancer.db, 'event', lambda *a: None), \
-                mock.patch.object(rebalancer, 'notify', lambda ev, **kw: seen.append(ev)):
-            out = rebalancer.janitor(state)
+        with mock.patch.object(lp.signers, 'chain', lambda *a, **k: (calls.append(a) or next(it))), \
+                mock.patch.object(lp.capital, 'pool_tokens', lambda: ((SOL, 'SOL'), (USDC, 'USDC'))), \
+                mock.patch.object(lp.paths, 'save', lambda s: None), \
+                mock.patch.object(lp.paths, 'load', lambda: state), \
+                mock.patch.object(db, 'event', lambda *a: None), \
+                mock.patch.object(lp.books, 'notify', lambda ev, **kw: seen.append(ev)):
+            out = lp.housekeeping.janitor(state)
         return out, calls, seen
 
     FIRST = ({'closable': [{'mint': 'RAY', 'lamports': 1}], 'reclaimSol': 1e-9}, None)

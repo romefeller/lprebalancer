@@ -25,6 +25,8 @@ import _fixtures  # noqa: F401  (first: it puts lp_bot on the path)
 import config
 import db
 import rebalancer
+import lp.capital
+import lp.signers
 import wallets
 from test_multi_loop import (Fixture, FakeChain, MU, MU_POOL, POOLS, SOL, SOL_POOL, USDC, WALLET)
 
@@ -226,10 +228,10 @@ class Replay(unittest.TestCase):
 
 class Rent(unittest.TestCase):
     def setUp(self):
-        rebalancer.NATIVE_PX.clear(); rebalancer.RENT_UNPRICED.clear()
-        self.addCleanup(rebalancer.NATIVE_PX.clear); self.addCleanup(rebalancer.RENT_UNPRICED.clear)
+        lp.capital.NATIVE_PX.clear(); lp.capital.RENT_UNPRICED.clear()
+        self.addCleanup(lp.capital.NATIVE_PX.clear); self.addCleanup(lp.capital.RENT_UNPRICED.clear)
         self.told = []
-        p = mock.patch.object(rebalancer, 'notify', lambda ev, **kw: self.told.append(ev))
+        p = mock.patch.object(lp.books, 'notify', lambda ev, **kw: self.told.append(ev))
         p.start(); self.addCleanup(p.stop)
 
     def stat(self, rent_usd, rent_sol=0.0675):
@@ -237,62 +239,62 @@ class Rent(unittest.TestCase):
 
     def test_the_signers_price_is_used_and_remembered(self):
         with mock.patch.object(db, 'native_price', return_value=None):
-            self.assertAlmostEqual(rebalancer.position_usd(self.stat(8.2688)), 218.2688)
-            self.assertAlmostEqual(rebalancer.NATIVE_PX['px'], 8.2688 / 0.0675)
+            self.assertAlmostEqual(lp.capital.position_usd(self.stat(8.2688)), 218.2688)
+            self.assertAlmostEqual(lp.capital.NATIVE_PX['px'], 8.2688 / 0.0675)
             # the next poll's Jupiter request fails: the rent keeps its value (was $0)
-            self.assertAlmostEqual(rebalancer.position_usd(self.stat(None)), 218.2688, places=6)
+            self.assertAlmostEqual(lp.capital.position_usd(self.stat(None)), 218.2688, places=6)
         self.assertEqual(self.told, [])
 
     def test_a_null_is_priced_from_the_native_pools_snapshot(self):
         with mock.patch.object(db, 'native_price', return_value=120.0) as q:
-            self.assertAlmostEqual(rebalancer.position_usd(self.stat(None)), 210.0 + 0.0675 * 120.0)
+            self.assertAlmostEqual(lp.capital.position_usd(self.stat(None)), 210.0 + 0.0675 * 120.0)
         self.assertEqual(q.call_args.args[0], config.CAPS['native_mint'])
 
     def test_a_cache_older_than_its_limit_is_not_used(self):
-        rebalancer.NATIVE_PX.update(px=100.0, at=time.time() - rebalancer.NATIVE_PX_MAX_AGE_S - 1)
+        lp.capital.NATIVE_PX.update(px=100.0, at=time.time() - lp.capital.NATIVE_PX_MAX_AGE_S - 1)
         with mock.patch.object(db, 'native_price', return_value=None):
-            self.assertEqual(rebalancer.position_usd(self.stat(None)), 210.0)
-            self.assertEqual(rebalancer.position_usd(self.stat(None)), 210.0)
+            self.assertEqual(lp.capital.position_usd(self.stat(None)), 210.0)
+            self.assertEqual(lp.capital.position_usd(self.stat(None)), 210.0)
         self.assertEqual(self.told, ['rent_unpriced'])                          # said once, not every poll
 
     def test_a_database_error_falls_back_to_the_cache(self):
-        rebalancer.NATIVE_PX.update(px=100.0, at=time.time())
+        lp.capital.NATIVE_PX.update(px=100.0, at=time.time())
         with mock.patch.object(db, 'native_price', side_effect=RuntimeError('db')):
-            self.assertAlmostEqual(rebalancer.rent_usd(self.stat(None)), 6.75)
+            self.assertAlmostEqual(lp.capital.rent_usd(self.stat(None)), 6.75)
 
     def test_no_rent_is_zero_without_asking(self):
         asked = []
-        with mock.patch.object(rebalancer, 'native_usd', lambda: asked.append(1)):
-            self.assertEqual(rebalancer.rent_usd({'rentUsd': None, 'rentSol': 0}), 0.0)
-            self.assertEqual(rebalancer.rent_usd({}), 0.0)
+        with mock.patch.object(lp.capital, 'native_usd', lambda: asked.append(1)):
+            self.assertEqual(lp.capital.rent_usd({'rentUsd': None, 'rentSol': 0}), 0.0)
+            self.assertEqual(lp.capital.rent_usd({}), 0.0)
         self.assertEqual((asked, self.told), ([], []))
 
     def test_a_zero_rent_usd_is_a_price_not_a_null(self):
-        with mock.patch.object(rebalancer, 'native_usd', side_effect=AssertionError('asked')):
-            self.assertEqual(rebalancer.rent_usd({'rentUsd': 0.0, 'rentSol': 0.0}), 0.0)
+        with mock.patch.object(lp.capital, 'native_usd', side_effect=AssertionError('asked')):
+            self.assertEqual(lp.capital.rent_usd({'rentUsd': 0.0, 'rentSol': 0.0}), 0.0)
 
     def test_only_a_positive_price_is_remembered(self):
         for bad in (None, 0.0, -1.0):
-            rebalancer.note_native_px(bad)
-            self.assertEqual(rebalancer.NATIVE_PX, {})
-        rebalancer.note_native_px(1e-9)
-        self.assertEqual(rebalancer.NATIVE_PX['px'], 1e-9)
+            lp.capital.note_native_px(bad)
+            self.assertEqual(lp.capital.NATIVE_PX, {})
+        lp.capital.note_native_px(1e-9)
+        self.assertEqual(lp.capital.NATIVE_PX['px'], 1e-9)
 
     def test_a_cache_exactly_its_limit_old_still_prices(self):
         with mock.patch.object(db, 'native_price', return_value=None), \
-                mock.patch.object(rebalancer.time, 'time', return_value=5000.0):
-            rebalancer.NATIVE_PX.update(px=100.0, at=5000.0 - rebalancer.NATIVE_PX_MAX_AGE_S)
-            self.assertEqual(rebalancer.native_usd(), 100.0)
-            rebalancer.NATIVE_PX.update(at=5000.0 - rebalancer.NATIVE_PX_MAX_AGE_S - 1e-3)
-            self.assertIsNone(rebalancer.native_usd())
+                mock.patch.object(time, 'time', return_value=5000.0):
+            lp.capital.NATIVE_PX.update(px=100.0, at=5000.0 - lp.capital.NATIVE_PX_MAX_AGE_S)
+            self.assertEqual(lp.capital.native_usd(), 100.0)
+            lp.capital.NATIVE_PX.update(at=5000.0 - lp.capital.NATIVE_PX_MAX_AGE_S - 1e-3)
+            self.assertIsNone(lp.capital.native_usd())
 
     def test_without_the_signers_dollar_figure_the_close_estimate_and_the_rent(self):
         st_ = {'closeEstA': 2.0, 'closeEstB': 30.0, 'quoteUsd': 1.5, 'price': 10.0, 'rentUsd': 4.0, 'rentSol': 0.04}
-        with mock.patch.object(rebalancer, 'ui_price', lambda s: s['price']):
-            self.assertAlmostEqual(rebalancer.position_usd(st_), (2.0 * 10.0 + 30.0) * 1.5 + 4.0)
+        with mock.patch.object(lp.capital, 'ui_price', lambda s: s['price']):
+            self.assertAlmostEqual(lp.capital.position_usd(st_), (2.0 * 10.0 + 30.0) * 1.5 + 4.0)
             for k in ('closeEstA', 'closeEstB', 'quoteUsd'):
-                self.assertIsNone(rebalancer.position_usd(dict(st_, **{k: None})))
-            self.assertAlmostEqual(rebalancer.position_usd(dict(st_, closeEstA=0.0, closeEstB=0.0)), 4.0)
+                self.assertIsNone(lp.capital.position_usd(dict(st_, **{k: None})))
+            self.assertAlmostEqual(lp.capital.position_usd(dict(st_, closeEstA=0.0, closeEstB=0.0)), 4.0)
 
     @settings(max_examples=200, deadline=None)
     @given(rent_sol=st.floats(min_value=0.0, max_value=1.0, allow_nan=False),
@@ -301,12 +303,12 @@ class Rent(unittest.TestCase):
     def test_failed_signer_prices_never_move_the_mark(self, rent_sol, px, fails):
         """Within the cache's life, a run of polls whose signer price fails
         or not gives one mark: the 2026-10-02 flicker cannot happen."""
-        rebalancer.NATIVE_PX.clear()
+        lp.capital.NATIVE_PX.clear()
         marks = []
         with mock.patch.object(db, 'native_price', return_value=None):
-            rebalancer.position_usd(self.stat(round(rent_sol * px, 4), rent_sol))
+            lp.capital.position_usd(self.stat(round(rent_sol * px, 4), rent_sol))
             for f in fails:
-                marks.append(rebalancer.position_usd(self.stat(None if f else round(rent_sol * px, 4), rent_sol)))
+                marks.append(lp.capital.position_usd(self.stat(None if f else round(rent_sol * px, 4), rent_sol)))
         self.assertLess(max(marks) - min(marks), 1e-3)
 
 
@@ -368,9 +370,9 @@ class Loop(Fixture):
     def setUp(self):
         super().setUp()
         self.chain = RentChain()
-        for p in (mock.patch.object(rebalancer, '_chain', self.chain),
+        for p in (mock.patch.object(lp.signers, '_chain', self.chain),
                   mock.patch.object(wallets, '_rpc', lambda *a: self.chain.rpc(*a)),
-                  mock.patch.dict(rebalancer.NATIVE_PX, clear=True)):
+                  mock.patch.dict(lp.capital.NATIVE_PX, clear=True)):
             p.start(); self.addCleanup(p.stop)
 
     def internal(self):
@@ -383,9 +385,9 @@ class Loop(Fixture):
         """The poll's snapshot of `name` (rebalancer.main): its sleeve and its mark."""
         pool = {'e2e-sol': SOL_POOL, 'e2e-mu': MU_POOL}[name]
         with self.as_profile(name):
-            st_, _ = rebalancer.chain('status')
+            st_, _ = lp.signers.chain('status')
             db.snapshot(st_['positionMint'], POOLS[pool]['price'], True, '1', 0, 0, 0,
-                        rebalancer.wallet(pool)['walletUsd'], rebalancer.position_usd(st_))
+                        lp.capital.wallet(pool)['walletUsd'], lp.capital.position_usd(st_))
 
     def open_both(self):
         self.chain.wallet.update({SOL: 2.0})
@@ -418,9 +420,9 @@ class Loop(Fixture):
     def test_the_rent_is_in_mu_usdcs_mark_although_the_signer_gave_no_price(self):
         self.open_both()
         with self.as_profile('e2e-mu'):
-            st_, _ = rebalancer.chain('status')                          # rentSol, no rentUsd (RentChain)
+            st_, _ = lp.signers.chain('status')                          # rentSol, no rentUsd (RentChain)
             self.assertIsNone(st_['rentUsd'])
-            mark = rebalancer.position_usd(st_)
+            mark = lp.capital.position_usd(st_)
         self.assertAlmostEqual(mark, st_['positionUsd'] + RENT * 150.0, places=6)
 
     def test_neither_book_moves_when_mu_opens(self):
@@ -446,7 +448,7 @@ class Loop(Fixture):
         self.open_both()
         mint = self.chain.positions[MU_POOL]['mint']
         with self.as_profile('e2e-mu'):
-            out, err = rebalancer.chain('close', mint, '--execute')
+            out, err = lp.signers.chain('close', mint, '--execute')
         self.assertIsNone(err)
         last = self.internal()[-2:]
         self.assertEqual({(r['kind'], r['profile']) for r in last},
@@ -464,33 +466,33 @@ class Loop(Fixture):
         self.chain.wallet[MU] = 10.0
         self.chain.lags = [0, 0] + [1] * 400                             # before: two reads; then never the slot
         with self.as_profile('e2e-mu'):
-            out, _ = rebalancer.chain('rebalance', MU, USDC, '50', '50', '--execute', dex='jupiter',
+            out, _ = lp.signers.chain('rebalance', MU, USDC, '50', '50', '--execute', dex='jupiter',
                                       extra_env={'LPBOT_SLEEVE': json.dumps({MU: 10.0, USDC: 0.0})})
         self.assertTrue(out['sent'])
         self.assertEqual(self.internal(), [])
         self.assertIsNotNone(wallets.settle_state(WALLET)[1]['native'])
         self.chain.lags = []
         with self.as_profile('e2e-sol'):                                 # another process books it
-            self.assertTrue(rebalancer.settle_pending(0))
-            self.assertTrue(rebalancer.settle_pending(0))                # and only once
+            self.assertTrue(lp.signers.settle_pending(0))
+            self.assertTrue(lp.signers.settle_pending(0))                # and only once
         rows = self.internal()
         self.assertEqual(len(rows), 2)
         self.assertAlmostEqual(rows[0]['amounts'][SOL], FEE, places=9)
 
     def test_a_write_without_signatures_says_so(self):
         p = {'profile': 'e2e-mu', 'command': 'open', 'native': {'mint': SOL, 'giver': 'e2e-sol'}}
-        with mock.patch.object(rebalancer, 'native_usd', return_value=100.0):
+        with mock.patch.object(lp.capital, 'native_usd', return_value=100.0):
             for sigs in (None, []):
-                rows = rebalancer.native_flows(dict(p, signatures=sigs), -0.01)
+                rows = lp.signers.native_flows(dict(p, signatures=sigs), -0.01)
                 self.assertEqual({r['detail'] for r in rows}, {'open by e2e-mu: no signature'})
-            rows = rebalancer.native_flows(dict(p, signatures=['a', 'b']), -0.01)
+            rows = lp.signers.native_flows(dict(p, signatures=['a', 'b']), -0.01)
             self.assertEqual({r['detail'] for r in rows}, {'open by e2e-mu: a b'})
 
     def test_a_pending_write_from_before_the_change_books_as_before(self):
         wallets.set_pending(WALLET, {'profile': 'e2e-mu', 'command': 'open', 'mints': [USDC],
                                      'before': {USDC: 0.0}, 'before_slot': self.chain.slot, 'signatures': []})
         with self.as_profile('e2e-sol'):
-            self.assertTrue(rebalancer.settle_pending(0))
+            self.assertTrue(lp.signers.settle_pending(0))
         self.assertEqual(self.internal(), [])
 
 

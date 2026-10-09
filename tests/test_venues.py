@@ -9,7 +9,11 @@ import _fixtures
 _fixtures.ensure_profile()
 
 from venues import solana_state       # noqa: E402
-import rebalancer  # noqa: E402
+import config  # noqa: E402
+import db  # noqa: E402
+from venues.jupiter import prices as jupiter_api  # noqa: E402
+import lp.board  # noqa: E402
+import lp.harvest  # noqa: E402
 
 SOL, USDC = 'So11111111111111111111111111111111111111112', 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'
 B58 = solana_state.b58
@@ -98,49 +102,49 @@ class Sampling(unittest.TestCase):
                  'token_a': {'address': SOL}, 'token_b': {'address': 'JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN'}},
                 {'address': 'U1', 'dex': 'orca', 'screen_ok': False, 'skipped': None,
                  'token_a': {'address': SOL}, 'token_b': {'address': USDC}}]
-        with mock.patch.object(rebalancer.db, 'latest_scan', lambda max_age_seconds=None: ({'id': 1}, rows)), \
-                mock.patch.object(rebalancer, 'pool_tokens', lambda: ((SOL, 'SOL'), (USDC, 'USDC'))), \
-                mock.patch.object(rebalancer.config, 'POOL', 'HELD'), \
-                mock.patch.object(rebalancer.config, 'DEX', 'raydium-clmm'), \
-                mock.patch.object(rebalancer.config, 'ALLOW_SWAP', False):
-            got = {a for _, a, _ in rebalancer.venue_candidates()}
+        with mock.patch.object(db, 'latest_scan', lambda max_age_seconds=None: ({'id': 1}, rows)), \
+                mock.patch.object(lp.capital, 'pool_tokens', lambda: ((SOL, 'SOL'), (USDC, 'USDC'))), \
+                mock.patch.object(config, 'POOL', 'HELD'), \
+                mock.patch.object(config, 'DEX', 'raydium-clmm'), \
+                mock.patch.object(config, 'ALLOW_SWAP', False):
+            got = {a for _, a, _ in lp.board.venue_candidates()}
             self.assertEqual(got, {'HELD', 'R2'})           # Meteora: no counters; X1: other pair; U1: unscreened
-            with mock.patch.object(rebalancer.solana_state, 'fee_states', lambda pools: calls.append(pools) or {}), \
-                    mock.patch.object(rebalancer, 'save', lambda s: None), \
-                    mock.patch.object(rebalancer.config, 'VENUE_SAMPLE_S', 600):
+            with mock.patch.object(solana_state, 'fee_states', lambda pools: calls.append(pools) or {}), \
+                    mock.patch.object(lp.paths, 'save', lambda s: None), \
+                    mock.patch.object(config, 'VENUE_SAMPLE_S', 600):
                 st = {'last_fee_sample': time.time() - 30}
-                rebalancer.sample_fee_growth(st); self.assertEqual(calls, [])
+                lp.board.sample_fee_growth(st); self.assertEqual(calls, [])
                 st['last_fee_sample'] = time.time() - 700
-                rebalancer.sample_fee_growth(st); self.assertEqual(len(calls), 1)
+                lp.board.sample_fee_growth(st); self.assertEqual(len(calls), 1)
 
 
 class Ledger(unittest.TestCase):
     def test_samples_span_and_fourteen_day_window(self):
-        with rebalancer.db.cursor(commit=True) as cur:
+        with db.cursor(commit=True) as cur:
             cur.execute('truncate fee_growth')
             for age in ('3 days', '13 days 23 hours', '14 days 1 hour', '20 days'):
                 cur.execute("insert into fee_growth (ts, dex, pool, sqrt_price, g0, g1, dec_a, dec_b, mint_a, mint_b) "
                             f"values (now() - interval '{age}', 'orca', 'OLD', 1, 0, 0, 9, 6, 'a', 'b')")
         st = {'sqrt_price': SQRT, 'g0': 1, 'g1': 2, 'dec_a': 9, 'dec_b': 6, 'mint_a': SOL, 'mint_b': USDC, 'rewards': []}
-        rebalancer.db.record_fee_state('orca', 'P', st)
-        with rebalancer.db.cursor() as cur:
+        db.record_fee_state('orca', 'P', st)
+        with db.cursor() as cur:
             cur.execute("select count(*) n from fee_growth where pool = 'OLD'")
             self.assertEqual(cur.fetchone()['n'], 2)                    # kept 14 days: 3 d and 13 d 23 h stay
-        self.assertEqual(rebalancer.db.FEE_GROWTH_KEEP_DAYS, 14)
-        self.assertIsNone(rebalancer.db.fee_state_span('P'))            # one sample of P: no span yet
-        rebalancer.db.record_fee_state('orca', 'P', dict(st, g0=5))
-        first, last, secs = rebalancer.db.fee_state_span('P')
+        self.assertEqual(db.FEE_GROWTH_KEEP_DAYS, 14)
+        self.assertIsNone(db.fee_state_span('P'))            # one sample of P: no span yet
+        db.record_fee_state('orca', 'P', dict(st, g0=5))
+        first, last, secs = db.fee_state_span('P')
         self.assertEqual((int(first['g0']), int(last['g0'])), (1, 5)); self.assertGreaterEqual(secs, 0)
 
 
 class RewardPrices(unittest.TestCase):
     def test_a_failed_fetch_uses_the_last_good_price_for_six_hours(self):
-        rebalancer._REWARD_PX.clear()
-        with mock.patch.object(rebalancer.jupiter_api, 'jupiter_prices', lambda m: {'CAKE': 2.7}):
-            self.assertEqual(rebalancer.reward_prices(['CAKE']), {'CAKE': 2.7})
-        with mock.patch.object(rebalancer.jupiter_api, 'jupiter_prices', lambda m: {}):
-            self.assertEqual(rebalancer.reward_prices(['CAKE']), {'CAKE': 2.7})
-        rebalancer._REWARD_PX['CAKE'] = (time.time() - 7 * 3600, 2.7)
-        with mock.patch.object(rebalancer.jupiter_api, 'jupiter_prices', lambda m: {}):
-            self.assertEqual(rebalancer.reward_prices(['CAKE']), {})
-        rebalancer._REWARD_PX.clear()
+        lp.harvest._REWARD_PX.clear()
+        with mock.patch.object(jupiter_api, 'jupiter_prices', lambda m: {'CAKE': 2.7}):
+            self.assertEqual(lp.harvest.reward_prices(['CAKE']), {'CAKE': 2.7})
+        with mock.patch.object(jupiter_api, 'jupiter_prices', lambda m: {}):
+            self.assertEqual(lp.harvest.reward_prices(['CAKE']), {'CAKE': 2.7})
+        lp.harvest._REWARD_PX['CAKE'] = (time.time() - 7 * 3600, 2.7)
+        with mock.patch.object(jupiter_api, 'jupiter_prices', lambda m: {}):
+            self.assertEqual(lp.harvest.reward_prices(['CAKE']), {})
+        lp.harvest._REWARD_PX.clear()

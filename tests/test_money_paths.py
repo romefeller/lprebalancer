@@ -18,6 +18,13 @@ import db
 import fees
 import guards
 import rebalancer
+import lp.books
+import lp.harvest
+import lp.paths
+import lp.regime
+import lp.signers
+import config
+import time
 import txfees
 
 SOL = fees.NATIVE_MINT
@@ -144,12 +151,12 @@ class Status(unittest.TestCase):
         def chain(*a, **k):
             calls.append(a)
             return next(it)
-        with mock.patch.object(rebalancer, 'chain', chain), \
-                mock.patch.object(rebalancer.time, 'sleep', lambda s: None), \
-                mock.patch.object(rebalancer.db, 'last_fees', lambda m: last), \
-                mock.patch.object(rebalancer.db, 'event', lambda *a: None), \
-                mock.patch.object(rebalancer, 'notify', lambda ev, **kw: seen.append(ev)):
-            out = rebalancer.read_status(*args)
+        with mock.patch.object(lp.signers, 'chain', chain), \
+                mock.patch.object(time, 'sleep', lambda s: None), \
+                mock.patch.object(db, 'last_fees', lambda m: last), \
+                mock.patch.object(db, 'event', lambda *a: None), \
+                mock.patch.object(lp.books, 'notify', lambda ev, **kw: seen.append(ev)):
+            out = lp.signers.read_status(*args)
         return out, seen, calls
 
     def test_an_unreadable_answer_is_passed_on(self):
@@ -175,26 +182,26 @@ class Status(unittest.TestCase):
         self.assertEqual(out['feesAccrued_USD'], 0.015); self.assertIn('fee_read_rejected', seen)
 
     def test_an_unreadable_ledger_still_checks_the_level(self):
-        with mock.patch.object(rebalancer.db, 'last_fees', side_effect=RuntimeError('db')):
-            self.assertIsNotNone(rebalancer.fee_problem(BAD))
-            out = rebalancer.sanitised(BAD, 'why')
+        with mock.patch.object(db, 'last_fees', side_effect=RuntimeError('db')):
+            self.assertIsNotNone(lp.signers.fee_problem(BAD))
+            out = lp.signers.sanitised(BAD, 'why')
         self.assertEqual(out['feesAccrued_USD'], 0.0)
 
     def test_sanitised_values_quote_units_by_the_quote_price(self):
         last = {'accrued_a': 0.001, 'accrued_b': 0.2, 'accrued_usd': 0.5, 'hours': 0.1}
-        with mock.patch.object(rebalancer.db, 'last_fees', lambda m: last), \
-                mock.patch.object(rebalancer.db, 'event', lambda *a: None), \
-                mock.patch.object(rebalancer, 'notify', lambda ev, **kw: None):
-            out = rebalancer.sanitised(dict(BAD, quoteUsd=2.0), 'why')
+        with mock.patch.object(db, 'last_fees', lambda m: last), \
+                mock.patch.object(db, 'event', lambda *a: None), \
+                mock.patch.object(lp.books, 'notify', lambda ev, **kw: None):
+            out = lp.signers.sanitised(dict(BAD, quoteUsd=2.0), 'why')
             self.assertEqual((out['feesAccruedA'], out['feesAccruedB'], out['feesAccrued_USD']), (0.001, 0.2, 0.5))
             self.assertEqual(out['feesAccrued_quote'], 0.25)
-            out = rebalancer.sanitised(dict(BAD, quoteUsd=None), 'why')
+            out = lp.signers.sanitised(dict(BAD, quoteUsd=None), 'why')
             self.assertEqual(out['feesAccrued_quote'], 0.5)
-        with mock.patch.object(rebalancer.db, 'last_fees', lambda m: {'accrued_a': None, 'accrued_b': None,
+        with mock.patch.object(db, 'last_fees', lambda m: {'accrued_a': None, 'accrued_b': None,
                                                                     'accrued_usd': None, 'hours': 1.0}), \
-                mock.patch.object(rebalancer.db, 'event', lambda *a: None), \
-                mock.patch.object(rebalancer, 'notify', lambda ev, **kw: None):
-            out = rebalancer.sanitised(BAD, 'why')
+                mock.patch.object(db, 'event', lambda *a: None), \
+                mock.patch.object(lp.books, 'notify', lambda ev, **kw: None):
+            out = lp.signers.sanitised(BAD, 'why')
         self.assertEqual((out['feesAccruedA'], out['feesAccruedB'], out['feesAccrued_USD']), (0.0, 0.0, 0.0))
         self.assertEqual(BAD['feesAccrued_USD'], 1000.0)          # the input is not modified
 
@@ -213,12 +220,12 @@ def vault_tx(pool, a_raw, b_raw, mint_a=SOL, mint_b=USDC):
 class Measured(unittest.TestCase):
     def run_it(self, out, status, a, b, usd, fetch, tokens=((SOL, 'SOL'), (USDC, 'USDC')), last=None):
         seen = []
-        with mock.patch.object(rebalancer, 'pool_tokens', lambda: tokens), \
+        with mock.patch.object(lp.capital, 'pool_tokens', lambda: tokens), \
                 mock.patch.object(txfees, 'fetch', fetch), \
-                mock.patch.object(rebalancer.db, 'last_fees', lambda m: last), \
-                mock.patch.object(rebalancer.db, 'event', lambda *x: None), \
-                mock.patch.object(rebalancer, 'notify', lambda ev, **kw: seen.append((ev, kw))):
-            got = rebalancer.measured_fees(out, status, a, b, usd)
+                mock.patch.object(db, 'last_fees', lambda m: last), \
+                mock.patch.object(db, 'event', lambda *x: None), \
+                mock.patch.object(lp.books, 'notify', lambda ev, **kw: seen.append((ev, kw))):
+            got = lp.harvest.measured_fees(out, status, a, b, usd)
         return got, [e for e, _ in seen]
 
     ST = {'positionMint': 'M', 'whirlpool': POOL, 'price': 100.0, 'quoteUsd': 2.0, 'positionUsd': 200.0}
@@ -242,7 +249,7 @@ class Measured(unittest.TestCase):
         self.assertEqual(seen, ['s1', 's2']); self.assertEqual((a, b), (0.002, 0.2))
 
     def test_without_the_status_pool_the_profile_pool_is_used(self):
-        with mock.patch.object(rebalancer.config, 'POOL', POOL):
+        with mock.patch.object(config, 'POOL', POOL):
             (a, _, _), _ = self.run_it({'signature': 's'}, {k: v for k, v in self.ST.items() if k != 'whirlpool'},
                                        0.0, 0.0, 0.0, lambda rpc, s, **k: vault_tx(POOL, 10**6, 0))
         self.assertEqual(a, 0.001)
@@ -262,10 +269,10 @@ class Measured(unittest.TestCase):
         self.assertIn('harvest_measured', ev)
 
     def test_unreadable_pool_tokens_fall_back_to_a_sane_read(self):
-        with mock.patch.object(rebalancer, 'pool_tokens', side_effect=RuntimeError('api')), \
-                mock.patch.object(rebalancer.db, 'last_fees', lambda m: None), \
-                mock.patch.object(rebalancer, 'notify', lambda ev, **kw: None):
-            got = rebalancer.measured_fees({'signature': 's'}, self.ST, 0.001, 0.2, 0.6)
+        with mock.patch.object(lp.capital, 'pool_tokens', side_effect=RuntimeError('api')), \
+                mock.patch.object(db, 'last_fees', lambda m: None), \
+                mock.patch.object(lp.books, 'notify', lambda ev, **kw: None):
+            got = lp.harvest.measured_fees({'signature': 's'}, self.ST, 0.001, 0.2, 0.6)
         self.assertEqual(got, (0.001, 0.2, 0.6))
 
     def test_no_output_falls_back(self):
@@ -288,17 +295,17 @@ class Distribute(unittest.TestCase):
         def rec(*a, **k):
             rows.append({'mint': a[2], 'symbol': a[3], 'amount': a[4], 'usd': a[5], 'kind': a[6], **k})
         with mock.patch.dict(os.environ, {'LPBOT_PROFIT_WALLET_PIN': pin}), \
-                mock.patch.object(rebalancer.config, 'PAYOUT_ENABLED', enabled), \
-                mock.patch.object(rebalancer.config, 'PAYOUT_MINT', payout), \
-                mock.patch.object(rebalancer.config, 'PROFIT_WALLET', PROFIT), \
-                mock.patch.object(rebalancer.config, 'GAS_RESERVE_SOL', 0.05), \
-                mock.patch.object(rebalancer, 'pool_tokens', tokens if callable(tokens) else (lambda: tokens)), \
-                mock.patch.object(rebalancer, 'wallet', lambda p: bal), \
-                mock.patch.object(rebalancer, 'chain', chain), \
-                mock.patch.object(rebalancer, 'save', lambda s: None), \
-                mock.patch.object(rebalancer, 'notify', lambda ev, **kw: seen.append((ev, kw))), \
-                mock.patch.object(rebalancer.db, 'record_payout', rec):
-            ret = rebalancer.distribute(state, 'M', fa, fb)
+                mock.patch.object(config, 'PAYOUT_ENABLED', enabled), \
+                mock.patch.object(config, 'PAYOUT_MINT', payout), \
+                mock.patch.object(config, 'PROFIT_WALLET', PROFIT), \
+                mock.patch.object(config, 'GAS_RESERVE_SOL', 0.05), \
+                mock.patch.object(lp.capital, 'pool_tokens', tokens if callable(tokens) else (lambda: tokens)), \
+                mock.patch.object(lp.capital, 'wallet', lambda p: bal), \
+                mock.patch.object(lp.signers, 'chain', chain), \
+                mock.patch.object(lp.paths, 'save', lambda s: None), \
+                mock.patch.object(lp.books, 'notify', lambda ev, **kw: seen.append((ev, kw))), \
+                mock.patch.object(db, 'record_payout', rec):
+            ret = lp.harvest.distribute(state, 'M', fa, fb)
         return ret, rows, calls, [e for e, _ in seen], state, seen
 
     def test_disabled_or_no_fees_does_nothing(self):
@@ -356,7 +363,7 @@ class Distribute(unittest.TestCase):
 
     def test_a_quote_token_without_a_dollar_price_books_nothing(self):
         # quote_price None: no dollar figure for the split, so nothing is paid, booked or sent
-        with mock.patch.object(rebalancer, 'quote_price', lambda bal: None):
+        with mock.patch.object(lp.capital, 'quote_price', lambda bal: None):
             ret, rows, calls, ev, *_, seen = self.run_it(0.002, 0.3)
         self.assertEqual((ret, rows, calls), (None, [], []))
         self.assertEqual(ev, ['payout_skipped'])
@@ -410,7 +417,7 @@ class Distribute(unittest.TestCase):
         *_, calls, _, _, seen = self.run_it(0.002, 0.3, bal=bal)
         pay = [kw for e, kw in seen if e == 'PAYOUT'][0]
         self.assertTrue(pay['gas_low']); self.assertEqual(pay['sent'], []); self.assertEqual(calls, [])
-        self.assertEqual(pay['gas_reserve'], rebalancer.config.GAS_RESERVE_SOL)
+        self.assertEqual(pay['gas_reserve'], config.GAS_RESERVE_SOL)
         self.assertEqual(pay['held'], [{'symbol': 'USDC', 'amount': 0.3, 'usd': 0.3}])
 
     def test_a_paid_harvest_holds_nothing(self):
@@ -445,7 +452,7 @@ class Distribute(unittest.TestCase):
         self.assertIn('uncertain', [r['kind'] for r in rows]); self.assertEqual(state['payout_owed'], {})
 
     def test_the_summary_counts_a_part_without_dollars_as_zero(self):
-        with mock.patch.object(rebalancer.fees, 'split', lambda *a: [
+        with mock.patch.object(fees, 'split', lambda *a: [
                 {'mint': USDC, 'symbol': 'USDC', 'amount': 0.3, 'usd': None, 'kind': 'reinvested'}]):
             *_, seen = self.run_it(0.002, 0.3)
         self.assertEqual([kw for e, kw in seen if e == 'PAYOUT'][0]['split']['reinvested'], 0)
@@ -477,14 +484,14 @@ class Distribute(unittest.TestCase):
 
     def test_held_none_sends_nothing(self):
         bal = {'balanceA': 0.07, 'balanceB': 40.0, 'sol': 0.07, 'price': 120.0, 'quoteUsd': 1.0}
-        with mock.patch.object(rebalancer.fees, 'split', lambda *a: [
+        with mock.patch.object(fees, 'split', lambda *a: [
                 {'mint': USDC, 'symbol': 'USDC', 'amount': 0.3, 'usd': 0.3, 'kind': 'paid'},
                 {'mint': BONK, 'symbol': 'BONK', 'amount': 1.0, 'usd': 1.0, 'kind': 'paid'}]):
             _, rows, calls, *_ = self.run_it(0.002, 0.3, bal=bal)
         self.assertEqual([c[1] for c in calls], [USDC])          # BONK is not in the wallet map
 
     def test_a_part_without_dollars_is_paid_without_dollars(self):
-        with mock.patch.object(rebalancer.fees, 'split', lambda *a: [
+        with mock.patch.object(fees, 'split', lambda *a: [
                 {'mint': USDC, 'symbol': 'USDC', 'amount': 0.3, 'usd': None, 'kind': 'paid'}]):
             _, rows, *_ = self.run_it(0.002, 0.3)
         self.assertEqual([(r['kind'], r['usd']) for r in rows], [('paid', None)])
@@ -759,9 +766,9 @@ class RiskRecord(unittest.TestCase):
         self.assertTrue(all(v is None for k, v in row.items() if k != 'stale')); self.assertFalse(row['stale'])
 
     def test_the_status_pool_wins_over_the_profile_pool(self):
-        with mock.patch.object(rebalancer, 'LAST_REGIME', {'risk': None}), \
-                mock.patch.object(rebalancer.config, 'POOL', 'PROFILEPOOL'):
-            rebalancer.record_risk({'price': 1.0, 'whirlpool': 'STATUSPOOL'}, {'mode': 'CALM'}, None)
+        with mock.patch.object(lp.books, 'LAST_REGIME', {'risk': None}), \
+                mock.patch.object(config, 'POOL', 'PROFILEPOOL'):
+            lp.regime.record_risk({'price': 1.0, 'whirlpool': 'STATUSPOOL'}, {'mode': 'CALM'}, None)
         with db.cursor() as cur:
             cur.execute('select pool from risk_profile')
             self.assertEqual([r['pool'] for r in cur.fetchall()], ['STATUSPOOL'])
@@ -820,10 +827,10 @@ class RiskRecord(unittest.TestCase):
         _fixtures.reset_ledger()
 
     def test_the_loop_falls_back_to_the_profile_pool(self):
-        with mock.patch.object(rebalancer, 'LAST_REGIME', {'risk': None}), \
-                mock.patch.object(rebalancer.config, 'POOL', 'PROFILEPOOL'):
-            rebalancer.record_risk({'price': 1.0, 'positionMint': 'M'}, {'mode': 'CALM'}, None)
-            rebalancer.record_risk({'price': 1.0, 'positionMint': 'M', 'whirlpool': None}, {'mode': 'CALM'}, None)
+        with mock.patch.object(lp.books, 'LAST_REGIME', {'risk': None}), \
+                mock.patch.object(config, 'POOL', 'PROFILEPOOL'):
+            lp.regime.record_risk({'price': 1.0, 'positionMint': 'M'}, {'mode': 'CALM'}, None)
+            lp.regime.record_risk({'price': 1.0, 'positionMint': 'M', 'whirlpool': None}, {'mode': 'CALM'}, None)
         with db.cursor() as cur:
             cur.execute('select pool from risk_profile')
             self.assertEqual([r['pool'] for r in cur.fetchall()], ['PROFILEPOOL', 'PROFILEPOOL'])
@@ -832,13 +839,13 @@ class RiskRecord(unittest.TestCase):
 class Isolation(unittest.TestCase):
     def test_tests_never_write_the_live_feed(self):
         live = _fixtures.ROOT / 'events.jsonl'
-        self.assertNotEqual(rebalancer.FEED.resolve(), live.resolve())
+        self.assertNotEqual(lp.paths.FEED.resolve(), live.resolve())
         before = live.stat().st_size if live.exists() else 0
-        rebalancer.notify('test_isolation_probe', note='must not reach events.jsonl')
+        lp.books.notify('test_isolation_probe', note='must not reach events.jsonl')
         after = live.stat().st_size if live.exists() else 0
         # the live bot may append meanwhile, but never our probe
         self.assertNotIn('test_isolation_probe', live.read_text()[before:] if live.exists() else '')
-        self.assertIn('test_isolation_probe', rebalancer.FEED.read_text())
+        self.assertIn('test_isolation_probe', lp.paths.FEED.read_text())
 
 
 if __name__ == '__main__':

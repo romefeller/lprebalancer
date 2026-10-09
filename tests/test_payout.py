@@ -10,6 +10,12 @@ _fixtures.ensure_profile()
 
 import fees        # noqa: E402
 import rebalancer  # noqa: E402
+import lp.capital  # noqa: E402
+import lp.harvest  # noqa: E402
+import lp.swaps  # noqa: E402
+import config  # noqa: E402
+import db  # noqa: E402
+import time  # noqa: E402
 
 SOL = fees.NATIVE_MINT
 USDC = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'
@@ -56,17 +62,17 @@ class Distribute(unittest.TestCase):
         bal = {'balanceA': sol, 'balanceB': 40.0, 'sol': sol, 'price': 120.0, 'quoteUsd': 1.0}
         state = state if state is not None else {}
         with mock.patch.dict(os.environ, {'LPBOT_PROFIT_WALLET_PIN': PROFIT}), \
-                mock.patch.object(rebalancer.config, 'PAYOUT_ENABLED', True), \
-                mock.patch.object(rebalancer.config, 'PAYOUT_MINT', USDC), \
-                mock.patch.object(rebalancer.config, 'PROFIT_WALLET', PROFIT), \
-                mock.patch.object(rebalancer.config, 'GAS_RESERVE_SOL', 0.05), \
-                mock.patch.object(rebalancer, 'pool_tokens', lambda: ((SOL, 'SOL'), (USDC, 'USDC'))), \
-                mock.patch.object(rebalancer, 'wallet', lambda p: bal), \
-                mock.patch.object(rebalancer, 'chain', lambda *a, **k: (calls.append((a, k)) or chain_result)), \
-                mock.patch.object(rebalancer, 'save', lambda s: None), \
-                mock.patch.object(rebalancer, 'notify', lambda ev, **kw: sent.append(ev)), \
-                mock.patch.object(rebalancer.db, 'record_payout', lambda *a, **k: rows.append(a[6])):
-            rebalancer.distribute(state, 'M', fee_a, fee_b)
+                mock.patch.object(config, 'PAYOUT_ENABLED', True), \
+                mock.patch.object(config, 'PAYOUT_MINT', USDC), \
+                mock.patch.object(config, 'PROFIT_WALLET', PROFIT), \
+                mock.patch.object(config, 'GAS_RESERVE_SOL', 0.05), \
+                mock.patch.object(lp.capital, 'pool_tokens', lambda: ((SOL, 'SOL'), (USDC, 'USDC'))), \
+                mock.patch.object(lp.capital, 'wallet', lambda p: bal), \
+                mock.patch.object(lp.signers, 'chain', lambda *a, **k: (calls.append((a, k)) or chain_result)), \
+                mock.patch.object(lp.paths, 'save', lambda s: None), \
+                mock.patch.object(lp.books, 'notify', lambda ev, **kw: sent.append(ev)), \
+                mock.patch.object(db, 'record_payout', lambda *a, **k: rows.append(a[6])):
+            lp.harvest.distribute(state, 'M', fee_a, fee_b)
         return rows, calls, sent, state
 
     def test_pays_usdc_to_the_profit_wallet_and_records_the_rest(self):
@@ -122,31 +128,31 @@ class Distribute(unittest.TestCase):
         self.assertEqual(state.get('payout_owed', {}), {})          # never sent twice
 
     def test_off_does_nothing(self):
-        with mock.patch.object(rebalancer.config, 'PAYOUT_ENABLED', False), \
-                mock.patch.object(rebalancer, 'chain', side_effect=AssertionError('sent')):
-            self.assertIsNone(rebalancer.distribute({}, 'M', 0.002, 0.3))
+        with mock.patch.object(config, 'PAYOUT_ENABLED', False), \
+                mock.patch.object(lp.signers, 'chain', side_effect=AssertionError('sent')):
+            self.assertIsNone(lp.harvest.distribute({}, 'M', 0.002, 0.3))
 
 
 class Capital(unittest.TestCase):
     def test_reinvested_fees_raise_the_base_under_the_ceiling(self):
-        with mock.patch.object(rebalancer.config, 'PAYOUT_ENABLED', True), \
-                mock.patch.object(rebalancer.config, 'CAPITAL_USD', 190.0), \
-                mock.patch.object(rebalancer.config, 'MAX_USD', 260.0), \
-                mock.patch.object(rebalancer.config, 'SIDE_CAP_FRACTION', 0.55):
-            with mock.patch.object(rebalancer.db, 'reinvested_usd', lambda n: 5.0):
-                self.assertAlmostEqual(rebalancer.capital(), 195.0)
-            with mock.patch.object(rebalancer.db, 'reinvested_usd', lambda n: 500.0):
-                self.assertAlmostEqual(rebalancer.capital(), 260 / 1.1)
-        with mock.patch.object(rebalancer.config, 'PAYOUT_ENABLED', False), \
-                mock.patch.object(rebalancer.config, 'CAPITAL_USD', 190.0), \
-                mock.patch.object(rebalancer.db, 'reinvested_usd', side_effect=AssertionError('read')):
-            self.assertEqual(rebalancer.capital(), 190.0)
+        with mock.patch.object(config, 'PAYOUT_ENABLED', True), \
+                mock.patch.object(config, 'CAPITAL_USD', 190.0), \
+                mock.patch.object(config, 'MAX_USD', 260.0), \
+                mock.patch.object(config, 'SIDE_CAP_FRACTION', 0.55):
+            with mock.patch.object(db, 'reinvested_usd', lambda n: 5.0):
+                self.assertAlmostEqual(lp.capital.capital(), 195.0)
+            with mock.patch.object(db, 'reinvested_usd', lambda n: 500.0):
+                self.assertAlmostEqual(lp.capital.capital(), 260 / 1.1)
+        with mock.patch.object(config, 'PAYOUT_ENABLED', False), \
+                mock.patch.object(config, 'CAPITAL_USD', 190.0), \
+                mock.patch.object(db, 'reinvested_usd', side_effect=AssertionError('read')):
+            self.assertEqual(lp.capital.capital(), 190.0)
 
 
 class SwapRetry(unittest.TestCase):
     def setUp(self):
         # Jupiter's own retries; the Orca fallback has its own tests (test_jupiter_gate.OrcaFallback)
-        p = mock.patch.object(rebalancer, 'SWAP_FALLBACK', ''); p.start(); self.addCleanup(p.stop)
+        p = mock.patch.object(lp.swaps, 'SWAP_FALLBACK', ''); p.start(); self.addCleanup(p.stop)
 
     BAL = {'price': 100.0, 'quoteUsd': 1.0, 'balanceA': 0.06, 'balanceB': 300.0, 'nativeSide': 'A'}
     REC = {'token_a': {'address': SOL, 'decimals': 9, 'symbol': 'SOL'},
@@ -156,16 +162,16 @@ class SwapRetry(unittest.TestCase):
         global calls_env
         calls, state, calls_env = [], {'failures': 0}, []
         it = iter(results)
-        with mock.patch.object(rebalancer, 'chain', lambda *a, **k: (calls.append(a) or calls_env.append(k.get('extra_env')) or next(it))), \
-                mock.patch.object(rebalancer, 'wallet', lambda p: dict(self.BAL, balanceA=1.0, balanceB=100.0)), \
-                mock.patch.object(rebalancer, 'notify', lambda *a, **k: None), \
-                mock.patch.object(rebalancer, 'save', lambda s: None), \
-                mock.patch.object(rebalancer.db, 'event', lambda *a: None), \
-                mock.patch.object(rebalancer.time, 'sleep', lambda s: None), \
-                mock.patch.object(rebalancer.config, 'REBALANCE_SWAP', True), \
-                mock.patch.object(rebalancer.config, 'CAPITAL_USD', 190.0), \
-                mock.patch.object(rebalancer.config, 'PAYOUT_ENABLED', False):
-            out = rebalancer.balance_wallet(state, dict(self.BAL), self.REC)
+        with mock.patch.object(lp.signers, 'chain', lambda *a, **k: (calls.append(a) or calls_env.append(k.get('extra_env')) or next(it))), \
+                mock.patch.object(lp.capital, 'wallet', lambda p: dict(self.BAL, balanceA=1.0, balanceB=100.0)), \
+                mock.patch.object(lp.books, 'notify', lambda *a, **k: None), \
+                mock.patch.object(lp.paths, 'save', lambda s: None), \
+                mock.patch.object(db, 'event', lambda *a: None), \
+                mock.patch.object(time, 'sleep', lambda s: None), \
+                mock.patch.object(config, 'REBALANCE_SWAP', True), \
+                mock.patch.object(config, 'CAPITAL_USD', 190.0), \
+                mock.patch.object(config, 'PAYOUT_ENABLED', False):
+            out = lp.swaps.balance_wallet(state, dict(self.BAL), self.REC)
         return out, calls, state
 
     def test_a_rate_limited_swap_is_retried_once(self):
@@ -187,18 +193,18 @@ class SwapGate(unittest.TestCase):
     """The swap tops a side up to its deposit cap, not merely to half."""
     def go(self, a_sol, b_usdc):
         calls = []
-        with mock.patch.object(rebalancer, 'chain', lambda *a, **k: (calls.append(a) or ({'sent': True, 'signature': 's'}, None))), \
-                mock.patch.object(rebalancer, 'wallet', lambda p: {'balanceA': 1.0, 'balanceB': 100.0, 'price': 100.0}), \
-                mock.patch.object(rebalancer, 'notify', lambda *a, **k: None), \
-                mock.patch.object(rebalancer.db, 'event', lambda *a: None), \
-                mock.patch.object(rebalancer.time, 'sleep', lambda s: None), \
-                mock.patch.object(rebalancer.config, 'REBALANCE_SWAP', True), \
-                mock.patch.object(rebalancer.config, 'CAPITAL_USD', 190.0), \
-                mock.patch.object(rebalancer.config, 'SIDE_CAP_FRACTION', 0.55), \
-                mock.patch.object(rebalancer.config, 'GAS_RESERVE_SOL', 0.05), \
-                mock.patch.object(rebalancer.config, 'DEPLOY_ALL', False), \
-                mock.patch.object(rebalancer.config, 'PAYOUT_ENABLED', False):
-            rebalancer.balance_wallet({'failures': 0}, {'price': 100.0, 'quoteUsd': 1.0, 'balanceA': a_sol,
+        with mock.patch.object(lp.signers, 'chain', lambda *a, **k: (calls.append(a) or ({'sent': True, 'signature': 's'}, None))), \
+                mock.patch.object(lp.capital, 'wallet', lambda p: {'balanceA': 1.0, 'balanceB': 100.0, 'price': 100.0}), \
+                mock.patch.object(lp.books, 'notify', lambda *a, **k: None), \
+                mock.patch.object(db, 'event', lambda *a: None), \
+                mock.patch.object(time, 'sleep', lambda s: None), \
+                mock.patch.object(config, 'REBALANCE_SWAP', True), \
+                mock.patch.object(config, 'CAPITAL_USD', 190.0), \
+                mock.patch.object(config, 'SIDE_CAP_FRACTION', 0.55), \
+                mock.patch.object(config, 'GAS_RESERVE_SOL', 0.05), \
+                mock.patch.object(config, 'DEPLOY_ALL', False), \
+                mock.patch.object(config, 'PAYOUT_ENABLED', False):
+            lp.swaps.balance_wallet({'failures': 0}, {'price': 100.0, 'quoteUsd': 1.0, 'balanceA': a_sol,
                                                         'balanceB': b_usdc, 'nativeSide': 'A'},
                                       {'token_a': {'address': SOL}, 'token_b': {'address': USDC}})
         return len(calls)

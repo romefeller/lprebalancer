@@ -17,7 +17,8 @@ from unittest import mock
 import _fixtures  # noqa: F401  (first: it puts lp_bot on the path)
 import config
 import db
-import rebalancer
+import lp.books
+import lp.loop
 import test_multi_loop as M
 
 WPOL = '0x0d500b1d8e8ef31e21c99d1db9a6444d3adf1270'
@@ -63,11 +64,11 @@ class PolyChain(M.FakeChain):
 
     def answer(self, *args, dex=None, extra_env=None):
         if args[0] == 'wrap':
-            self.calls.append({'args': args, 'dex': dex, 'env': extra_env or {}, 'profile': rebalancer.config.PROFILE})
+            self.calls.append({'args': args, 'dex': dex, 'env': extra_env or {}, 'profile': config.PROFILE})
             amt = float(args[1])
             if self.refuse:
                 return None, self.refuse
-            if self.wallet[POL] - amt < rebalancer.config.GAS_RESERVE_SOL:
+            if self.wallet[POL] - amt < config.GAS_RESERVE_SOL:
                 return None, 'refused: below the gas reserve'
             self.wallet[POL] -= amt
             self.wallet[WPOL] += amt
@@ -99,8 +100,8 @@ class Polygon(M.Fixture):
         super().setUp()
         self.chain = PolyChain()
         band = {'band': 1.05, 'net_day_pct': 0.1, 'rebal_per_day': 0.1}
-        for p in (mock.patch.object(rebalancer, '_chain', self.chain),
-                  mock.patch.object(rebalancer, 'best_band_for', lambda pool, dex=None: dict(
+        for p in (mock.patch.object(lp.signers, '_chain', self.chain),
+                  mock.patch.object(lp.board, 'best_band_for', lambda pool, dex=None: dict(
                       band, price=M.POOLS[pool]['price'], record=M.pool_record_for(pool), all_runs=[band]))):
             p.start(); self.addCleanup(p.stop)
 
@@ -139,11 +140,11 @@ class Polygon(M.Fixture):
         pos.update(fee_a=fee_a, fee_b=fee_b)
         self.chain.wallet[POL] = gas
         seen = []
-        real = rebalancer.notify
+        real = lp.books.notify
         with self.as_profile('e2e-poly'), self.paying(reserve), \
-                mock.patch.object(rebalancer, 'notify', lambda e, **kw: (seen.append((e, kw)), real(e, **kw))):
+                mock.patch.object(lp.books, 'notify', lambda e, **kw: (seen.append((e, kw)), real(e, **kw))):
             try:
-                rebalancer.main()
+                lp.loop.main()
             except M.StopPoll:
                 pass
         with db.cursor() as cur:
@@ -196,7 +197,7 @@ class Polygon(M.Fixture):
         self.assertEqual((pay['sol_before'], pay['gas_reserve']), (1.5, 2.0))
         self.assertEqual(pay['held'], [{'symbol': 'USDT0', 'amount': 3.0, 'usd': 3.0}])
         self.assertEqual(pay['split']['gas'], 0)                         # WPOL fees never refill POL
-        self.assertEqual(rebalancer.emoji_for('PAYOUT', pay), '⛽')
+        self.assertEqual(lp.books.emoji_for('PAYOUT', pay), '⛽')
 
     def keep(self, n=10.0):
         p = mock.patch.object(config, 'NATIVE_KEEP', n)
@@ -240,9 +241,9 @@ class Polygon(M.Fixture):
     def test_a_failed_wrap_is_said_once_and_leaves_the_pol(self):
         self.keep(10.0)
         seen = []
-        real = rebalancer.notify
+        real = lp.books.notify
         self.chain.refuse = 'refused: the RPC refused the transaction'
-        with mock.patch.object(rebalancer, 'notify', lambda e, **kw: (seen.append(e), real(e, **kw))):
+        with mock.patch.object(lp.books, 'notify', lambda e, **kw: (seen.append(e), real(e, **kw))):
             self.chain.wallet.update({POL: 4010.0})
             self.poll('e2e-poly', n=2)
         self.assertEqual(len(self.chain.of('e2e-poly', 'wrap')), 2)       # tried each poll

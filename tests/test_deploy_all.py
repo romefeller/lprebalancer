@@ -9,9 +9,12 @@ from hypothesis import given, settings, assume, strategies as st
 
 import _fixtures  # noqa: F401
 import config
-import rebalancer
+import db
+import time
+import lp.capital
+import lp.swaps
 
-RES = lambda: config.GAS_RESERVE_SOL + rebalancer.OPEN_RENT_HEADROOM_SOL
+RES = lambda: config.GAS_RESERVE_SOL + lp.capital.OPEN_RENT_HEADROOM_SOL
 SOL, USDC = 'So11111111111111111111111111111111111111112', 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'
 
 
@@ -23,8 +26,8 @@ class Patched(unittest.TestCase):
     def setUp(self):
         # balance_wallet records the swap outcome itself: no breaker state may leak between tests
         # These tests pin Jupiter's own retries; the Orca fallback has its own (test_jupiter_gate.OrcaFallback).
-        p = mock.patch.object(rebalancer, 'SWAP_FALLBACK', ''); p.start(); self.addCleanup(p.stop)
-        with rebalancer.db.cursor(commit=True) as cur:
+        p = mock.patch.object(lp.swaps, 'SWAP_FALLBACK', ''); p.start(); self.addCleanup(p.stop)
+        with db.cursor(commit=True) as cur:
             cur.execute('truncate health')
         for name, v in (('DEPLOY_ALL', True), ('MAX_USD', 300.0), ('SIDE_CAP_FRACTION', 0.55),
                         ('GAS_RESERVE_SOL', 0.05), ('CAPITAL_USD', 190.0), ('PAYOUT_ENABLED', False),
@@ -34,50 +37,50 @@ class Patched(unittest.TestCase):
 
 class Deployable(Patched):
     def test_everything_but_the_reserve_on_the_native_side(self):
-        self.assertAlmostEqual(rebalancer.deployable_usd(bal(1.0, 100.0)), (1.0 - RES()) * 120.0 + 100.0)
-        self.assertAlmostEqual(rebalancer.deployable_usd(bal(1000.0, 1.0, price=0.01, q=120.0, native='B')),
+        self.assertAlmostEqual(lp.capital.deployable_usd(bal(1.0, 100.0)), (1.0 - RES()) * 120.0 + 100.0)
+        self.assertAlmostEqual(lp.capital.deployable_usd(bal(1000.0, 1.0, price=0.01, q=120.0, native='B')),
                                (1000.0 * 0.01 + (1.0 - RES())) * 120.0)
-        self.assertAlmostEqual(rebalancer.deployable_usd(bal(1.0, 100.0, native=None)), 220.0)
+        self.assertAlmostEqual(lp.capital.deployable_usd(bal(1.0, 100.0, native=None)), 220.0)
 
     def test_a_wallet_under_the_reserve_deploys_nothing_of_it(self):
-        self.assertEqual(rebalancer.deployable_usd(bal(0.03, 0.0)), 0.0)
-        self.assertEqual(rebalancer.deployable_usd(bal(0.03, 5.0)), 5.0)
-        self.assertEqual(rebalancer.deployable_usd({'balanceA': None, 'balanceB': None, 'price': 120.0, 'quoteUsd': 1.0}), 0.0)
+        self.assertEqual(lp.capital.deployable_usd(bal(0.03, 0.0)), 0.0)
+        self.assertEqual(lp.capital.deployable_usd(bal(0.03, 5.0)), 5.0)
+        self.assertEqual(lp.capital.deployable_usd({'balanceA': None, 'balanceB': None, 'price': 120.0, 'quoteUsd': 1.0}), 0.0)
 
     def test_capital_is_the_wallet_under_the_ceiling(self):
-        self.assertAlmostEqual(rebalancer.capital(bal(1.0, 100.0)), (1.0 - RES()) * 120.0 + 100.0)
+        self.assertAlmostEqual(lp.capital.capital(bal(1.0, 100.0)), (1.0 - RES()) * 120.0 + 100.0)
         ceiling = 300.0 / (2 * 0.55)
-        self.assertAlmostEqual(rebalancer.capital(bal(10.0, 1000.0)), ceiling)
+        self.assertAlmostEqual(lp.capital.capital(bal(10.0, 1000.0)), ceiling)
 
     def test_without_a_wallet_read_or_with_deploy_all_off_the_configured_capital_stands(self):
-        self.assertEqual(rebalancer.capital(), 190.0)
-        self.assertEqual(rebalancer.capital({'price': 120.0}), 190.0)
-        self.assertEqual(rebalancer.capital(dict(bal(), price=0)), 190.0)
+        self.assertEqual(lp.capital.capital(), 190.0)
+        self.assertEqual(lp.capital.capital({'price': 120.0}), 190.0)
+        self.assertEqual(lp.capital.capital(dict(bal(), price=0)), 190.0)
         with mock.patch.object(config, 'DEPLOY_ALL', False):
-            self.assertEqual(rebalancer.capital(bal(1.0, 100.0)), 190.0)
+            self.assertEqual(lp.capital.capital(bal(1.0, 100.0)), 190.0)
         with mock.patch.object(config, 'PAYOUT_ENABLED', True), \
-                mock.patch.object(rebalancer.db, 'reinvested_usd', lambda p: 5.0):
-            self.assertEqual(rebalancer.capital(), 195.0)
+                mock.patch.object(db, 'reinvested_usd', lambda p: 5.0):
+            self.assertEqual(lp.capital.capital(), 195.0)
         with mock.patch.object(config, 'PAYOUT_ENABLED', True), \
-                mock.patch.object(rebalancer.db, 'reinvested_usd', side_effect=RuntimeError('db')):
-            self.assertEqual(rebalancer.capital(), 190.0)
+                mock.patch.object(db, 'reinvested_usd', side_effect=RuntimeError('db')):
+            self.assertEqual(lp.capital.capital(), 190.0)
 
     def test_the_target_share_is_half_when_the_whole_wallet_is_the_capital(self):
-        self.assertEqual(rebalancer.side_target_fraction(), 0.5)
+        self.assertEqual(lp.capital.side_target_fraction(), 0.5)
         with mock.patch.object(config, 'DEPLOY_ALL', False):
-            self.assertEqual(rebalancer.side_target_fraction(), 0.55)
+            self.assertEqual(lp.capital.side_target_fraction(), 0.55)
 
 
 class Caps(Patched):
     def test_a_balanced_wallet_deploys_both_sides_whole(self):
         b = bal(1.0 + RES(), 120.0)
-        a_cap, b_cap = rebalancer.deposit_caps(b)
+        a_cap, b_cap = lp.capital.deposit_caps(b)
         self.assertAlmostEqual(a_cap, 1.0); self.assertAlmostEqual(b_cap, 120.0)
 
     @settings(max_examples=300, deadline=None)
     @given(a=st.floats(0, 5), b=st.floats(0, 600), price=st.floats(20, 400))
     def test_caps_never_touch_the_reserve_nor_exceed_the_wallet(self, a, b, price):
-        a_cap, b_cap = rebalancer.deposit_caps(bal(a, b, price))
+        a_cap, b_cap = lp.capital.deposit_caps(bal(a, b, price))
         self.assertLessEqual(a_cap, max(a - RES(), 0.0) + 1e-12)
         self.assertLessEqual(b_cap, b + 1e-9)
         self.assertGreaterEqual(a_cap, 0.0); self.assertGreaterEqual(b_cap, 0.0)
@@ -105,31 +108,31 @@ class Swap(Patched):
 
     def run_it(self, b):
         calls = []
-        with mock.patch.object(rebalancer, 'chain', lambda *a, **k: (calls.append(a) or ({'sent': True, 'signature': 's'}, None))), \
-                mock.patch.object(rebalancer, 'wallet', lambda p: b), \
-                mock.patch.object(rebalancer, 'notify', lambda *a, **k: None), \
-                mock.patch.object(rebalancer, 'save', lambda s: None), \
-                mock.patch.object(rebalancer.db, 'event', lambda *a: None), \
-                mock.patch.object(rebalancer.time, 'sleep', lambda s: None):
-            rebalancer.balance_wallet({'failures': 0}, dict(b), self.REC)
+        with mock.patch.object(lp.signers, 'chain', lambda *a, **k: (calls.append(a) or ({'sent': True, 'signature': 's'}, None))), \
+                mock.patch.object(lp.capital, 'wallet', lambda p: b), \
+                mock.patch.object(lp.books, 'notify', lambda *a, **k: None), \
+                mock.patch.object(lp.paths, 'save', lambda s: None), \
+                mock.patch.object(db, 'event', lambda *a: None), \
+                mock.patch.object(time, 'sleep', lambda s: None):
+            lp.swaps.balance_wallet({'failures': 0}, dict(b), self.REC)
         return calls
 
     def test_a_lopsided_wallet_swaps_to_half_each_with_the_headroom_on_sol(self):
         b = bal(0.2, 200.0, price=120.0)
         calls = self.run_it(b)
         self.assertEqual(len(calls), 1)
-        C = rebalancer.deployable_usd(b)
+        C = lp.capital.deployable_usd(b)
         _, _, _, ta, tb, *_ = calls[0]
-        self.assertAlmostEqual(float(ta), C / 2 + rebalancer.OPEN_RENT_HEADROOM_SOL * 120.0, places=2)
+        self.assertAlmostEqual(float(ta), C / 2 + lp.capital.OPEN_RENT_HEADROOM_SOL * 120.0, places=2)
         self.assertAlmostEqual(float(tb), C / 2, places=2)
 
     def test_native_on_the_b_side_gets_the_headroom_there(self):
         b = bal(20000.0, 0.2, price=0.0001, q=120.0, native='B')
         calls = self.run_it(b)
-        C = rebalancer.deployable_usd(b)
+        C = lp.capital.deployable_usd(b)
         _, _, _, ta, tb, *_ = calls[0]
         self.assertAlmostEqual(float(ta), C / 2, places=2)
-        self.assertAlmostEqual(float(tb), C / 2 + rebalancer.OPEN_RENT_HEADROOM_SOL * 120.0, places=2)
+        self.assertAlmostEqual(float(tb), C / 2 + lp.capital.OPEN_RENT_HEADROOM_SOL * 120.0, places=2)
 
     def test_no_native_side_has_no_headroom(self):
         b = bal(0.2, 200.0, native=None)
@@ -145,13 +148,13 @@ class Swap(Patched):
     @given(a=st.floats(0.06, 4), b=st.floats(0, 500), price=st.floats(50, 300))
     def test_after_the_swap_only_the_reserve_stays_out(self, a, b, price):
         w = bal(a, b, price)
-        C = rebalancer.deployable_usd(w)
+        C = lp.capital.deployable_usd(w)
         assume(C > 20 and C < 300 / 1.1)
         calls = self.run_it(w)
         if calls:
             _, _, _, ta, tb, *_ = calls[0]
             w = simulate_swap(w, float(ta), float(tb))
-        a_cap, b_cap = rebalancer.deposit_caps(w)
+        a_cap, b_cap = lp.capital.deposit_caps(w)
         deposit = 2 * min(a_cap * price, b_cap)            # a centred band takes half in value of each
         self.assertGreaterEqual(deposit, 0.955 * C)         # 4% no-swap tolerance, plus rounding
         self.assertLessEqual(a_cap, w['balanceA'] - RES() + 1e-9)
@@ -171,14 +174,14 @@ class BalanceWallet(Patched):
         it = iter(answers)
         state = state if state is not None else {'failures': 0}
         after = after if after is not None else dict(b, balanceA=b['balanceA'] + 0.0001)
-        with mock.patch.object(rebalancer, 'chain', lambda *a, **k: (calls.append((a, k)) or next(it))), \
-                mock.patch.object(rebalancer, 'wallet', lambda p: after), \
-                mock.patch.object(rebalancer, 'notify', lambda ev, **kw: seen.append((ev, kw))), \
-                mock.patch.object(rebalancer, 'save', lambda s: None), \
-                mock.patch.object(rebalancer, 'halt', lambda r: halted.append(r)), \
-                mock.patch.object(rebalancer.db, 'event', lambda *a: events.append(a)), \
-                mock.patch.object(rebalancer.time, 'sleep', lambda s: None):
-            out = rebalancer.balance_wallet(state, dict(b), self.REC if rec is None else rec)
+        with mock.patch.object(lp.signers, 'chain', lambda *a, **k: (calls.append((a, k)) or next(it))), \
+                mock.patch.object(lp.capital, 'wallet', lambda p: after), \
+                mock.patch.object(lp.books, 'notify', lambda ev, **kw: seen.append((ev, kw))), \
+                mock.patch.object(lp.paths, 'save', lambda s: None), \
+                mock.patch.object(lp.books, 'halt', lambda r: halted.append(r)), \
+                mock.patch.object(db, 'event', lambda *a: events.append(a)), \
+                mock.patch.object(time, 'sleep', lambda s: None):
+            out = lp.swaps.balance_wallet(state, dict(b), self.REC if rec is None else rec)
         return out, calls, [e for e, _ in seen], events, state, halted, seen
 
     LOP = bal(0.2, 200.0)                                                      # SOL short: needs a swap
@@ -197,7 +200,7 @@ class BalanceWallet(Patched):
         b = dict(self.LOP, quoteUsd=None)
         out, calls, *_ = self.go(b)
         self.assertEqual((out, calls), (b, []))
-        self.assertIsNone(rebalancer.deployable_usd(b))
+        self.assertIsNone(lp.capital.deployable_usd(b))
 
     def test_the_thresholds(self):
         # Under deploy-all the 4% balance gate is the one that binds: a short side
@@ -219,7 +222,7 @@ class BalanceWallet(Patched):
         self.assertEqual(len(calls), 1)
         none = bal(0.2, 200.0, native=None)                                    # no native side: nothing reserved
         _, calls, *_ = self.go(none)
-        C = rebalancer.deployable_usd(none)
+        C = lp.capital.deployable_usd(none)
         self.assertAlmostEqual(C, 0.2 * 120 + 200.0)
         self.assertAlmostEqual(float(calls[0][0][3]), C / 2, places=2)
 
@@ -308,8 +311,8 @@ class BalanceWalletEdges(BalanceWallet):
     def test_without_a_record_nothing_is_asked_or_said(self):
         out, calls, seen, *_ = self.go(self.LOP, rec={})
         self.assertEqual((out, calls, seen), (self.LOP, [], []))
-        with mock.patch.object(rebalancer, 'notify', lambda *a, **k: self.fail('notified')):
-            self.assertEqual(rebalancer.balance_wallet({'failures': 0}, dict(self.LOP), None), self.LOP)
+        with mock.patch.object(lp.books, 'notify', lambda *a, **k: self.fail('notified')):
+            self.assertEqual(lp.swaps.balance_wallet({'failures': 0}, dict(self.LOP), None), self.LOP)
 
     def test_a_record_without_token_a_skips(self):
         out, calls, seen, *_ = self.go(self.LOP, rec={'token_b': {'address': USDC}})
@@ -318,15 +321,15 @@ class BalanceWalletEdges(BalanceWallet):
     def test_a_short_side_of_exactly_need_does_not_swap(self):
         # The capital is capped, so a side can reach `need` while the wallet is lopsided.
         C = config.MAX_USD / (2 * config.SIDE_CAP_FRACTION)
-        need = C * rebalancer.side_target_fraction() * 0.97
+        need = C * lp.capital.side_target_fraction() * 0.97
         b = bal(400.0, need, price=1.0, native=None)
-        self.assertAlmostEqual(rebalancer.capital(b), C)
+        self.assertAlmostEqual(lp.capital.capital(b), C)
         self.no_swap(b)
         self.swaps(bal(400.0, need * 0.999, price=1.0, native=None))
 
     def test_a_gap_of_exactly_4_percent_is_balanced(self):
         self.assertEqual(abs(52.0 - 48.0), 0.04 * (52.0 + 48.0))
-        self.assertLess(48.0, rebalancer.capital(bal(52.0, 48.0, price=1.0, native=None)) * 0.5 * 0.97)   # under need
+        self.assertLess(48.0, lp.capital.capital(bal(52.0, 48.0, price=1.0, native=None)) * 0.5 * 0.97)   # under need
         self.no_swap(bal(52.0, 48.0, price=1.0, native=None))
         self.no_swap(bal(48.0, 52.0, price=1.0, native=None))                   # nothing reserved off A either
         self.swaps(bal(52.5, 47.5, price=1.0, native=None))
@@ -344,9 +347,9 @@ class BalanceWalletEdges(BalanceWallet):
     def test_the_quote_price_reaches_the_targets_and_the_hints(self):
         b = bal(0.2, 200.0, price=120.0, q=2.0)
         _, calls, *_ = self.go(b)
-        C = rebalancer.capital(b)
+        C = lp.capital.capital(b)
         a = calls[0][0]
-        self.assertAlmostEqual(float(a[3]), C / 2 + rebalancer.OPEN_RENT_HEADROOM_SOL * 120.0 * 2.0, places=2)
+        self.assertAlmostEqual(float(a[3]), C / 2 + lp.capital.OPEN_RENT_HEADROOM_SOL * 120.0 * 2.0, places=2)
         self.assertAlmostEqual(float(a[4]), C / 2, places=2)
         h = json.loads(calls[0][1]['extra_env']['LPBOT_TOKEN_HINTS'])
         self.assertEqual((h[SOL]['usd'], h[USDC]['usd']), (240.0, 2.0))

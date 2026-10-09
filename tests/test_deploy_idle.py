@@ -10,7 +10,10 @@ from hypothesis import given, settings, strategies as st
 
 import _fixtures  # noqa: F401
 import config
-import rebalancer
+import db
+import time
+import lp.capital
+import lp.swaps
 from test_deploy_all import Patched, bal, RES, SOL, USDC
 
 NOW = dt.datetime(2026, 9, 28, 19, 0, tzinfo=dt.timezone.utc)
@@ -18,7 +21,7 @@ NOW = dt.datetime(2026, 9, 28, 19, 0, tzinfo=dt.timezone.utc)
 
 class Decision(unittest.TestCase):
     def test_thresholds(self):
-        f = rebalancer.idle_to_deploy
+        f = lp.swaps.idle_to_deploy
         self.assertTrue(f(22.0, 241.0, 1800))
         self.assertFalse(f(4.8, 240.0, 1800))            # exactly 2% of equity: not over
         self.assertTrue(f(4.81, 240.0, 1800))
@@ -27,15 +30,15 @@ class Decision(unittest.TestCase):
         self.assertTrue(f(2.01, None, 1800))
 
     def test_a_fresh_or_unknown_band_waits(self):
-        f = rebalancer.idle_to_deploy
+        f = lp.swaps.idle_to_deploy
         self.assertFalse(f(22.0, 241.0, 599)); self.assertTrue(f(22.0, 241.0, 600))
         self.assertFalse(f(22.0, 241.0, None))
 
     @settings(max_examples=300, deadline=None)
     @given(st.floats(0, 500), st.floats(0, 1000), st.floats(0, 100), st.floats(600, 1e6))
     def test_more_idle_never_turns_it_off(self, idle, eq, more, age):
-        if rebalancer.idle_to_deploy(idle, eq, age):
-            self.assertTrue(rebalancer.idle_to_deploy(idle + more, eq, age))
+        if lp.swaps.idle_to_deploy(idle, eq, age):
+            self.assertTrue(lp.swaps.idle_to_deploy(idle + more, eq, age))
 
 
 class Hook(Patched):
@@ -52,14 +55,14 @@ class Hook(Patched):
             def now(cls, tz=None):
                 return NOW
         opened = None if opened_min is None else NOW - dt.timedelta(minutes=opened_min)
-        with mock.patch.object(rebalancer, 'datetime', FakeDT), \
-                mock.patch.object(rebalancer.db, 'position_opened', lambda m: opened), \
-                mock.patch.object(rebalancer.db, 'event', lambda *a: events.append(a)), \
-                mock.patch.object(rebalancer, 'calm_budget_left', lambda s: budget), \
-                mock.patch.object(rebalancer, 'voluntary_move_allowed', lambda s: allowed), \
-                mock.patch.object(rebalancer, 'notify_book', lambda ev, **kw: books.append((ev, kw))), \
-                mock.patch.object(rebalancer, 'rebalance', lambda *a, **k: moves.append((a, k))):
-            out = rebalancer.deploy_idle(self.state(), dict(self.STATUS), wbal, rv, 119.5)
+        with mock.patch.object(lp.swaps, 'datetime', FakeDT), \
+                mock.patch.object(db, 'position_opened', lambda m: opened), \
+                mock.patch.object(db, 'event', lambda *a: events.append(a)), \
+                mock.patch.object(lp.regime, 'calm_budget_left', lambda s: budget), \
+                mock.patch.object(lp.regime, 'voluntary_move_allowed', lambda s: allowed), \
+                mock.patch.object(lp.books, 'notify_book', lambda ev, **kw: books.append((ev, kw))), \
+                mock.patch.object(lp.moves, 'rebalance', lambda *a, **k: moves.append((a, k))):
+            out = lp.swaps.deploy_idle(self.state(), dict(self.STATUS), wbal, rv, 119.5)
         return out, moves, books, events
 
     # today's wallet: 0.2462 SOL (0.187 idle above the reserve and headroom) and $0.75 USDC
@@ -105,13 +108,13 @@ class Retries(Patched):
         calls, sleeps = [], []
         it = iter(answers)
         b = bal(0.2, 200.0)
-        with mock.patch.object(rebalancer, 'chain', lambda *a, **k: (calls.append(a) or next(it))), \
-                mock.patch.object(rebalancer, 'wallet', lambda p: b), \
-                mock.patch.object(rebalancer, 'notify', lambda *a, **k: None), \
-                mock.patch.object(rebalancer, 'save', lambda s: None), \
-                mock.patch.object(rebalancer.db, 'event', lambda *a: None), \
-                mock.patch.object(rebalancer.time, 'sleep', lambda s: sleeps.append(s)):
-            out = rebalancer.balance_wallet({'failures': 0}, dict(b), self.REC)
+        with mock.patch.object(lp.signers, 'chain', lambda *a, **k: (calls.append(a) or next(it))), \
+                mock.patch.object(lp.capital, 'wallet', lambda p: b), \
+                mock.patch.object(lp.books, 'notify', lambda *a, **k: None), \
+                mock.patch.object(lp.paths, 'save', lambda s: None), \
+                mock.patch.object(db, 'event', lambda *a: None), \
+                mock.patch.object(time, 'sleep', lambda s: sleeps.append(s)):
+            out = lp.swaps.balance_wallet({'failures': 0}, dict(b), self.REC)
         return out, calls, sleeps
 
     OK = ({'sent': True, 'signature': 's'}, None)
@@ -132,7 +135,7 @@ class Retries(Patched):
         self.assertEqual(len(calls), 3); self.assertEqual(out, bal(0.2, 200.0))
 
     def test_the_pauses(self):
-        self.assertEqual(rebalancer.SWAP_RETRY_PAUSES, (15, 30))
+        self.assertEqual(lp.swaps.SWAP_RETRY_PAUSES, (15, 30))
 
 
 if __name__ == '__main__':
@@ -141,8 +144,8 @@ if __name__ == '__main__':
 
 class Exact(Hook):
     def test_answers_are_exactly_false_or_true(self):
-        self.assertIs(rebalancer.idle_to_deploy(1.0, 240.0, 1800), False)
-        self.assertIs(rebalancer.idle_to_deploy(1.0, 240.0, None), False)
+        self.assertIs(lp.swaps.idle_to_deploy(1.0, 240.0, 1800), False)
+        self.assertIs(lp.swaps.idle_to_deploy(1.0, 240.0, None), False)
         self.assertIs(self.go({'walletUsd': 1.0})[0], False)
         self.assertIs(self.go(self.WALLET, allowed=False)[0], False)
         self.assertIs(self.go(self.WALLET)[0], True)
@@ -158,14 +161,14 @@ class Exact(Hook):
             @classmethod
             def now(cls, tz=None):
                 return NOW
-        with mock.patch.object(rebalancer, 'datetime', FakeDT), \
-                mock.patch.object(rebalancer.db, 'position_opened', lambda m: NOW - dt.timedelta(hours=1)), \
-                mock.patch.object(rebalancer.db, 'event', lambda *a: None), \
-                mock.patch.object(rebalancer, 'calm_budget_left', lambda s: 5), \
-                mock.patch.object(rebalancer, 'voluntary_move_allowed', lambda s: True), \
-                mock.patch.object(rebalancer, 'notify_book', lambda *a, **k: None), \
-                mock.patch.object(rebalancer, 'rebalance', lambda *a, **k: moves.append(1)):
-            self.assertIs(rebalancer.deploy_idle(self.state(), status, w, None, 119.5), True)
+        with mock.patch.object(lp.swaps, 'datetime', FakeDT), \
+                mock.patch.object(db, 'position_opened', lambda m: NOW - dt.timedelta(hours=1)), \
+                mock.patch.object(db, 'event', lambda *a: None), \
+                mock.patch.object(lp.regime, 'calm_budget_left', lambda s: 5), \
+                mock.patch.object(lp.regime, 'voluntary_move_allowed', lambda s: True), \
+                mock.patch.object(lp.books, 'notify_book', lambda *a, **k: None), \
+                mock.patch.object(lp.moves, 'rebalance', lambda *a, **k: moves.append(1)):
+            self.assertIs(lp.swaps.deploy_idle(self.state(), status, w, None, 119.5), True)
 
 
 class ToleranceBaseline(Hook):
@@ -178,15 +181,15 @@ class ToleranceBaseline(Hook):
             def now(cls, tz=None):
                 return NOW
         st = dict(self.STATUS, positionMint=mint)
-        with mock.patch.object(rebalancer, 'datetime', FakeDT), \
-                mock.patch.object(rebalancer.db, 'position_opened', lambda m: NOW - dt.timedelta(hours=1)), \
-                mock.patch.object(rebalancer.db, 'event', lambda *a: None), \
-                mock.patch.object(rebalancer, 'calm_budget_left', lambda s: 5), \
-                mock.patch.object(rebalancer, 'voluntary_move_allowed', lambda s: True), \
-                mock.patch.object(rebalancer, 'save', lambda s: None), \
-                mock.patch.object(rebalancer, 'notify_book', lambda *a, **k: None), \
-                mock.patch.object(rebalancer, 'rebalance', lambda *a, **k: moves.append(k)):
-            out = rebalancer.deploy_idle(state, st, wbal, None, 119.5)
+        with mock.patch.object(lp.swaps, 'datetime', FakeDT), \
+                mock.patch.object(db, 'position_opened', lambda m: NOW - dt.timedelta(hours=1)), \
+                mock.patch.object(db, 'event', lambda *a: None), \
+                mock.patch.object(lp.regime, 'calm_budget_left', lambda s: 5), \
+                mock.patch.object(lp.regime, 'voluntary_move_allowed', lambda s: True), \
+                mock.patch.object(lp.paths, 'save', lambda s: None), \
+                mock.patch.object(lp.books, 'notify_book', lambda *a, **k: None), \
+                mock.patch.object(lp.moves, 'rebalance', lambda *a, **k: moves.append(k)):
+            out = lp.swaps.deploy_idle(state, st, wbal, None, 119.5)
         return out, moves
 
     TOL = dict(bal(0.059 + 0.06, 6.0, price=119.5), walletUsd=13.2)          # $13.17 left by the open
@@ -196,11 +199,11 @@ class ToleranceBaseline(Hook):
         out, moves = self.go_state(state, self.TOL)
         self.assertIs(out, False); self.assertEqual(moves, [])
         self.assertEqual(state['idle_baseline']['mint'], 'M')
-        self.assertAlmostEqual(state['idle_baseline']['usd'], rebalancer.deployable_usd(self.TOL), places=3)
+        self.assertAlmostEqual(state['idle_baseline']['usd'], lp.capital.deployable_usd(self.TOL), places=3)
         self.assertIs(self.go_state(state, self.TOL)[0], False)               # the same leftover: still held
 
     def test_new_money_beyond_the_leftover_is_deployed(self):
-        state = {'idle_baseline': {'mint': 'M', 'usd': rebalancer.deployable_usd(self.TOL)}}
+        state = {'idle_baseline': {'mint': 'M', 'usd': lp.capital.deployable_usd(self.TOL)}}
         more = dict(self.TOL, balanceB=6.0 + 4.0, walletUsd=17.2)             # +$4: under max($2, 2% of ~$230)
         self.assertIs(self.go_state(state, more)[0], False)
         more = dict(self.TOL, balanceB=6.0 + 50.0, walletUsd=63.2)            # a $50 deposit
@@ -222,15 +225,15 @@ class ToleranceBaseline(Hook):
         for answers, flag in ((((None, 'custom program error'),), True), ((({'sent': True, 'signature': 's'}, None),), False)):
             state = {'failures': 0, 'open_unbalanced': not flag}
             it = iter(answers)
-            with mock.patch.object(rebalancer, 'chain', lambda *a, **k: next(it)), \
-                    mock.patch.object(rebalancer, 'wallet', lambda p: b), \
-                    mock.patch.object(rebalancer, 'notify', lambda *a, **k: None), \
-                    mock.patch.object(rebalancer, 'save', lambda s: None), \
-                    mock.patch.object(rebalancer.db, 'event', lambda *a: None), \
-                    mock.patch.object(rebalancer.time, 'sleep', lambda s: None):
-                rebalancer.balance_wallet(state, dict(b), rec)
+            with mock.patch.object(lp.signers, 'chain', lambda *a, **k: next(it)), \
+                    mock.patch.object(lp.capital, 'wallet', lambda p: b), \
+                    mock.patch.object(lp.books, 'notify', lambda *a, **k: None), \
+                    mock.patch.object(lp.paths, 'save', lambda s: None), \
+                    mock.patch.object(db, 'event', lambda *a: None), \
+                    mock.patch.object(time, 'sleep', lambda s: None):
+                lp.swaps.balance_wallet(state, dict(b), rec)
             self.assertIs(state['open_unbalanced'], flag)
         state = {'open_unbalanced': True}                                       # balanced already: not unbalanced
-        with mock.patch.object(rebalancer.config, 'REBALANCE_SWAP', False):
-            rebalancer.balance_wallet(state, dict(b), rec)
+        with mock.patch.object(config, 'REBALANCE_SWAP', False):
+            lp.swaps.balance_wallet(state, dict(b), rec)
         self.assertIs(state['open_unbalanced'], False)

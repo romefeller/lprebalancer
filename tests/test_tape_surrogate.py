@@ -15,6 +15,10 @@ _fixtures.ensure_profile()
 import calm        # noqa: E402
 import engine      # noqa: E402
 import rebalancer  # noqa: E402
+import lp.regime  # noqa: E402
+import lp.tape  # noqa: E402
+import config  # noqa: E402
+import db  # noqa: E402
 
 W = calm.WIDTHS
 S = calm.BAR_SECONDS
@@ -207,10 +211,10 @@ class Overlay(unittest.TestCase):
     """rebalancer.with_surrogate: GeckoTerminal wins; the surrogate fills."""
 
     def setUp(self):
-        rebalancer._SURR.clear(); rebalancer.LAST_SURROGATE.clear()
+        lp.tape._SURR.clear(); lp.tape.LAST_SURROGATE.clear()
 
     def tearDown(self):
-        rebalancer._SURR.clear(); rebalancer.LAST_SURROGATE.clear()
+        lp.tape._SURR.clear(); lp.tape.LAST_SURROGATE.clear()
 
     def run_it(self, gecko, surr=None, calls=None, pool='P'):
         def fake(pair, start, price, ref=None):
@@ -219,14 +223,14 @@ class Overlay(unittest.TestCase):
             if isinstance(surr, Exception):
                 raise surr
             return ('Binance', surr) if surr is not None else (None, None)
-        with mock.patch.object(rebalancer.calm, 'surrogate_5m', fake):
-            return rebalancer.with_surrogate(pool, gecko, 120.0, 'SOL/USDC')
+        with mock.patch.object(calm, 'surrogate_5m', fake):
+            return lp.tape.with_surrogate(pool, gecko, 120.0, 'SOL/USDC')
 
     def test_a_complete_gecko_tape_never_asks_the_surrogate(self):
         g = tape()
-        with mock.patch.object(rebalancer.calm, 'surrogate_5m', side_effect=AssertionError('asked')):
-            out = rebalancer.with_surrogate('P', g, 120.0, 'SOL/USDC')
-        self.assertIs(out, g); self.assertEqual(rebalancer.LAST_SURROGATE['P']['source'], 'Gecko')
+        with mock.patch.object(calm, 'surrogate_5m', side_effect=AssertionError('asked')):
+            out = lp.tape.with_surrogate('P', g, 120.0, 'SOL/USDC')
+        self.assertIs(out, g); self.assertEqual(lp.tape.LAST_SURROGATE['P']['source'], 'Gecko')
 
     def test_gaps_are_filled_and_gecko_wins_where_it_has_a_bar(self):
         end = slot_now(); holes = {end - k * S for k in range(1, 6)}
@@ -239,7 +243,7 @@ class Overlay(unittest.TestCase):
             self.assertEqual(at[t], c)                                         # GeckoTerminal untouched
         for t in holes:
             self.assertAlmostEqual(at[t], dict(zip(full[0].astype(int), full[4]))[t] * 1.0002)
-        src = rebalancer.LAST_SURROGATE['P']
+        src = lp.tape.LAST_SURROGATE['P']
         self.assertEqual(src['source'], 'Gecko+Binance'); self.assertEqual(src['filled_1h'], 5)
         self.assertTrue(calm.tape_fresh(out[0], time.time()))
 
@@ -247,17 +251,17 @@ class Overlay(unittest.TestCase):
         end = slot_now()
         g = tape(end=end, drop={end - k * S for k in range(1, 20)})
         self.run_it(g, tape(end=end))
-        self.assertEqual(rebalancer.LAST_SURROGATE['P']['source'], 'Binance')
+        self.assertEqual(lp.tape.LAST_SURROGATE['P']['source'], 'Binance')
 
     def test_every_surrogate_failure_returns_gecko_as_it_is(self):
         end = slot_now(); g = tape(end=end, drop={end - S})
         for surr in (None, RuntimeError('down')):
-            rebalancer._SURR.clear()
+            lp.tape._SURR.clear()
             out = self.run_it(g, surr)
             self.assertIs(out, g)
-        with mock.patch.object(rebalancer.calm, 'missing_slots', side_effect=ValueError('bug')):
-            self.assertIs(rebalancer.with_surrogate('P', g, 120.0), g)
-        self.assertIsNone(rebalancer.with_surrogate('P', None, 120.0))
+        with mock.patch.object(calm, 'missing_slots', side_effect=ValueError('bug')):
+            self.assertIs(lp.tape.with_surrogate('P', g, 120.0), g)
+        self.assertIsNone(lp.tape.with_surrogate('P', None, 120.0))
 
     def test_asks_at_most_once_per_refresh_and_keeps_bars_a_failed_ask_gave(self):
         end = slot_now(); g = tape(end=end, drop={end - S, end - 2 * S}); calls = []
@@ -267,8 +271,8 @@ class Overlay(unittest.TestCase):
         g2 = tape(end=end, drop={end - S, end - 2 * S, end - 3 * S})         # a new hole, inside the refresh
         self.run_it(g2, full, calls)
         self.assertEqual(len(calls), 1)
-        t, name, s = rebalancer._SURR['P']
-        rebalancer._SURR['P'] = (t - 10 * rebalancer.SURROGATE_REFRESH, name, s)
+        t, name, s = lp.tape._SURR['P']
+        lp.tape._SURR['P'] = (t - 10 * lp.tape.SURROGATE_REFRESH, name, s)
         out = self.run_it(g2, None, calls)                                   # the next ask fails
         self.assertEqual(len(calls), 2)
         self.assertIn(end - S, set(out[0].astype(int)))                      # the earlier fill stays
@@ -276,50 +280,50 @@ class Overlay(unittest.TestCase):
     def test_holes_already_filled_are_not_asked_again(self):
         end = slot_now(); g = tape(end=end, drop={end - 50 * S}); calls = []
         self.run_it(g, tape(end=end), calls)
-        t, name, s = rebalancer._SURR['P']
-        rebalancer._SURR['P'] = (t - 10 * rebalancer.SURROGATE_REFRESH, name, s)
+        t, name, s = lp.tape._SURR['P']
+        lp.tape._SURR['P'] = (t - 10 * lp.tape.SURROGATE_REFRESH, name, s)
         self.run_it(g, tape(end=end), calls)
         self.assertEqual(len(calls), 1)
 
     def test_back_to_gecko_when_it_is_complete(self):
         end = slot_now(); g = tape(end=end, drop={end - S})
         self.run_it(g, tape(end=end))
-        self.assertEqual(rebalancer.LAST_SURROGATE['P']['source'], 'Gecko+Binance')
+        self.assertEqual(lp.tape.LAST_SURROGATE['P']['source'], 'Gecko+Binance')
         full = tape(end=end)
-        with mock.patch.object(rebalancer.calm, 'surrogate_5m', side_effect=AssertionError('asked')):
-            out = rebalancer.with_surrogate('P', full, 120.0, 'SOL/USDC')
+        with mock.patch.object(calm, 'surrogate_5m', side_effect=AssertionError('asked')):
+            out = lp.tape.with_surrogate('P', full, 120.0, 'SOL/USDC')
         self.assertIs(out, full)
-        self.assertEqual(rebalancer.LAST_SURROGATE['P']['source'], 'Gecko'); self.assertNotIn('P', rebalancer._SURR)
+        self.assertEqual(lp.tape.LAST_SURROGATE['P']['source'], 'Gecko'); self.assertNotIn('P', lp.tape._SURR)
 
     def test_the_cache_holds_one_pool_and_one_day(self):
         end = slot_now()
         for p in ('P1', 'P2', 'P3'):
             self.run_it(tape(end=end, drop={end - S}), tape(n=8000, end=end), pool=p)
-        self.assertEqual(list(rebalancer._SURR), ['P3'])
-        s = rebalancer._SURR['P3'][2]
-        self.assertGreaterEqual(s[0][0], time.time() - rebalancer.SURROGATE_LOOKBACK_S - 3600 - S)
+        self.assertEqual(list(lp.tape._SURR), ['P3'])
+        s = lp.tape._SURR['P3'][2]
+        self.assertGreaterEqual(s[0][0], time.time() - lp.tape.SURROGATE_LOOKBACK_S - 3600 - S)
 
 
 class NeverStored(unittest.TestCase):
     """Surrogate bars never reach the database: a late GeckoTerminal bar replaces them."""
 
     def setUp(self):
-        rebalancer._TAPE5.clear(); rebalancer._SURR.clear()
-        with rebalancer.db.cursor(commit=True) as cur:
+        lp.tape._TAPE5.clear(); lp.tape._SURR.clear()
+        with db.cursor(commit=True) as cur:
             cur.execute('truncate tape5')
 
     def tearDown(self):
-        rebalancer._TAPE5.clear(); rebalancer._SURR.clear()
+        lp.tape._TAPE5.clear(); lp.tape._SURR.clear()
 
     def test_tape5_stores_gecko_only(self):
         end = slot_now(); holes = {end - k * S for k in range(1, 4)}
         g = tape(n=1000, end=end, drop=holes)
-        with mock.patch.object(rebalancer.calm, 'tape_5m', lambda pool, live_price=None, before=None: None if before else g), \
-                mock.patch.object(rebalancer.config, 'REGIME_TAPE_DAYS', 1), \
-                mock.patch.object(rebalancer.calm, 'surrogate_5m', lambda *a, **k: ('Binance', tape(n=1000, end=end))):
-            b = rebalancer.tape5('SURRPOOL', 120.0, 'SOL/USDC')
+        with mock.patch.object(calm, 'tape_5m', lambda pool, live_price=None, before=None: None if before else g), \
+                mock.patch.object(config, 'REGIME_TAPE_DAYS', 1), \
+                mock.patch.object(calm, 'surrogate_5m', lambda *a, **k: ('Binance', tape(n=1000, end=end))):
+            b = lp.tape.tape5('SURRPOOL', 120.0, 'SOL/USDC')
         self.assertTrue(holes <= set(b[0].astype(int)))
-        with rebalancer.db.cursor() as cur:
+        with db.cursor() as cur:
             cur.execute("select ts from tape5 where pool = 'SURRPOOL'")
             stored = {int(r['ts']) for r in cur.fetchall()}
         self.assertTrue(stored); self.assertFalse(holes & stored)
@@ -329,14 +333,14 @@ class RegimeDefence(unittest.TestCase):
     """regime_view: STALE only when no source has the market; no flapping."""
 
     def view(self, state, bars, p=120.0, half=1.02):
-        with mock.patch.object(rebalancer.config, 'REGIME_ENABLED', True), \
-                mock.patch.object(rebalancer, 'tape5', lambda pool, price, pair=None: bars), \
-                mock.patch.object(rebalancer, 'liquidity_view', lambda *a: {'factor': 1.0}), \
-                mock.patch.object(rebalancer, 'save', lambda s: None), \
-                mock.patch.object(rebalancer, 'notify', lambda *a, **k: None), \
-                mock.patch.object(rebalancer.db, 'event', lambda *a: None):
-            rebalancer.LAST_SURROGATE.clear()
-            return rebalancer.regime_view(state, {'price': p, 'lowerPrice': p / half, 'upperPrice': p * half})
+        with mock.patch.object(config, 'REGIME_ENABLED', True), \
+                mock.patch.object(lp.tape, 'tape5', lambda pool, price, pair=None: bars), \
+                mock.patch.object(lp.tape, 'liquidity_view', lambda *a: {'factor': 1.0}), \
+                mock.patch.object(lp.paths, 'save', lambda s: None), \
+                mock.patch.object(lp.books, 'notify', lambda *a, **k: None), \
+                mock.patch.object(db, 'event', lambda *a: None):
+            lp.tape.LAST_SURROGATE.clear()
+            return lp.regime.regime_view(state, {'price': p, 'lowerPrice': p / half, 'upperPrice': p * half})
 
     def test_replay_2026_09_29_both_sources_down_is_stale(self):
         end = slot_now()
@@ -350,7 +354,7 @@ class RegimeDefence(unittest.TestCase):
         state = {'regime_mode': 'STALE'}; b = tape()
         v = self.view(state, b)
         self.assertEqual(v['mode'], 'STALE'); self.assertGreater(v['unstale_in_s'], 0)
-        state['tape_fresh_since'] -= rebalancer.REGIME_UNSTALE_S + 1
+        state['tape_fresh_since'] -= lp.regime.REGIME_UNSTALE_S + 1
         v = self.view(state, b)
         self.assertNotEqual(v['mode'], 'STALE'); self.assertFalse(v.get('stale'))
 
@@ -381,12 +385,12 @@ class RegimeDefence(unittest.TestCase):
 class SourceMessages(unittest.TestCase):
     def run_seq(self, labels):
         sent, state = [], {}
-        with mock.patch.object(rebalancer, 'save', lambda s: None), \
-                mock.patch.object(rebalancer.db, 'event', lambda *a: None), \
-                mock.patch.object(rebalancer, 'notify', lambda ev, **kw: sent.append(kw['source'])):
+        with mock.patch.object(lp.paths, 'save', lambda s: None), \
+                mock.patch.object(db, 'event', lambda *a: None), \
+                mock.patch.object(lp.books, 'notify', lambda ev, **kw: sent.append(kw['source'])):
             for lab in labels:
                 n = 0 if lab in ('Gecko', 'none') else 4
-                rebalancer.track_tape_source(state, {'source': lab, 'surrogate': 'Binance' if n else None,
+                lp.regime.track_tape_source(state, {'source': lab, 'surrogate': 'Binance' if n else None,
                                                      'filled_1h': n, 'bars_1h': 12, 'filled_24h': n})
         return sent
 
@@ -398,7 +402,7 @@ class SourceMessages(unittest.TestCase):
 
     def test_tape_source_labels(self):
         now = time.time(); b = tape(end=slot_now())
-        f = rebalancer.tape_source
+        f = lp.tape.tape_source
         self.assertEqual(f(b[0], [], now, None, True)['source'], 'Gecko')
         self.assertEqual(f(b[0], b[0][-3:], now, 'Binance', True)['source'], 'Gecko+Binance')
         self.assertEqual(f(b[0], b[0][-20:], now, 'Binance', True)['source'], 'Binance')
@@ -424,8 +428,8 @@ class Boundaries(unittest.TestCase):
     def test_tape_source_hour_edge(self):
         end = slot_now(); ts = np.arange(end - 30 * S, end, S, dtype=float)
         now = float(end)                                                           # a bar sits at now - 3900
-        self.assertEqual(rebalancer.tape_source(ts, [], now, None, True)['bars_1h'], 13)
-        self.assertEqual(rebalancer.tape_source(ts, [], now + 1, None, True)['bars_1h'], 12)
+        self.assertEqual(lp.tape.tape_source(ts, [], now, None, True)['bars_1h'], 13)
+        self.assertEqual(lp.tape.tape_source(ts, [], now + 1, None, True)['bars_1h'], 12)
 
     def test_binance_parses_every_column_and_pages_from_the_last_bar(self):
         b = tape(n=1500)
@@ -446,7 +450,7 @@ class Boundaries(unittest.TestCase):
 
 class OverlayWiring(unittest.TestCase):
     def setUp(self):
-        rebalancer._SURR.clear(); rebalancer.LAST_SURROGATE.clear()
+        lp.tape._SURR.clear(); lp.tape.LAST_SURROGATE.clear()
 
     tearDown = setUp
 
@@ -455,27 +459,27 @@ class OverlayWiring(unittest.TestCase):
 
         def fake(pair, start, price, ref=None):
             asked.append(pair); return None, None
-        with mock.patch.object(rebalancer.calm, 'surrogate_5m', fake):
-            rebalancer.with_surrogate(rebalancer.config.POOL, g, 120.0)
-            rebalancer._SURR.clear()
-            rebalancer.with_surrogate('SOMEOTHERPOOL', g, 120.0)
-            rebalancer._SURR.clear()
-            rebalancer.with_surrogate('SOMEOTHERPOOL', g, 120.0, 'SOL/USDT')
-        self.assertEqual(asked, [rebalancer.config.PAIR_LABEL, None, 'SOL/USDT'])
+        with mock.patch.object(calm, 'surrogate_5m', fake):
+            lp.tape.with_surrogate(config.POOL, g, 120.0)
+            lp.tape._SURR.clear()
+            lp.tape.with_surrogate('SOMEOTHERPOOL', g, 120.0)
+            lp.tape._SURR.clear()
+            lp.tape.with_surrogate('SOMEOTHERPOOL', g, 120.0, 'SOL/USDT')
+        self.assertEqual(asked, [config.PAIR_LABEL, None, 'SOL/USDT'])
 
     def test_a_complete_tape_reports_its_hour(self):
         g = tape()
-        rebalancer.with_surrogate('P', g, 120.0, 'SOL/USDC')
-        src = rebalancer.LAST_SURROGATE['P']
+        lp.tape.with_surrogate('P', g, 120.0, 'SOL/USDC')
+        src = lp.tape.LAST_SURROGATE['P']
         self.assertGreaterEqual(src['bars_1h'], 11); self.assertEqual(src['filled_1h'], 0)
         self.assertIsNone(src['surrogate'])
 
     def test_the_cache_keeps_exactly_the_last_day(self):
         end = slot_now()
-        with mock.patch.object(rebalancer.calm, 'surrogate_5m', lambda *a, **k: ('Binance', tape(n=8000, end=end))):
-            rebalancer.with_surrogate('P', tape(end=end, drop={end - S}), 120.0, 'SOL/USDC')
-        s = rebalancer._SURR['P'][2]
-        edge = time.time() - rebalancer.SURROGATE_LOOKBACK_S - 3600
+        with mock.patch.object(calm, 'surrogate_5m', lambda *a, **k: ('Binance', tape(n=8000, end=end))):
+            lp.tape.with_surrogate('P', tape(end=end, drop={end - S}), 120.0, 'SOL/USDC')
+        s = lp.tape._SURR['P'][2]
+        edge = time.time() - lp.tape.SURROGATE_LOOKBACK_S - 3600
         self.assertGreaterEqual(s[0][0], edge); self.assertLessEqual(s[0][0], edge + S)
 
 
@@ -488,16 +492,16 @@ class ViewWiring(unittest.TestCase):
             if seen is not None:
                 seen.append(pool)
             if surr is not None:
-                rebalancer.LAST_SURROGATE[pool] = surr
+                lp.tape.LAST_SURROGATE[pool] = surr
             return bars
-        with mock.patch.object(rebalancer.config, 'REGIME_ENABLED', True), \
-                mock.patch.object(rebalancer, 'tape5', t5), \
-                mock.patch.object(rebalancer, 'liquidity_view', lambda *a: {'factor': factor}), \
-                mock.patch.object(rebalancer, 'save', lambda s: None), \
-                mock.patch.object(rebalancer, 'notify', lambda *a, **k: None), \
-                mock.patch.object(rebalancer.db, 'event', lambda *a: None):
-            rebalancer.LAST_SURROGATE.clear()
-            return rebalancer.regime_view(state, status)
+        with mock.patch.object(config, 'REGIME_ENABLED', True), \
+                mock.patch.object(lp.tape, 'tape5', t5), \
+                mock.patch.object(lp.tape, 'liquidity_view', lambda *a: {'factor': factor}), \
+                mock.patch.object(lp.paths, 'save', lambda s: None), \
+                mock.patch.object(lp.books, 'notify', lambda *a, **k: None), \
+                mock.patch.object(db, 'event', lambda *a: None):
+            lp.tape.LAST_SURROGATE.clear()
+            return lp.regime.regime_view(state, status)
 
     def test_no_tape_is_no_view(self):
         self.assertIsNone(self.view({}, None))
@@ -506,10 +510,10 @@ class ViewWiring(unittest.TestCase):
         seen = []; p = 120.0
         self.view({}, tape(), status={'price': p, 'lowerPrice': p / 1.02, 'upperPrice': p * 1.02, 'whirlpool': 'HELD'}, seen=seen)
         self.view({}, tape(), seen=seen)
-        self.assertEqual(seen, ['HELD', rebalancer.config.POOL])
+        self.assertEqual(seen, ['HELD', config.POOL])
 
     def test_the_liquidity_threshold_is_clamped(self):
-        base = rebalancer.config.REGIME_THRESHOLD
+        base = config.REGIME_THRESHOLD
         self.assertAlmostEqual(self.view({}, tape(), factor=1.0)['threshold'], min(max(base, 0.05), 0.40))
         self.assertAlmostEqual(self.view({}, tape(), factor=1e6)['threshold'], 0.40)
         self.assertAlmostEqual(self.view({}, tape(), factor=1e-6)['threshold'], 0.05)
@@ -530,12 +534,12 @@ class ViewWiring(unittest.TestCase):
 class SourceMessageText(unittest.TestCase):
     def go(self, first, labels):
         sent, state = [], {}
-        with mock.patch.object(rebalancer, 'save', lambda s: None), \
-                mock.patch.object(rebalancer.db, 'event', lambda *a: None), \
-                mock.patch.object(rebalancer, 'notify', lambda ev, **kw: sent.append(kw)):
+        with mock.patch.object(lp.paths, 'save', lambda s: None), \
+                mock.patch.object(db, 'event', lambda *a: None), \
+                mock.patch.object(lp.books, 'notify', lambda ev, **kw: sent.append(kw)):
             for lab in [first] + labels:
                 n = 0 if lab in ('Gecko', 'none') else 4
-                rebalancer.track_tape_source(state, {'source': lab, 'surrogate': 'Binance' if n else None,
+                lp.regime.track_tape_source(state, {'source': lab, 'surrogate': 'Binance' if n else None,
                                                      'filled_1h': n, 'bars_1h': 12, 'filled_24h': n})
         return sent
 

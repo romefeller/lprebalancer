@@ -7,7 +7,7 @@ import _fixtures
 _fixtures.ensure_profile()
 
 import db          # noqa: E402
-import rebalancer  # noqa: E402
+import lp.regime  # noqa: E402
 
 
 class Touches(unittest.TestCase):
@@ -58,12 +58,12 @@ class Touches(unittest.TestCase):
     def test_the_loop_records_at_most_every_ten_minutes_and_skips_stale_views(self):
         rv = {'probs': [[1.0, 0.2]], 'horizon_minutes': 120, 'threshold': 0.2, 'choice': 1.01}
         calls = []
-        with mock.patch.object(rebalancer.db, 'record_touch_forecast', lambda *a: calls.append(a)), \
-                mock.patch.object(rebalancer.db, 'resolve_touch_forecasts', lambda p: 0), \
-                mock.patch.object(rebalancer.db, 'touch_calibration', lambda d, p: {'chosen': {'n': 0}}), \
-                mock.patch.object(rebalancer, 'save', lambda s: None):
+        with mock.patch.object(db, 'record_touch_forecast', lambda *a: calls.append(a)), \
+                mock.patch.object(db, 'resolve_touch_forecasts', lambda p: 0), \
+                mock.patch.object(db, 'touch_calibration', lambda d, p: {'chosen': {'n': 0}}), \
+                mock.patch.object(lp.paths, 'save', lambda s: None):
             st = {}
-            rebalancer.track_touch_forecasts(st, rv, {'price': 100.0, 'whirlpool': 'P'})
-            rebalancer.track_touch_forecasts(st, rv, {'price': 100.0, 'whirlpool': 'P'})
-            rebalancer.track_touch_forecasts({}, dict(rv, stale=True), {'price': 100.0, 'whirlpool': 'P'})
+            lp.regime.track_touch_forecasts(st, rv, {'price': 100.0, 'whirlpool': 'P'})
+            lp.regime.track_touch_forecasts(st, rv, {'price': 100.0, 'whirlpool': 'P'})
+            lp.regime.track_touch_forecasts({}, dict(rv, stale=True), {'price': 100.0, 'whirlpool': 'P'})
         self.assertEqual(len(calls), 1)

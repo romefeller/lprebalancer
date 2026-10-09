@@ -29,6 +29,10 @@ import _fixtures  # noqa: F401  (first: it puts lp_bot on the path)
 import calm
 import db
 import rebalancer
+import lp.polls
+import lp.regime
+import config
+import health
 import replay_capture
 
 FIXTURES = pathlib.Path(__file__).resolve().parent / 'replay'
@@ -50,7 +54,7 @@ class PollReplay(unittest.TestCase):
         for path in sorted(FIXTURES.glob('polls_*.jsonl.gz')):
             for i, row in enumerate(lines(path)):
                 with self.subTest(fixture=path.name, line=i + 1):
-                    self.assertEqual(rebalancer.poll_verdict(row['seen']), row['verdict'])
+                    self.assertEqual(lp.polls.poll_verdict(row['seen']), row['verdict'])
 
     def test_every_verdict_kind_is_covered(self):
         acts, flags = set(), set()
@@ -138,16 +142,16 @@ class Properties(unittest.TestCase):
     @given(seen_st())
     def test_pure_and_json_stable(self, s):
         before = copy.deepcopy(s)
-        a = rebalancer.poll_verdict(s)
+        a = lp.polls.poll_verdict(s)
         self.assertEqual(s, before)                               # reads, never writes
-        self.assertEqual(rebalancer.poll_verdict(s), a)
-        self.assertEqual(rebalancer.poll_verdict(json.loads(json.dumps(s))), a)
+        self.assertEqual(lp.polls.poll_verdict(s), a)
+        self.assertEqual(lp.polls.poll_verdict(json.loads(json.dumps(s))), a)
         self.assertEqual(json.loads(json.dumps(a)), a)
 
     @FAST
     @given(seen_st())
     def test_exit_exactly_when_out_of_range(self, s):
-        v = rebalancer.poll_verdict(s)
+        v = lp.polls.poll_verdict(s)
         self.assertEqual(v['act'] == 'exit', not s['band']['in_range'])
         if v['act'] == 'exit':
             self.assertEqual(v['side'], 'above' if s['band']['price'] > s['band']['upper'] else 'below')
@@ -159,14 +163,14 @@ class Properties(unittest.TestCase):
     @FAST
     @given(seen_st())
     def test_every_voluntary_move_passes_its_gates(self, s):
-        v = rebalancer.poll_verdict(s)
+        v = lp.polls.poll_verdict(s)
         if v['act'] not in VOLUNTARY:
             return
         g, k = s['gates'], s['knobs']
         self.assertTrue(g['breaker_ok'])
-        self.assertTrue(rebalancer.move_gap_ok(g['calm_times'], g['last_rebalance'], AT, k['calm_min_gap']))
+        self.assertTrue(lp.regime.move_gap_ok(g['calm_times'], g['last_rebalance'], AT, k['calm_min_gap']))
         if v['act'].startswith('regime') or v['act'] in ('calm_narrow', 'calm_recentre'):
-            self.assertGreater(rebalancer.moves_left(g['calm_times'], AT, k['calm_max_moves']), 0)
+            self.assertGreater(lp.regime.moves_left(g['calm_times'], AT, k['calm_max_moves']), 0)
         if v['act'].startswith('calm'):
             self.assertIsNone(s['regime'])                        # regime mode owns the band when it has a view
             self.assertTrue(k['calm_enabled'])
@@ -176,7 +180,7 @@ class Properties(unittest.TestCase):
     @FAST
     @given(seen_st())
     def test_harvest_and_deferral_only_without_a_move(self, s):
-        v = rebalancer.poll_verdict(s)
+        v = lp.polls.poll_verdict(s)
         if v['harvest'] or v['deferred']:
             self.assertIsNone(v['act'])
         if v['deferred']:
@@ -234,22 +238,22 @@ class SameAsBefore(unittest.TestCase):
     @settings(max_examples=3000, deadline=None)
     @given(seen_st())
     def test_poll_verdict_is_the_inline_rules(self, s):
-        v = rebalancer.poll_verdict(s)
+        v = lp.polls.poll_verdict(s)
         self.assertEqual((v['act'], v['band'], v['side'], v['deferred'], v['harvest']), inline_rules(s))
 
     def test_the_wrappers_still_read_state_and_config(self):
         now = time.time()
-        with mock.patch.object(rebalancer.config, 'CALM_MAX_MOVES', 2), \
-                mock.patch.object(rebalancer.config, 'CALM_MIN_GAP', 600), \
-                mock.patch.object(rebalancer.config, 'CALM_BAND', 1.01), \
-                mock.patch.object(rebalancer.config, 'CALM_THRESHOLD', 0.25), \
-                mock.patch.object(rebalancer.health, 'allowed', lambda key, now=None: (True, 'closed', 0, None)):
+        with mock.patch.object(config, 'CALM_MAX_MOVES', 2), \
+                mock.patch.object(config, 'CALM_MIN_GAP', 600), \
+                mock.patch.object(config, 'CALM_BAND', 1.01), \
+                mock.patch.object(config, 'CALM_THRESHOLD', 0.25), \
+                mock.patch.object(health, 'allowed', lambda key, now=None: (True, 'closed', 0, None)):
             st_ = {'calm_times': [now - 100, now - 90000], 'last_rebalance': 0}
-            self.assertEqual(rebalancer.calm_budget_left(st_), 1)
-            self.assertFalse(rebalancer.voluntary_move_allowed(st_))
-            self.assertTrue(rebalancer.voluntary_move_allowed({'calm_times': [now - 700], 'last_rebalance': 0}))
-            self.assertEqual(rebalancer.calm_reopen_band({'calm': True, 'p_touch_fresh': 0.1}, st_), 1.01)
-            self.assertIsNone(rebalancer.calm_reopen_band({'calm': True, 'p_touch_fresh': 0.1},
+            self.assertEqual(lp.regime.calm_budget_left(st_), 1)
+            self.assertFalse(lp.regime.voluntary_move_allowed(st_))
+            self.assertTrue(lp.regime.voluntary_move_allowed({'calm_times': [now - 700], 'last_rebalance': 0}))
+            self.assertEqual(lp.regime.calm_reopen_band({'calm': True, 'p_touch_fresh': 0.1}, st_), 1.01)
+            self.assertIsNone(lp.regime.calm_reopen_band({'calm': True, 'p_touch_fresh': 0.1},
                                                           {'calm_times': [now - 1, now - 2]}))
 
 
@@ -271,25 +275,25 @@ class Recording(unittest.TestCase):
 
     def seen(self, fc=None, busy=False, allowed=True, threshold=0.5):
         asked = []
-        with mock.patch.object(rebalancer, 'busy_hour', lambda: asked.append(1) or busy), \
-                mock.patch.object(rebalancer.config, 'PROACTIVE_THRESHOLD', threshold), \
-                mock.patch.object(rebalancer.health, 'allowed', lambda key, now=None: (allowed, 'x', 0, None)):
-            s = rebalancer.poll_seen({'calm_times': [time.time() - 10, time.time() - 90000], 'last_rebalance': 5,
+        with mock.patch.object(lp.board, 'busy_hour', lambda: asked.append(1) or busy), \
+                mock.patch.object(config, 'PROACTIVE_THRESHOLD', threshold), \
+                mock.patch.object(health, 'allowed', lambda key, now=None: (allowed, 'x', 0, None)):
+            s = lp.polls.poll_seen({'calm_times': [time.time() - 10, time.time() - 90000], 'last_rebalance': 5,
                                       'last_harvest': 7}, STATUS, RV, CV, fc)
         return s, asked
 
     def test_seen_is_plain_json_with_only_the_listed_fields(self):
         s, _ = self.seen(fc={'act': np.bool_(False), 'p_exit_horizon': np.float64(0.3), 'other': 1})
         self.assertEqual(json.loads(json.dumps(s)), s)
-        self.assertEqual(set(s['regime']), set(rebalancer.SEEN_REGIME))
-        self.assertEqual(set(s['calm']), set(rebalancer.SEEN_CALM))
+        self.assertEqual(set(s['regime']), set(lp.polls.SEEN_REGIME))
+        self.assertEqual(set(s['calm']), set(lp.polls.SEEN_CALM))
         self.assertEqual(s['forecast'], {'act': False, 'p_exit_horizon': 0.3})
         self.assertEqual(s['band'], {'price': 100.0, 'lower': 98.0, 'upper': 102.0, 'in_range': True, 'fees_usd': 0.3})
         # a day-old move is out of the window, the ten-second-old one in it
         self.assertEqual(len(s['gates']['calm_times']), 1)
         self.assertLess(time.time() - s['gates']['calm_times'][0], 60)
         self.assertEqual((s['gates']['last_rebalance'], s['gates']['last_harvest']), (5, 7))
-        self.assertEqual(s['knobs'], rebalancer.poll_knobs())
+        self.assertEqual(s['knobs'], lp.polls.poll_knobs())
 
     def test_the_hour_is_read_only_for_a_live_proactive_case(self):
         for fc, threshold, want in (({'act': True, 'p_exit_horizon': 0.6}, 0.5, [1]),
@@ -304,8 +308,8 @@ class Recording(unittest.TestCase):
         self.assertTrue(self.seen(allowed=True)[0]['gates']['breaker_ok'])
 
     def test_no_views_and_out_of_range(self):
-        with mock.patch.object(rebalancer.health, 'allowed', lambda key, now=None: (True, 'x', 0, None)):
-            s = rebalancer.poll_seen({}, dict(STATUS, inRange=False, feesAccrued_USD=None), None, None, None)
+        with mock.patch.object(health, 'allowed', lambda key, now=None: (True, 'x', 0, None)):
+            s = lp.polls.poll_seen({}, dict(STATUS, inRange=False, feesAccrued_USD=None), None, None, None)
         self.assertEqual((s['regime'], s['calm'], s['forecast']), (None, None, None))
         self.assertFalse(s['band']['in_range'])
         self.assertEqual(s['gates']['calm_times'], [])
@@ -313,14 +317,14 @@ class Recording(unittest.TestCase):
 
     def test_record_poll_stores_and_prunes(self):
         s, _ = self.seen()
-        v = rebalancer.poll_verdict(s)
+        v = lp.polls.poll_verdict(s)
         with db.cursor(commit=True) as cur:
             cur.execute("insert into replay_polls (ts, profile, pool, seen, verdict) values "
                         "(now() - interval '15 days', %s, 'P', '{}', '{}'), "
                         "(now() - interval '15 days', 'someone-else', 'P', '{}', '{}'), "
                         "(now() - interval '13 days', %s, 'P', '{}', '{}')",
                         (db.CONTEXT['profile'], db.CONTEXT['profile']))
-        rebalancer.record_poll('POOL', s, v)
+        lp.polls.record_poll('POOL', s, v)
         with db.cursor() as cur:
             cur.execute('select profile, pool, seen, verdict, ts > now() - interval \'1 minute\' new '
                         'from replay_polls order by ts')
@@ -328,41 +332,41 @@ class Recording(unittest.TestCase):
         self.assertEqual([(r['profile'], r['new']) for r in rows],
                          [('someone-else', False), (db.CONTEXT['profile'], False), (db.CONTEXT['profile'], True)])
         self.assertEqual((rows[-1]['pool'], rows[-1]['seen'], rows[-1]['verdict']), ('POOL', s, v))
-        self.assertEqual(rebalancer.poll_verdict(rows[-1]['seen']), v)
+        self.assertEqual(lp.polls.poll_verdict(rows[-1]['seen']), v)
 
     def test_a_failed_record_is_said_and_never_raised(self):
         said = []
-        with mock.patch.object(rebalancer.db, 'record_replay_poll', side_effect=RuntimeError('db down')), \
-                mock.patch.object(rebalancer, 'notify', lambda ev, **kw: said.append((ev, kw['reason']))):
-            rebalancer.record_poll('POOL', {}, {})
+        with mock.patch.object(db, 'record_replay_poll', side_effect=RuntimeError('db down')), \
+                mock.patch.object(lp.books, 'notify', lambda ev, **kw: said.append((ev, kw['reason']))):
+            lp.polls.record_poll('POOL', {}, {})
         self.assertEqual(said, [('replay_record_failed', 'RuntimeError: db down')])
 
 
 class PureHelpers(unittest.TestCase):
     def test_moves_left(self):
-        self.assertEqual(rebalancer.moves_left([AT - 1, AT - 86399, AT - 86400, AT - 90000], AT, 3), 1)
-        self.assertEqual(rebalancer.moves_left([AT - 1] * 5, AT, 3), 0)
-        self.assertEqual(rebalancer.moves_left([], AT, 0), 0)
+        self.assertEqual(lp.regime.moves_left([AT - 1, AT - 86399, AT - 86400, AT - 90000], AT, 3), 1)
+        self.assertEqual(lp.regime.moves_left([AT - 1] * 5, AT, 3), 0)
+        self.assertEqual(lp.regime.moves_left([], AT, 0), 0)
 
     def test_move_gap_ok(self):
-        self.assertTrue(rebalancer.move_gap_ok([], AT - 600, AT, 600))
-        self.assertFalse(rebalancer.move_gap_ok([], AT - 599, AT, 600))
-        self.assertFalse(rebalancer.move_gap_ok([AT - 100], AT - 9999, AT, 600))
-        self.assertTrue(rebalancer.move_gap_ok([AT - 100000], AT - 9999, AT, 600))   # a day-old move does not count
-        self.assertTrue(rebalancer.move_gap_ok([AT - 700], 0, AT, 600))
+        self.assertTrue(lp.regime.move_gap_ok([], AT - 600, AT, 600))
+        self.assertFalse(lp.regime.move_gap_ok([], AT - 599, AT, 600))
+        self.assertFalse(lp.regime.move_gap_ok([AT - 100], AT - 9999, AT, 600))
+        self.assertTrue(lp.regime.move_gap_ok([AT - 100000], AT - 9999, AT, 600))   # a day-old move does not count
+        self.assertTrue(lp.regime.move_gap_ok([AT - 700], 0, AT, 600))
 
     def test_tight_reopen(self):
-        self.assertEqual(rebalancer.tight_reopen({'calm': True, 'p_touch_fresh': 0.1}, 1, 1.01, 0.25), 1.01)
-        self.assertEqual(rebalancer.tight_reopen({'calm': True, 'p_touch_fresh': None}, 1, 1.01, 0.25), 1.01)
-        self.assertIsNone(rebalancer.tight_reopen({'calm': True, 'p_touch_fresh': 0.25}, 1, 1.01, 0.25))
-        self.assertIsNone(rebalancer.tight_reopen({'calm': True, 'p_touch_fresh': 0.1}, 0, 1.01, 0.25))
-        self.assertIsNone(rebalancer.tight_reopen({'calm': False, 'p_touch_fresh': 0.1}, 1, 1.01, 0.25))
-        self.assertIsNone(rebalancer.tight_reopen(None, 1, 1.01, 0.25))
+        self.assertEqual(lp.regime.tight_reopen({'calm': True, 'p_touch_fresh': 0.1}, 1, 1.01, 0.25), 1.01)
+        self.assertEqual(lp.regime.tight_reopen({'calm': True, 'p_touch_fresh': None}, 1, 1.01, 0.25), 1.01)
+        self.assertIsNone(lp.regime.tight_reopen({'calm': True, 'p_touch_fresh': 0.25}, 1, 1.01, 0.25))
+        self.assertIsNone(lp.regime.tight_reopen({'calm': True, 'p_touch_fresh': 0.1}, 0, 1.01, 0.25))
+        self.assertIsNone(lp.regime.tight_reopen({'calm': False, 'p_touch_fresh': 0.1}, 1, 1.01, 0.25))
+        self.assertIsNone(lp.regime.tight_reopen(None, 1, 1.01, 0.25))
 
     def test_plain(self):
-        self.assertEqual(json.dumps({'a': np.bool_(True), 'b': np.int64(3), 'c': math.inf}, default=rebalancer._plain),
+        self.assertEqual(json.dumps({'a': np.bool_(True), 'b': np.int64(3), 'c': math.inf}, default=lp.polls._plain),
                          '{"a": true, "b": 3, "c": Infinity}')
-        self.assertEqual(rebalancer._plain(object.__new__(type('X', (), {'__str__': lambda self: 'x'}))), 'x')
+        self.assertEqual(lp.polls._plain(object.__new__(type('X', (), {'__str__': lambda self: 'x'}))), 'x')
 
 
 if __name__ == '__main__':

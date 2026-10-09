@@ -11,7 +11,11 @@ _fixtures.ensure_profile()
 import config      # noqa: E402
 import db          # noqa: E402
 import health      # noqa: E402
-import rebalancer  # noqa: E402
+import lp.board  # noqa: E402
+import lp.books  # noqa: E402
+import lp.regime  # noqa: E402
+import lp.signers  # noqa: E402
+import lp.swaps  # noqa: E402
 from test_health import clear, venue, ARMED, SIGS  # noqa: E402
 
 
@@ -76,8 +80,8 @@ class ChainEdges(unittest.TestCase):
 
         def fake(*a, **k):
             seen.update(args=a, **k); return answer
-        with mock.patch.object(rebalancer, '_chain', fake):
-            rebalancer.chain(*args, **kw)
+        with mock.patch.object(lp.signers, '_chain', fake):
+            lp.signers.chain(*args, **kw)
         return seen
 
     def test_defaults_reach_the_signer(self):
@@ -124,15 +128,15 @@ class IdleEdges(unittest.TestCase):
         t = IdleWaitsForSwaps()
         import datetime as dt
         opened = dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=1)
-        with mock.patch.object(rebalancer.time, 'time', lambda: now), \
-                mock.patch.object(rebalancer.db, 'position_opened', lambda m: opened), \
-                mock.patch.object(rebalancer.db, 'event', lambda *a: None), \
-                mock.patch.object(rebalancer, 'calm_budget_left', lambda s: 40), \
-                mock.patch.object(rebalancer, 'voluntary_move_allowed', lambda s: True), \
-                mock.patch.object(rebalancer, 'save', lambda s: None), \
-                mock.patch.object(rebalancer, 'notify', lambda *a, **k: None), \
-                mock.patch.object(rebalancer, 'rebalance', lambda *a, **k: None):
-            out = rebalancer.deploy_idle(st, dict(t.STATUS), dict(t.WALLET), {'choice': 1.025}, 119.6)
+        with mock.patch.object(time, 'time', lambda: now), \
+                mock.patch.object(db, 'position_opened', lambda m: opened), \
+                mock.patch.object(db, 'event', lambda *a: None), \
+                mock.patch.object(lp.regime, 'calm_budget_left', lambda s: 40), \
+                mock.patch.object(lp.regime, 'voluntary_move_allowed', lambda s: True), \
+                mock.patch.object(lp.paths, 'save', lambda s: None), \
+                mock.patch.object(lp.books, 'notify', lambda *a, **k: None), \
+                mock.patch.object(lp.moves, 'rebalance', lambda *a, **k: None):
+            out = lp.swaps.deploy_idle(st, dict(t.STATUS), dict(t.WALLET), {'choice': 1.025}, 119.6)
         self.assertIs(out, False)
 
     def test_one_deploy_left_is_used_and_old_ones_are_pruned(self):
@@ -152,16 +156,16 @@ class VoluntaryGap(unittest.TestCase):
     def test_the_gap_holds_even_when_healthy(self):
         now = time.time()
         with mock.patch.object(config, 'CALM_MIN_GAP', 600):
-            self.assertFalse(rebalancer.voluntary_move_allowed({'calm_times': [now - 100], 'last_rebalance': 0}))
-            self.assertFalse(rebalancer.voluntary_move_allowed({'calm_times': [], 'last_rebalance': now - 599}))
-            self.assertTrue(rebalancer.voluntary_move_allowed({'calm_times': [now - 700], 'last_rebalance': now - 601}))
+            self.assertFalse(lp.regime.voluntary_move_allowed({'calm_times': [now - 100], 'last_rebalance': 0}))
+            self.assertFalse(lp.regime.voluntary_move_allowed({'calm_times': [], 'last_rebalance': now - 599}))
+            self.assertTrue(lp.regime.voluntary_move_allowed({'calm_times': [now - 700], 'last_rebalance': now - 601}))
 
 
 class PickEdges(unittest.TestCase):
     def pick(self, venues, **kw):
         args = dict(execute_dexes=ARMED, signers=SIGS, min_hours=6)
         args.update(kw)
-        return rebalancer.failover_pick('raydium-clmm', venues, lambda d: True, **args)
+        return lp.board.failover_pick('raydium-clmm', venues, lambda d: True, **args)
 
     def test_a_held_venue_without_an_income_figure(self):
         held = dict(venue('raydium-clmm', 0.0, held=True), total_pct_day=None)
@@ -192,15 +196,15 @@ class FailoverEdges(unittest.TestCase):
         seen = {'vv': [], 'reopen': [], 'rebalance': []}
         with mock.patch.object(config, 'DEX', 'raydium-clmm'), mock.patch.object(config, 'POOL', 'POOL_raydium-clmm'), \
                 mock.patch.object(config, 'POOL_PINNED', pinned), mock.patch.object(config, 'EXECUTE_DEXES', ARMED), \
-                mock.patch.object(config, 'REGIME_ENABLED', regime), mock.patch.object(rebalancer, 'SIGNERS', SIGS), \
-                mock.patch.object(rebalancer, 'venue_view', lambda p, q=1.0: (seen['vv'].append((p, q)), venues)[1]), \
-                mock.patch.object(rebalancer, 'regime_choice_now', lambda *a: choice), \
-                mock.patch.object(rebalancer, 'save', lambda s: None), mock.patch.object(rebalancer.db, 'event', lambda *a: None), \
-                mock.patch.object(rebalancer, 'notify', lambda *a, **k: None), \
-                mock.patch.object(rebalancer, 'rebalance', lambda *a, **k: seen['rebalance'].append(k)), \
-                mock.patch.object(rebalancer, 'repoint', lambda row: None), \
-                mock.patch.object(rebalancer, 'reopen', lambda s, r, band=None, recovering=False: seen['reopen'].append(band)):
-            out = rebalancer.venue_failover({}, status, price=price, quote=quote)
+                mock.patch.object(config, 'REGIME_ENABLED', regime), mock.patch.object(lp.signers, 'SIGNERS', SIGS), \
+                mock.patch.object(lp.board, 'venue_view', lambda p, q=1.0: (seen['vv'].append((p, q)), venues)[1]), \
+                mock.patch.object(lp.regime, 'regime_choice_now', lambda *a: choice), \
+                mock.patch.object(lp.paths, 'save', lambda s: None), mock.patch.object(db, 'event', lambda *a: None), \
+                mock.patch.object(lp.books, 'notify', lambda *a, **k: None), \
+                mock.patch.object(lp.moves, 'rebalance', lambda *a, **k: seen['rebalance'].append(k)), \
+                mock.patch.object(lp.board, 'repoint', lambda row: None), \
+                mock.patch.object(lp.moves, 'reopen', lambda s, r, band=None, recovering=False: seen['reopen'].append(band)):
+            out = lp.board.venue_failover({}, status, price=price, quote=quote)
         return out, seen
 
     V = [venue('raydium-clmm', 1.0, held=True), venue('byreal', 0.9)]
@@ -232,10 +236,10 @@ class FailoverEdges(unittest.TestCase):
 
 class TidyEdges(unittest.TestCase):
     def test_nothing_is_nothing(self):
-        self.assertIsNone(rebalancer.tidy(None)); self.assertIsNone(rebalancer.tidy(''))
+        self.assertIsNone(lp.books.tidy(None)); self.assertIsNone(lp.books.tidy(''))
 
     def test_a_program_error_starts_at_its_name_and_is_capped(self):
-        t = rebalancer.tidy('Simulation noise here ' + 'custom program error: 0x1771 ' + 'x' * 300)
+        t = lp.books.tidy('Simulation noise here ' + 'custom program error: 0x1771 ' + 'x' * 300)
         self.assertTrue(t.startswith('custom program error: 0x1771'), t)
         self.assertEqual(len(t), 140)
 
@@ -245,37 +249,37 @@ class RegimeAtMoveEdges(unittest.TestCase):
 
     def test_no_band_without_a_proper_band(self):
         for lo, up in ((120.0, 120.0), (0.0, 121.0), (121.0, 120.0), (None, 121.0), (120.0, None), (-1.0, 1.0)):
-            self.assertIsNone(rebalancer.regime_at_move(self.VIEW, lo, up)['held'], (lo, up))
+            self.assertIsNone(lp.books.regime_at_move(self.VIEW, lo, up)['held'], (lo, up))
 
     def test_probs_as_strings_or_missing(self):
-        self.assertEqual(rebalancer.regime_at_move(self.VIEW, 120 / 1.03, 120 * 1.03)['p_held'], 0.081)
-        self.assertIsNone(rebalancer.regime_at_move({'probs': None}, 120 / 1.03, 120 * 1.03)['p_held'])
-        self.assertIsNone(rebalancer.regime_at_move({}, 120 / 1.03, 120 * 1.03)['p_held'])
+        self.assertEqual(lp.books.regime_at_move(self.VIEW, 120 / 1.03, 120 * 1.03)['p_held'], 0.081)
+        self.assertIsNone(lp.books.regime_at_move({'probs': None}, 120 / 1.03, 120 * 1.03)['p_held'])
+        self.assertIsNone(lp.books.regime_at_move({}, 120 / 1.03, 120 * 1.03)['p_held'])
 
 
 class NotifyBookAttachments(unittest.TestCase):
     def go(self, **payload):
         sent = []
-        with mock.patch.object(rebalancer.db, 'stats', lambda: {}), \
-                mock.patch.object(rebalancer.health, 'summary', lambda: []), \
-                mock.patch.object(rebalancer, 'notify', lambda ev, **p: sent.append(p)):
-            rebalancer.notify_book('in_band', **payload)
+        with mock.patch.object(db, 'stats', lambda: {}), \
+                mock.patch.object(health, 'summary', lambda: []), \
+                mock.patch.object(lp.books, 'notify', lambda ev, **p: sent.append(p)):
+            lp.books.notify_book('in_band', **payload)
         return sent[0]
 
     def test_calm_regime_and_venues_are_attached_unless_given(self):
         venues = [{'dex': str(i)} for i in range(6)]
         with mock.patch.object(config, 'CALM_ENABLED', True), mock.patch.object(config, 'REGIME_ENABLED', True), \
-                mock.patch.dict(rebalancer.LAST_CALM, {'view': {'c': 1}}), \
-                mock.patch.dict(rebalancer.LAST_REGIME, {'view': {'r': 1}}), \
-                mock.patch.dict(rebalancer.LAST_VENUES, {'view': venues}):
+                mock.patch.dict(lp.books.LAST_CALM, {'view': {'c': 1}}), \
+                mock.patch.dict(lp.books.LAST_REGIME, {'view': {'r': 1}}), \
+                mock.patch.dict(lp.books.LAST_VENUES, {'view': venues}):
             b = self.go()
             self.assertEqual((b['calm'], b['regime'], len(b['venues'])), ({'c': 1}, {'r': 1}, 4))
             b = self.go(calm={'mine': 1}, regime={'mine': 2}, venues=[{'dex': 'x'}], health=['h'])
             self.assertEqual((b['calm'], b['regime'], b['venues'], b['health']), ({'mine': 1}, {'mine': 2}, [{'dex': 'x'}], ['h']))
         with mock.patch.object(config, 'CALM_ENABLED', False), mock.patch.object(config, 'REGIME_ENABLED', False), \
-                mock.patch.dict(rebalancer.LAST_CALM, {'view': {'c': 1}}), \
-                mock.patch.dict(rebalancer.LAST_REGIME, {'view': {'r': 1}}), \
-                mock.patch.dict(rebalancer.LAST_VENUES, {'view': None}):
+                mock.patch.dict(lp.books.LAST_CALM, {'view': {'c': 1}}), \
+                mock.patch.dict(lp.books.LAST_REGIME, {'view': {'r': 1}}), \
+                mock.patch.dict(lp.books.LAST_VENUES, {'view': None}):
             b = self.go()
             self.assertNotIn('calm', b); self.assertNotIn('regime', b); self.assertNotIn('venues', b)
 
@@ -307,11 +311,11 @@ class LastSurvivors(unittest.TestCase):
 
     def test_held_evidence_at_exactly_min_hours_sets_the_floor(self):
         vs = [venue('raydium-clmm', 1.0, held=True, hours=6), venue('orca', 0.5, hours=6)]
-        self.assertIsNone(rebalancer.failover_pick('raydium-clmm', vs, lambda d: True, execute_dexes=ARMED, signers=SIGS, min_hours=6))
+        self.assertIsNone(lp.board.failover_pick('raydium-clmm', vs, lambda d: True, execute_dexes=ARMED, signers=SIGS, min_hours=6))
 
     def test_a_signer_without_execute_permission_is_not_a_target(self):
         vs = [venue('raydium-clmm', 1.0, held=True), venue('pancake', 2.0)]
-        self.assertIsNone(rebalancer.failover_pick('raydium-clmm', vs, lambda d: True, execute_dexes=ARMED,
+        self.assertIsNone(lp.board.failover_pick('raydium-clmm', vs, lambda d: True, execute_dexes=ARMED,
                                                    signers={**SIGS, 'pancake': 'x'}, min_hours=6))
 
     def test_a_status_without_a_position_reopens(self):
@@ -321,16 +325,16 @@ class LastSurvivors(unittest.TestCase):
         self.assertTrue(out); self.assertEqual(seen['rebalance'], []); self.assertEqual(len(seen['reopen']), 1)
 
     def test_a_pair_priced_below_one(self):
-        v = rebalancer.regime_at_move({'probs': [['3.0', 0.1]]}, 0.8 / 1.03, 0.8 * 1.03)
+        v = lp.books.regime_at_move({'probs': [['3.0', 0.1]]}, 0.8 / 1.03, 0.8 * 1.03)
         self.assertEqual((v['held'], v['p_held']), (1.03, 0.1))
 
     def test_no_view_no_attachment(self):
         sent = []
         with mock.patch.object(config, 'CALM_ENABLED', True), mock.patch.object(config, 'REGIME_ENABLED', True), \
-                mock.patch.dict(rebalancer.LAST_CALM, {}, clear=True), mock.patch.dict(rebalancer.LAST_REGIME, {}, clear=True), \
-                mock.patch.object(rebalancer.db, 'stats', lambda: {}), mock.patch.object(rebalancer.health, 'summary', lambda: []), \
-                mock.patch.object(rebalancer, 'notify', lambda ev, **p: sent.append(p)):
-            rebalancer.notify_book('in_band')
+                mock.patch.dict(lp.books.LAST_CALM, {}, clear=True), mock.patch.dict(lp.books.LAST_REGIME, {}, clear=True), \
+                mock.patch.object(db, 'stats', lambda: {}), mock.patch.object(health, 'summary', lambda: []), \
+                mock.patch.object(lp.books, 'notify', lambda ev, **p: sent.append(p)):
+            lp.books.notify_book('in_band')
         self.assertNotIn('calm', sent[0]); self.assertNotIn('regime', sent[0])
 
     def test_no_equity_no_share_and_no_error(self):
@@ -364,16 +368,16 @@ class Round3(unittest.TestCase):
         t = IdleWaitsForSwaps()
         import datetime as dt
         opened = dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=1)
-        with mock.patch.object(rebalancer.time, 'time', lambda: now), \
-                mock.patch.object(rebalancer.db, 'position_opened', lambda m: opened), \
-                mock.patch.object(rebalancer.db, 'event', lambda *a: None), \
-                mock.patch.object(rebalancer, 'calm_budget_left', lambda s: 40), \
-                mock.patch.object(rebalancer, 'voluntary_move_allowed', lambda s: True), \
-                mock.patch.object(rebalancer, 'save', lambda s: None), \
-                mock.patch.object(rebalancer, 'notify', lambda ev, **k: sent.append((ev, k))), \
-                mock.patch.object(rebalancer, 'rebalance', lambda *a, **k: None):
+        with mock.patch.object(time, 'time', lambda: now), \
+                mock.patch.object(db, 'position_opened', lambda m: opened), \
+                mock.patch.object(db, 'event', lambda *a: None), \
+                mock.patch.object(lp.regime, 'calm_budget_left', lambda s: 40), \
+                mock.patch.object(lp.regime, 'voluntary_move_allowed', lambda s: True), \
+                mock.patch.object(lp.paths, 'save', lambda s: None), \
+                mock.patch.object(lp.books, 'notify', lambda ev, **k: sent.append((ev, k))), \
+                mock.patch.object(lp.moves, 'rebalance', lambda *a, **k: None):
             for dt_ in (0, 300, 600):
-                rebalancer.deploy_idle(state, dict(t.STATUS), dict(t.WALLET), {'choice': 1.025}, 119.6)
+                lp.swaps.deploy_idle(state, dict(t.STATUS), dict(t.WALLET), {'choice': 1.025}, 119.6)
         return [k for ev, k in sent if ev == 'deploy_idle_deferred']
 
     def test_one_deferral_message_per_cause_with_its_reason(self):
@@ -391,7 +395,7 @@ class Round3(unittest.TestCase):
     def test_unknown_incomes_rank_last(self):
         h = dict(venue('raydium-clmm', 1.0, held=True), hours=1)
         vs = [h, dict(venue('orca', None), total_pct_day=None), venue('byreal', 0.5)]
-        self.assertEqual(rebalancer.failover_pick('raydium-clmm', vs, lambda d: True, execute_dexes=ARMED,
+        self.assertEqual(lp.board.failover_pick('raydium-clmm', vs, lambda d: True, execute_dexes=ARMED,
                                                   signers=SIGS, min_hours=6)['dex'], 'byreal')
 
     def test_a_failover_move_is_a_voluntary_move(self):

@@ -22,7 +22,11 @@ import _fixtures
 _fixtures.ensure_profile()
 
 import config      # noqa: E402
-import rebalancer  # noqa: E402
+import db  # noqa: E402
+from venues.jupiter import prices as jupiter_api  # noqa: E402
+import time  # noqa: E402
+import wallets  # noqa: E402
+import lp.swaps  # noqa: E402
 from test_deploy_all import bal, SOL, USDC  # noqa: E402
 
 DJT = 'DJTu7vi8norVzdVAffgvb39VP7wjKeTsgaMBJrzfxvoF'
@@ -37,47 +41,47 @@ ORCA_OK = ({'sent': True, 'signature': 'ORCA', 'routePlan': ['Orca Whirlpool']},
 def on_pool(dex, pool, tokens):
     """Patches that put the profile on `pool` of `dex` holding `tokens`."""
     return [mock.patch.object(config, 'DEX', dex), mock.patch.object(config, 'POOL', pool),
-            mock.patch.object(rebalancer, 'pool_tokens', lambda: tokens)]
+            mock.patch.object(lp.capital, 'pool_tokens', lambda: tokens)]
 
 
 class Patched(unittest.TestCase):
     def setUp(self):
-        with rebalancer.db.cursor(commit=True) as cur:
+        with db.cursor(commit=True) as cur:
             cur.execute('truncate health')
         for name, v in (('DEPLOY_ALL', True), ('MAX_USD', 300.0), ('SIDE_CAP_FRACTION', 0.55),
                         ('GAS_RESERVE_SOL', 0.05), ('CAPITAL_USD', 190.0), ('PAYOUT_ENABLED', False),
                         ('REBALANCE_SWAP', True), ('MAX_CONSECUTIVE_FAILURES', 3)):
             p = mock.patch.object(config, name, v); p.start(); self.addCleanup(p.stop)
-        p = mock.patch.object(rebalancer, 'SWAP_FALLBACK', 'orca-swap'); p.start(); self.addCleanup(p.stop)
+        p = mock.patch.object(lp.swaps, 'SWAP_FALLBACK', 'orca-swap'); p.start(); self.addCleanup(p.stop)
         for p in on_pool('orca', DJT_POOL, ((DJT, 'DJT'), (USDC, 'USDC'))):
             p.start(); self.addCleanup(p.stop)
         self.notes = []
 
     def tearDown(self):
-        with rebalancer.db.cursor(commit=True) as cur:
+        with db.cursor(commit=True) as cur:
             cur.execute('truncate health')
 
 
 # --- A: the fallback's pool -------------------------------------------------------------
 class FallbackPoolArgs(Patched):
     def test_the_held_orca_pool_of_the_pair_is_passed(self):
-        self.assertEqual(rebalancer.fallback_pool_args(DJT, USDC), ['--pool', DJT_POOL])
-        self.assertEqual(rebalancer.fallback_pool_args(USDC, DJT), ['--pool', DJT_POOL])      # either order
+        self.assertEqual(lp.swaps.fallback_pool_args(DJT, USDC), ['--pool', DJT_POOL])
+        self.assertEqual(lp.swaps.fallback_pool_args(USDC, DJT), ['--pool', DJT_POOL])      # either order
 
     def test_another_pair_gets_the_default_pools(self):
-        self.assertEqual(rebalancer.fallback_pool_args(SOL, USDC), [])     # the SOL left behind after the switch
-        self.assertEqual(rebalancer.fallback_pool_args(DJT, SOL), [])
+        self.assertEqual(lp.swaps.fallback_pool_args(SOL, USDC), [])     # the SOL left behind after the switch
+        self.assertEqual(lp.swaps.fallback_pool_args(DJT, SOL), [])
 
     def test_a_pool_that_is_not_orca_is_never_passed(self):
         for dex in ('raydium-clmm', 'meteora', 'uniswap-v3-polygon'):
             with mock.patch.object(config, 'DEX', dex):
-                self.assertEqual(rebalancer.fallback_pool_args(DJT, USDC), [], dex)
+                self.assertEqual(lp.swaps.fallback_pool_args(DJT, USDC), [], dex)
 
     def test_an_unreadable_pool_record_passes_nothing(self):
         def boom():
             raise RuntimeError('pool record unavailable')
-        with mock.patch.object(rebalancer, 'pool_tokens', boom):
-            self.assertEqual(rebalancer.fallback_pool_args(DJT, USDC), [])
+        with mock.patch.object(lp.capital, 'pool_tokens', boom):
+            self.assertEqual(lp.swaps.fallback_pool_args(DJT, USDC), [])
 
     def test_the_orca_script_knows_djt_usdc_without_the_flag(self):
         venue = json.loads((_fixtures.ROOT / 'venues/orca/venue.json').read_text())
@@ -88,35 +92,35 @@ class FallbackPoolArgs(Patched):
 # --- B: the side the band needs ---------------------------------------------------------
 class OneSideShort(unittest.TestCase):
     def test_replay_2026_10_09_no_djt_is_short(self):
-        self.assertTrue(rebalancer.one_side_short(0.0, 13.70, 0.5, 0.5, 13.70))
+        self.assertTrue(lp.swaps.one_side_short(0.0, 13.70, 0.5, 0.5, 13.70))
 
     def test_both_sides_held_is_not_short(self):
-        self.assertFalse(rebalancer.one_side_short(40.0, 150.0, 0.5, 0.5, 190.0))
+        self.assertFalse(lp.swaps.one_side_short(40.0, 150.0, 0.5, 0.5, 190.0))
 
     def test_exactly_at_the_floor_is_not_short(self):
-        self.assertFalse(rebalancer.one_side_short(2.0, 98.0, 0.5, 0.5, 100.0))
-        self.assertTrue(rebalancer.one_side_short(1.999, 98.0, 0.5, 0.5, 100.0))
+        self.assertFalse(lp.swaps.one_side_short(2.0, 98.0, 0.5, 0.5, 100.0))
+        self.assertTrue(lp.swaps.one_side_short(1.999, 98.0, 0.5, 0.5, 100.0))
 
     def test_a_side_the_band_does_not_want_may_be_empty(self):
-        self.assertFalse(rebalancer.one_side_short(0.0, 100.0, 0.0, 1.0, 100.0))
-        self.assertFalse(rebalancer.one_side_short(100.0, 0.0, 1.0, 0.0, 100.0))
+        self.assertFalse(lp.swaps.one_side_short(0.0, 100.0, 0.0, 1.0, 100.0))
+        self.assertFalse(lp.swaps.one_side_short(100.0, 0.0, 1.0, 0.0, 100.0))
 
     @settings(max_examples=300, deadline=None)
     @given(st.floats(0, 1e6), st.floats(0, 1e6), st.floats(0.01, 0.99))
     def test_property_short_iff_a_wanted_side_is_under_the_floor(self, a, b, fa):
         c = a + b
-        want = a < rebalancer.OPEN_SIDE_MIN * c or b < rebalancer.OPEN_SIDE_MIN * c
-        self.assertEqual(rebalancer.one_side_short(a, b, fa, 1 - fa, c), want)
+        want = a < lp.swaps.OPEN_SIDE_MIN * c or b < lp.swaps.OPEN_SIDE_MIN * c
+        self.assertEqual(lp.swaps.one_side_short(a, b, fa, 1 - fa, c), want)
 
     @settings(max_examples=200, deadline=None)
     @given(st.floats(0, 1e6), st.floats(0, 1e6), st.floats(1e-3, 0.99), st.floats(1.0, 1e3))
     def test_property_more_of_a_side_never_makes_it_short(self, a, b, fa, k):
         c = a + b
-        if not rebalancer.one_side_short(a, b, fa, 1 - fa, c):
-            self.assertFalse(rebalancer.one_side_short(a * k, b * k, fa, 1 - fa, c))
+        if not lp.swaps.one_side_short(a, b, fa, 1 - fa, c):
+            self.assertFalse(lp.swaps.one_side_short(a * k, b * k, fa, 1 - fa, c))
 
     def test_a_negative_capital_has_no_floor(self):
-        self.assertFalse(rebalancer.one_side_short(0.0, 0.0, 0.5, 0.5, -5.0))
+        self.assertFalse(lp.swaps.one_side_short(0.0, 0.0, 0.5, 0.5, -5.0))
 
 
 class BalanceWallet(Patched):
@@ -132,15 +136,15 @@ class BalanceWallet(Patched):
         def fake(*a, **k):
             calls.append((a, k))
             return next(it)
-        with mock.patch.object(rebalancer, 'chain', fake), \
-                mock.patch.object(rebalancer, 'wallet', lambda p: b), \
-                mock.patch.object(rebalancer, 'notify', lambda *a, **k: self.notes.append((a, k))), \
-                mock.patch.object(rebalancer, 'save', lambda s: None), \
-                mock.patch.object(rebalancer, 'halt', lambda r: halts.append(r)), \
-                mock.patch.object(rebalancer.db, 'event', lambda *a: None), \
+        with mock.patch.object(lp.signers, 'chain', fake), \
+                mock.patch.object(lp.capital, 'wallet', lambda p: b), \
+                mock.patch.object(lp.books, 'notify', lambda *a, **k: self.notes.append((a, k))), \
+                mock.patch.object(lp.paths, 'save', lambda s: None), \
+                mock.patch.object(lp.books, 'halt', lambda r: halts.append(r)), \
+                mock.patch.object(db, 'event', lambda *a: None), \
                 mock.patch('builtins.print'), \
-                mock.patch.object(rebalancer.time, 'sleep', lambda s: None):
-            out = rebalancer.balance_wallet(state, dict(b), REC)
+                mock.patch.object(time, 'sleep', lambda s: None):
+            out = lp.swaps.balance_wallet(state, dict(b), REC)
         return out, calls, state, halts
 
     def test_replay_the_fallback_swaps_on_the_djt_pool(self):
@@ -198,14 +202,14 @@ class LeftBehind(Patched):
         def fake(*a, **k):
             calls.append((a, k))
             return next(it)
-        with mock.patch.object(rebalancer, 'chain', fake), \
-                mock.patch.object(rebalancer, 'claim_mints', lambda: ({SOL, DJT, USDC}, None, False)), \
-                mock.patch.object(rebalancer.wallets, 'read_balances', lambda *a: ({SOL: 1.6676}, None)), \
-                mock.patch.object(rebalancer.jupiter_api, 'jupiter_prices', lambda m: prices or {}), \
-                mock.patch.object(rebalancer, 'notify', lambda *a, **k: self.notes.append((a, k))), \
-                mock.patch.object(rebalancer, 'save', lambda s: None), \
-                mock.patch.object(rebalancer.db, 'event', lambda *a: None):
-            sold = rebalancer.sell_left_behind(state, force=True)
+        with mock.patch.object(lp.signers, 'chain', fake), \
+                mock.patch.object(lp.signers, 'claim_mints', lambda: ({SOL, DJT, USDC}, None, False)), \
+                mock.patch.object(wallets, 'read_balances', lambda *a: ({SOL: 1.6676}, None)), \
+                mock.patch.object(jupiter_api, 'jupiter_prices', lambda m: prices or {}), \
+                mock.patch.object(lp.books, 'notify', lambda *a, **k: self.notes.append((a, k))), \
+                mock.patch.object(lp.paths, 'save', lambda s: None), \
+                mock.patch.object(db, 'event', lambda *a: None):
+            sold = lp.swaps.sell_left_behind(state, force=True)
         return sold, calls, state
 
     def test_replay_jupiter_429_sells_the_sol_on_orca(self):
@@ -236,13 +240,13 @@ class LeftBehind(Patched):
         self.assertEqual(len(calls), 2)
 
     def test_off_means_jupiter_alone(self):
-        with mock.patch.object(rebalancer, 'SWAP_FALLBACK', ''):
+        with mock.patch.object(lp.swaps, 'SWAP_FALLBACK', ''):
             sold, calls, _ = self.go([J429])
         self.assertFalse(sold)
         self.assertEqual(len(calls), 1)
 
     def test_a_fallback_that_is_no_signer_is_never_called(self):
-        with mock.patch.object(rebalancer, 'SWAP_FALLBACK', 'no-such-signer'):
+        with mock.patch.object(lp.swaps, 'SWAP_FALLBACK', 'no-such-signer'):
             sold, calls, _ = self.go([J429])
         self.assertEqual((sold, len(calls)), (False, 1))
 

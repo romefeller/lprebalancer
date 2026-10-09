@@ -18,6 +18,9 @@ _fixtures.ensure_profile()
 import config      # noqa: E402
 import db          # noqa: E402
 import rebalancer  # noqa: E402
+import lp.books  # noqa: E402
+import lp.loop  # noqa: E402
+import lp.signers  # noqa: E402
 
 KEY = '0123abcd-4567-89ef-0123-456789abcdef'
 URL = f'https://mainnet.helius-rpc.com/?api-key={KEY}'
@@ -36,18 +39,18 @@ class KeyedUrl(unittest.TestCase):
 
 class Redaction(unittest.TestCase):
     def test_redact(self):
-        self.assertEqual(rebalancer.redact(URL), 'https://mainnet.helius-rpc.com/?api-key=***')
-        self.assertEqual(rebalancer.redact(f'x {URL}&y=1 "api_key={KEY}" API-KEY={KEY}'),
+        self.assertEqual(lp.books.redact(URL), 'https://mainnet.helius-rpc.com/?api-key=***')
+        self.assertEqual(lp.books.redact(f'x {URL}&y=1 "api_key={KEY}" API-KEY={KEY}'),
                          'x https://mainnet.helius-rpc.com/?api-key=***&y=1 "api_key=***" API-KEY=***')
-        self.assertEqual(rebalancer.redact('nothing here'), 'nothing here')
-        self.assertNotIn(KEY, rebalancer.redact({'u': URL}))
+        self.assertEqual(lp.books.redact('nothing here'), 'nothing here')
+        self.assertNotIn(KEY, lp.books.redact({'u': URL}))
 
     def test_feed_and_log_never_show_the_key(self):
         with tempfile.TemporaryDirectory() as d:
             feed = pathlib.Path(d) / 'events.jsonl'
             out = io.StringIO()
-            with mock.patch.object(rebalancer, 'FEED', feed), mock.patch('sys.stdout', out):
-                rebalancer.notify('open_failed', reason=f'fetch failed at {URL}', nested={'url': URL})
+            with mock.patch.object(lp.paths, 'FEED', feed), mock.patch('sys.stdout', out):
+                lp.books.notify('open_failed', reason=f'fetch failed at {URL}', nested={'url': URL})
             text = feed.read_text()
             self.assertNotIn(KEY, text); self.assertNotIn(KEY, out.getvalue())
             self.assertEqual(json.loads(text)['event'], 'open_failed')          # still valid JSON
@@ -77,9 +80,9 @@ class Probe(unittest.TestCase):
             return self.Resp(json.dumps(answer).encode())
         with mock.patch('urllib.request.urlopen', urlopen), mock.patch.object(config, 'RPC', URL), \
                 mock.patch.object(config, 'PUBLIC_RPC', 'https://api.mainnet-beta.solana.com'), \
-                mock.patch.object(rebalancer, 'notify', lambda ev, **kw: sent.append((ev, kw))), \
+                mock.patch.object(lp.books, 'notify', lambda ev, **kw: sent.append((ev, kw))), \
                 mock.patch('builtins.print'):
-            used = rebalancer.probe_rpc()
+            used = lp.signers.probe_rpc()
             rpc_after = config.RPC
         return used, rpc_after, sent
 
@@ -99,13 +102,13 @@ class Probe(unittest.TestCase):
 
     def test_the_public_endpoint_is_not_probed(self):
         with mock.patch('urllib.request.urlopen', side_effect=AssertionError('probed')):
-            self.assertEqual(rebalancer.probe_rpc('https://api.mainnet-beta.solana.com', 'https://api.mainnet-beta.solana.com'),
+            self.assertEqual(lp.signers.probe_rpc('https://api.mainnet-beta.solana.com', 'https://api.mainnet-beta.solana.com'),
                              'https://api.mainnet-beta.solana.com')
 
     def test_startup_probes_before_anything_else(self):
-        src = pathlib.Path(rebalancer.__file__).read_text()
+        src = pathlib.Path(lp.loop.__file__).read_text()
         i = src.index('def main():')
-        self.assertLess(src.index('    probe_rpc()', i), src.index('    state = load()', i))
+        self.assertLess(src.index('    signers.probe_rpc()', i), src.index('    state = paths.load()', i))
 
 
 # --- every secret the environment names, whatever its shape (review, 2026-10-09) ----------
@@ -122,7 +125,7 @@ class ValueRedaction(unittest.TestCase):
     def test_a_named_secret_never_survives(self, secret, before, after):
         env = {'FOO_API_KEY': secret, 'BAR_TOKEN': f' {secret} ', 'LPBOT_UNICHAIN_RPC': f'https://x.g.alchemy.com/v2/{secret}'}
         with mock.patch.dict(os.environ, env):
-            out = rebalancer.redact(before + secret + after)
+            out = lp.books.redact(before + secret + after)
             vals = db.secret_values()
         self.assertNotIn(secret, out); self.assertIn('***', out)
         self.assertIn(secret, vals); self.assertIn(f'v2/{secret}', vals)
@@ -158,7 +161,7 @@ class ValueRedaction(unittest.TestCase):
                          'at https://unichain.g.alchemy.com/*** now')
         self.assertEqual(db.redact('dbname=rebalancer password=hunter2 host=db', []), 'dbname=rebalancer password=*** host=db')
         with mock.patch.dict(os.environ, {'TELEGRAM_BOT_TOKEN': '123456789:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw'}):
-            self.assertEqual(rebalancer.redact('fetch https://api.telegram.org/bot123456789:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw/x'),
+            self.assertEqual(lp.books.redact('fetch https://api.telegram.org/bot123456789:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw/x'),
                              'fetch https://api.telegram.org/bot***/x')
 
     def test_the_feed_and_the_events_table_never_show_a_named_secret(self):
@@ -167,8 +170,8 @@ class ValueRedaction(unittest.TestCase):
         with mock.patch.dict(os.environ, {'QUICKNODE_TOKEN': secret}), tempfile.TemporaryDirectory() as d:
             feed = pathlib.Path(d) / 'events.jsonl'
             out = io.StringIO()
-            with mock.patch.object(rebalancer, 'FEED', feed), mock.patch('sys.stdout', out):
-                rebalancer.notify('open_failed', reason=f'fetch failed at https://x.quiknode.pro/{secret}/')
+            with mock.patch.object(lp.paths, 'FEED', feed), mock.patch('sys.stdout', out):
+                lp.books.notify('open_failed', reason=f'fetch failed at https://x.quiknode.pro/{secret}/')
             db.event('swap_skipped', f'boom {secret}')
             with db.cursor() as cur:
                 cur.execute("select detail from events where kind = 'swap_skipped'")

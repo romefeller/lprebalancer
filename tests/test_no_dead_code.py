@@ -28,9 +28,11 @@ import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 OWNED = ('rebalancer.py', 'db.py', 'engine.py', 'dexes.py', 'scanner.py', 'calm.py',
-         'fees.py', 'guards.py', 'txfees.py', 'config.py', 'wallets.py', 'chains.py', 'audit.py')
+         'fees.py', 'guards.py', 'txfees.py', 'config.py', 'wallets.py', 'chains.py', 'audit.py',
+         *sorted(str(p.relative_to(ROOT)) for p in (ROOT / 'lp').glob('*.py')),
+         *sorted(str(p.relative_to(ROOT)) for p in (ROOT / 'venues').rglob('*.py')))
 TEXT_SUFFIXES = {'.mjs', '.js', '.sql', '.json', '.md', '.sh', '.service'}
-SKIP_DIRS = {'node_modules', '__pycache__', 'research', '.git'}
+SKIP_DIRS = {'node_modules', '__pycache__', 'research', '.git', '.claude'}
 
 # Names that nothing in this tree references, but that are reached from
 # outside it. Each entry needs a reason. Keep this list short.

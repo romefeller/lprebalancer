@@ -14,6 +14,10 @@ from hypothesis import given, settings, HealthCheck, strategies as st
 
 from _fixtures import db, reset_ledger, ensure_profile
 import stats
+import config
+import rebalancer
+import lp.books
+import lp.paths
 
 MU_POOL = '13MEx6gjRadJNUdmToaGSzgeWHLH7FzScUQS9Mc5nYF5'
 SOL_MINT = 'So11111111111111111111111111111111111111112'
@@ -1252,13 +1256,13 @@ class TwoSolanaWallets(unittest.TestCase):
     def test_notify_names_the_wallet_by_its_tag(self):
         import rebalancer
         from unittest import mock
-        with mock.patch.object(rebalancer.config, 'WALLET_ADDRESS', SWING_ADDR):
-            rebalancer.notify('zzz_test', a=1)
-        row = json.loads(rebalancer.FEED.read_text().splitlines()[-1])
+        with mock.patch.object(config, 'WALLET_ADDRESS', SWING_ADDR):
+            lp.books.notify('zzz_test', a=1)
+        row = json.loads(lp.paths.FEED.read_text().splitlines()[-1])
         self.assertEqual((row['event'], row['wallet_tag']), ('zzz_test', 'FogqBWLC4y'))
-        with mock.patch.object(rebalancer.config, 'WALLET_ADDRESS', None):
-            rebalancer.notify('zzz_test', wallet_tag='given')
-        self.assertEqual(json.loads(rebalancer.FEED.read_text().splitlines()[-1])['wallet_tag'], 'given')
+        with mock.patch.object(config, 'WALLET_ADDRESS', None):
+            lp.books.notify('zzz_test', wallet_tag='given')
+        self.assertEqual(json.loads(lp.paths.FEED.read_text().splitlines()[-1])['wallet_tag'], 'given')
 
 
 USDC_MINT = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'

@@ -19,7 +19,9 @@ from unittest import mock
 import _fixtures  # noqa: F401  (first: it puts lp_bot on the path)
 import config
 import db
-import rebalancer
+import engine
+import lp.capital
+import lp.loop
 import test_multi_loop as M
 
 UUSDC = '0x078d782b760474a361dda0af3839290b0ef57ad6'
@@ -100,8 +102,8 @@ class Unichain(M.Fixture):
         super().setUp()
         self.chain = UniChain()
         band = {'band': 1.05, 'net_day_pct': 0.1, 'rebal_per_day': 0.1}
-        for p in (mock.patch.object(rebalancer, '_chain', self.chain),
-                  mock.patch.object(rebalancer, 'best_band_for', lambda pool, dex=None: dict(
+        for p in (mock.patch.object(lp.signers, '_chain', self.chain),
+                  mock.patch.object(lp.board, 'best_band_for', lambda pool, dex=None: dict(
                       band, price=M.POOLS[pool]['price'], record=M.pool_record_for(pool), all_runs=[band]))):
             p.start(); self.addCleanup(p.stop)
 
@@ -153,10 +155,10 @@ class Unichain(M.Fixture):
         self.poll('e2e-uni')                                             # in band: a snapshot
         with self.as_profile('e2e-uni'):
             st = self.chain.status(UNI_POOL)
-            self.assertAlmostEqual(rebalancer.position_usd(st), st['positionUsd'], places=6)
-            bal = rebalancer.wallet(UNI_POOL)
-            self.assertAlmostEqual(rebalancer.quote_price(bal), HYPE_USD, places=6)
-            self.assertAlmostEqual(rebalancer.deployable_usd(bal),
+            self.assertAlmostEqual(lp.capital.position_usd(st), st['positionUsd'], places=6)
+            bal = lp.capital.wallet(UNI_POOL)
+            self.assertAlmostEqual(lp.capital.quote_price(bal), HYPE_USD, places=6)
+            self.assertAlmostEqual(lp.capital.deployable_usd(bal),
                                    self.chain.wallet[UUSDC] + self.chain.wallet[HYPE] * HYPE_USD, places=6)
         with db.cursor() as cur:
             cur.execute("select equity_usd, position_usd from snapshots s join positions p using (mint) "
@@ -167,10 +169,10 @@ class Unichain(M.Fixture):
 
     def test_a_null_quote_price_from_the_signer_is_one_over_price_for_a_stable_token_a(self):
         with self.as_profile('e2e-uni'):
-            self.assertAlmostEqual(rebalancer.quote_price({'quoteUsd': None, 'price': PRICE}), HYPE_USD, places=6)
-            self.assertEqual(rebalancer.stable_quote_usd(UUSDC, HYPE, 0), None)
-            self.assertEqual(rebalancer.stable_quote_usd(HYPE, UUSDC, PRICE), 1.0)
-            self.assertEqual(rebalancer.stable_quote_usd(HYPE, M.WETH, PRICE), None)
+            self.assertAlmostEqual(lp.capital.quote_price({'quoteUsd': None, 'price': PRICE}), HYPE_USD, places=6)
+            self.assertEqual(lp.capital.stable_quote_usd(UUSDC, HYPE, 0), None)
+            self.assertEqual(lp.capital.stable_quote_usd(HYPE, UUSDC, PRICE), 1.0)
+            self.assertEqual(lp.capital.stable_quote_usd(HYPE, M.WETH, PRICE), None)
 
     def test_a_harvest_books_dollars_and_pays_the_usdc_fees_through_the_venue_signer(self):
         pos = self.opened()
@@ -178,7 +180,7 @@ class Unichain(M.Fixture):
         usdc_before = self.chain.wallet[UUSDC]
         with self.as_profile('e2e-uni'), self.paying():
             try:
-                rebalancer.main()
+                lp.loop.main()
             except M.StopPoll:
                 pass
         self.assertEqual(len(self.chain.of('e2e-uni', 'harvest')), 1)
@@ -251,17 +253,17 @@ class QuoteFallbacks(M.Fixture):
 
     def setUp(self):
         super().setUp()
-        tokens = mock.patch.object(rebalancer, 'pool_tokens', lambda: ((UUSDC, 'USDC'), (HYPE, 'HYPE')))
+        tokens = mock.patch.object(lp.capital, 'pool_tokens', lambda: ((UUSDC, 'USDC'), (HYPE, 'HYPE')))
         tokens.start(); self.addCleanup(tokens.stop)
 
     def test_quote_price_prefers_the_ui_price(self):
-        self.assertAlmostEqual(rebalancer.quote_price({'quoteUsd': None, 'uiPrice': 0.01, 'price': 0.02}), 100.0)
-        self.assertAlmostEqual(rebalancer.quote_price({'quoteUsd': None, 'price': 0.02}), 50.0)
+        self.assertAlmostEqual(lp.capital.quote_price({'quoteUsd': None, 'uiPrice': 0.01, 'price': 0.02}), 100.0)
+        self.assertAlmostEqual(lp.capital.quote_price({'quoteUsd': None, 'price': 0.02}), 50.0)
 
     def test_sleeve_of_fills_the_quote_from_the_ui_price_else_the_price(self):
         with mock.patch.object(config, 'WALLET_ID', None):
-            a = rebalancer.sleeve_of({'balanceA': 1.0, 'balanceB': 1.0, 'quoteUsd': None, 'uiPrice': 0.01, 'price': 0.02})
-            b = rebalancer.sleeve_of({'balanceA': 1.0, 'balanceB': 1.0, 'quoteUsd': None, 'price': 0.02})
+            a = lp.capital.sleeve_of({'balanceA': 1.0, 'balanceB': 1.0, 'quoteUsd': None, 'uiPrice': 0.01, 'price': 0.02})
+            b = lp.capital.sleeve_of({'balanceA': 1.0, 'balanceB': 1.0, 'quoteUsd': None, 'price': 0.02})
         self.assertAlmostEqual(a['quoteUsd'], 100.0)
         self.assertAlmostEqual(b['quoteUsd'], 50.0)
         self.assertEqual(a['quoteUsdSource'], 'stable mint')

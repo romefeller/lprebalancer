@@ -15,7 +15,12 @@ _fixtures.ensure_profile()
 
 import calm        # noqa: E402
 import config      # noqa: E402
-import rebalancer  # noqa: E402
+import lp.books  # noqa: E402
+import lp.moves  # noqa: E402
+import lp.paths  # noqa: E402
+import lp.regime  # noqa: E402
+import lp.swaps  # noqa: E402
+import db  # noqa: E402
 
 
 def bars(n=1000, sigma=0.001, seed=4, start=None):
@@ -114,26 +119,26 @@ class Tape(unittest.TestCase):
 
 class Loop(unittest.TestCase):
     def test_calm_off_never_touches_the_tape(self):
-        with mock.patch.object(rebalancer.config, 'CALM_ENABLED', False), \
-                mock.patch.object(rebalancer, 'tape5', side_effect=AssertionError('fetched')):
-            self.assertIsNone(rebalancer.calm_view({}, {'price': 1, 'lowerPrice': 0.9, 'upperPrice': 1.1}))
+        with mock.patch.object(config, 'CALM_ENABLED', False), \
+                mock.patch.object(lp.tape, 'tape5', side_effect=AssertionError('fetched')):
+            self.assertIsNone(lp.regime.calm_view({}, {'price': 1, 'lowerPrice': 0.9, 'upperPrice': 1.1}))
 
     def test_budget_counts_the_last_24h(self):
         now = time.time()
-        with mock.patch.object(rebalancer.config, 'CALM_MAX_MOVES', 4):
-            self.assertEqual(rebalancer.calm_budget_left({'calm_times': [now - 10, now - 90000]}), 3)
-            self.assertEqual(rebalancer.calm_budget_left({}), 4)
-            self.assertEqual(rebalancer.calm_budget_left({'calm_times': [now] * 9}), 0)
+        with mock.patch.object(config, 'CALM_MAX_MOVES', 4):
+            self.assertEqual(lp.regime.calm_budget_left({'calm_times': [now - 10, now - 90000]}), 3)
+            self.assertEqual(lp.regime.calm_budget_left({}), 4)
+            self.assertEqual(lp.regime.calm_budget_left({'calm_times': [now] * 9}), 0)
 
     def test_reopen_band_after_a_tight_exit(self):
         st = {'calm_times': []}
-        with mock.patch.object(rebalancer.config, 'CALM_MAX_MOVES', 4), \
-                mock.patch.object(rebalancer.config, 'CALM_THRESHOLD', 0.25), \
-                mock.patch.object(rebalancer.config, 'CALM_BAND', 1.01):
-            self.assertEqual(rebalancer.calm_reopen_band({'calm': True, 'p_touch_fresh': 0.1}, st), 1.01)
-            self.assertIsNone(rebalancer.calm_reopen_band({'calm': True, 'p_touch_fresh': 0.3}, st))
-            self.assertIsNone(rebalancer.calm_reopen_band({'calm': False, 'p_touch_fresh': 0.1}, st))
-            self.assertIsNone(rebalancer.calm_reopen_band(None, st))
+        with mock.patch.object(config, 'CALM_MAX_MOVES', 4), \
+                mock.patch.object(config, 'CALM_THRESHOLD', 0.25), \
+                mock.patch.object(config, 'CALM_BAND', 1.01):
+            self.assertEqual(lp.regime.calm_reopen_band({'calm': True, 'p_touch_fresh': 0.1}, st), 1.01)
+            self.assertIsNone(lp.regime.calm_reopen_band({'calm': True, 'p_touch_fresh': 0.3}, st))
+            self.assertIsNone(lp.regime.calm_reopen_band({'calm': False, 'p_touch_fresh': 0.1}, st))
+            self.assertIsNone(lp.regime.calm_reopen_band(None, st))
 
     def bal(self, a, b):
         return {'price': 100.0, 'quoteUsd': 1.0, 'balanceA': a, 'balanceB': b, 'nativeSide': 'A',
@@ -145,22 +150,22 @@ class Loop(unittest.TestCase):
     def test_swap_gate(self):
         calls = []
         chain = lambda *a, **k: (calls.append((a, k)) or ({'sent': True, 'signature': 's'}, None))
-        with mock.patch.object(rebalancer, 'chain', chain), \
-                mock.patch.object(rebalancer, 'wallet', lambda p: self.bal(1.0, 100.0)), \
-                mock.patch.object(rebalancer, 'notify', lambda *a, **k: None), \
-                mock.patch.object(rebalancer.db, 'event', lambda *a: None), \
-                mock.patch.object(rebalancer.time, 'sleep', lambda s: None), \
-                mock.patch.object(rebalancer.config, 'CAPITAL_USD', 190.0), \
-                mock.patch.object(rebalancer.config, 'GAS_RESERVE_SOL', 0.05):
-            with mock.patch.object(rebalancer.config, 'REBALANCE_SWAP', False):
-                self.assertEqual(rebalancer.balance_wallet({}, self.bal(0.06, 300.0), self.REC)['balanceA'], 0.06)
+        with mock.patch.object(lp.signers, 'chain', chain), \
+                mock.patch.object(lp.capital, 'wallet', lambda p: self.bal(1.0, 100.0)), \
+                mock.patch.object(lp.books, 'notify', lambda *a, **k: None), \
+                mock.patch.object(db, 'event', lambda *a: None), \
+                mock.patch.object(time, 'sleep', lambda s: None), \
+                mock.patch.object(config, 'CAPITAL_USD', 190.0), \
+                mock.patch.object(config, 'GAS_RESERVE_SOL', 0.05):
+            with mock.patch.object(config, 'REBALANCE_SWAP', False):
+                self.assertEqual(lp.swaps.balance_wallet({}, self.bal(0.06, 300.0), self.REC)['balanceA'], 0.06)
             self.assertEqual(calls, [])
-            with mock.patch.object(rebalancer.config, 'REBALANCE_SWAP', True):
+            with mock.patch.object(config, 'REBALANCE_SWAP', True):
                 # balanced: nothing
-                rebalancer.balance_wallet({}, self.bal(1.1, 110.0), self.REC)
+                lp.swaps.balance_wallet({}, self.bal(1.1, 110.0), self.REC)
                 self.assertEqual(calls, [])
                 # one side short of half the capital: one Jupiter rebalance, then a fresh read
-                after = rebalancer.balance_wallet({'failures': 0}, self.bal(0.06, 300.0), self.REC)
+                after = lp.swaps.balance_wallet({'failures': 0}, self.bal(0.06, 300.0), self.REC)
                 self.assertEqual(len(calls), 1)
                 self.assertEqual(calls[0][0][0], 'rebalance'); self.assertEqual(calls[0][1]['dex'], 'jupiter')
                 self.assertIn('--execute', calls[0][0])
@@ -171,60 +176,60 @@ class Loop(unittest.TestCase):
         # A side under OPEN_SIDE_MIN holds instead (test_orca_fallback_pool, 2026-10-09).
         for b, opens in ((self.bal(0.6, 300.0), True), (self.bal(0.06, 300.0), False)):
             state = {'failures': 0}
-            with mock.patch.object(rebalancer, 'chain', lambda *a, **k: (None, 'impact too high')), \
-                    mock.patch.object(rebalancer, 'notify', lambda *a, **k: None), \
-                    mock.patch.object(rebalancer, 'save', lambda s: None), \
-                    mock.patch.object(rebalancer.db, 'event', lambda *a: None), \
-                    mock.patch.object(rebalancer.config, 'REBALANCE_SWAP', True), \
-                    mock.patch.object(rebalancer.config, 'CAPITAL_USD', 190.0):
-                out = rebalancer.balance_wallet(state, b, self.REC)
+            with mock.patch.object(lp.signers, 'chain', lambda *a, **k: (None, 'impact too high')), \
+                    mock.patch.object(lp.books, 'notify', lambda *a, **k: None), \
+                    mock.patch.object(lp.paths, 'save', lambda s: None), \
+                    mock.patch.object(db, 'event', lambda *a: None), \
+                    mock.patch.object(config, 'REBALANCE_SWAP', True), \
+                    mock.patch.object(config, 'CAPITAL_USD', 190.0):
+                out = lp.swaps.balance_wallet(state, b, self.REC)
             self.assertIs(out, b if opens else None)
             self.assertEqual(state['failures'], 0)
 
     def test_a_partial_swap_opens_nothing_and_counts(self):
         state = {'failures': 0}
-        with mock.patch.object(rebalancer, 'chain', lambda *a, **k: ({'signature': 's', 'partial': True}, 'confirm lost')), \
-                mock.patch.object(rebalancer, 'notify', lambda *a, **k: None), \
-                mock.patch.object(rebalancer, 'save', lambda s: None), \
-                mock.patch.object(rebalancer.db, 'event', lambda *a: None), \
-                mock.patch.object(rebalancer.config, 'REBALANCE_SWAP', True), \
-                mock.patch.object(rebalancer.config, 'CAPITAL_USD', 190.0):
-            self.assertIsNone(rebalancer.balance_wallet(state, self.bal(0.06, 300.0), self.REC))
+        with mock.patch.object(lp.signers, 'chain', lambda *a, **k: ({'signature': 's', 'partial': True}, 'confirm lost')), \
+                mock.patch.object(lp.books, 'notify', lambda *a, **k: None), \
+                mock.patch.object(lp.paths, 'save', lambda s: None), \
+                mock.patch.object(db, 'event', lambda *a: None), \
+                mock.patch.object(config, 'REBALANCE_SWAP', True), \
+                mock.patch.object(config, 'CAPITAL_USD', 190.0):
+            self.assertIsNone(lp.swaps.balance_wallet(state, self.bal(0.06, 300.0), self.REC))
         self.assertEqual(state['failures'], 1)
 
     def test_calm_moves_have_their_own_gap_and_budget_under_one_ceiling(self):
         now = time.time()
         sent, halted = [], []
-        with mock.patch.object(rebalancer, 'notify', lambda ev, **kw: sent.append(ev)), \
-                mock.patch.object(rebalancer, 'halt', lambda r: halted.append(r)), \
-                mock.patch.object(rebalancer, 'chain', side_effect=AssertionError('should not trade')), \
-                mock.patch.object(rebalancer.config, 'MIN_REBALANCE_GAP', 3600), \
-                mock.patch.object(rebalancer.config, 'CALM_MIN_GAP', 600), \
-                mock.patch.object(rebalancer.config, 'MAX_REBALANCES_PER_DAY', 6), \
-                mock.patch.object(rebalancer.config, 'CALM_MAX_MOVES', 12):
+        with mock.patch.object(lp.books, 'notify', lambda ev, **kw: sent.append(ev)), \
+                mock.patch.object(lp.books, 'halt', lambda r: halted.append(r)), \
+                mock.patch.object(lp.signers, 'chain', side_effect=AssertionError('should not trade')), \
+                mock.patch.object(config, 'MIN_REBALANCE_GAP', 3600), \
+                mock.patch.object(config, 'CALM_MIN_GAP', 600), \
+                mock.patch.object(config, 'MAX_REBALANCES_PER_DAY', 6), \
+                mock.patch.object(config, 'CALM_MAX_MOVES', 12):
             # a calm move 5 min after a calm move: deferred by the calm gap
-            rebalancer.rebalance({'last_rebalance': 0, 'rebalance_times': [], 'calm_times': [now - 300]},
+            lp.moves.rebalance({'last_rebalance': 0, 'rebalance_times': [], 'calm_times': [now - 300]},
                                  {'positionMint': 'M'}, 'x', calm_move=True)
             self.assertEqual(sent[-1], 'rebalance_deferred')
             # a normal move 20 min after a normal one: deferred by the normal gap
-            rebalancer.rebalance({'last_rebalance': now - 1200, 'rebalance_times': [now - 1200]},
+            lp.moves.rebalance({'last_rebalance': now - 1200, 'rebalance_times': [now - 1200]},
                                  {'positionMint': 'M'}, 'x')
             self.assertEqual(sent[-1], 'rebalance_deferred')
             # the hard ceiling halts whatever the kind
-            rebalancer.rebalance({'last_rebalance': 0, 'rebalance_times': [now - 9000] * 6,
+            lp.moves.rebalance({'last_rebalance': 0, 'rebalance_times': [now - 9000] * 6,
                                   'calm_times': [now - 9000] * 12}, {'positionMint': 'M'}, 'x', calm_move=True)
             self.assertIn('hard ceiling', halted[-1])
             # the normal ceiling still halts a normal move, but not a calm one
             n = len(halted)
-            with mock.patch.object(rebalancer, 'chain', lambda *a, **k: (None, 'stop here')), \
-                    mock.patch.object(rebalancer, 'read_status', lambda *a: ({'positionMint': 'M'}, None)), \
-                    mock.patch.object(rebalancer, 'save', lambda s: None), \
-                    mock.patch.object(rebalancer.db, 'event', lambda *a: None), \
-                    mock.patch.object(rebalancer.time, 'sleep', lambda s: None):
-                rebalancer.rebalance({'last_rebalance': 0, 'rebalance_times': [now - 9000] * 6, 'calm_times': [],
+            with mock.patch.object(lp.signers, 'chain', lambda *a, **k: (None, 'stop here')), \
+                    mock.patch.object(lp.signers, 'read_status', lambda *a: ({'positionMint': 'M'}, None)), \
+                    mock.patch.object(lp.paths, 'save', lambda s: None), \
+                    mock.patch.object(db, 'event', lambda *a: None), \
+                    mock.patch.object(time, 'sleep', lambda s: None):
+                lp.moves.rebalance({'last_rebalance': 0, 'rebalance_times': [now - 9000] * 6, 'calm_times': [],
                                       'failures': 0}, {'positionMint': 'M'}, 'x', calm_move=True)
             self.assertEqual(len(halted), n)
-            rebalancer.rebalance({'last_rebalance': 0, 'rebalance_times': [now - 9000] * 6, 'calm_times': []},
+            lp.moves.rebalance({'last_rebalance': 0, 'rebalance_times': [now - 9000] * 6, 'calm_times': []},
                                  {'positionMint': 'M'}, 'x')
             self.assertIn('at the ceiling', halted[-1])
 
@@ -234,35 +239,35 @@ class Recovery(unittest.TestCase):
         self.stack = contextlib.ExitStack()
         self.addCleanup(self.stack.close)
         tmp = self.stack.enter_context(tempfile.TemporaryDirectory())
-        self.patch(rebalancer, 'STATE', pathlib.Path(tmp) / 'runtime.json')
-        self.patch(rebalancer.time, 'sleep', lambda _: None)
+        self.patch(lp.paths, 'STATE', pathlib.Path(tmp) / 'runtime.json')
+        self.patch(time, 'sleep', lambda _: None)
         self.events = []
-        self.patch(rebalancer, 'notify', lambda ev, **kw: self.events.append((ev, kw)))
-        self.patch(rebalancer, 'notify_book', lambda ev, **kw: self.events.append((ev, kw)))
+        self.patch(lp.books, 'notify', lambda ev, **kw: self.events.append((ev, kw)))
+        self.patch(lp.books, 'notify_book', lambda ev, **kw: self.events.append((ev, kw)))
         for name in ['open_position', 'close_position', 'snapshot', 'record_harvest', 'event']:
-            self.patch(rebalancer.db, name, mock.Mock())
-        self.patch(rebalancer.config, 'CALM_ENABLED', True)
-        self.patch(rebalancer.config, 'CALM_MAX_MOVES', 12)
-        self.patch(rebalancer.config, 'CALM_THRESHOLD', .25)
-        self.patch(rebalancer.config, 'DEX', 'orca')
-        self.patch(rebalancer.config, 'EXECUTE_DEXES', ('orca',))
-        self.patch(rebalancer.config, 'CAPITAL_USD', 190)
-        self.patch(rebalancer.config, 'MAX_USD', 260)
+            self.patch(db, name, mock.Mock())
+        self.patch(config, 'CALM_ENABLED', True)
+        self.patch(config, 'CALM_MAX_MOVES', 12)
+        self.patch(config, 'CALM_THRESHOLD', .25)
+        self.patch(config, 'DEX', 'orca')
+        self.patch(config, 'EXECUTE_DEXES', ('orca',))
+        self.patch(config, 'CAPITAL_USD', 190)
+        self.patch(config, 'MAX_USD', 260)
         self.bal = dict(price=100, quoteUsd=1, balanceA=1.2, balanceB=120,
                         nativeSide='A', tokenA='SOL', tokenB='USDC')
-        self.patch(rebalancer, 'wallet', lambda _: dict(self.bal))
-        self.patch(rebalancer, 'best_band_for', lambda _: dict(
+        self.patch(lp.capital, 'wallet', lambda _: dict(self.bal))
+        self.patch(lp.board, 'best_band_for', lambda _: dict(
             band=1.08, price=100, record={}, net_day_pct=.2, rebal_per_day=.1))
         self.fresh = dict(calm=True, bar_age_s=420, p_touch_fresh=.06)
-        self.patch(rebalancer, 'calm_view', lambda *a: self.fresh)
+        self.patch(lp.regime, 'calm_view', lambda *a: self.fresh)
         self.sent = []
         def chain(*args, **kwargs):
             self.sent.append(args)
             if args[0] == 'open':
                 return dict(positionMint='new', signature='open-sig', depositUsd=200), None
             return {'signature': args[0] + '-sig'}, None
-        self.patch(rebalancer, 'chain', chain)
-        self.patch(rebalancer, 'read_status', lambda *a: (dict(positionMint='new', positionUsd=200), None))
+        self.patch(lp.signers, 'chain', chain)
+        self.patch(lp.signers, 'read_status', lambda *a: (dict(positionMint='new', positionUsd=200), None))
         self.state = dict(last_rebalance=0, rebalance_times=[], calm_times=[], failures=0)
         self.status = dict(positionMint='old', whirlpool=config.POOL, price=100,
                            inRange=True, liquidity=1, positionUsd=200, feesAccrued_USD=.1)
@@ -271,16 +276,16 @@ class Recovery(unittest.TestCase):
         return self.stack.enter_context(mock.patch.object(obj, name, value))
 
     def fail_then_resume(self, fresh=None):
-        self.patch(rebalancer, 'balance_wallet', mock.Mock(side_effect=[None, self.bal]))
-        rebalancer.rebalance(self.state, self.status, 'calm: tight band re-centred before a touch',
+        self.patch(lp.swaps, 'balance_wallet', mock.Mock(side_effect=[None, self.bal]))
+        lp.moves.rebalance(self.state, self.status, 'calm: tight band re-centred before a touch',
                              band=1.01, calm_move=True)
         self.assertEqual([a[0] for a in self.sent], ['harvest', 'close'])
         self.assertTrue(self.state['pending_reopen']['closed'])
-        restarted = rebalancer.load()
+        restarted = lp.paths.load()
         self.assertEqual(restarted['pending_reopen']['band'], 1.01)
         if fresh is not None:
             self.fresh = fresh
-        self.assertTrue(rebalancer.resume_reopen(restarted))
+        self.assertTrue(lp.regime.resume_reopen(restarted))
         return restarted
 
     def test_swap_failure_and_restart_reopen_tight_once_without_spending_another_move(self):
@@ -290,7 +295,7 @@ class Recovery(unittest.TestCase):
         self.assertAlmostEqual(float(args[2]), 100/1.01, places=5)
         self.assertEqual(float(args[3]), 101)
         self.assertEqual(len(state['calm_times']), 1)
-        self.assertNotIn('pending_reopen', rebalancer.load())
+        self.assertNotIn('pending_reopen', lp.paths.load())
         opened = next(kw for ev, kw in self.events if ev == 'OPEN')
         self.assertTrue(opened['calm_band'])
         self.assertIsNone(opened['expected_net_day_pct'])
@@ -321,14 +326,14 @@ class AuditFixes(unittest.TestCase):
                 return {'closed': 'M', 'signature': 'c'}, None
             return None, 'unexpected'
         state = {'last_rebalance': 0, 'rebalance_times': [], 'calm_times': [], 'failures': 0}
-        with mock.patch.object(rebalancer, 'chain', chain), \
-                mock.patch.object(rebalancer, 'notify', lambda ev, **kw: sent.append(ev)), \
-                mock.patch.object(rebalancer, 'notify_book', lambda ev, **kw: sent.append(ev)), \
-                mock.patch.object(rebalancer, 'save', lambda s: None), \
-                mock.patch.object(rebalancer, 'reopen', lambda *a, **k: sent.append('REOPEN')), \
-                mock.patch.object(rebalancer.db, 'close_position', lambda *a: None), \
-                mock.patch.object(rebalancer.db, 'event', lambda *a: None):
-            rebalancer.rebalance(state, {'positionMint': 'M', 'price': 100, 'positionUsd': 190},
+        with mock.patch.object(lp.signers, 'chain', chain), \
+                mock.patch.object(lp.books, 'notify', lambda ev, **kw: sent.append(ev)), \
+                mock.patch.object(lp.books, 'notify_book', lambda ev, **kw: sent.append(ev)), \
+                mock.patch.object(lp.paths, 'save', lambda s: None), \
+                mock.patch.object(lp.moves, 'reopen', lambda *a, **k: sent.append('REOPEN')), \
+                mock.patch.object(db, 'close_position', lambda *a: None), \
+                mock.patch.object(db, 'event', lambda *a: None):
+            lp.moves.rebalance(state, {'positionMint': 'M', 'price': 100, 'positionUsd': 190},
                                  'price went above')
         self.assertEqual(calls, ['harvest', 'close'])
         self.assertIn('harvest_skipped', sent); self.assertIn('REOPEN', sent)
@@ -340,16 +345,16 @@ class AuditFixes(unittest.TestCase):
             if a[0] == 'harvest':
                 return {'signature': 'h'}, None
             return None, 'close exploded'
-        with mock.patch.object(rebalancer, 'chain', chain), \
-                mock.patch.object(rebalancer, 'read_status', lambda *a: ({'positionMint': 'M'}, None)), \
-                mock.patch.object(rebalancer, 'notify', lambda *a, **k: None), \
-                mock.patch.object(rebalancer, 'wallet', lambda p: {}), \
-                mock.patch.object(rebalancer, 'save', lambda s: None), \
-                mock.patch.object(rebalancer.time, 'sleep', lambda s: None), \
-                mock.patch.object(rebalancer.db, 'record_harvest', lambda *a: None), \
-                mock.patch.object(rebalancer.db, 'snapshot', lambda *a, **k: None), \
-                mock.patch.object(rebalancer.db, 'event', lambda *a: None):
-            rebalancer.rebalance(state, {'positionMint': 'M', 'price': 100, 'whirlpool': 'P'},
+        with mock.patch.object(lp.signers, 'chain', chain), \
+                mock.patch.object(lp.signers, 'read_status', lambda *a: ({'positionMint': 'M'}, None)), \
+                mock.patch.object(lp.books, 'notify', lambda *a, **k: None), \
+                mock.patch.object(lp.capital, 'wallet', lambda p: {}), \
+                mock.patch.object(lp.paths, 'save', lambda s: None), \
+                mock.patch.object(time, 'sleep', lambda s: None), \
+                mock.patch.object(db, 'record_harvest', lambda *a: None), \
+                mock.patch.object(db, 'snapshot', lambda *a, **k: None), \
+                mock.patch.object(db, 'event', lambda *a: None):
+            lp.moves.rebalance(state, {'positionMint': 'M', 'price': 100, 'whirlpool': 'P'},
                                  'calm: tight band', band=1.01, calm_move=True)
         self.assertNotIn('pending_reopen', state)
         self.assertEqual(state['failures'], 1)
@@ -357,27 +362,27 @@ class AuditFixes(unittest.TestCase):
     def test_intent_older_than_a_day_is_dropped(self):
         state = {'pending_reopen': {'mint': 'M', 'pool': config.POOL, 'dex': config.DEX, 'band': 1.01,
                                     'reason': 'x', 'started_at': time.time() - 90000, 'closed': True}}
-        with mock.patch.object(rebalancer, 'save', lambda s: None), \
-                mock.patch.object(rebalancer, 'notify', lambda *a, **k: None), \
-                mock.patch.object(rebalancer, 'reopen', side_effect=AssertionError('replayed')):
-            self.assertFalse(rebalancer.resume_reopen(state))
+        with mock.patch.object(lp.paths, 'save', lambda s: None), \
+                mock.patch.object(lp.books, 'notify', lambda *a, **k: None), \
+                mock.patch.object(lp.moves, 'reopen', side_effect=AssertionError('replayed')):
+            self.assertFalse(lp.regime.resume_reopen(state))
         self.assertNotIn('pending_reopen', state)
 
 
 class EveryBookCarriesCalm(unittest.TestCase):
     def test_open_and_close_books_get_the_latest_view(self):
         sent = []
-        with mock.patch.object(rebalancer.config, 'CALM_ENABLED', True), \
-                mock.patch.dict(rebalancer.LAST_CALM, {'view': {'calm': True, 'sigma_5m_pct': 0.13}}), \
-                mock.patch.object(rebalancer, 'notify', lambda ev, **kw: sent.append(kw)), \
-                mock.patch.object(rebalancer.db, 'stats', lambda: {'equity_usd': 1}):
-            rebalancer.notify_book('OPEN', pair='SOL/USDC')
-            rebalancer.notify_book('in_band', calm={'calm': False})
+        with mock.patch.object(config, 'CALM_ENABLED', True), \
+                mock.patch.dict(lp.books.LAST_CALM, {'view': {'calm': True, 'sigma_5m_pct': 0.13}}), \
+                mock.patch.object(lp.books, 'notify', lambda ev, **kw: sent.append(kw)), \
+                mock.patch.object(db, 'stats', lambda: {'equity_usd': 1}):
+            lp.books.notify_book('OPEN', pair='SOL/USDC')
+            lp.books.notify_book('in_band', calm={'calm': False})
         self.assertEqual(sent[0]['calm']['sigma_5m_pct'], 0.13)
         self.assertEqual(sent[1]['calm'], {'calm': False})          # an explicit view wins
-        with mock.patch.object(rebalancer.config, 'CALM_ENABLED', False), \
-                mock.patch.dict(rebalancer.LAST_CALM, {'view': {'calm': True}}), \
-                mock.patch.object(rebalancer, 'notify', lambda ev, **kw: sent.append(kw)), \
-                mock.patch.object(rebalancer.db, 'stats', lambda: {}):
-            rebalancer.notify_book('OPEN')
+        with mock.patch.object(config, 'CALM_ENABLED', False), \
+                mock.patch.dict(lp.books.LAST_CALM, {'view': {'calm': True}}), \
+                mock.patch.object(lp.books, 'notify', lambda ev, **kw: sent.append(kw)), \
+                mock.patch.object(db, 'stats', lambda: {}):
+            lp.books.notify_book('OPEN')
         self.assertNotIn('calm', sent[-1])

@@ -11,7 +11,11 @@ import _fixtures
 _fixtures.ensure_profile()
 
 import fees        # noqa: E402
-import rebalancer  # noqa: E402
+import config  # noqa: E402
+import db  # noqa: E402
+import guards  # noqa: E402
+from venues.jupiter import prices as jupiter_api  # noqa: E402
+import lp.harvest  # noqa: E402
 import txfees      # noqa: E402
 
 SOL, USDC = fees.NATIVE_MINT, 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'
@@ -64,27 +68,27 @@ class Run:
                 return send
             raise AssertionError(a)
 
-        caps = dict(rebalancer.config.CAPS, rewards=caps_rewards)
+        caps = dict(config.CAPS, rewards=caps_rewards)
         with mock.patch.dict(os.environ, {'LPBOT_PROFIT_WALLET_PIN': PROFIT}), \
-                mock.patch.object(rebalancer.config, 'PAYOUT_ENABLED', enabled), \
-                mock.patch.object(rebalancer.config, 'REWARD_POLICY', policy), \
-                mock.patch.object(rebalancer.config, 'CAPS', caps), \
-                mock.patch.object(rebalancer.config, 'REWARD_MIN_USD', min_usd), \
-                mock.patch.object(rebalancer.config, 'REWARD_MAX_USD', max_usd), \
-                mock.patch.object(rebalancer.config, 'PAYOUT_MINT', payout_mint), \
-                mock.patch.object(rebalancer.config, 'PROFIT_WALLET', PROFIT), \
-                mock.patch.object(rebalancer.config, 'WALLET_ADDRESS', address), \
-                mock.patch.object(rebalancer.config, 'GAS_RESERVE_SOL', 0.05), \
-                mock.patch.object(rebalancer, 'pool_record', lambda: rec), \
-                mock.patch.object(rebalancer, 'wallet', lambda p: dict(bal)), \
-                mock.patch.object(rebalancer, 'wallet_mints', lambda: set(theirs)), \
+                mock.patch.object(config, 'PAYOUT_ENABLED', enabled), \
+                mock.patch.object(config, 'REWARD_POLICY', policy), \
+                mock.patch.object(config, 'CAPS', caps), \
+                mock.patch.object(config, 'REWARD_MIN_USD', min_usd), \
+                mock.patch.object(config, 'REWARD_MAX_USD', max_usd), \
+                mock.patch.object(config, 'PAYOUT_MINT', payout_mint), \
+                mock.patch.object(config, 'PROFIT_WALLET', PROFIT), \
+                mock.patch.object(config, 'WALLET_ADDRESS', address), \
+                mock.patch.object(config, 'GAS_RESERVE_SOL', 0.05), \
+                mock.patch.object(lp.capital, 'pool_record', lambda: rec), \
+                mock.patch.object(lp.capital, 'wallet', lambda p: dict(bal)), \
+                mock.patch.object(lp.swaps, 'wallet_mints', lambda: set(theirs)), \
                 mock.patch.object(txfees, 'fetch', lambda rpc, s, **k: harvest(brought)), \
-                mock.patch.object(rebalancer.jupiter_api, 'jupiter_prices', lambda ms: {RAY: price} if price else {}), \
-                mock.patch.object(rebalancer, 'chain', chain), \
-                mock.patch.object(rebalancer, 'save', lambda s: None), \
-                mock.patch.object(rebalancer, 'notify', lambda ev, **k: self.notes.append((ev, k))), \
-                mock.patch.object(rebalancer.db, 'record_payout', lambda *a, **k: self.payouts.append((a, k))):
-            self.out = rebalancer.distribute_rewards(self.state, 'M', ['H'])
+                mock.patch.object(jupiter_api, 'jupiter_prices', lambda ms: {RAY: price} if price else {}), \
+                mock.patch.object(lp.signers, 'chain', chain), \
+                mock.patch.object(lp.paths, 'save', lambda s: None), \
+                mock.patch.object(lp.books, 'notify', lambda ev, **k: self.notes.append((ev, k))), \
+                mock.patch.object(db, 'record_payout', lambda *a, **k: self.payouts.append((a, k))):
+            self.out = lp.harvest.distribute_rewards(self.state, 'M', ['H'])
 
     @property
     def ops(self):
@@ -123,8 +127,8 @@ class Programs(unittest.TestCase):
     def test_each_program_is_remembered_once_and_eight_at_most(self):
         r = Run(reward_mints=(RAY, RAY))
         self.assertEqual(r.state['reward_mints_seen'], [RAY])
-        many = [m for m in (f'{n}' + RAY[1:] for n in range(2, 10)) if rebalancer.guards.is_address(m)]
-        many += [RAY[:1] + f'{n}' + RAY[2:] for n in range(2, 6) if rebalancer.guards.is_address(RAY[:1] + f'{n}' + RAY[2:])]
+        many = [m for m in (f'{n}' + RAY[1:] for n in range(2, 10)) if guards.is_address(m)]
+        many += [RAY[:1] + f'{n}' + RAY[2:] for n in range(2, 6) if guards.is_address(RAY[:1] + f'{n}' + RAY[2:])]
         self.assertGreaterEqual(len(many), 9)
         r = Run(reward_mints=many)
         self.assertEqual(r.state['reward_mints_seen'], many[-8:])

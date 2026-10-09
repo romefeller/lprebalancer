@@ -15,7 +15,10 @@ from hypothesis import given, settings, HealthCheck, strategies as st
 
 import _fixtures
 import db
-import rebalancer
+import time
+import lp.harvest
+import lp.moves
+import lp.paths
 
 MINT, OTHER = 'BANDMINT111', 'OTHERMINT22'
 POOL = '8sLbNZoA1cfnvMJLPfp98ZLAnFSYCFApfJKMbiXNLwxj'
@@ -251,64 +254,64 @@ class Hooks(unittest.TestCase):
 
         def notify(event, **payload):               # notify's real signature: a payload key 'event' fails here
             seen.append((event, payload))
-        with mock.patch.object(rebalancer.db, 'record_band_profile', side_effect=RuntimeError('db down')), \
-                mock.patch.object(rebalancer, 'notify', notify):
-            rebalancer.band_profile('M', 'harvest')
+        with mock.patch.object(db, 'record_band_profile', side_effect=RuntimeError('db down')), \
+                mock.patch.object(lp.books, 'notify', notify):
+            lp.harvest.band_profile('M', 'harvest')
         self.assertEqual(seen[0][0], 'band_profile_failed'); self.assertEqual(seen[0][1]['band_event'], 'harvest')
 
     def test_band_profile_passes_its_arguments(self):
         calls = []
-        with mock.patch.object(rebalancer.db, 'record_band_profile', lambda *a: calls.append(a)):
-            rebalancer.band_profile('M', 'rebalance', 'price went above')
+        with mock.patch.object(db, 'record_band_profile', lambda *a: calls.append(a)):
+            lp.harvest.band_profile('M', 'rebalance', 'price went above')
         self.assertEqual(calls, [('M', 'rebalance', 'price went above')])
 
     def test_dividend_writes_a_harvest_profile(self):
         calls = []
         status = {'positionMint': 'M', 'whirlpool': 'P', 'price': 100.0, 'inRange': True, 'liquidity': '1',
                   'feesAccruedA': 0.001, 'feesAccruedB': 0.2, 'feesAccrued_USD': 0.3, 'positionUsd': 190.0}
-        with mock.patch.object(rebalancer, 'chain', lambda *a, **k: ({'signature': 'sig'}, None)), \
-                mock.patch.object(rebalancer, 'wallet', lambda p: {'walletUsd': 50.0}), \
-                mock.patch.object(rebalancer, 'save', lambda s: None), \
-                mock.patch.object(rebalancer, 'notify_book', lambda ev, **kw: None), \
-                mock.patch.object(rebalancer, 'notify', lambda ev, **kw: None), \
-                mock.patch.object(rebalancer, 'pool_tokens', lambda: (('A', 'SOL'), ('B', 'USDC'))), \
-                mock.patch.object(rebalancer, 'distribute', lambda *a: None), \
-                mock.patch.object(rebalancer, 'distribute_rewards', lambda *a: None), \
-                mock.patch.object(rebalancer.db, 'record_harvest', lambda *a: None), \
-                mock.patch.object(rebalancer.db, 'snapshot', lambda *a, **k: None), \
-                mock.patch.object(rebalancer.db, 'event', lambda *a: None), \
-                mock.patch.object(rebalancer.db, 'record_band_profile', lambda *a: calls.append(a)):
-            self.assertTrue(rebalancer.dividend({}, status))
+        with mock.patch.object(lp.signers, 'chain', lambda *a, **k: ({'signature': 'sig'}, None)), \
+                mock.patch.object(lp.capital, 'wallet', lambda p: {'walletUsd': 50.0}), \
+                mock.patch.object(lp.paths, 'save', lambda s: None), \
+                mock.patch.object(lp.books, 'notify_book', lambda ev, **kw: None), \
+                mock.patch.object(lp.books, 'notify', lambda ev, **kw: None), \
+                mock.patch.object(lp.capital, 'pool_tokens', lambda: (('A', 'SOL'), ('B', 'USDC'))), \
+                mock.patch.object(lp.harvest, 'distribute', lambda *a: None), \
+                mock.patch.object(lp.harvest, 'distribute_rewards', lambda *a: None), \
+                mock.patch.object(db, 'record_harvest', lambda *a: None), \
+                mock.patch.object(db, 'snapshot', lambda *a, **k: None), \
+                mock.patch.object(db, 'event', lambda *a: None), \
+                mock.patch.object(db, 'record_band_profile', lambda *a: calls.append(a)):
+            self.assertTrue(lp.harvest.dividend({}, status))
         self.assertEqual(calls, [('M', 'harvest', None)])
 
     def test_a_failed_dividend_writes_nothing(self):
         calls = []
-        with mock.patch.object(rebalancer, 'chain', lambda *a, **k: (None, 'rpc down')), \
-                mock.patch.object(rebalancer, 'save', lambda s: None), \
-                mock.patch.object(rebalancer, 'notify', lambda ev, **kw: None), \
-                mock.patch.object(rebalancer.db, 'record_band_profile', lambda *a: calls.append(a)):
-            self.assertFalse(rebalancer.dividend({}, {'positionMint': 'M', 'feesAccruedA': 0, 'feesAccruedB': 0,
+        with mock.patch.object(lp.signers, 'chain', lambda *a, **k: (None, 'rpc down')), \
+                mock.patch.object(lp.paths, 'save', lambda s: None), \
+                mock.patch.object(lp.books, 'notify', lambda ev, **kw: None), \
+                mock.patch.object(db, 'record_band_profile', lambda *a: calls.append(a)):
+            self.assertFalse(lp.harvest.dividend({}, {'positionMint': 'M', 'feesAccruedA': 0, 'feesAccruedB': 0,
                                                       'feesAccrued_USD': 0}))
         self.assertEqual(calls, [])
 
     def test_the_rebalance_writes_the_final_profile_after_the_close(self):
         order = []
-        state = dict(rebalancer.STATE_DEFAULTS)
+        state = dict(lp.paths.STATE_DEFAULTS)
         status = {'positionMint': 'M', 'whirlpool': 'P', 'price': 100.0, 'inRange': False, 'liquidity': '1',
                   'feesAccruedA': 0.0, 'feesAccruedB': 0.0, 'feesAccrued_USD': 0.0, 'positionUsd': 190.0,
                   'lowerPrice': 99.0, 'upperPrice': 101.0}
         def chain(cmd, *a, **k):
             order.append(cmd)
             return ({'signature': 's'}, None) if cmd == 'close' else (None, 'nothing to claim')
-        with mock.patch.object(rebalancer, 'chain', chain), \
-                mock.patch.object(rebalancer, 'save', lambda s: None), \
-                mock.patch.object(rebalancer, 'notify', lambda ev, **kw: None), \
-                mock.patch.object(rebalancer, 'notify_book', lambda ev, **kw: order.append(ev)), \
-                mock.patch.object(rebalancer.db, 'close_position', lambda *a: order.append('db_close')), \
-                mock.patch.object(rebalancer.db, 'record_band_profile', lambda *a: order.append(('profile',) + a)), \
-                mock.patch.object(rebalancer, 'reopen', lambda *a, **k: order.append('reopen')), \
-                mock.patch.object(rebalancer.time, 'sleep', lambda s: None):
-            rebalancer.rebalance(state, status, 'price went above', band=1.015, calm_move=True, exit_move=True)
+        with mock.patch.object(lp.signers, 'chain', chain), \
+                mock.patch.object(lp.paths, 'save', lambda s: None), \
+                mock.patch.object(lp.books, 'notify', lambda ev, **kw: None), \
+                mock.patch.object(lp.books, 'notify_book', lambda ev, **kw: order.append(ev)), \
+                mock.patch.object(db, 'close_position', lambda *a: order.append('db_close')), \
+                mock.patch.object(db, 'record_band_profile', lambda *a: order.append(('profile',) + a)), \
+                mock.patch.object(lp.moves, 'reopen', lambda *a, **k: order.append('reopen')), \
+                mock.patch.object(time, 'sleep', lambda s: None):
+            lp.moves.rebalance(state, status, 'price went above', band=1.015, calm_move=True, exit_move=True)
         i_close, i_prof = order.index('db_close'), order.index(('profile', 'M', 'rebalance', 'price went above'))
         self.assertLess(i_close, i_prof)
         self.assertEqual(sum(1 for x in order if isinstance(x, tuple)), 1)

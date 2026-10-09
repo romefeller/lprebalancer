@@ -29,7 +29,10 @@ from venues import api as venue_api
 from venues import evm
 from venues.uniswap_v3 import pools as uniswap_pools
 import engine
-import rebalancer
+import subprocess
+import config
+import lp.capital
+import lp.signers
 import wallets
 
 DEX = 'uniswap-v3-polygon'
@@ -187,7 +190,7 @@ class ChainRow(unittest.TestCase):
 
 class NativeToWrap(unittest.TestCase):
     def test_the_table(self):
-        f = rebalancer.native_to_wrap
+        f = lp.capital.native_to_wrap
         self.assertEqual(f(4010, 10, 2), 4000)
         self.assertEqual(f(4010, 2, 10), 4000)                           # the reserve, when larger, is kept too
         self.assertEqual(f(11.0, 10, 2), 1.0)                            # exactly WRAP_MIN
@@ -204,8 +207,8 @@ class NativeToWrap(unittest.TestCase):
         rng = random.Random(8)
         for _ in range(2000):
             native, keep, reserve = rng.uniform(0, 1e5), rng.uniform(0.01, 100), rng.uniform(0, 50)
-            w = rebalancer.native_to_wrap(native, keep, reserve)
-            self.assertTrue(w == 0 or w >= rebalancer.WRAP_MIN)
+            w = lp.capital.native_to_wrap(native, keep, reserve)
+            self.assertTrue(w == 0 or w >= lp.capital.WRAP_MIN)
             self.assertGreaterEqual(native - w, min(native, max(keep, reserve)) - 1e-9)
 
 
@@ -223,17 +226,17 @@ class WrapNative(unittest.TestCase):
             self.reads.append('wallet')
             return {'sol': sol, 'balanceA': 0.0, 'balanceB': 0.0}
         caps = chains.caps('polygon') if caps is None else caps
-        with mock.patch.object(rebalancer.config, 'CAPS', caps), \
-                mock.patch.object(rebalancer.config, 'NATIVE_KEEP', keep), \
-                mock.patch.object(rebalancer.config, 'GAS_RESERVE_SOL', 2.0), \
-                mock.patch.object(rebalancer, 'pool_tokens', read_tokens), \
-                mock.patch.object(rebalancer, 'wallet', read_wallet), \
-                mock.patch.object(rebalancer, 'chain', lambda *a, **k: (calls.append((a, k)) or (answer or ({'signature': 'W'}, None)))), \
-                mock.patch.object(rebalancer, 'save', lambda s: None), \
-                mock.patch.object(rebalancer, 'notify', lambda e, **kw: seen.append((e, kw))), \
-                mock.patch.object(rebalancer.db, 'event', lambda *a: None):
+        with mock.patch.object(config, 'CAPS', caps), \
+                mock.patch.object(config, 'NATIVE_KEEP', keep), \
+                mock.patch.object(config, 'GAS_RESERVE_SOL', 2.0), \
+                mock.patch.object(lp.capital, 'pool_tokens', read_tokens), \
+                mock.patch.object(lp.capital, 'wallet', read_wallet), \
+                mock.patch.object(lp.signers, 'chain', lambda *a, **k: (calls.append((a, k)) or (answer or ({'signature': 'W'}, None)))), \
+                mock.patch.object(lp.paths, 'save', lambda s: None), \
+                mock.patch.object(lp.books, 'notify', lambda e, **kw: seen.append((e, kw))), \
+                mock.patch.object(db, 'event', lambda *a: None):
             state = {}
-            out = rebalancer.wrap_native(state)
+            out = lp.capital.wrap_native(state)
         return out, calls, seen, state
 
     def test_wraps_the_excess_once_without_feeding_the_breaker(self):
@@ -347,9 +350,9 @@ class Readers(unittest.TestCase):
 
 class Loop(unittest.TestCase):
     def test_the_polygon_dex_runs_the_uniswap_signer(self):
-        self.assertEqual(rebalancer.SIGNERS[DEX], rebalancer.SIGNERS['uniswap-v3-unichain'])
-        self.assertTrue(rebalancer.SIGNERS[DEX].endswith('venues/uniswap_v3/signer.mjs'))
-        self.assertEqual(rebalancer.OPEN_RENT_HEADROOM[DEX], 0.0)
+        self.assertEqual(lp.signers.SIGNERS[DEX], lp.signers.SIGNERS['uniswap-v3-unichain'])
+        self.assertTrue(lp.signers.SIGNERS[DEX].endswith('venues/uniswap_v3/signer.mjs'))
+        self.assertEqual(lp.capital.OPEN_RENT_HEADROOM[DEX], 0.0)
 
     def test_the_signer_is_told_its_chain(self):
         seen = {}
@@ -360,10 +363,10 @@ class Loop(unittest.TestCase):
         def run(cmd, **kw):
             seen.update(kw['env'])
             return Done()
-        with mock.patch.object(rebalancer.config, 'CHAIN', 'polygon'), \
-                mock.patch.object(rebalancer.config, 'DEX', DEX), \
-                mock.patch.object(rebalancer.subprocess, 'run', run):
-            rebalancer._chain('pool', dex=DEX)
+        with mock.patch.object(config, 'CHAIN', 'polygon'), \
+                mock.patch.object(config, 'DEX', DEX), \
+                mock.patch.object(subprocess, 'run', run):
+            lp.signers._chain('pool', dex=DEX)
         self.assertEqual(seen.get('LPBOT_CHAIN'), 'polygon')
 
 

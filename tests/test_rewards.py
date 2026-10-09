@@ -19,7 +19,12 @@ from venues.orca import pools as orca_pools       # noqa: E402
 from venues.raydium_clmm import pools as raydium_pools       # noqa: E402
 import engine      # noqa: E402
 import fees        # noqa: E402
-import rebalancer  # noqa: E402
+import config  # noqa: E402
+import db  # noqa: E402
+import txfees  # noqa: E402
+import lp.board  # noqa: E402
+import lp.harvest  # noqa: E402
+import lp.moves  # noqa: E402
 
 SOL, USDC = fees.NATIVE_MINT, 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'
 RAY = '4k3Dyjzvzp8eMZWUXbBCjEvwSkkk59S5iCNLY3QrkX6R'
@@ -87,18 +92,18 @@ class CalmReview(unittest.TestCase):
 
     def go(self, venues):
         moved, sent = [], []
-        with mock.patch.object(rebalancer, 'venue_view', lambda price, q=1.0: venues), \
-                mock.patch.object(rebalancer, 'notify', lambda ev, **kw: sent.append((ev, kw))), \
-                mock.patch.object(rebalancer.db, 'event', lambda *a: None), \
-                mock.patch.object(rebalancer, 'rebalance', lambda *a, **k: moved.append(k)), \
-                mock.patch.object(rebalancer, 'regime_choice_now', lambda pool, price, pair=None: 1.0125), \
-                mock.patch.object(rebalancer.config, 'POOL', 'HELD'), \
-                mock.patch.object(rebalancer.config, 'POOL_PINNED', False), \
-                mock.patch.object(rebalancer.config, 'MIGRATE_MIN_GAIN', 0.25), \
-                mock.patch.object(rebalancer.config, 'VENUE_MIN_HOURS', 6), \
-                mock.patch.object(rebalancer.config, 'REGIME_ENABLED', True), \
-                mock.patch.object(rebalancer.config, 'EXECUTE_DEXES', ('orca', 'raydium-clmm')):
-            r = rebalancer.calm_board_check({}, {'positionMint': 'M', 'price': 121.0, 'quoteUsd': 1.0})
+        with mock.patch.object(lp.board, 'venue_view', lambda price, q=1.0: venues), \
+                mock.patch.object(lp.books, 'notify', lambda ev, **kw: sent.append((ev, kw))), \
+                mock.patch.object(db, 'event', lambda *a: None), \
+                mock.patch.object(lp.moves, 'rebalance', lambda *a, **k: moved.append(k)), \
+                mock.patch.object(lp.regime, 'regime_choice_now', lambda pool, price, pair=None: 1.0125), \
+                mock.patch.object(config, 'POOL', 'HELD'), \
+                mock.patch.object(config, 'POOL_PINNED', False), \
+                mock.patch.object(config, 'MIGRATE_MIN_GAIN', 0.25), \
+                mock.patch.object(config, 'VENUE_MIN_HOURS', 6), \
+                mock.patch.object(config, 'REGIME_ENABLED', True), \
+                mock.patch.object(config, 'EXECUTE_DEXES', ('orca', 'raydium-clmm')):
+            r = lp.board.calm_board_check({}, {'positionMint': 'M', 'price': 121.0, 'quoteUsd': 1.0})
         return r, moved, sent
 
     def v(self, addr, dex, pct, hours, held=False):
@@ -146,22 +151,22 @@ class Sweep(unittest.TestCase):
                 return {'signature': 't'}, None
         rec = {'token_a': {'address': SOL}, 'token_b': {'address': USDC}, 'reward_mints': [RAY]}
         with mock.patch.dict(os.environ, {'LPBOT_PROFIT_WALLET_PIN': PROFIT}), \
-                mock.patch.object(rebalancer.config, 'PAYOUT_ENABLED', True), \
-                mock.patch.object(rebalancer.config, 'REWARD_POLICY', 'payout'), \
-                mock.patch.object(rebalancer.config, 'REWARD_MIN_USD', 1.0), \
-                mock.patch.object(rebalancer.config, 'PAYOUT_MINT', USDC), \
-                mock.patch.object(rebalancer.config, 'PROFIT_WALLET', PROFIT), \
-                mock.patch.object(rebalancer.config, 'GAS_RESERVE_SOL', 0.05), \
-                mock.patch.object(rebalancer, 'pool_record', lambda: rec), \
-                mock.patch.object(rebalancer, 'wallet', lambda p: {'sol': sol, 'owner': OWNER}), \
-                mock.patch.object(rebalancer, 'wallet_mints', lambda: set(theirs)), \
-                mock.patch.object(rebalancer.txfees, 'fetch', lambda rpc, s, **k: harvest_tx(RAY, brought)), \
-                mock.patch.object(rebalancer.jupiter_api, 'jupiter_prices', lambda m: {RAY: price}), \
-                mock.patch.object(rebalancer, 'chain', chain), \
-                mock.patch.object(rebalancer, 'save', lambda s: None), \
-                mock.patch.object(rebalancer, 'notify', lambda *a, **k: None), \
-                mock.patch.object(rebalancer.db, 'record_payout', lambda *a, **k: rows.append(a[6])):
-            rebalancer.distribute_rewards(state, 'M', list(sigs))
+                mock.patch.object(config, 'PAYOUT_ENABLED', True), \
+                mock.patch.object(config, 'REWARD_POLICY', 'payout'), \
+                mock.patch.object(config, 'REWARD_MIN_USD', 1.0), \
+                mock.patch.object(config, 'PAYOUT_MINT', USDC), \
+                mock.patch.object(config, 'PROFIT_WALLET', PROFIT), \
+                mock.patch.object(config, 'GAS_RESERVE_SOL', 0.05), \
+                mock.patch.object(lp.capital, 'pool_record', lambda: rec), \
+                mock.patch.object(lp.capital, 'wallet', lambda p: {'sol': sol, 'owner': OWNER}), \
+                mock.patch.object(lp.swaps, 'wallet_mints', lambda: set(theirs)), \
+                mock.patch.object(txfees, 'fetch', lambda rpc, s, **k: harvest_tx(RAY, brought)), \
+                mock.patch.object(jupiter_api, 'jupiter_prices', lambda m: {RAY: price}), \
+                mock.patch.object(lp.signers, 'chain', chain), \
+                mock.patch.object(lp.paths, 'save', lambda s: None), \
+                mock.patch.object(lp.books, 'notify', lambda *a, **k: None), \
+                mock.patch.object(db, 'record_payout', lambda *a, **k: rows.append(a[6])):
+            lp.harvest.distribute_rewards(state, 'M', list(sigs))
         return calls, rows, state
 
     def test_reward_swapped_to_usdc_and_paid(self):
@@ -203,14 +208,14 @@ class Sweep(unittest.TestCase):
 
     def test_pool_tokens_are_never_swept(self):
         rec_calls = []
-        with mock.patch.object(rebalancer.config, 'PAYOUT_ENABLED', True), \
-                mock.patch.object(rebalancer.config, 'REWARD_POLICY', 'payout'), \
-                mock.patch.object(rebalancer, 'pool_record',
+        with mock.patch.object(config, 'PAYOUT_ENABLED', True), \
+                mock.patch.object(config, 'REWARD_POLICY', 'payout'), \
+                mock.patch.object(lp.capital, 'pool_record',
                                   lambda: {'token_a': {'address': SOL}, 'token_b': {'address': USDC},
                                            'reward_mints': [SOL]}), \
-                mock.patch.object(rebalancer, 'chain', lambda *a, **k: rec_calls.append(a)), \
-                mock.patch.object(rebalancer, 'save', lambda s: None):
-            self.assertIsNone(rebalancer.distribute_rewards({}, 'M'))
+                mock.patch.object(lp.signers, 'chain', lambda *a, **k: rec_calls.append(a)), \
+                mock.patch.object(lp.paths, 'save', lambda s: None):
+            self.assertIsNone(lp.harvest.distribute_rewards({}, 'M'))
         self.assertEqual(rec_calls, [])
 
 
@@ -269,10 +274,10 @@ class CloseRetry(unittest.TestCase):
 
     def test_the_retry_pattern(self):
         for err in ('429', 'request timed out', 'ECONNRESET', 'Blockhash not found', *self.EXPIRED):
-            self.assertRegex(err, '(?i)' + rebalancer.CLOSE_RETRY_ERRORS)
+            self.assertRegex(err, '(?i)' + lp.moves.CLOSE_RETRY_ERRORS)
         for err in ('PriceSlippageCheck (6017)', 'transaction failed on chain: {"InstructionError":[2,{"Custom":1}]}',
                     'position M not found for this wallet on this pool', 'partial send: 1/2 sent'):
-            self.assertNotRegex(err, '(?i)' + rebalancer.CLOSE_RETRY_ERRORS)
+            self.assertNotRegex(err, '(?i)' + lp.moves.CLOSE_RETRY_ERRORS)
 
     def close_after(self, err):
         """A rebalance whose first close fails with `err` and whose second
@@ -281,20 +286,20 @@ class CloseRetry(unittest.TestCase):
         calls, sent = [], []
         results = iter([({'signature': 'h'}, None), (None, err), ({'closed': 'M', 'signature': 'c'}, None)])
         state = {'last_rebalance': 0, 'rebalance_times': [], 'calm_times': [], 'failures': 0}
-        with mock.patch.object(rebalancer, 'chain', lambda *a, **k: (calls.append(a[0]) or next(results))), \
-                mock.patch.object(rebalancer, 'read_status', lambda *a: ({'positionMint': 'M'}, None)), \
-                mock.patch.object(rebalancer, 'notify', lambda ev, **kw: sent.append(ev)), \
-                mock.patch.object(rebalancer, 'notify_book', lambda ev, **kw: sent.append(ev)), \
-                mock.patch.object(rebalancer, 'wallet', lambda p: {}), \
-                mock.patch.object(rebalancer, 'save', lambda s: None), \
-                mock.patch.object(rebalancer, 'reopen', lambda *a, **k: sent.append('REOPEN')), \
-                mock.patch.object(rebalancer, 'distribute', lambda *a, **k: None), \
-                mock.patch.object(rebalancer, 'distribute_rewards', lambda *a, **k: None), \
-                mock.patch.object(rebalancer.time, 'sleep', lambda s: None), \
-                mock.patch.object(rebalancer.db, 'record_harvest', lambda *a: None), \
-                mock.patch.object(rebalancer.db, 'snapshot', lambda *a, **k: None), \
-                mock.patch.object(rebalancer.db, 'close_position', lambda *a: None), \
-                mock.patch.object(rebalancer.db, 'event', lambda *a: None), \
-                mock.patch.object(rebalancer, 'record_health', lambda *a, **k: None):
-            rebalancer.rebalance(state, {'positionMint': 'M', 'price': 100, 'whirlpool': 'P'}, 'x')
+        with mock.patch.object(lp.signers, 'chain', lambda *a, **k: (calls.append(a[0]) or next(results))), \
+                mock.patch.object(lp.signers, 'read_status', lambda *a: ({'positionMint': 'M'}, None)), \
+                mock.patch.object(lp.books, 'notify', lambda ev, **kw: sent.append(ev)), \
+                mock.patch.object(lp.books, 'notify_book', lambda ev, **kw: sent.append(ev)), \
+                mock.patch.object(lp.capital, 'wallet', lambda p: {}), \
+                mock.patch.object(lp.paths, 'save', lambda s: None), \
+                mock.patch.object(lp.moves, 'reopen', lambda *a, **k: sent.append('REOPEN')), \
+                mock.patch.object(lp.harvest, 'distribute', lambda *a, **k: None), \
+                mock.patch.object(lp.harvest, 'distribute_rewards', lambda *a, **k: None), \
+                mock.patch.object(time, 'sleep', lambda s: None), \
+                mock.patch.object(db, 'record_harvest', lambda *a: None), \
+                mock.patch.object(db, 'snapshot', lambda *a, **k: None), \
+                mock.patch.object(db, 'close_position', lambda *a: None), \
+                mock.patch.object(db, 'event', lambda *a: None), \
+                mock.patch.object(lp.signers, 'record_health', lambda *a, **k: None):
+            lp.moves.rebalance(state, {'positionMint': 'M', 'price': 100, 'whirlpool': 'P'}, 'x')
         return calls, sent, state

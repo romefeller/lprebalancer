@@ -180,7 +180,7 @@ class Flows(WalletBase):
         self.txs = {'D': tx('D', keys=('SENDER', OWNER), pre_tok=[tb(1, OWNER, MU, 0), tb(2, OWNER, USDC, 0)],
                             post_tok=[tb(1, OWNER, MU, 2_000_000), tb(2, OWNER, USDC, 1_000_000)])}
         b = self.bot()
-        b.dexes = types.SimpleNamespace(jupiter_prices=lambda mints: {}, jupiter_token=lambda m: None)
+        b.prices = types.SimpleNamespace(jupiter_prices=lambda mints: {}, jupiter_token=lambda m: None)
         with mock.patch.object(self, 'bot', lambda: b):
             self.run_wallet(book([P_SOL, P_MU]))
         r = self.flow()
