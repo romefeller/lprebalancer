@@ -1,4 +1,4 @@
-// signer_aerodrome.mjs and its helpers (evm/clmath.mjs, evm/rpc.mjs), without a node:
+// venues/aerodrome/signer.mjs and its helpers (chains/evm/clmath.mjs, chains/evm/rpc.mjs), without a node:
 // the money arithmetic, every refusal, the endpoint policy and the partial-send report.
 // Failure paths first. No network: the CLI cases use a closed loopback port, which
 // baseEndpoints() makes the ONLY endpoint, so nothing can reach mainnet.
@@ -10,14 +10,14 @@ import path from 'node:path';
 import http from 'node:http';
 import { spawnSync } from 'node:child_process';
 import fc from 'fast-check';
-import * as M from '../evm/clmath.mjs';
-import { baseEndpoints, evmErrorKind, overBase, isLoopback } from '../evm/rpc.mjs';
-import { AfterSignError } from '../rpc_policy.mjs';
-import * as S from '../signer_aerodrome.mjs';
-import { WETH, USDC, DEPLOYMENTS, ETH_USD_FEED } from '../evm/addresses.mjs';
+import * as M from '../chains/evm/clmath.mjs';
+import { baseEndpoints, evmErrorKind, overBase, isLoopback } from '../chains/evm/rpc.mjs';
+import { AfterSignError } from '../shared/rpc_policy.mjs';
+import * as S from '../venues/aerodrome/signer.mjs';
+import { WETH, USDC, DEPLOYMENTS, ETH_USD_FEED } from '../chains/evm/base_addresses.mjs';
 
 const dir = path.dirname(new URL(import.meta.url).pathname);
-const script = path.join(dir, '..', 'signer_aerodrome.mjs');
+const script = path.join(dir, '..', 'venues/aerodrome/signer.mjs');
 const POOL = '0xb2cc224c1c9feE385f8ad6a55b4d94E92359DC59';
 const PIN = '0x2b35948898e1b4897E7FC5a70e39b213dcfd0142';
 const OTHER = '0x70997970C51812dc3A010C7d01b50e0d17dc79C8';

@@ -8,23 +8,23 @@
 // printed, one JSON object on stdout, `ERROR: <message>` on stderr with exit 1,
 // dry run by default.
 //
-//   node payout.mjs send <mint> <amount> <to> [--execute]
-//   node payout.mjs balance <mint>
+//   node chains/solana/payout.mjs send <mint> <amount> <to> [--execute]
+//   node chains/solana/payout.mjs balance <mint>
 //
 // `amount` is in human units of the mint: UI units, so a Token-2022 scaled
-// mint's multiplier applies (token2022.mjs), as in every signer. A paused mint
+// mint's multiplier applies (shared/token2022.mjs), as in every signer. A paused mint
 // or one with a transfer hook refuses. The recipient's associated token
 // account is created if missing (idempotent instruction; the LP wallet pays
 // its rent once, about 0.002 SOL). The native mint So111...112 sends lamports.
 import fs from 'node:fs';
 import path from 'node:path';
-import { assertNotHalted } from './halt_guard.mjs';
-import { BOT_ROOT } from './bot_root.mjs';
+import { assertNotHalted } from '../../shared/halt_guard.mjs';
+import { BOT_ROOT } from '../../bot_root.mjs';
 import { createRequire } from 'node:module';
 
-import { readMints, rawToUi, uiToRaw, writeRefusal } from './token2022.mjs';
-import { isEntry } from './rpc_policy.mjs';
-import { NeverLanded, priorityCuPrice, sendUntilLanded, REBROADCAST_MS } from './tx_send.mjs';
+import { readMints, rawToUi, uiToRaw, writeRefusal } from '../../shared/token2022.mjs';
+import { isEntry } from '../../shared/rpc_policy.mjs';
+import { NeverLanded, priorityCuPrice, sendUntilLanded, REBROADCAST_MS } from '../../shared/tx_send.mjs';
 
 export { NeverLanded, sendUntilLanded, REBROADCAST_MS };
 
@@ -56,7 +56,7 @@ export function payoutCuPrice(recent, units = CU_LIMIT, cap = PRIORITY_MAX_LAMPO
 }
 
 function guard() {
-  assertNotHalted(BOT_ROOT);                // the global HALT and this profile's (halt_guard.mjs)
+  assertNotHalted(BOT_ROOT);                // the global HALT and this profile's (shared/halt_guard.mjs)
 }
 
 async function secretBytes() {

@@ -80,7 +80,7 @@ class FallbackPoolArgs(Patched):
             self.assertEqual(rebalancer.fallback_pool_args(DJT, USDC), [])
 
     def test_the_orca_script_knows_djt_usdc_without_the_flag(self):
-        src = (_fixtures.ROOT / 'swap_orca.mjs').read_text()
+        src = (_fixtures.ROOT / 'venues/orca/swap.mjs').read_text()
         self.assertIn("[`${DJT_MINT}/${USDC_MINT}`]: '7gkB2D1SqhUYgKrSpDU5cma4tK9efijHouYituABdJcG'", src)
         self.assertIn(f"export const DJT_MINT = '{DJT}'", src)
 

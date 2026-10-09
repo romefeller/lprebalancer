@@ -129,7 +129,7 @@ class TidyKeepsTheCause(unittest.TestCase):
         with mock.patch.object(rebalancer.subprocess, 'run', lambda *a, **k: R()), \
                 mock.patch.object(rebalancer.guards, 'signer_args', lambda a: None), \
                 mock.patch.object(rebalancer.guards, 'inside', lambda *a: None), \
-                mock.patch.dict(rebalancer.SIGNERS, {'jupiter': str(ROOT / 'swap_jupiter.mjs')}):
+                mock.patch.dict(rebalancer.SIGNERS, {'jupiter': str(ROOT / 'venues/jupiter/swap.mjs')}):
             out, err = rebalancer._chain('rebalance', 'A', 'B', dex='jupiter')
         self.assertIsNone(out)
         self.assertIn('Indexed requests require a personal token', rebalancer.LAST_CHAIN_ERROR['text'])

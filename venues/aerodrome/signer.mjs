@@ -1,12 +1,12 @@
 // Rebalancer — the Aerodrome Slipstream signing layer on Base. Same commands and output
 // fields as the Solana signers (SIGNER_CONTRACT.md), so the loop cannot tell which chain it
-// is on, plus the EVM additions of MULTI_DESIGN.md: `rebalance` (the swap_jupiter.mjs
+// is on, plus the EVM additions of MULTI_DESIGN.md: `rebalance` (the venues/jupiter/swap.mjs
 // shape, swapping through the pool's own router) and `send` / `balance <token>` (the
-// payout.mjs shape, to the pinned profit wallet only).
+// chains/solana/payout.mjs shape, to the pinned profit wallet only).
 //
 // A Slipstream position is an ERC-721 from the NonfungiblePositionManager (NPM). Aerodrome
 // runs several Slipstream deployments; the pool names its own (factory, NPM), and every
-// call goes to the NPM, router and quoter of that deployment in evm/addresses.mjs
+// call goes to the NPM, router and quoter of that deployment in chains/evm/base_addresses.mjs
 // (DEPLOYMENTS). A pool of an unknown deployment is refused. The signer reads, opens,
 // harvests and closes only NFTs of THIS wallet on THIS pool, and only unstaked ones: a
 // position staked in the gauge earns AERO instead of fees and is out of scope. Unstaked
@@ -25,36 +25,36 @@
 // pending transaction from this wallet refuses the command. After the first send nothing
 // is retried: a failure part-way is printed with `sent: true, partial: true` and every hash.
 //
-// The key is read from WALLET_SECRET_PATH inside this process (evm/keyfile.mjs) and never
+// The key is read from WALLET_SECRET_PATH inside this process (chains/evm/keyfile.mjs) and never
 // printed. Commands:
-//   node signer_aerodrome.mjs balance [pool]          | balance <token>   (payout.mjs shape)
-//   node signer_aerodrome.mjs positions
-//   node signer_aerodrome.mjs status [tokenId]
-//   node signer_aerodrome.mjs pool [pool]
-//   node signer_aerodrome.mjs open <pool> <lowerPrice> <upperPrice> <maxA> <maxB> [--execute]
-//   node signer_aerodrome.mjs harvest <tokenId> [--execute]
-//   node signer_aerodrome.mjs close <tokenId> [--execute]
-//   node signer_aerodrome.mjs rebalance <mintA> <mintB> <targetUsdA> <targetUsdB> [--execute]
-//   node signer_aerodrome.mjs send <token> <amount> <to> [--execute]
+//   node venues/aerodrome/signer.mjs balance [pool]          | balance <token>   (chains/solana/payout.mjs shape)
+//   node venues/aerodrome/signer.mjs positions
+//   node venues/aerodrome/signer.mjs status [tokenId]
+//   node venues/aerodrome/signer.mjs pool [pool]
+//   node venues/aerodrome/signer.mjs open <pool> <lowerPrice> <upperPrice> <maxA> <maxB> [--execute]
+//   node venues/aerodrome/signer.mjs harvest <tokenId> [--execute]
+//   node venues/aerodrome/signer.mjs close <tokenId> [--execute]
+//   node venues/aerodrome/signer.mjs rebalance <mintA> <mintB> <targetUsdA> <targetUsdB> [--execute]
+//   node venues/aerodrome/signer.mjs send <token> <amount> <to> [--execute]
 import fs from 'node:fs';
 import path from 'node:path';
-import { assertNotHalted } from './halt_guard.mjs';
-import { BOT_ROOT } from './bot_root.mjs';
+import { assertNotHalted } from '../../shared/halt_guard.mjs';
+import { BOT_ROOT } from '../../bot_root.mjs';
 import { createPublicClient, http, getAddress, isAddress, encodeFunctionData, decodeEventLog, keccak256 } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 import { base } from 'viem/chains';
-import { isEntry, AfterSignError } from './rpc_policy.mjs';
-import { planRebalance } from './rebalance_plan.mjs';
-import { readKey } from './evm/keyfile.mjs';
-import { baseEndpoints, overBase, evmErrorKind } from './evm/rpc.mjs';
-import * as A from './evm/addresses.mjs';
-import * as M from './evm/clmath.mjs';
+import { isEntry, AfterSignError } from '../../shared/rpc_policy.mjs';
+import { planRebalance } from '../../shared/rebalance_plan.mjs';
+import { readKey } from '../../chains/evm/keyfile.mjs';
+import { baseEndpoints, overBase, evmErrorKind } from '../../chains/evm/rpc.mjs';
+import * as A from '../../chains/evm/base_addresses.mjs';
+import * as M from '../../chains/evm/clmath.mjs';
 
 const DEX = 'aerodrome-slipstream';
 const DEADLINE_S = 300;                 // past the latest block's timestamp
 const RECEIPT_TIMEOUT_MS = 120_000;
 const ORACLE_MAX_AGE_S = 3600;          // the feed's heartbeat is 1200 s
-const TARGET_TOLERANCE = 0.02;          // as swap_jupiter.mjs: "at target" = within 2%
+const TARGET_TOLERANCE = 0.02;          // as venues/jupiter/swap.mjs: "at target" = within 2%
 const MAX_POSITIONS_SCANNED = 200;
 
 // Read at call time, not import time, so a test can set them per case.
@@ -79,7 +79,7 @@ export function settings(env = process.env) {
 
 // HALT in this script's directory halts every profile; LPBOT_RUN_DIR/HALT halts one.
 export function guard(env = process.env) {
-  assertNotHalted(BOT_ROOT, env);           // halt_guard.mjs: one rule for every signer
+  assertNotHalted(BOT_ROOT, env);           // shared/halt_guard.mjs: one rule for every signer
 }
 
 function poolArg(explicit) {

@@ -1,4 +1,4 @@
-// fee_snapshot.mjs: the fee read of Raydium-layout CLMM positions.
+// shared/fee_snapshot.mjs: the fee read of Raydium-layout CLMM positions.
 //
 //   * a simulator of the program's fee-growth bookkeeping (global growth,
 //     the boundary ticks' "outside" growth that flips on every crossing)
@@ -14,7 +14,7 @@ import { createRequire } from 'node:module';
 import fc from 'fast-check';
 import {
   wrappingSubU128, checkFees, feesFromSnapshot, consistentFees, snapshotKeys, U128, HALF_U128,
-} from '../fee_snapshot.mjs';
+} from '../shared/fee_snapshot.mjs';
 
 const require = createRequire(import.meta.url);
 const BN = require('bn.js');
@@ -310,7 +310,7 @@ test('consistentFees refuses accounts owned by another program', async () => {
 });
 
 // --- the Byreal adapter ---------------------------------------------------------------
-import { BYREAL_LAYOUT, RAYDIUM_LAYOUT } from '../fee_snapshot.mjs';
+import { BYREAL_LAYOUT, RAYDIUM_LAYOUT } from '../shared/fee_snapshot.mjs';
 const by = require('@byreal-io/byreal-clmm-sdk');
 const BY_PROGRAM = by.BYREAL_CLMM_PROGRAM_ID;
 const BY_POOL = new PublicKey('9GTj99g9tbz9U6UYDsX6YeRTgUnkYG6GTnHv3qLa5aXq');

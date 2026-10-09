@@ -1,4 +1,4 @@
-// orca_fees.mjs: the Orca fee read, from one consistent snapshot.
+// venues/orca/fees.mjs: the Orca fee read, from one consistent snapshot.
 //
 // A bigint simulator of the whirlpool's fee-growth bookkeeping gives the true
 // fee of any history. A consistent snapshot must reproduce it exactly, and the
@@ -14,7 +14,7 @@ import { getTickArrayStartTickIndex, getTickIndexInArray } from '@orca-so/whirlp
 import {
   U128, HALF_U128, U64, growthInside, ownFees, checkOrca, transferFeeOf, feesFromOrcaSnapshot,
   consistentOrcaFees, snapshotAddresses,
-} from '../orca_fees.mjs';
+} from '../venues/orca/fees.mjs';
 
 const POOL = address('Czfq3xZZDmsdGdUyrNLtRhGc47cXcZtLG4crryfu44zE');
 const OTHER = address('4QU2NpRaqmKMvPSwVKQDeW4V6JFEKJdkzbzdauumD9qN');

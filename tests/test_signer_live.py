@@ -13,7 +13,7 @@ import unittest
 import _fixtures  # noqa: F401
 from _fixtures import ADAPTIVE_POOL, BTC_QUOTE_POOL, LIVE_POOL, ROOT
 
-SIGNER = str(ROOT / 'signer2.mjs')
+SIGNER = str(ROOT / 'venues/orca/signer.mjs')
 HAVE_KEY = bool(os.environ.get('WALLET_SECRET_PATH')) and \
     pathlib.Path(os.environ.get('WALLET_SECRET_PATH', '')).exists()
 

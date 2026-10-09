@@ -619,7 +619,7 @@ def pancakeswap_pool(address):
 
 # --- Meteora DLMM ------------------------------------------------------------
 # The list API has everything but the liquidity around the active bin, which
-# the fee model needs and which only the chain knows. dlmm_probe.mjs reads it
+# the fee model needs and which only the chain knows. venues/meteora_dlmm/probe.mjs reads it
 # for every listed pool in one pass through the SDK.
 
 DLMM_MIN_TVL = 100_000
@@ -628,7 +628,7 @@ DLMM_MIN_TVL = 100_000
 def _dlmm_probe(addresses, timeout=180):
     if not addresses:
         return {}
-    r = subprocess.run(['node', str(ROOT / 'dlmm_probe.mjs'), *addresses],
+    r = subprocess.run(['node', str(ROOT / 'venues/meteora_dlmm/probe.mjs'), *addresses],
                        capture_output=True, text=True, timeout=timeout,
                        env=dict(os.environ, LPBOT_RPC=_rpc_url()))
     text = r.stdout or ''
@@ -804,7 +804,7 @@ def _jupiter_token(mint):
 GECKO_BASE = 'https://api.geckoterminal.com/api/v2/networks/base'
 BASE_RPCS = ('https://mainnet.base.org', 'https://base-rpc.publicnode.com')
 # Known Slipstream deployments: factory -> its NonfungiblePositionManager (lower
-# case). Same table as evm/addresses.mjs DEPLOYMENTS; evidence in evm/ADDRESSES.md.
+# case). Same table as chains/evm/base_addresses.mjs DEPLOYMENTS; evidence in chains/evm/BASE_ADDRESSES.md.
 SLIPSTREAM_DEPLOYMENTS = {
     '0x5e7bb104d84c7cb9b682aac2f3d509f5f406809a': '0x827922686190790b37229fd06084350e74485b72',   # initial
     '0xf8f2eb4940cfe7d13603dddd87f123820fc061ef': '0xe1f8cd9ac4e4a65f54f38a5cdafca44f6dd68b53',   # gauges-v3

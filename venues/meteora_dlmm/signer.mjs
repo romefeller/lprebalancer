@@ -1,5 +1,5 @@
 // Rebalancer — the Meteora DLMM signing layer. Same commands and the same
-// output fields as signer2.mjs, so the loop cannot tell which DEX it is on.
+// output fields as venues/orca/signer.mjs, so the loop cannot tell which DEX it is on.
 //
 // Built on @meteora-ag/dlmm 1.9. A DLMM position is a range of bins, not a
 // pair of ticks: bin i covers the price (1 + step/10000)^i in lamport units.
@@ -16,7 +16,7 @@
 // `feasible_bands` keeps such a band from being chosen, and `open` refuses it.
 //
 // Token-2022 base tokens (MU): every human amount and dollar figure here is
-// in UI units (token2022.mjs); `price`, `lowerPrice`, `upperPrice` and the bin
+// in UI units (shared/token2022.mjs); `price`, `lowerPrice`, `upperPrice` and the bin
 // prices stay pool-native, `uiPrice` is the price in UI units. A paused mint
 // or one with a transfer hook refuses open, harvest and close.
 //
@@ -25,20 +25,20 @@
 // DLMM is only readable through its pool.
 //
 // Commands:
-//   node signer_dlmm.mjs balance [pool]
-//   node signer_dlmm.mjs positions
-//   node signer_dlmm.mjs status [position]
-//   node signer_dlmm.mjs open <pool> <lowerPrice> <upperPrice> <maxA> <maxB> [--execute]
-//   node signer_dlmm.mjs harvest <position> [--execute]
-//   node signer_dlmm.mjs close <position> [--execute]
+//   node venues/meteora_dlmm/signer.mjs balance [pool]
+//   node venues/meteora_dlmm/signer.mjs positions
+//   node venues/meteora_dlmm/signer.mjs status [position]
+//   node venues/meteora_dlmm/signer.mjs open <pool> <lowerPrice> <upperPrice> <maxA> <maxB> [--execute]
+//   node venues/meteora_dlmm/signer.mjs harvest <position> [--execute]
+//   node venues/meteora_dlmm/signer.mjs close <position> [--execute]
 import fs from 'node:fs';
 import path from 'node:path';
-import { assertNotHalted } from './halt_guard.mjs';
-import { BOT_ROOT } from './bot_root.mjs';
+import { assertNotHalted } from '../../shared/halt_guard.mjs';
+import { BOT_ROOT } from '../../bot_root.mjs';
 import { createRequire } from 'node:module';
-import { waitTurn } from './jupiter_gate.mjs';
-import { endpoints, overEndpoints, isEntry, AfterSignError } from './rpc_policy.mjs';
-import { readMints, rawToUi, uiToNative, uiPrice, assertWritable, mintFields } from './token2022.mjs';
+import { waitTurn } from '../jupiter/gate.mjs';
+import { endpoints, overEndpoints, isEntry, AfterSignError } from '../../shared/rpc_policy.mjs';
+import { readMints, rawToUi, uiToNative, uiPrice, assertWritable, mintFields } from '../../shared/token2022.mjs';
 
 // The package's ESM build imports a directory and fails to load under Node 24;
 // the CommonJS build resolves cleanly.
@@ -67,7 +67,7 @@ const JUPITER = 'https://lite-api.jup.ag';
 const HEADERS = { accept: 'application/json', 'user-agent': 'Mozilla/5.0' };
 
 function guard() {
-  assertNotHalted(BOT_ROOT);                // the global HALT and this profile's (halt_guard.mjs)
+  assertNotHalted(BOT_ROOT);                // the global HALT and this profile's (shared/halt_guard.mjs)
 }
 
 async function secretBytes() {
@@ -108,7 +108,7 @@ async function symbols(pool, dlmm) {
 
 async function tokenUsd(mint) {
   try {
-    await waitTurn();                                 // one Jupiter slot (jupiter_gate.mjs)
+    await waitTurn();                                 // one Jupiter slot (venues/jupiter/gate.mjs)
     const j = await (await fetch(`${JUPITER}/price/v3?ids=${mint}`, { headers: HEADERS })).json();
     const p = Number(j?.[mint]?.usdPrice);
     return p > 0 ? p : null;
@@ -163,7 +163,7 @@ async function connect(url) {
   return { connection, payer };
 }
 
-// Run the whole operation over the endpoints (rpc_policy.mjs). A rate limit,
+// Run the whole operation over the endpoints (shared/rpc_policy.mjs). A rate limit,
 // a refusal or a transport failure moves on, BEFORE anything is sent. An
 // error after a send (`sent`), a program failure or an answer from the chain
 // is thrown at once, as itself. `deps` replaces the endpoints, connect and

@@ -92,7 +92,7 @@ class Gate(unittest.TestCase):
         """Five processes, two languages: every slot at least the spacing apart."""
         env = dict(os.environ, LPBOT_JUP_GATE=self.gate, LPBOT_JUP_SPACING_MS='40')
         py = ("import jupgate, json; print(json.dumps([jupgate.reserve() for _ in range(4)]))")
-        js = ("import { reserve } from './jupiter_gate.mjs'; const o = [];"
+        js = ("import { reserve } from './venues/jupiter/gate.mjs'; const o = [];"
               "for (let i = 0; i < 4; i++) o.push((await reserve()) / 1000); console.log(JSON.stringify(o));")
         procs = [subprocess.Popen([sys.executable, '-c', py], cwd=ROOT, env=env, stdout=subprocess.PIPE, text=True)
                  for _ in range(3)]
@@ -214,19 +214,20 @@ class Gate(unittest.TestCase):
         self.assertEqual(k, {'capture_output': True, 'text': True})
 
     def test_every_jupiter_call_site_takes_a_slot(self):
-        for f in ('signer_pancake.mjs', 'signer_dlmm.mjs', 'signer_byreal.mjs', 'signer_raydium.mjs'):
+        for f in ('venues/pancakeswap_v3/signer.mjs', 'venues/meteora_dlmm/signer.mjs', 'venues/byreal/signer.mjs',
+                  'venues/raydium_clmm/signer.mjs'):
             src = (ROOT / f).read_text()
-            self.assertIn("import { waitTurn } from './jupiter_gate.mjs';", src, f)
+            self.assertIn("import { waitTurn } from '../jupiter/gate.mjs';", src, f)
             body = src[src.index('async function tokenUsd(mint) {'):]
             self.assertLess(body.index('await waitTurn()'), body.index('JUPITER}/price'), f)
-        sw = (ROOT / 'swap_jupiter.mjs').read_text()
+        sw = (ROOT / 'venues/jupiter/swap.mjs').read_text()
         jf = sw[sw.index('async function jfetch'):]
         self.assertLess(jf.index('await waitTurn()'), jf.index('await fetch(url, init)'))
         not_ours = {'node_modules', '.git', '.claude'}             # dependencies and agent worktrees
         for f in (f for f in ROOT.rglob('*.mjs') if not not_ours & set(f.relative_to(ROOT).parts)):
             src = f.read_text()
-            if 'lite-api.jup.ag' in src and f.name not in ('jupiter_gate.mjs',):
-                self.assertIn('waitTurn', src, f'{f.name} talks to Jupiter without the gate')
+            if 'lite-api.jup.ag' in src and f != ROOT / 'venues/jupiter/gate.mjs':
+                self.assertIn('waitTurn', src, f'{f.relative_to(ROOT)} talks to Jupiter without the gate')
 
 
 def clear():
@@ -376,7 +377,7 @@ class OrcaFallback(OneOutcomePerSwap):
         self.assertEqual(self.dexes(calls), ['jupiter'])                       # part of it may have landed
 
     def test_the_fallback_script_is_a_registered_signer(self):
-        self.assertTrue(rebalancer.SIGNERS['orca-swap'].endswith('swap_orca.mjs'))
+        self.assertTrue(rebalancer.SIGNERS['orca-swap'].endswith('venues/orca/swap.mjs'))
         self.assertNotIn('orca-swap', rebalancer.config.EXECUTE_DEXES)                # never a venue
 
 

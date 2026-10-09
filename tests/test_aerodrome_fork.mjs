@@ -1,7 +1,7 @@
-// signer_aerodrome.mjs end to end on an anvil fork of Base: rebalance (wrap + approve +
+// venues/aerodrome/signer.mjs end to end on an anvil fork of Base: rebalance (wrap + approve +
 // swap) -> open -> fees from another trader -> harvest -> close -> pinned send -> run-dir
 // HALT, with --execute, against a LOCAL fork only. The cycle runs once on a pool of each
-// Slipstream deployment in evm/addresses.mjs (initial: tickSpacing 100; gauges-v3:
+// Slipstream deployment in chains/evm/base_addresses.mjs (initial: tickSpacing 100; gauges-v3:
 // tickSpacing 50), and checks each transaction went to THAT deployment's router or NPM. The keys are anvil's public test accounts; the LP wallet's key is never
 // read. Skipped when anvil is not installed or the fork cannot start.
 //
@@ -16,8 +16,8 @@ import net from 'node:net';
 import { spawn, spawnSync } from 'node:child_process';
 
 const dir = path.dirname(new URL(import.meta.url).pathname);
-const signer = path.join(dir, '..', 'signer_aerodrome.mjs');
-import { DEPLOYMENTS } from '../evm/addresses.mjs';
+const signer = path.join(dir, '..', 'venues/aerodrome/signer.mjs');
+import { DEPLOYMENTS } from '../chains/evm/base_addresses.mjs';
 
 const [INITIAL, V3] = DEPLOYMENTS;
 const POOL = '0xb2cc224c1c9feE385f8ad6a55b4d94E92359DC59';

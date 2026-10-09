@@ -1,4 +1,4 @@
-// evm_wallet.mjs and evm/keyfile.mjs: a new key is written once, mode 0600, never over an
+// chains/evm/wallet.mjs and chains/evm/keyfile.mjs: a new key is written once, mode 0600, never over an
 // existing file, and the only thing printed is the address. Every case runs in a scratch
 // directory; the real key at /home/ubuntu/.kamino-keys is never opened.
 import test from 'node:test';
@@ -7,10 +7,10 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { readKey, writeNewKey, validKey } from '../evm/keyfile.mjs';
+import { readKey, writeNewKey, validKey } from '../chains/evm/keyfile.mjs';
 
 const dir = path.dirname(new URL(import.meta.url).pathname);
-const script = path.join(dir, '..', 'evm_wallet.mjs');
+const script = path.join(dir, '..', 'chains/evm/wallet.mjs');
 const ADDR = /^0x[0-9a-fA-F]{40}\n$/;
 
 const made = [];

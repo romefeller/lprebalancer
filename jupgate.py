@@ -5,7 +5,7 @@ loop, its scanner thread, the audit and every signer and swap process ask it
 for prices or quotes from this one host. On 2026-10-01 20:33Z they bursted
 together and a pre-open swap got 429 three times in a row.
 
-The protocol, shared with jupiter_gate.mjs:
+The protocol, shared with venues/jupiter/gate.mjs:
     1. take the lock: create GATE.lock exclusively (O_CREAT | O_EXCL);
        a lock older than STALE_S is a crashed holder and is removed;
     2. read the last reserved slot from GATE (epoch seconds, as text);

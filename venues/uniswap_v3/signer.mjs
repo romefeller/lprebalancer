@@ -1,7 +1,7 @@
 // Rebalancer — the Uniswap v3 signing layer on Unichain and Polygon (LPBOT_CHAIN picks the chain
-// module in evm/chains.mjs; unset means Unichain). Same commands and output fields as
+// module in chains/evm/chains.mjs; unset means Unichain). Same commands and output fields as
 // the other signers (SIGNER_CONTRACT.md), plus the EVM additions of MULTI_DESIGN.md:
-// `rebalance` (the swap_jupiter.mjs shape) and `send` / `balance <token>` (the payout.mjs
+// `rebalance` (the venues/jupiter/swap.mjs shape) and `send` / `balance <token>` (the chains/solana/payout.mjs
 // shape, to the pinned profit wallet only).
 //
 // A position is an ERC-721 of the NonfungiblePositionManager (NPM). The signer reads, opens,
@@ -23,32 +23,32 @@
 // send nothing is retried: a failure part-way is printed with `sent: true, partial: true`
 // and every hash.
 //
-// The key is read from WALLET_SECRET_PATH inside this process (evm/keyfile.mjs) and never
+// The key is read from WALLET_SECRET_PATH inside this process (chains/evm/keyfile.mjs) and never
 // printed. Commands:
-//   node signer_uniswap.mjs balance [pool]          | balance <token>   (payout.mjs shape)
-//   node signer_uniswap.mjs positions
-//   node signer_uniswap.mjs status [tokenId]
-//   node signer_uniswap.mjs pool [pool]
-//   node signer_uniswap.mjs open <pool> <lowerPrice> <upperPrice> <maxA> <maxB> [--execute]
-//   node signer_uniswap.mjs increase <tokenId> <maxA> <maxB> [--execute]   (add to the open position, in range)
-//   node signer_uniswap.mjs harvest <tokenId> [--execute]
-//   node signer_uniswap.mjs close <tokenId> [--execute]
-//   node signer_uniswap.mjs rebalance <mintA> <mintB> <targetUsdA> <targetUsdB> [--execute]
-//   node signer_uniswap.mjs send <token> <amount> <to> [--execute]
-//   node signer_uniswap.mjs wrap <amount> [--execute]                (native coin -> its wrapped token)
+//   node venues/uniswap_v3/signer.mjs balance [pool]          | balance <token>   (chains/solana/payout.mjs shape)
+//   node venues/uniswap_v3/signer.mjs positions
+//   node venues/uniswap_v3/signer.mjs status [tokenId]
+//   node venues/uniswap_v3/signer.mjs pool [pool]
+//   node venues/uniswap_v3/signer.mjs open <pool> <lowerPrice> <upperPrice> <maxA> <maxB> [--execute]
+//   node venues/uniswap_v3/signer.mjs increase <tokenId> <maxA> <maxB> [--execute]   (add to the open position, in range)
+//   node venues/uniswap_v3/signer.mjs harvest <tokenId> [--execute]
+//   node venues/uniswap_v3/signer.mjs close <tokenId> [--execute]
+//   node venues/uniswap_v3/signer.mjs rebalance <mintA> <mintB> <targetUsdA> <targetUsdB> [--execute]
+//   node venues/uniswap_v3/signer.mjs send <token> <amount> <to> [--execute]
+//   node venues/uniswap_v3/signer.mjs wrap <amount> [--execute]                (native coin -> its wrapped token)
 import path from 'node:path';
-import { assertNotHalted } from './halt_guard.mjs';
-import { BOT_ROOT } from './bot_root.mjs';
+import { assertNotHalted } from '../../shared/halt_guard.mjs';
+import { BOT_ROOT } from '../../bot_root.mjs';
 import { createPublicClient, http, getAddress, isAddress, encodeFunctionData, encodeAbiParameters, decodeEventLog, keccak256 } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
-import { isEntry } from './rpc_policy.mjs';
-import { planRebalance, TARGET_TOLERANCE } from './rebalance_plan.mjs';
-import { readKey } from './evm/keyfile.mjs';
-import { overBase, evmErrorKind } from './evm/rpc.mjs';
-import { chainModule } from './evm/chains.mjs';
-import * as M from './evm/clmath.mjs';
+import { isEntry } from '../../shared/rpc_policy.mjs';
+import { planRebalance, TARGET_TOLERANCE } from '../../shared/rebalance_plan.mjs';
+import { readKey } from '../../chains/evm/keyfile.mjs';
+import { overBase, evmErrorKind } from '../../chains/evm/rpc.mjs';
+import { chainModule } from '../../chains/evm/chains.mjs';
+import * as M from '../../chains/evm/clmath.mjs';
 
-// The chain module: Unichain unless LPBOT_CHAIN names another (evm/chains.mjs).
+// The chain module: Unichain unless LPBOT_CHAIN names another (chains/evm/chains.mjs).
 let U = chainModule(process.env.LPBOT_CHAIN);
 // Tests switch the chain without a new process. Returns the module.
 export function useChain(name) {

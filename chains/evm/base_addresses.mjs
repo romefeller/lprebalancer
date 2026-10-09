@@ -1,6 +1,6 @@
 // Base mainnet addresses and ABIs for the Aerodrome Slipstream signer.
 //
-// Every address here was verified on chain (evidence in evm/ADDRESSES.md). Aerodrome runs
+// Every address here was verified on chain (evidence in chains/evm/BASE_ADDRESSES.md). Aerodrome runs
 // more than one Slipstream deployment on Base. Each deployment has its own factory,
 // NonfungiblePositionManager (NPM), SwapRouter and quoter, and they do not mix: an NPM
 // mints only for pools of its own factory, and a router or quoter computes the pool

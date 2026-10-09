@@ -10,14 +10,14 @@
 // WALLET_SECRET_PATH and never printed, one JSON object on stdout,
 // `ERROR: <message>` on stderr with exit 1, dry run by default.
 //
-//   node janitor.mjs close-empty <keepMint> [<keepMint> ...] [--execute]
+//   node chains/solana/janitor.mjs close-empty <keepMint> [<keepMint> ...] [--execute]
 //
 // 2026-09-28: four empty accounts (mSOL, RAY, ZEC, JitoSOL) held 0.00705 SOL.
 // A close costs 5,000 lamports and returns 1.5-2.0 million.
 import fs from 'node:fs';
 import path from 'node:path';
-import { assertNotHalted } from './halt_guard.mjs';
-import { BOT_ROOT } from './bot_root.mjs';
+import { assertNotHalted } from '../../shared/halt_guard.mjs';
+import { BOT_ROOT } from '../../bot_root.mjs';
 import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
@@ -69,7 +69,7 @@ export function verifyCloseTx(tx, owner, plan) {
 }
 
 function guard() {
-  assertNotHalted(BOT_ROOT);                // the global HALT and this profile's (halt_guard.mjs)
+  assertNotHalted(BOT_ROOT);                // the global HALT and this profile's (shared/halt_guard.mjs)
 }
 
 async function secretBytes() {
@@ -120,7 +120,7 @@ async function main() {
   const args = process.argv.slice(2);
   const execute = args.includes('--execute');
   const rest = args.filter(a => a !== '--execute');
-  if (rest[0] !== 'close-empty') throw new Error('usage: janitor.mjs close-empty <keepMint>... [--execute]');
+  if (rest[0] !== 'close-empty') throw new Error('usage: chains/solana/janitor.mjs close-empty <keepMint>... [--execute]');
   await closeEmpty(rest.slice(1), execute);
 }
 

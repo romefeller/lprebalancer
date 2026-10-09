@@ -1,7 +1,7 @@
 // The Raydium signer's `increase`: arguments are checked before any RPC.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { increase } from '../signer_raydium.mjs';
+import { increase } from '../venues/raydium_clmm/signer.mjs';
 
 test('increase refuses bad amounts before it reads anything', async () => {
   for (const [a, b] of [['x', '1'], ['-1', '1'], ['0', '0'], ['1', 'NaN'], [undefined, '1'], ['Infinity', '1']]) {

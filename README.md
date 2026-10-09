@@ -630,8 +630,8 @@ python3 config.py
 python3 db.py
 
 # the current position and the wallet, straight from the chain
-WALLET_SECRET_PATH=/path/to/key node signer2.mjs status
-WALLET_SECRET_PATH=/path/to/key node signer2.mjs balance <pool>
+WALLET_SECRET_PATH=/path/to/key node venues/orca/signer.mjs status
+WALLET_SECRET_PATH=/path/to/key node venues/orca/signer.mjs balance <pool>
 
 # run it: one process per profile (systemd template ops/lp-bot@.service)
 sudo systemctl start lp-bot@sol-usdc  # one profile

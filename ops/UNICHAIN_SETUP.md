@@ -17,7 +17,7 @@ Additive and idempotent: it lets a `wallets` row name chain `unichain`.
 
 ## 2. The key (once)
 
-    node evm_wallet.mjs create --path /home/ubuntu/.kamino-keys/unichain-wallet.secret
+    node chains/evm/wallet.mjs create --path /home/ubuntu/.kamino-keys/unichain-wallet.secret
 
 It prints the new address and nothing else. The file is mode 0600 and is never
 overwritten. A new key is necessary: `wallets.address` is unique, so the Base

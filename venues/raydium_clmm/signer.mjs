@@ -1,5 +1,5 @@
 // Rebalancer — the Raydium CLMM signing layer. Same commands and the same
-// output fields as signer2.mjs and signer_dlmm.mjs, so the loop cannot tell
+// output fields as venues/orca/signer.mjs and venues/meteora_dlmm/signer.mjs, so the loop cannot tell
 // which DEX it is on. SIGNER_CONTRACT.md is the specification.
 //
 // Built on @raydium-io/raydium-sdk-v2 0.2.73-alpha. A Raydium CLMM position is
@@ -8,7 +8,7 @@
 // position is owned through an NFT; its mint is the ledger id (`positionMint`).
 // One position account holds the whole band, so an open is one transaction.
 // The wallet can still hold several positions on one pool (a failed close, an
-// open retried by hand); as signer_dlmm.mjs does, `status` reports their union,
+// open retried by hand); as venues/meteora_dlmm/signer.mjs does, `status` reports their union,
 // `harvest` claims them all, `close` empties and closes them all, and the
 // first (lowest tick) position's mint is the id of the lot.
 //
@@ -16,12 +16,12 @@
 // the pool's fee growth and the two boundary ticks, so `feesAccruedA/B` are the
 // live figures, not the stale `tokenFeesOwed` the program settles only when
 // the position is touched. The pool, positions and tick arrays come from one
-// read (fee_snapshot.mjs), so all inputs share a slot. If that read is
+// read (shared/fee_snapshot.mjs), so all inputs share a slot. If that read is
 // unreadable or fails its invariants, the stale figure is reported and
 // `feesSource` says so.
 //
 // Token-2022 base tokens (MSFTx): every human amount and dollar figure here
-// is in UI units (token2022.mjs); `price`, `lowerPrice`, `upperPrice` and the
+// is in UI units (shared/token2022.mjs); `price`, `lowerPrice`, `upperPrice` and the
 // tick prices stay pool-native, `uiPrice` is the price in UI units. A paused
 // mint or one with a transfer hook refuses open, harvest and close.
 //
@@ -30,27 +30,27 @@
 // LPBOT_POOL for every command that needs one.
 //
 // Commands:
-//   node signer_raydium.mjs balance [pool]
-//   node signer_raydium.mjs positions
-//   node signer_raydium.mjs status [position]
-//   node signer_raydium.mjs pool [pool]
-//   node signer_raydium.mjs open <pool> <lowerPrice> <upperPrice> <maxA> <maxB> [--execute]
-//   node signer_raydium.mjs harvest <position> [--execute]
-//   node signer_raydium.mjs close <position> [--execute]
-//   node signer_raydium.mjs increase <position> <maxA> <maxB> [--execute]   (add to an open position in range)
+//   node venues/raydium_clmm/signer.mjs balance [pool]
+//   node venues/raydium_clmm/signer.mjs positions
+//   node venues/raydium_clmm/signer.mjs status [position]
+//   node venues/raydium_clmm/signer.mjs pool [pool]
+//   node venues/raydium_clmm/signer.mjs open <pool> <lowerPrice> <upperPrice> <maxA> <maxB> [--execute]
+//   node venues/raydium_clmm/signer.mjs harvest <position> [--execute]
+//   node venues/raydium_clmm/signer.mjs close <position> [--execute]
+//   node venues/raydium_clmm/signer.mjs increase <position> <maxA> <maxB> [--execute]   (add to an open position in range)
 import fs from 'node:fs';
-import { positionRent } from './position_rent.mjs';
-import { PRICE_SLIPPAGE_BPS, SLIPPAGE_REFUSAL, openToleranceBps, safeBase } from './slippage.mjs';
-import { executeBuilt, isProgramFailure, signerError } from './signer_errors.mjs';
-import { consistentFees } from './fee_snapshot.mjs';
-import { endpoints, overEndpoints, isEntry } from './rpc_policy.mjs';
-import { readMints, rawToUi, uiToNative, uiPrice, assertWritable, mintFields } from './token2022.mjs';
+import { positionRent } from '../../shared/position_rent.mjs';
+import { PRICE_SLIPPAGE_BPS, SLIPPAGE_REFUSAL, openToleranceBps, safeBase } from '../../shared/slippage.mjs';
+import { executeBuilt, isProgramFailure, signerError } from '../../shared/signer_errors.mjs';
+import { consistentFees } from '../../shared/fee_snapshot.mjs';
+import { endpoints, overEndpoints, isEntry } from '../../shared/rpc_policy.mjs';
+import { readMints, rawToUi, uiToNative, uiPrice, assertWritable, mintFields } from '../../shared/token2022.mjs';
 import path from 'node:path';
-import { assertNotHalted } from './halt_guard.mjs';
-import { BOT_ROOT } from './bot_root.mjs';
+import { assertNotHalted } from '../../shared/halt_guard.mjs';
+import { BOT_ROOT } from '../../bot_root.mjs';
 import { createRequire } from 'node:module';
-import { waitTurn } from './jupiter_gate.mjs';
-import { NeverLanded, priorityCuPrice, sendUntilLanded } from './tx_send.mjs';
+import { waitTurn } from '../jupiter/gate.mjs';
+import { NeverLanded, priorityCuPrice, sendUntilLanded } from '../../shared/tx_send.mjs';
 
 // The SDK's ESM build loads under Node 24, but the CommonJS build is used so
 // that this file, the SDK and web3.js share one copy of PublicKey and BN.
@@ -103,7 +103,7 @@ if (!CLMM_PROGRAM_ID.equals(PROGRAM_ID)) {
 }
 
 function guard() {
-  assertNotHalted(BOT_ROOT);                // the global HALT and this profile's (halt_guard.mjs)
+  assertNotHalted(BOT_ROOT);                // the global HALT and this profile's (shared/halt_guard.mjs)
 }
 
 async function secretBytes() {
@@ -150,7 +150,7 @@ async function symbols(pool, poolInfo) {
 
 async function tokenUsd(mint) {
   try {
-    await waitTurn();                                 // one Jupiter slot (jupiter_gate.mjs)
+    await waitTurn();                                 // one Jupiter slot (venues/jupiter/gate.mjs)
     const j = await fetchJson(`${JUPITER}/price/v3?ids=${mint}`);
     const p = Number(j?.[mint]?.usdPrice);
     return p > 0 ? p : null;
@@ -225,7 +225,7 @@ async function connect(url, { withKey = true } = {}) {
   return { connection, payer, raydium };
 }
 
-// Run the whole operation over the endpoints (rpc_policy.mjs). A rate limit,
+// Run the whole operation over the endpoints (shared/rpc_policy.mjs). A rate limit,
 // a refusal or a transport failure moves on, BEFORE anything is sent. An
 // error after a send (`sent`), a program failure or an answer from the chain
 // is thrown at once, as itself. `deps` replaces the endpoints, connect and
@@ -271,7 +271,7 @@ async function positionsOnPool(raydium, pool) {
 }
 
 // The accrued fees of every position, from ONE consistent read of the pool,
-// the positions and their tick arrays (fee_snapshot.mjs). Three separate
+// the positions and their tick arrays (shared/fee_snapshot.mjs). Three separate
 // reads booked $6,237 of fees on a $230 position on 2026-09-27, when the
 // price crossed a boundary tick between them. A read that fails the
 // invariants reports the settled tokenFeesOwed instead: stale, but never more
@@ -406,7 +406,7 @@ async function positions() {
 // --- sizing -------------------------------------------------------------------
 // Deposit for a band [pa, pb] at price p with per-token caps: the liquidity
 // each cap alone would fund, the smaller of the two, and the amounts that
-// liquidity takes. From signer2.mjs; human units.
+// liquidity takes. From venues/orca/signer.mjs; human units.
 function depositQuote(p, pa, pb, capA, capB) {
   if (!(p > 0 && pa > 0 && pb > pa)) return null;
   const sp = Math.sqrt(p), sa = Math.sqrt(pa), sb = Math.sqrt(pb);
@@ -523,7 +523,7 @@ async function open(pool, lower, upper, uiMaxA, uiMaxB, execute) {
 
     // One side goes in exactly, the other up to its cap. The fixed side is
     // sized so the other fits under its cap anywhere in the price range
-    // (slippage.mjs): with the binding side fixed at its cap, a small price
+    // (shared/slippage.mjs): with the binding side fixed at its cap, a small price
     // move asked for more than the cap and opens failed with 6017.
     const sb_ = safeBase(price, band.tickLowerPrice, band.tickUpperPrice, maxA, maxB,
                          openToleranceBps(band.tickLowerPrice, band.tickUpperPrice));
@@ -698,7 +698,7 @@ async function close(address, execute) {
       const am = positionAmounts(p, r, tickOf);
       ests.push(am);
       // All liquidity out, fees and rewards collected, NFT burnt, accounts
-      // closed. Slippage is a PRICE range (slippage.mjs): each minimum is
+      // closed. Slippage is a PRICE range (shared/slippage.mjs): each minimum is
       // what the position holds if the price moves PRICE_SLIPPAGE_BPS against
       // that token. A 1% cut of each amount was a ~0.01% price tolerance on a
       // +/-1% band, and closes failed with PriceSlippageCheck (6017).

@@ -5,7 +5,7 @@
 // to the next endpoint. The rules are rpc_policy.mjs's: a read may move on, BEFORE anything
 // is signed; after signing nothing moves and nothing is retried; a revert is the same on
 // every endpoint.
-import { errorKind as solanaErrorKind, AfterSignError } from '../rpc_policy.mjs';
+import { errorKind as solanaErrorKind, AfterSignError } from '../../shared/rpc_policy.mjs';
 
 export const BASE_PUBLIC = 'https://mainnet.base.org';
 export const BASE_PUBLICNODE = 'https://base-rpc.publicnode.com';

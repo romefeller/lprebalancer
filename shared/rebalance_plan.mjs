@@ -1,6 +1,6 @@
 // The one swap that brings a wallet's split of two tokens to the targets.
-// Shared by every swapper the loop drives with `rebalance` (swap_jupiter.mjs,
-// swap_orca.mjs, signer_aerodrome.mjs), so they all plan alike. No imports:
+// Shared by every swapper the loop drives with `rebalance` (venues/jupiter/swap.mjs,
+// venues/orca/swap.mjs, venues/aerodrome/signer.mjs), so they all plan alike. No imports:
 // a signer may load it without the Solana SDK.
 
 export const TARGET_TOLERANCE = 0.02;                // "at target" = within 2%

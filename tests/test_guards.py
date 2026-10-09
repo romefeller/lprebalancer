@@ -42,7 +42,7 @@ class SignerArgs(unittest.TestCase):
 class Inside(unittest.TestCase):
     def test_scripts_must_live_in_the_bot_directory(self):
         root = pathlib.Path(__file__).resolve().parent.parent
-        self.assertTrue(guards.inside(root / 'signer2.mjs', root))
+        self.assertTrue(guards.inside(root / 'venues/orca/signer.mjs', root))
         with self.assertRaises(guards.Refused):
             guards.inside('/tmp/evil.mjs', root)
         with self.assertRaises(guards.Refused):

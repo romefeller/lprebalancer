@@ -1,4 +1,4 @@
-// One HALT rule for every signer (halt_guard.mjs): the script directory's HALT
+// One HALT rule for every signer (shared/halt_guard.mjs): the script directory's HALT
 // stops every profile, LPBOT_RUN_DIR/HALT stops one. The helper once, then
 // every write script, run for real with a HALT in a run directory only.
 import test from 'node:test';
@@ -8,7 +8,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { haltFiles, assertNotHalted } from '../halt_guard.mjs';
+import { haltFiles, assertNotHalted } from '../shared/halt_guard.mjs';
 
 const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const tmp = (p) => fs.mkdtempSync(path.join(os.tmpdir(), p));
@@ -38,16 +38,16 @@ const USDC = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
 const POOL = 'Czfq3xZZDmsdGdUyrNLtRhGc47cXcZtLG4crryfu44zE';
 const EVM = '0x' + 'ab'.repeat(20);
 const WRITES = {
-  'signer2.mjs': ['open', POOL, '1', '2', '1', '1', '--execute'],
-  'signer_dlmm.mjs': ['open', POOL, '1', '2', '1', '1', '--execute'],
-  'signer_raydium.mjs': ['open', POOL, '1', '2', '1', '1', '--execute'],
-  'signer_byreal.mjs': ['open', POOL, '1', '2', '1', '1', '--execute'],
-  'signer_pancake.mjs': ['open', POOL, '1', '2', '1', '1', '--execute'],
-  'swap_jupiter.mjs': ['rebalance', SOL, USDC, '1', '1', '--execute'],
-  'swap_orca.mjs': ['rebalance', SOL, USDC, '1', '1', '--execute'],
-  'payout.mjs': ['send', USDC, '1', USDC, '--execute'],
-  'janitor.mjs': ['close-empty', '--execute'],
-  'signer_aerodrome.mjs': ['open', EVM, '1', '2', '1', '1', '--execute'],
+  'venues/orca/signer.mjs': ['open', POOL, '1', '2', '1', '1', '--execute'],
+  'venues/meteora_dlmm/signer.mjs': ['open', POOL, '1', '2', '1', '1', '--execute'],
+  'venues/raydium_clmm/signer.mjs': ['open', POOL, '1', '2', '1', '1', '--execute'],
+  'venues/byreal/signer.mjs': ['open', POOL, '1', '2', '1', '1', '--execute'],
+  'venues/pancakeswap_v3/signer.mjs': ['open', POOL, '1', '2', '1', '1', '--execute'],
+  'venues/jupiter/swap.mjs': ['rebalance', SOL, USDC, '1', '1', '--execute'],
+  'venues/orca/swap.mjs': ['rebalance', SOL, USDC, '1', '1', '--execute'],
+  'chains/solana/payout.mjs': ['send', USDC, '1', USDC, '--execute'],
+  'chains/solana/janitor.mjs': ['close-empty', '--execute'],
+  'venues/aerodrome/signer.mjs': ['open', EVM, '1', '2', '1', '1', '--execute'],
 };
 
 for (const [script, args] of Object.entries(WRITES)) {
@@ -68,7 +68,7 @@ for (const [script, args] of Object.entries(WRITES)) {
 // The global HALT: the bot root's HALT stops every write script, wherever the
 // script lives in the tree. Run on a copy of the tree, never on the live one:
 // a HALT written there would stop the real bot.
-const WRITES_ALL = { ...WRITES, 'signer_uniswap.mjs': ['open', EVM, '1', '2', '1', '1', '--execute'] };
+const WRITES_ALL = { ...WRITES, 'venues/uniswap_v3/signer.mjs': ['open', EVM, '1', '2', '1', '1', '--execute'] };
 const SKIP_IN_COPY = new Set(['node_modules', '.git', '.claude', 'run', 'tests', '__pycache__']);
 
 function treeCopy() {

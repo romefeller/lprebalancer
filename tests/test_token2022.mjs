@@ -1,4 +1,4 @@
-// token2022.mjs: scaled UI amounts, pause and transfer hook (2026-10-01).
+// shared/token2022.mjs: scaled UI amounts, pause and transfer hook (2026-10-01).
 //
 // The bot LPs tokenized stocks (MU, DJT, MSFTx), Token-2022 mints whose UI
 // amount is raw / 10^decimals × a multiplier the issuer changes. Proven here:
@@ -15,7 +15,7 @@ import fc from 'fast-check';
 import {
   effectiveMultiplier, mintFacts, readMints, rawToUi, uiToRaw, uiToNative, uiPrice,
   writeRefusal, assertWritable, mintFields, REFUSE_PAUSED, REFUSE_HOOK, TOKEN_2022_PROGRAM, TOKEN_PROGRAM,
-} from '../token2022.mjs';
+} from '../shared/token2022.mjs';
 
 const FIX = JSON.parse(fs.readFileSync(new URL('./fixtures_stocks_20261001.json', import.meta.url)));
 const NOW = 1790885369;                   // 2026-10-01, after MSFTx's switch at 1787185800

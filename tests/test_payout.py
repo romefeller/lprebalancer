@@ -100,11 +100,11 @@ class Distribute(unittest.TestCase):
 
     def test_a_payout_that_never_landed_is_owed_not_uncertain(self):
         """2026-10-02: two expired payouts were booked 'uncertain' (counted
-        paid, never re-sent). payout.mjs now proves an expired one never
+        paid, never re-sent). chains/solana/payout.mjs now proves an expired one never
         landed (NeverLanded): the loop owes it and the next harvest pays it."""
         root = pathlib.Path(rebalancer.__file__).parent
-        inner = re.search(r"new NeverLanded\(`([^`]*)`\)", (root / 'tx_send.mjs').read_text()).group(1)
-        outer = re.search(r"new NeverLanded\(`([^`]*)`\)", (root / 'payout.mjs').read_text()).group(1)
+        inner = re.search(r"new NeverLanded\(`([^`]*)`\)", (root / 'shared/tx_send.mjs').read_text()).group(1)
+        outer = re.search(r"new NeverLanded\(`([^`]*)`\)", (root / 'chains/solana/payout.mjs').read_text()).group(1)
         msg = outer.replace('${e.message}', inner).replace('${signature}', 'SIG')
         self.assertIn('owed again', msg)
         rows, _, sent, state = self.run_it(sol=0.07, chain_result=(None, msg))

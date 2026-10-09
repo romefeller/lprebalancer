@@ -25,7 +25,7 @@ add `config.native_keep`.
 
 ## 2. The key (once)
 
-    node evm_wallet.mjs create --path /home/ubuntu/.kamino-keys/polygon-wallet.secret
+    node chains/evm/wallet.mjs create --path /home/ubuntu/.kamino-keys/polygon-wallet.secret
 
 It prints the new address and nothing else. The file is mode 0600 and is never
 overwritten. The unit names the path:

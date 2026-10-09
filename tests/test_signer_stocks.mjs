@@ -17,10 +17,10 @@ import fs from 'node:fs';
 import fc from 'fast-check';
 import { createRequire } from 'node:module';
 import { sqrtPriceToPrice } from '@orca-so/whirlpools-core';
-import * as dlmm from '../signer_dlmm.mjs';
-import * as orca from '../signer2.mjs';
-import * as raydium from '../signer_raydium.mjs';
-import { assertWritable, uiPrice } from '../token2022.mjs';
+import * as dlmm from '../venues/meteora_dlmm/signer.mjs';
+import * as orca from '../venues/orca/signer.mjs';
+import * as raydium from '../venues/raydium_clmm/signer.mjs';
+import { assertWritable, uiPrice } from '../shared/token2022.mjs';
 
 const require = createRequire(import.meta.url);
 const BN = require('bn.js');

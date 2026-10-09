@@ -1,11 +1,11 @@
-// LPBOT_SLEEVE in swap_jupiter.mjs: the swap plans from one profile's share
+// LPBOT_SLEEVE in venues/jupiter/swap.mjs: the swap plans from one profile's share
 // of a shared wallet, and a sleeve that cannot be read refuses the call.
 // And Token-2022 scaled UI amounts: the sleeve, the plan and Jupiter's
 // usdPrice are UI units, the quote raw.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { parseSleeve, sleeveCap, uiOf, amountToRaw, verifyQuote } from '../swap_jupiter.mjs';
-import { planRebalance } from '../rebalance_plan.mjs';
+import { parseSleeve, sleeveCap, uiOf, amountToRaw, verifyQuote } from '../venues/jupiter/swap.mjs';
+import { planRebalance } from '../shared/rebalance_plan.mjs';
 
 const USDC = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
 const MU = 'MUmint1111111111111111111111111111111111111';

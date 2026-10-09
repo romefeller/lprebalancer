@@ -1,10 +1,10 @@
-// The Node side of the Jupiter gate (jupiter_gate.mjs; protocol in jupgate.py).
+// The Node side of the Jupiter gate (venues/jupiter/gate.mjs; protocol in jupgate.py).
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { reserve, waitTurn, STALE_MS, WAIT_MS } from '../jupiter_gate.mjs';
+import { reserve, waitTurn, STALE_MS, WAIT_MS } from '../venues/jupiter/gate.mjs';
 
 function clock(t = 1_000_000) {
   const c = { t, slept: [] };

@@ -106,18 +106,18 @@ CLOSE = RUN / 'CLOSE'           # a disabled profile: harvest and close its posi
 engine.use_network(config.CAPS['gecko_network'])
 # One signer per DEX. A DEX without an entry can be scanned and recommended
 # but never opened; `execute_dexes` must not name it.
-SIGNERS = {'orca': str(ROOT / 'signer2.mjs'),
-           'meteora-dlmm': str(ROOT / 'signer_dlmm.mjs'),
-           'raydium-clmm': str(ROOT / 'signer_raydium.mjs'),
-           'byreal': str(ROOT / 'signer_byreal.mjs'),
-           'pancakeswap-v3-solana': str(ROOT / 'signer_pancake.mjs'),
-           'aerodrome-slipstream': str(ROOT / 'signer_aerodrome.mjs'),     # Base: positions, swaps, payouts
-           'uniswap-v3-unichain': str(ROOT / 'signer_uniswap.mjs'),       # Unichain: positions, swaps, payouts
-           'uniswap-v3-polygon': str(ROOT / 'signer_uniswap.mjs'),        # Polygon: the same signer, LPBOT_CHAIN=polygon
-           'jupiter': str(ROOT / 'swap_jupiter.mjs'),       # swaps, not positions
-           'orca-swap': str(ROOT / 'swap_orca.mjs'),        # the fallback swap, direct on an Orca whirlpool
-           'payout': str(ROOT / 'payout.mjs'),              # transfers to the profit wallet only
-           'janitor': str(ROOT / 'janitor.mjs')}            # closes empty token accounts, rent to the wallet
+SIGNERS = {'orca': str(ROOT / 'venues/orca/signer.mjs'),
+           'meteora-dlmm': str(ROOT / 'venues/meteora_dlmm/signer.mjs'),
+           'raydium-clmm': str(ROOT / 'venues/raydium_clmm/signer.mjs'),
+           'byreal': str(ROOT / 'venues/byreal/signer.mjs'),
+           'pancakeswap-v3-solana': str(ROOT / 'venues/pancakeswap_v3/signer.mjs'),
+           'aerodrome-slipstream': str(ROOT / 'venues/aerodrome/signer.mjs'),  # Base: positions, swaps, payouts
+           'uniswap-v3-unichain': str(ROOT / 'venues/uniswap_v3/signer.mjs'),  # Unichain: positions, swaps, payouts
+           'uniswap-v3-polygon': str(ROOT / 'venues/uniswap_v3/signer.mjs'),   # Polygon: same signer, LPBOT_CHAIN=polygon
+           'jupiter': str(ROOT / 'venues/jupiter/swap.mjs'),                   # swaps, not positions
+           'orca-swap': str(ROOT / 'venues/orca/swap.mjs'),                    # the fallback swap, on an Orca whirlpool
+           'payout': str(ROOT / 'chains/solana/payout.mjs'),                   # transfers to the profit wallet only
+           'janitor': str(ROOT / 'chains/solana/janitor.mjs')}                 # closes empty token accounts
 
 
 def band_label(k):
@@ -233,7 +233,7 @@ def halted():
 
 def route(kind):
     """The SIGNERS key that does `kind` ('swap' or 'payout') on this chain:
-    its own script on Solana (Jupiter, payout.mjs), the venue signer where the
+    its own script on Solana (Jupiter, chains/solana/payout.mjs), the venue signer where the
     chain row says 'venue' (Base)."""
     via = config.CAPS[f'{kind}_via']
     return config.DEX if via == 'venue' else via
@@ -691,7 +691,7 @@ def _chain(*args, dex=None, timeout=420, extra_env=None):
     # scripts, _NATIVE for every signer that is not Solana's. LPBOT_RUN_DIR:
     # a signer refuses writes on this profile's HALT as on the global one.
     # LPBOT_CHAIN: the EVM Uniswap signer serves Unichain and Polygon and picks
-    # its chain module by it (evm/chains.mjs).
+    # its chain module by it (chains/evm/chains.mjs).
     # The profile's own signer gets its opt-ins (config.SIGNER_ENV); no other
     # script does.
     own = config.SIGNER_ENV if (dex or config.DEX) == config.DEX else {}
@@ -1231,7 +1231,7 @@ def profit_wallet_pinned():
     """The payout destination must match the address pinned in the service
     environment, which a database write cannot change: the chain row names
     the variable (LPBOT_PROFIT_WALLET_PIN on Solana, LPBOT_EVM_PROFIT_WALLET_PIN
-    on Base). payout.mjs and the EVM signer check the same pin themselves."""
+    on Base). chains/solana/payout.mjs and the EVM signer check the same pin themselves."""
     pin = os.environ.get(config.CAPS['pin_env'], '')
     # an EVM address is one address in any letter case (EIP-55 checksums)
     return bool(pin) and wallets.norm(pin) == wallets.norm(config.PROFIT_WALLET) and chains.is_address(config.CHAIN, pin)
@@ -2430,7 +2430,7 @@ def run_audits(state):
 
 def janitor(state):
     """Once a day: reclaim the rent of empty token accounts the bot does not
-    use (janitor.mjs). A dry run first, which costs nothing; a close only when
+    use (chains/solana/janitor.mjs). A dry run first, which costs nothing; a close only when
     there is rent to reclaim. The rent returns to the LP wallet and the next
     open deploys it. Wallet-wide: the residual owner's chore, keeping every
     mint of every profile of the wallet. Never blocks the loop."""
@@ -2921,7 +2921,7 @@ SWAP_RETRY_PAUSES = (15, 30)      # three attempts in all
 # An RPC rate limit keeps the short pauses: rpc_policy moves to the next endpoint.
 SWAP_RATE_LIMIT_PAUSES = (30, 60)
 # When Jupiter fails without sending, the same swap is tried once directly on
-# an Orca whirlpool (swap_orca.mjs), so a Jupiter outage or rate limit does not
+# an Orca whirlpool (venues/orca/swap.mjs), so a Jupiter outage or rate limit does not
 # open a lopsided band (owner, 2026-10-01). '' turns the fallback off.
 SWAP_FALLBACK = os.environ.get('LPBOT_SWAP_FALLBACK', 'orca-swap')
 # A failed swap that leaves a side the band needs under this share of the
@@ -3019,7 +3019,7 @@ def balance_wallet(state, bal, rec, share_a=None):
     env = {'LPBOT_TOKEN_HINTS': json.dumps(hints)} if hints else None
     if config.WALLET_ID:
         # The wallet may hold other profiles' tokens: the swap plans from
-        # this profile's sleeve only (swap_jupiter.mjs, swap_orca.mjs, the
+        # this profile's sleeve only (venues/jupiter/swap.mjs, venues/orca/swap.mjs, the
         # venue signer).
         env = dict(env or {}, LPBOT_SLEEVE=json.dumps(wallets.sleeve_caps(bal, mint_a, mint_b)))
     swap_dex = route('swap')

@@ -1,4 +1,4 @@
-// signer_uniswap.mjs and evm/unichain.mjs without a node: the money arithmetic, every
+// venues/uniswap_v3/signer.mjs and chains/evm/unichain.mjs without a node: the money arithmetic, every
 // refusal, the price reference, the v4 swap calldata and the partial-send report. Failure
 // paths first. No network: the CLI cases use a closed loopback port, which
 // unichainEndpoints() makes the ONLY endpoint, so nothing can reach mainnet.
@@ -10,12 +10,12 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import fc from 'fast-check';
 import { decodeFunctionData, decodeAbiParameters, getAddress, keccak256, encodeAbiParameters } from 'viem';
-import * as M from '../evm/clmath.mjs';
-import * as U from '../evm/unichain.mjs';
-import * as S from '../signer_uniswap.mjs';
+import * as M from '../chains/evm/clmath.mjs';
+import * as U from '../chains/evm/unichain.mjs';
+import * as S from '../venues/uniswap_v3/signer.mjs';
 
 const dir = path.dirname(new URL(import.meta.url).pathname);
-const script = path.join(dir, '..', 'signer_uniswap.mjs');
+const script = path.join(dir, '..', 'venues/uniswap_v3/signer.mjs');
 const POOL = '0x5d3e7f5dA38FBf476E8B36E3b90D02FC4C1A08C3';
 const PIN = '0x2b35948898e1b4897E7FC5a70e39b213dcfd0142';
 const OTHER = '0x70997970C51812dc3A010C7d01b50e0d17dc79C8';

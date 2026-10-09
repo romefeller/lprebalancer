@@ -1,11 +1,11 @@
-// payout.mjs refuses any destination that is not the pinned profit wallet,
+// chains/solana/payout.mjs refuses any destination that is not the pinned profit wallet,
 // before it reads a key or touches the network.
 import test from 'node:test';
 import assert from 'node:assert';
 import { spawnSync } from 'node:child_process';
 import path from 'node:path';
 const dir = path.dirname(new URL(import.meta.url).pathname);
-const script = path.join(dir, '..', 'payout.mjs');
+const script = path.join(dir, '..', 'chains/solana/payout.mjs');
 const USDC = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
 const A = '8funmDkPNBtjqfNkBEoBF16eBfyQ4vMAFrs4Nyys5D1h', B = '83HxMUUC7cn5oWKgNvUYCv52MVLUWmaUPFdCrgC4tV2f';
 const run = (env, dest) => spawnSync('node', [script, 'send', USDC, '0.01', dest],

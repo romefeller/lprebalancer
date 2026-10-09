@@ -70,14 +70,14 @@ TARGETS = {
     'health': ('health.py', ['cooldown', 'after_failure', 'after_success', 'verdict', 'load', 'record_failure',
                              'record_success', 'allowed', 'summary'], PY_TESTS('test_health', 'test_edges_0930')),
     'jupgate': ('jupgate.py', ['_take', 'reserve', 'wait_turn'], PY_TESTS('test_jupiter_gate.Gate')),
-    'jupiter_gate_js': ('jupiter_gate.mjs', ['take', 'reserve', 'waitTurn'], NODE_TESTS('test_jupiter_gate.mjs')),
+    'jupiter_gate_js': ('venues/jupiter/gate.mjs', ['take', 'reserve', 'waitTurn'], NODE_TESTS('test_jupiter_gate.mjs')),
     'one_outcome': ('rebalancer.py', ['record_health', 'chain', 'balance_wallet', 'sweep_foreign'],
                     PY_TESTS('test_jupiter_gate', 'test_health', 'test_deploy_all', 'test_deploy_idle', 'test_sweep',
                              'test_multi_loop', 'test_scaled', 'test_review_edges', 'test_orca_fallback_pool')),
     # 2026-10-09 DJT halt: the Orca fallback's pool, the left-behind sale's fallback, the one-side hold.
     'orca_fallback': ('rebalancer.py', ['fallback_pool_args', 'one_side_short'], PY_TESTS('test_orca_fallback_pool')),
     'token_facts': ('dexes.py', ['jupiter_token', '_get'], PY_TESTS('test_jupiter_gate.LessJupiterTraffic', 'test_jupiter_gate.Gate')),
-    'swap_orca': ('swap_orca.mjs', ['guard', 'toRaw', 'parseHints', 'checkPool', 'direction', 'planSwap', 'spotOutPerIn',
+    'swap_orca': ('venues/orca/swap.mjs', ['guard', 'toRaw', 'parseHints', 'checkPool', 'direction', 'planSwap', 'spotOutPerIn',
                                     'priceImpact', 'valueLossOk', 'verifyQuote', 'checkImpact', 'chooseCuPrice', 'cuLimit',
                                     'withWsolClose', 'decodeSwapV2', 'verifyTxShape', 'checkDeltas', 'noopReport', 'sendLanded'],
                   NODE_TESTS('test_swap_orca.mjs')),
@@ -92,20 +92,20 @@ TARGETS = {
     'books': ('rebalancer.py', ['regime_at_move', 'notify_book', 'emoji_for', 'tidy'],
               PY_TESTS('test_move_books', 'test_observability', 'test_rebalancer', 'test_edges_0930')),
     'deployment': ('db.py', ['_pct', '_deployment', 'deployment_now', '_pnl'], PY_TESTS('test_move_books', 'test_audit_more', 'test_edges_0930', 'test_db')),
-    'rpc_policy': ('rpc_policy.mjs', ['endpoints', 'errorKind', 'overEndpoints', 'isEntry'], NODE_TESTS('test_rpc_policy.mjs', 'test_signer_rpc.mjs')),
-    'rpc_raydium': ('signer_raydium.mjs', ['withRpc', 'sendAll'], NODE_TESTS('test_signer_rpc.mjs')),
-    'rpc_dlmm': ('signer_dlmm.mjs', ['withRpc', 'sendAll'], NODE_TESTS('test_signer_rpc.mjs')),
-    'rpc_pancake': ('signer_pancake.mjs', ['withRpc', 'sendOne'], NODE_TESTS('test_signer_rpc.mjs')),
-    'rpc_byreal': ('signer_byreal.mjs', ['withRpc', 'sendAll', 'confirm'], NODE_TESTS('test_signer_rpc.mjs')),
-    'rpc_orca': ('signer2.mjs', ['withRpc', 'sendOnce'], NODE_TESTS('test_signer_rpc.mjs')),
+    'rpc_policy': ('shared/rpc_policy.mjs', ['endpoints', 'errorKind', 'overEndpoints', 'isEntry'], NODE_TESTS('test_rpc_policy.mjs', 'test_signer_rpc.mjs')),
+    'rpc_raydium': ('venues/raydium_clmm/signer.mjs', ['withRpc', 'sendAll'], NODE_TESTS('test_signer_rpc.mjs')),
+    'rpc_dlmm': ('venues/meteora_dlmm/signer.mjs', ['withRpc', 'sendAll'], NODE_TESTS('test_signer_rpc.mjs')),
+    'rpc_pancake': ('venues/pancakeswap_v3/signer.mjs', ['withRpc', 'sendOne'], NODE_TESTS('test_signer_rpc.mjs')),
+    'rpc_byreal': ('venues/byreal/signer.mjs', ['withRpc', 'sendAll', 'confirm'], NODE_TESTS('test_signer_rpc.mjs')),
+    'rpc_orca': ('venues/orca/signer.mjs', ['withRpc', 'sendOnce'], NODE_TESTS('test_signer_rpc.mjs')),
     # Token-2022 stocks (MU, DJT, MSFTx): scaled UI amounts, pause and hook refusals, and the
     # signers' mint reads and position marks built on them.
-    'token2022': ('token2022.mjs', ['effectiveMultiplier', 'mintFacts', 'readMints', 'rawToUi', 'uiToRaw',
+    'token2022': ('shared/token2022.mjs', ['effectiveMultiplier', 'mintFacts', 'readMints', 'rawToUi', 'uiToRaw',
                                     'uiToNative', 'uiPrice', 'writeRefusal', 'assertWritable', 'mintFields'],
                   NODE_TESTS('test_token2022.mjs', 'test_signer_stocks.mjs')),
-    'stocks_dlmm': ('signer_dlmm.mjs', ['poolMints', 'positionView', 'unionView'], NODE_TESTS('test_signer_stocks.mjs')),
-    'stocks_raydium': ('signer_raydium.mjs', ['poolMints', 'positionView', 'unionView'], NODE_TESTS('test_signer_stocks.mjs')),
-    'stocks_orca': ('signer2.mjs', ['poolMints', 'chainView'], NODE_TESTS('test_signer_stocks.mjs')),
+    'stocks_dlmm': ('venues/meteora_dlmm/signer.mjs', ['poolMints', 'positionView', 'unionView'], NODE_TESTS('test_signer_stocks.mjs')),
+    'stocks_raydium': ('venues/raydium_clmm/signer.mjs', ['poolMints', 'positionView', 'unionView'], NODE_TESTS('test_signer_stocks.mjs')),
+    'stocks_orca': ('venues/orca/signer.mjs', ['poolMints', 'chainView'], NODE_TESTS('test_signer_stocks.mjs')),
     'book_lines': ('book_format.mjs', ['shareAgrees', 'lpLine', 'emojiFor', 'healthLine'], NODE_TESTS('test_book_format.mjs')),
     'surrogate': ('calm.py', ['pair_tokens', 'clean_bars', 'fit_surrogate', 'binance_5m', 'surrogate_5m',
                               'missing_slots', 'tape_fresh'], PY_TESTS('test_tape_surrogate')),
@@ -121,7 +121,7 @@ TARGETS = {
     'add_idle': ('rebalancer.py', ['add_idle', 'added_usd'], PY_TESTS('test_increase_idle')),
     'add_deposit': ('db.py', ['add_deposit'], PY_TESTS('test_increase_idle.AddDeposit')),
     'unsettled_guard': ('rebalancer.py', ['unsettled_guard', 'settle_mark', 'wallet'], PY_TESTS('test_unsettled_guard')),
-    'priority_fee': ('swap_jupiter.mjs', ['swapRequestBody', 'priorityFeeLamports', 'verifyPriorityFee'],
+    'priority_fee': ('venues/jupiter/swap.mjs', ['swapRequestBody', 'priorityFeeLamports', 'verifyPriorityFee'],
                      NODE_TESTS('test_priority_fee.mjs', 'test_security.mjs')),
     'audit_checks': ('audit.py', ['check_idle', 'check_gas', 'check_equity', 'lookalike', 'classify_tx', 'check_flows', 'check_harvest',
                                   'payout_received', 'check_positions', 'check_owed', 'check_empty', 'check_fee_reads',
@@ -138,13 +138,13 @@ TARGETS = {
                             'test_payout.SwapRetry', 'test_multi_loop', 'test_scaled', 'test_review_edges', 'test_jupiter_gate', 'test_health',
                             'test_deploy_idle')),
     'loop_hooks': ('rebalancer.py', ['janitor', 'run_audits'], PY_TESTS('test_audit.Hooks', 'test_audit_more.Hooks', 'test_audit_more.JanitorKeepsWhatComesBack', 'test_audit_more.JanitorReplan', 'test_audit_more.JanitorUnsignedClose')),
-    'janitor_js': ('janitor.mjs', ['planClose', 'closeInstructions', 'verifyCloseTx'], NODE_TESTS('test_janitor.mjs')),
+    'janitor_js': ('chains/solana/janitor.mjs', ['planClose', 'closeInstructions', 'verifyCloseTx'], NODE_TESTS('test_janitor.mjs')),
     'book_format': ('book_format.mjs', ['equityLine', 'lpLine', 'sinceStartLine'], NODE_TESTS('test_book_format.mjs')),
     'deploy_idle': ('rebalancer.py', ['idle_to_deploy', 'deploy_idle', 'balance_wallet'],
                     PY_TESTS('test_deploy_idle', 'test_deploy_all', 'test_multi_loop', 'test_scaled', 'test_review_edges', 'test_jupiter_gate', 'test_health', 'test_edges_0930')),
     'idle_capital': ('rebalancer.py', ['idle_to_deploy', 'deploy_idle', 'plan_sweep', 'sweep_foreign'],
                      PY_TESTS('test_deploy_idle', 'test_sweep', 'test_multi_loop', 'test_scaled', 'test_review_edges', 'test_health', 'test_edges_0930')),
-    'orca_fees': ('orca_fees.mjs', ['growthInside', 'ownFees', 'checkOrca', 'transferFeeOf', 'feesFromOrcaSnapshot',
+    'orca_fees': ('venues/orca/fees.mjs', ['growthInside', 'ownFees', 'checkOrca', 'transferFeeOf', 'feesFromOrcaSnapshot',
                                     'snapshotAddresses', 'consistentOrcaFees'], NODE_TESTS('test_orca_fees.mjs')),
     'book_scope': ('db.py', ['book_profiles', 'book_scope', 'open_by_profile', 'flow_totals', '_uncounted_usd'],
                    PY_TESTS('test_stats.Scope', 'test_stats.Attribution', 'test_stats.Portfolio', 'test_stats.OtherWallet',
@@ -206,13 +206,13 @@ TARGETS = {
                       PY_TESTS('test_quiet_pool', 'test_tape_surrogate')),
     'quiet_db': ('db.py', ['tape_ref_pool'], PY_TESTS('test_quiet_pool')),
     # 2026-10-02: a payout's priority fee, and the send loop that proves an expired one never landed
-    'payout_send': ('payout.mjs', ['payoutCuPrice'], NODE_TESTS('test_payout_send.mjs')),
-    'tx_send': ('tx_send.mjs', ['sendUntilLanded'], NODE_TESTS('test_payout_send.mjs')),
+    'payout_send': ('chains/solana/payout.mjs', ['payoutCuPrice'], NODE_TESTS('test_payout_send.mjs')),
+    'tx_send': ('shared/tx_send.mjs', ['sendUntilLanded'], NODE_TESTS('test_payout_send.mjs')),
     'deposit_mark': ('rebalancer.py', ['opened_mark', 'settle_deposit'], PY_TESTS('test_deposit_mark')),
     'deposit_db': ('db.py', ['set_deposit'], PY_TESTS('test_deposit_mark')),
-    'tx_send_price': ('tx_send.mjs', ['priorityCuPrice'], NODE_TESTS('test_payout_send.mjs', 'test_raydium_landing.mjs')),
-    'raydium_landing': ('signer_raydium.mjs', ['sendLanded', 'sendAll', 'rebuildOnRefusal'], NODE_TESTS('test_raydium_landing.mjs')),
-    'swap_send': ('swap_jupiter.mjs', ['sendSwap'], NODE_TESTS('test_payout_send.mjs')),
+    'tx_send_price': ('shared/tx_send.mjs', ['priorityCuPrice'], NODE_TESTS('test_payout_send.mjs', 'test_raydium_landing.mjs')),
+    'raydium_landing': ('venues/raydium_clmm/signer.mjs', ['sendLanded', 'sendAll', 'rebuildOnRefusal'], NODE_TESTS('test_raydium_landing.mjs')),
+    'swap_send': ('venues/jupiter/swap.mjs', ['sendSwap'], NODE_TESTS('test_payout_send.mjs')),
     # 2026-10-02: the swing (a profile on one pool in its market's session, another outside it)
     'swing_calendar': ('swing.py', ['session', 'is_open', 'wanted', 'decide', 'audit'],
                        PY_TESTS('test_swing.Calendar', 'test_swing.Decide', 'test_swing.Audit', 'test_swing.TickMore')),
@@ -239,21 +239,21 @@ TARGETS = {
                     PY_TESTS('test_scaled', 'test_audit', 'test_audit_edges')),
     'rewards_measured': ('rebalancer.py', ['distribute_rewards'], PY_TESTS('test_rewards', 'test_hardening', 'test_reward_payout')),
     'reward_inflow': ('txfees.py', ['_ui', 'inflow'], PY_TESTS('test_rewards', 'test_hardening', 'test_reward_payout')),
-    'halt_guard': ('halt_guard.mjs', ['haltFiles', 'assertNotHalted'], NODE_TESTS('test_halt_guard.mjs')),
-    'swap_sleeve': ('swap_jupiter.mjs', ['parseSleeve', 'sleeveCap', 'uiOf', 'amountToRaw'], NODE_TESTS('test_sleeve.mjs')),
-    'orca_sleeve': ('swap_orca.mjs', ['sellable'], NODE_TESTS('test_swap_orca.mjs')),
-    'fee_snapshot': ('fee_snapshot.mjs', ['wrappingSubU128', 'checkFees', 'feesFromSnapshot', 'snapshotKeys',
+    'halt_guard': ('shared/halt_guard.mjs', ['haltFiles', 'assertNotHalted'], NODE_TESTS('test_halt_guard.mjs')),
+    'swap_sleeve': ('venues/jupiter/swap.mjs', ['parseSleeve', 'sleeveCap', 'uiOf', 'amountToRaw'], NODE_TESTS('test_sleeve.mjs')),
+    'orca_sleeve': ('venues/orca/swap.mjs', ['sellable'], NODE_TESTS('test_swap_orca.mjs')),
+    'fee_snapshot': ('shared/fee_snapshot.mjs', ['wrappingSubU128', 'checkFees', 'feesFromSnapshot', 'snapshotKeys',
                                           'decodeSnapshot', 'consistentFees'],
                      NODE_TESTS('test_fee_snapshot.mjs')),
     # Base / Aerodrome Slipstream (EVM): the deposit arithmetic, the refusals, the deployment
     # registry (which factory, NPM, router and quoter a pool may use), the endpoint policy and
     # the key file. The fork test is not run per mutant (it needs anvil and a fork).
-    'evm_math': ('evm/clmath.mjs', ['sqrtRatioAtTick', 'amount0Delta', 'amount1Delta', 'amountsForLiquidity',
+    'evm_math': ('chains/evm/clmath.mjs', ['sqrtRatioAtTick', 'amount0Delta', 'amount1Delta', 'amountsForLiquidity',
                                     'liquidityForAmount0', 'liquidityForAmount1', 'liquidityForAmounts', 'depositFor',
                                     'minWithSlippage', 'tickAtPrice', 'bandTicks', 'wrapPlan', 'toRaw', 'rawFromFloat',
                                     'parseSleeve', 'sleeveCap', 'capped'], NODE_TESTS('test_aerodrome.mjs')),
     # 2026-10-08: a 9-decimal request rounded up past an 18-decimal holding is the holding
-    'evm_cap_held': ('evm/clmath.mjs', ['capToHeld'], NODE_TESTS('test_uniswap_polygon.mjs')),
+    'evm_cap_held': ('chains/evm/clmath.mjs', ['capToHeld'], NODE_TESTS('test_uniswap_polygon.mjs')),
     # the hot pause's fee side on Uniswap v3 venues (2026-10-08)
     'v3_fee_pool': ('dexes.py', ['v3_fee_state', 'uniswap_v3_fee_state'], PY_TESTS('test_polygon_hot_pause', 'test_hot_pause')),
     # an open's leftover into the position where the venue can add (2026-10-08)
@@ -261,11 +261,11 @@ TARGETS = {
                       PY_TESTS('test_deploy_leftover', 'test_deploy_idle', 'test_increase_idle')),
     'v3_fee_loop': ('rebalancer.py', ['sample_fee_growth', 'sample_v3_fee_growth'],
                     PY_TESTS('test_polygon_hot_pause', 'test_hot_pause', 'test_venues')),
-    'evm_signer': ('signer_aerodrome.mjs', ['guard', 'marketRefusals', 'spendable', 'positionView', 'simulateSequence',
+    'evm_signer': ('venues/aerodrome/signer.mjs', ['guard', 'marketRefusals', 'spendable', 'positionView', 'simulateSequence',
                                             'runSteps', 'planOpen', 'closeCalls', 'checkRecipient', 'isNative',
                                             'deploymentOf', 'describe', 'ownPositions'],
                    NODE_TESTS('test_aerodrome.mjs')),
-    'evm_rpc': ('evm/rpc.mjs', ['baseEndpoints', 'isLoopback', 'evmErrorKind', 'overBase'], NODE_TESTS('test_aerodrome.mjs')),
+    'evm_rpc': ('chains/evm/rpc.mjs', ['baseEndpoints', 'isLoopback', 'evmErrorKind', 'overBase'], NODE_TESTS('test_aerodrome.mjs')),
     'liq_factor': ('rebalancer.py', ['liquidity_view'],
                    PY_TESTS('test_hardening.Liquidity', 'test_hardening.LiquiditySmoothed',
                             'test_hardening.LiquidityViewExact')),
@@ -276,7 +276,7 @@ TARGETS = {
                                      'macro_view', 'macro_hold'], PY_TESTS('test_hot_pause')),
     'macro_db': ('db.py', ['macro_event_near', 'macro_next_ts'], PY_TESTS('test_hot_pause')),
     'pause_db': ('db.py', ['position_closed'], PY_TESTS('test_hot_pause')),
-    'evm_key': ('evm/keyfile.mjs', ['validKey', 'writeNewKey', 'readKey'], NODE_TESTS('test_evm_wallet.mjs')),
+    'evm_key': ('chains/evm/keyfile.mjs', ['validKey', 'writeNewKey', 'readKey'], NODE_TESTS('test_evm_wallet.mjs')),
     # Unichain / Uniswap v3 (2026-10-04): the pool lookup, the endpoint, and the money
     # figures of a pool whose stablecoin is token A (USDC/HYPE: quote 1/price, the hold
     # benchmarks on the HYPE's dollar price).
@@ -293,15 +293,15 @@ TARGETS = {
     # The Unichain signer: every refusal, the deposit and close arithmetic, the v4 swap
     # calldata, the simulation gate and the partial-send report (the fork test runs the
     # same code on chain; it is not in the mutant loop: one run takes a minute).
-    'uniswap_signer': ('signer_uniswap.mjs', ['settings', 'marketRefusals', 'referencePrices', 'spendable', 'planOpen',
+    'uniswap_signer': ('venues/uniswap_v3/signer.mjs', ['settings', 'marketRefusals', 'referencePrices', 'spendable', 'planOpen',
                                               'positionView', 'closeCalls', 'v4PoolsFor', 'v4SwapCalldata', 'blockingFailure',
                                               'simulateSequence', 'runSteps', 'checkRecipient', 'describe', 'parseArgs',
                                               'useChain', 'isNative', 'planIncrease', 'planWrap', 'nonceFor', 'atBlock'],
                        NODE_TESTS('test_uniswap.mjs', 'test_uniswap_polygon.mjs')),
-    'unichain_registry': ('evm/unichain.mjs', ['unichainEndpoints', 'simulationEndpoints'], NODE_TESTS('test_uniswap.mjs')),
+    'unichain_registry': ('chains/evm/unichain.mjs', ['unichainEndpoints', 'simulationEndpoints'], NODE_TESTS('test_uniswap.mjs')),
     # Polygon (2026-10-08): the chain module's endpoints and the registry that picks it.
-    'polygon_registry': ('evm/polygon.mjs', ['polygonEndpoints', 'simulationEndpoints'], NODE_TESTS('test_uniswap_polygon.mjs')),
-    'evm_chains': ('evm/chains.mjs', ['chainModule'], NODE_TESTS('test_uniswap_polygon.mjs', 'test_uniswap.mjs')),
+    'polygon_registry': ('chains/evm/polygon.mjs', ['polygonEndpoints', 'simulationEndpoints'], NODE_TESTS('test_uniswap_polygon.mjs')),
+    'evm_chains': ('chains/evm/chains.mjs', ['chainModule'], NODE_TESTS('test_uniswap_polygon.mjs', 'test_uniswap.mjs')),
     # native POL above native_keep into WPOL (owner, 2026-10-08)
     'native_wrap': ('rebalancer.py', ['native_to_wrap', 'wrap_native'], PY_TESTS('test_polygon', 'test_polygon_loop')),
     'book_inverted': ('book_format.mjs', ['pricedView', 'shownPrice', 'shownBand', 'shownMovePct', 'shownSide', 'equityLine', 'sinceStartLine'],
@@ -738,7 +738,7 @@ EQUIVALENT = {
         'error-message text only: ?? and || differ only for an error with an empty message',
     ('rpc_orca', 'sendOnce', '\\?\\? -> ||', 'throw new AfterSignError(`send failed after signing (not retried): ${e?.message ?? e}`);', 0):
         'error-message text only: ?? and || differ only for an error with an empty message',
-    # swap_orca.mjs
+    # venues/orca/swap.mjs
     ('swap_orca', 'planSwap', '(?<![<>=!-])>(?![>=]) -> >=', 'const raw = amount > 0 ? BigInt(Math.floor(amount * 10 ** sellInfo.decimals)) : 0n;', 0):
         'only amount 0 (or -0) differs, and BigInt(Math.floor(0)) is 0n, the same as the else branch',
     ('swap_orca', 'chooseCuPrice', '\\?\\? -> ||', 'const fees = (recent ?? []).map(r => Number(r.prioritizationFee ?? r)).filter(f => f > 0).sort((a, b) => a - b);', 1):

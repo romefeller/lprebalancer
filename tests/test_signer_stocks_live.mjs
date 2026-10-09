@@ -15,16 +15,16 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import http from 'node:http';
 import { execFile } from 'node:child_process';
-import { readMints } from '../token2022.mjs';
+import { readMints } from '../shared/token2022.mjs';
 
 const ROOT = new URL('..', import.meta.url).pathname;
 const MAINNET = 'https://api.mainnet-beta.solana.com';
 const KEY = process.env.WALLET_SECRET_PATH;
 const HAVE_KEY = Boolean(KEY && fs.existsSync(KEY));
 const POOLS = [
-  { signer: 'signer_dlmm.mjs', pool: '13MEx6gjRadJNUdmToaGSzgeWHLH7FzScUQS9Mc5nYF5', mint: 'MUxEsUKSMACyw5fZf68wxf5FLnZVhtU9CwH8uNNGay1', sym: 'MU', dec: 6 },
-  { signer: 'signer2.mjs', pool: '7gkB2D1SqhUYgKrSpDU5cma4tK9efijHouYituABdJcG', mint: 'DJTu7vi8norVzdVAffgvb39VP7wjKeTsgaMBJrzfxvoF', sym: 'DJT', dec: 6 },
-  { signer: 'signer_raydium.mjs', pool: 'D6bRhQUcR9B7bPbbqgxpE17MjyUjBtr8hHQCcJoHrrv1', mint: 'XspzcW1PRtgf6Wj92HCiZdjzKCyFekVD8P5Ueh3dRMX', sym: 'MSFTx', dec: 8 },
+  { signer: 'venues/meteora_dlmm/signer.mjs', pool: '13MEx6gjRadJNUdmToaGSzgeWHLH7FzScUQS9Mc5nYF5', mint: 'MUxEsUKSMACyw5fZf68wxf5FLnZVhtU9CwH8uNNGay1', sym: 'MU', dec: 6 },
+  { signer: 'venues/orca/signer.mjs', pool: '7gkB2D1SqhUYgKrSpDU5cma4tK9efijHouYituABdJcG', mint: 'DJTu7vi8norVzdVAffgvb39VP7wjKeTsgaMBJrzfxvoF', sym: 'DJT', dec: 6 },
+  { signer: 'venues/raydium_clmm/signer.mjs', pool: 'D6bRhQUcR9B7bPbbqgxpE17MjyUjBtr8hHQCcJoHrrv1', mint: 'XspzcW1PRtgf6Wj92HCiZdjzKCyFekVD8P5Ueh3dRMX', sym: 'MSFTx', dec: 8 },
 ];
 
 async function rpc(method, params, url = MAINNET) {
@@ -135,7 +135,7 @@ for (const [reason, mutate] of VARIANTS) {
         // harvest and close name a position; DLMM and Raydium check the pool's
         // mints before they look for it, so any address shows the refusal.
         // (Orca reads the pool from the position: it needs a real one.)
-        if (p.signer !== 'signer2.mjs') {
+        if (p.signer !== 'venues/orca/signer.mjs') {
           for (const cmd of ['harvest', 'close']) {
             const w = await run(p.signer, [cmd, '11111111111111111111111111111111', '--pool', p.pool], { SOLANA_RPC_URL: url });
             assert.notEqual(w.code, 0, `${p.signer} ${cmd}`);

@@ -1,4 +1,4 @@
-// signer_uniswap.mjs with LPBOT_CHAIN=polygon end to end on an anvil fork of Polygon PoS:
+// venues/uniswap_v3/signer.mjs with LPBOT_CHAIN=polygon end to end on an anvil fork of Polygon PoS:
 // rebalance (the held v3 pool only: Polygon has no v4 route) -> open -> fees from another
 // trader -> harvest -> close -> pinned send -> run-dir HALT, with --execute, against a LOCAL
 // fork only. Gas is native POL, outside the pool; WPOL is an ordinary ERC-20. The wallets are
@@ -16,10 +16,10 @@ import path from 'node:path';
 import net from 'node:net';
 import { spawn, spawnSync } from 'node:child_process';
 import { encodeFunctionData, parseAbi } from 'viem';
-import { V3, WPOL, USDT0 } from '../evm/polygon.mjs';
+import { V3, WPOL, USDT0 } from '../chains/evm/polygon.mjs';
 
 const dir = path.dirname(new URL(import.meta.url).pathname);
-const signer = path.join(dir, '..', 'signer_uniswap.mjs');
+const signer = path.join(dir, '..', 'venues/uniswap_v3/signer.mjs');
 const POOL = '0x9B08288C3Be4F62bbf8d1C20Ac9C5e6f9467d8B7';
 // publicnode first, then dRPC: a busy public endpoint must not turn the test into a skip.
 const FORK_URLS = process.env.LPBOT_POLYGON_FORK_URL ? [process.env.LPBOT_POLYGON_FORK_URL]

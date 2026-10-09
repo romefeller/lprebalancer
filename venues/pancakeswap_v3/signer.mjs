@@ -1,5 +1,5 @@
 // Rebalancer — the PancakeSwap V3 (Solana) signing layer. Same commands and
-// the same output fields as signer2.mjs and signer_dlmm.mjs, so the loop
+// the same output fields as venues/orca/signer.mjs and venues/meteora_dlmm/signer.mjs, so the loop
 // cannot tell which DEX it is on.
 //
 // PancakeSwap's Solana CLMM (program HpNfyc2Saw7RKkQd8nEL4khUcuPhQ7WwY1B2qjx8jxFq)
@@ -27,7 +27,7 @@
 // Position NFTs are Token-2022 mints (the fork's front end uses
 // open_position_with_token22_nft without metadata). The personal position PDA
 // is ["position", nftMint]. Several positions on one pool are reported as ONE
-// logical position (union view), as signer_dlmm.mjs does; `harvest` and
+// logical position (union view), as venues/meteora_dlmm/signer.mjs does; `harvest` and
 // `close` act on all of them.
 //
 // Fees: decrease_liquidity_v2 with liquidity 0 collects fees and rewards
@@ -38,27 +38,27 @@
 // printed. The pool comes from --pool <address> or LPBOT_POOL.
 //
 // Commands:
-//   node signer_pancake.mjs balance [pool]
-//   node signer_pancake.mjs positions
-//   node signer_pancake.mjs status [position]
-//   node signer_pancake.mjs pool [pool]
-//   node signer_pancake.mjs open <pool> <lowerPrice> <upperPrice> <maxA> <maxB> [--execute]
-//   node signer_pancake.mjs harvest <position> [--execute]
-//   node signer_pancake.mjs close <position> [--execute]
+//   node venues/pancakeswap_v3/signer.mjs balance [pool]
+//   node venues/pancakeswap_v3/signer.mjs positions
+//   node venues/pancakeswap_v3/signer.mjs status [position]
+//   node venues/pancakeswap_v3/signer.mjs pool [pool]
+//   node venues/pancakeswap_v3/signer.mjs open <pool> <lowerPrice> <upperPrice> <maxA> <maxB> [--execute]
+//   node venues/pancakeswap_v3/signer.mjs harvest <position> [--execute]
+//   node venues/pancakeswap_v3/signer.mjs close <position> [--execute]
 //
 // Without --execute the real instructions are built AND simulated with
 // connection.simulateTransaction; the report carries the simulation logs.
 // Extra env: LPBOT_PRIORITY_MICROLAMPORTS (compute unit price, default 20000).
 import fs from 'node:fs';
-import { positionRent } from './position_rent.mjs';
-import { SLIPPAGE_REFUSAL } from './slippage.mjs';
-import { consistentFees } from './fee_snapshot.mjs';
-import { endpoints, overEndpoints, isEntry, AfterSignError } from './rpc_policy.mjs';
+import { positionRent } from '../../shared/position_rent.mjs';
+import { SLIPPAGE_REFUSAL } from '../../shared/slippage.mjs';
+import { consistentFees } from '../../shared/fee_snapshot.mjs';
+import { endpoints, overEndpoints, isEntry, AfterSignError } from '../../shared/rpc_policy.mjs';
 import path from 'node:path';
-import { assertNotHalted } from './halt_guard.mjs';
-import { BOT_ROOT } from './bot_root.mjs';
+import { assertNotHalted } from '../../shared/halt_guard.mjs';
+import { BOT_ROOT } from '../../bot_root.mjs';
 import { createRequire } from 'node:module';
-import { waitTurn } from './jupiter_gate.mjs';
+import { waitTurn } from '../jupiter/gate.mjs';
 
 // The project is "type": "commonjs"; the SDK's CommonJS build resolves cleanly.
 const require = createRequire(import.meta.url);
@@ -102,7 +102,7 @@ const HEADERS = { accept: 'application/json', 'user-agent': 'Mozilla/5.0' };
 const GECKO_HEADERS = { accept: 'application/json;version=20230203', 'user-agent': 'Mozilla/5.0' };
 
 function guard() {
-  assertNotHalted(BOT_ROOT);                // the global HALT and this profile's (halt_guard.mjs)
+  assertNotHalted(BOT_ROOT);                // the global HALT and this profile's (shared/halt_guard.mjs)
 }
 
 async function secretBytes() {
@@ -212,7 +212,7 @@ async function symbols(pool, mintA, mintB) {
 
 async function tokenUsd(mint) {
   try {
-    await waitTurn();                                 // one Jupiter slot (jupiter_gate.mjs)
+    await waitTurn();                                 // one Jupiter slot (venues/jupiter/gate.mjs)
     const j = await (await fetch(`${JUPITER}/price/v3?ids=${mint}`, { headers: HEADERS })).json();
     const p = Number(j?.[mint]?.usdPrice);
     return p > 0 ? p : null;
@@ -257,7 +257,7 @@ async function connect(url, withKey = true) {
   return { connection, payer };
 }
 
-// Run the whole operation over the endpoints (rpc_policy.mjs). A rate limit,
+// Run the whole operation over the endpoints (shared/rpc_policy.mjs). A rate limit,
 // a refusal or a transport failure moves on, BEFORE anything is sent. An
 // error after a send (`sent`), a program failure or an answer from the chain
 // is thrown at once, as itself. `deps` replaces the endpoints, connect and
@@ -327,7 +327,7 @@ async function ownerPositions(connection, owner, p) {
 
 // Fees accrued but not collected: position vs pool fee growth, through the
 // two boundary ticks. The pool, the position and the tick arrays come from
-// ONE read (fee_snapshot.mjs): separate reads booked $6,237 of fees on a $230
+// ONE read (shared/fee_snapshot.mjs): separate reads booked $6,237 of fees on a $230
 // Raydium position on 2026-09-27, when the price crossed a boundary tick
 // between them. A read that is unreadable or fails the invariants reports
 // tokenFeesOwed and says so.
@@ -547,7 +547,7 @@ function bandTicks(lower, upper, dA, dB, ts) {
   return { lo, hi };
 }
 
-// signer2.mjs:depositQuote — the liquidity each cap alone would fund, the
+// venues/orca/signer.mjs:depositQuote — the liquidity each cap alone would fund, the
 // smaller one wins. Reported alongside the on-chain integer math as a check.
 function depositQuote(p, pa, pb, capA, capB) {
   if (!(p > 0 && pa > 0 && pb > pa)) return null;

@@ -1,4 +1,4 @@
-// The RPC endpoint policy (rpc_policy.mjs). 2026-09-30: a Jupiter 429 moved
+// The RPC endpoint policy (shared/rpc_policy.mjs). 2026-09-30: a Jupiter 429 moved
 // the swap to an endpoint that refuses indexed reads (403), and every swap
 // that reached it failed.
 import test from 'node:test';
@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { endpoints, errorKind, overEndpoints, JupiterError, AfterSignError, MAINNET, PUBLICNODE, CAPS, isEntry } from '../rpc_policy.mjs';
+import { endpoints, errorKind, overEndpoints, JupiterError, AfterSignError, MAINNET, PUBLICNODE, CAPS, isEntry } from '../shared/rpc_policy.mjs';
 
 const noSleep = { sleep: async () => {} };
 const INDEXED_403 = '403 Forbidden: {"jsonrpc":"2.0","error":{"code":-32602,"message":"Indexed requests require a personal token. Get one at: https://www.allnodes.com/publicnode"}}';
@@ -65,8 +65,8 @@ test('tries and pauses are bounded', async () => {
 });
 
 test('the swap script uses the policy and never the old list', () => {
-  const src = fs.readFileSync(new URL('../swap_jupiter.mjs', import.meta.url), 'utf8');
-  assert.ok(src.includes("from './rpc_policy.mjs'"));
+  const src = fs.readFileSync(new URL('../venues/jupiter/swap.mjs', import.meta.url), 'utf8');
+  assert.ok(src.includes("from '../../shared/rpc_policy.mjs'"));
   assert.ok(/endpoints\(process\.env, \{ indexed: true \}\)/.test(src));
   assert.ok(!src.includes('solana-rpc.publicnode.com'), 'no hard-coded endpoint list');
   assert.ok(/throw new JupiterError\(/.test(src));
@@ -89,7 +89,7 @@ test('signer rules: sent, program failures and HALT are fatal whatever the text'
 test('isEntry: true only for the script node was started with', () => {
   const me = new URL(import.meta.url).pathname;
   assert.equal(isEntry(import.meta.url, ['node', me]), true);
-  assert.equal(isEntry(import.meta.url, ['node', new URL('../rpc_policy.mjs', import.meta.url).pathname]), false);
+  assert.equal(isEntry(import.meta.url, ['node', new URL('../shared/rpc_policy.mjs', import.meta.url).pathname]), false);
   assert.equal(isEntry(import.meta.url, ['node']), false);
   assert.equal(isEntry(import.meta.url, ['node', '/no/such/file.mjs']), false);
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'isentry-'));

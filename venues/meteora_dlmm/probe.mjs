@@ -1,7 +1,7 @@
 // Meteora DLMM read probe: the liquidity around the active bin, which the
 // pool API does not publish and the fee model cannot do without.
 //
-//   node dlmm_probe.mjs <pool> [<pool> ...]
+//   node venues/meteora_dlmm/probe.mjs <pool> [<pool> ...]
 //
 // Prints one JSON object keyed by pool address. For each pool: the active bin,
 // the bins `span` either side of it with their token amounts in human units,
@@ -20,7 +20,7 @@ const SPAN = Number(process.env.DLMM_PROBE_SPAN ?? 12);
 
 async function main() {
   const addrs = process.argv.slice(2).filter(a => !a.startsWith('--'));
-  if (!addrs.length) throw new Error('usage: node dlmm_probe.mjs <pool> [...]');
+  if (!addrs.length) throw new Error('usage: node venues/meteora_dlmm/probe.mjs <pool> [...]');
   const connection = new Connection(RPC, 'confirmed');
   const pools = await DLMM.createMultiple(connection, addrs.map(a => new PublicKey(a)));
   const out = {};

@@ -1,8 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { PublicKey } from '@solana/web3.js';
-import { positionRent } from '../position_rent.mjs';
-import { executeBuilt, isProgramFailure, signerError } from '../signer_errors.mjs';
+import { positionRent } from '../shared/position_rent.mjs';
+import { executeBuilt, isProgramFailure, signerError } from '../shared/signer_errors.mjs';
 
 const key = n => new PublicKey(Buffer.alloc(32, n));
 const TOKEN_2022 = new PublicKey('TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb');

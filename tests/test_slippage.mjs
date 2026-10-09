@@ -2,7 +2,7 @@
 // anywhere in the range; the open tolerance scales with the band.
 import test from 'node:test';
 import assert from 'node:assert';
-const { amountsAt, closeMinimums, safeBase, openToleranceBps, SLIPPAGE_REFUSAL } = await import('../slippage.mjs');
+const { amountsAt, closeMinimums, safeBase, openToleranceBps, SLIPPAGE_REFUSAL } = await import('../shared/slippage.mjs');
 
 const p = 121, L = 1000;
 for (const w of [0.01, 0.02, 0.05]) {

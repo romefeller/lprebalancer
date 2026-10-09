@@ -19,9 +19,9 @@
 //   GET  /tokens/v2/search?query=<mint> -> [{ id, symbol, decimals, usdPrice }]
 //
 // Commands:
-//   node swap_jupiter.mjs quote <inMint> <outMint> <amountIn>              (amountIn in human units of inMint)
-//   node swap_jupiter.mjs swap  <inMint> <outMint> <amountIn> [--execute]
-//   node swap_jupiter.mjs rebalance <mintA> <mintB> <targetUsdA> <targetUsdB> [--execute]
+//   node venues/jupiter/swap.mjs quote <inMint> <outMint> <amountIn>              (amountIn in human units of inMint)
+//   node venues/jupiter/swap.mjs swap  <inMint> <outMint> <amountIn> [--execute]
+//   node venues/jupiter/swap.mjs rebalance <mintA> <mintB> <targetUsdA> <targetUsdB> [--execute]
 //
 // `rebalance` is what the loop calls: it reads the wallet's balances of the two
 // mints (native SOL counts as So111...112, less LPBOT_GAS_RESERVE_SOL), prices
@@ -38,23 +38,23 @@
 // (ratio, default 0.01 = 1%); Jupiter's own simulation of the built transaction
 // failed; the quote is older than QUOTE_MAX_AGE_MS at send time; the wallet
 // holds less than the amount to sell.
-import { NeverLanded, sendUntilLanded } from './tx_send.mjs';
+import { NeverLanded, sendUntilLanded } from '../../shared/tx_send.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
-import { assertNotHalted } from './halt_guard.mjs';
-import { BOT_ROOT } from './bot_root.mjs';
+import { assertNotHalted } from '../../shared/halt_guard.mjs';
+import { BOT_ROOT } from '../../bot_root.mjs';
 import { createRequire } from 'node:module';
 
-import { endpoints, overEndpoints, JupiterError, AfterSignError } from './rpc_policy.mjs';
-import { waitTurn } from './jupiter_gate.mjs';
-import { readMints, rawToUi, uiToRaw, writeRefusal } from './token2022.mjs';
-import { planRebalance, TARGET_TOLERANCE } from './rebalance_plan.mjs';
+import { endpoints, overEndpoints, JupiterError, AfterSignError } from '../../shared/rpc_policy.mjs';
+import { waitTurn } from './gate.mjs';
+import { readMints, rawToUi, uiToRaw, writeRefusal } from '../../shared/token2022.mjs';
+import { planRebalance, TARGET_TOLERANCE } from '../../shared/rebalance_plan.mjs';
 const require = createRequire(import.meta.url);
 const { Connection, Keypair, PublicKey, VersionedTransaction } = require('@solana/web3.js');
 const spl = require('@solana/spl-token');
 
 // The swap reads token balances (getTokenAccountsByOwner): indexed-capable
-// endpoints only (rpc_policy.mjs; 2026-09-30 publicnode 403).
+// endpoints only (shared/rpc_policy.mjs; 2026-09-30 publicnode 403).
 const ENDPOINTS = endpoints(process.env, { indexed: true });
 
 const SLIPPAGE_BPS = Number(process.env.LPBOT_SLIPPAGE_BPS ?? 100);
@@ -67,7 +67,7 @@ const JUPITER = 'https://lite-api.jup.ag';
 const HEADERS = { accept: 'application/json', 'user-agent': 'Mozilla/5.0' };
 
 function guard() {
-  assertNotHalted(BOT_ROOT);                // the global HALT and this profile's (halt_guard.mjs)
+  assertNotHalted(BOT_ROOT);                // the global HALT and this profile's (shared/halt_guard.mjs)
 }
 
 async function secretBytes() {
@@ -105,7 +105,7 @@ async function withRpc(fn) {
 const JUP_RETRY_MS = [2000, 6000, 15000];
 async function jfetch(url, init) {
   for (let attempt = 0; ; attempt++) {
-    await waitTurn();                                   // one Jupiter slot (jupiter_gate.mjs)
+    await waitTurn();                                   // one Jupiter slot (venues/jupiter/gate.mjs)
     const r = await fetch(url, init);
     const text = await r.text();
     let j; try { j = JSON.parse(text); } catch { j = null; }
@@ -176,7 +176,7 @@ function toRaw(human, decimals) {
 }
 const toHuman = (raw, decimals) => Number(raw) / 10 ** decimals;
 
-// Token-2022 scaled UI amounts (token2022.mjs): the loop, the sleeve and
+// Token-2022 scaled UI amounts (shared/token2022.mjs): the loop, the sleeve and
 // Jupiter's usdPrice speak UI units; the quote and the chain speak raw. A
 // plain mint (multiplier 1, or not read yet) converts exactly as before.
 export function uiOf(raw, info) {
@@ -485,7 +485,7 @@ async function performSwap({ connection, payer }, inInfo, outInfo, amountHuman, 
   tx.sign([payer]);
   const raw = tx.serialize();
   // From here on the transaction may be on chain. The same signed bytes are
-  // re-sent until they confirm (tx_send.mjs); never a new transaction.
+  // re-sent until they confirm (shared/tx_send.mjs); never a new transaction.
   const signature = await sendSwap(connection, raw, built.lastValidBlockHeight, report);
   const out = { ...report, signature, sent: true };
   console.log(JSON.stringify(out, null, 1));

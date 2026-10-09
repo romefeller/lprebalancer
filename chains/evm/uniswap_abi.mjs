@@ -1,5 +1,5 @@
 // The Uniswap v3/v4 ABIs and Universal Router codes the EVM Uniswap signer uses. They are the
-// same on every chain; each chain module (evm/unichain.mjs, evm/polygon.mjs) re-exports them.
+// same on every chain; each chain module (chains/evm/unichain.mjs, chains/evm/polygon.mjs) re-exports them.
 import { parseAbi } from 'viem';
 
 export const POOL_ABI = parseAbi([

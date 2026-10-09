@@ -1,4 +1,4 @@
-// signer_uniswap.mjs on Polygon without a node: the chain registry, the Polygon module's
+// venues/uniswap_v3/signer.mjs on Polygon without a node: the chain registry, the Polygon module's
 // endpoints and addresses, and the signer switched to Polygon (useChain): its gas cap, its
 // native token, its price references, no v4 route, and pool genuineness against Polygon's
 // factory. A loopback LPBOT_RPC is the ONLY endpoint, so nothing can reach mainnet.
@@ -6,11 +6,11 @@ import test from 'node:test';
 import assert from 'node:assert';
 import { getAddress } from 'viem';
 import fc from 'fast-check';
-import * as M from '../evm/clmath.mjs';
-import * as P from '../evm/polygon.mjs';
-import * as UNI from '../evm/unichain.mjs';
-import { chainModule, MODULES } from '../evm/chains.mjs';
-import * as S from '../signer_uniswap.mjs';
+import * as M from '../chains/evm/clmath.mjs';
+import * as P from '../chains/evm/polygon.mjs';
+import * as UNI from '../chains/evm/unichain.mjs';
+import { chainModule, MODULES } from '../chains/evm/chains.mjs';
+import * as S from '../venues/uniswap_v3/signer.mjs';
 
 const POOL = getAddress('0x9b08288c3be4f62bbf8d1c20ac9c5e6f9467d8b7');
 
@@ -129,7 +129,7 @@ test('describe on Polygon refuses Unichain\'s factory and a contract naming anot
 
 test('the process picks its chain from LPBOT_CHAIN at start', async () => {
   const { spawnSync } = await import('node:child_process');
-  const js = "import * as S from './signer_uniswap.mjs'; console.log(S.settings({}).maxFeeWei.toString(), S.isNative('POL'))";
+  const js = "import * as S from './venues/uniswap_v3/signer.mjs'; console.log(S.settings({}).maxFeeWei.toString(), S.isNative('POL'))";
   const run = env => spawnSync('node', ['--input-type=module', '-e', js], { cwd: new URL('..', import.meta.url).pathname, env: { PATH: process.env.PATH, ...env }, encoding: 'utf8' });
   assert.strictEqual(run({ LPBOT_CHAIN: 'polygon' }).stdout.trim(), `${M.toRaw(1500, 9)} true`);
   assert.strictEqual(run({}).stdout.trim(), `${M.toRaw(0.5, 9)} false`);

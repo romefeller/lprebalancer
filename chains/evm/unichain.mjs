@@ -72,7 +72,7 @@ export function simulationEndpoints(env = process.env) {
   return [UNICHAIN_PUBLICNODE, UNICHAIN_DRPC];
 }
 
-// What the signer needs to know of the chain itself (evm/chains.mjs picks the module).
+// What the signer needs to know of the chain itself (chains/evm/chains.mjs picks the module).
 export const NAME = 'Unichain';
 export const CHAIN = 'unichain';
 export const DEX = 'uniswap-v3-unichain';

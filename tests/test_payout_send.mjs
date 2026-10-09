@@ -1,4 +1,4 @@
-// payout.mjs: the priority fee and the send loop.
+// chains/solana/payout.mjs: the priority fee and the send loop.
 //
 // 2026-10-02: two mu-usdc payouts, sent with no priority fee and sent once,
 // expired unconfirmed ("block height exceeded"); the loop booked them as
@@ -10,7 +10,7 @@ import test from 'node:test';
 import assert from 'node:assert';
 import fc from 'fast-check';
 import { payoutCuPrice, sendUntilLanded, NeverLanded, CU_LIMIT, CU_PRICE_FLOOR, PRIORITY_MAX_LAMPORTS,
-         REBROADCAST_MS } from '../payout.mjs';
+         REBROADCAST_MS } from '../chains/solana/payout.mjs';
 
 const ceiling = Math.floor(PRIORITY_MAX_LAMPORTS * 1e6 / CU_LIMIT);
 
@@ -150,23 +150,23 @@ test('an RPC fault after the send is partial: afterSend with the signature', asy
   });
 });
 
-test('importing payout.mjs runs nothing', async () => {
+test('importing chains/solana/payout.mjs runs nothing', async () => {
   const before = process.exitCode;
-  await import('../payout.mjs');
+  await import('../chains/solana/payout.mjs');
   assert.strictEqual(process.exitCode, before);
 });
 
 test('payout.mjs says an expired payout is owed again; the shared loop does not', async () => {
   const fs = await import('node:fs');
-  const src = fs.readFileSync(new URL('../payout.mjs', import.meta.url), 'utf8');
+  const src = fs.readFileSync(new URL('../chains/solana/payout.mjs', import.meta.url), 'utf8');
   assert.match(src, /throw new NeverLanded\(`payout \$\{e\.message\}, it is owed again`\)/);
-  const shared = fs.readFileSync(new URL('../tx_send.mjs', import.meta.url), 'utf8');
+  const shared = fs.readFileSync(new URL('../shared/tx_send.mjs', import.meta.url), 'utf8');
   assert.doesNotMatch(shared, /owed|payout expired/);
 });
 
 // --- swap_jupiter.sendSwap: what the loop hears ---------------------------------------
-const { sendSwap } = await import('../swap_jupiter.mjs');
-const { AfterSignError } = await import('../rpc_policy.mjs');
+const { sendSwap } = await import('../venues/jupiter/swap.mjs');
+const { AfterSignError } = await import('../shared/rpc_policy.mjs');
 
 test('a swap that never landed: a plain error, no signature, nothing logged', async () => {
   const logged = [];

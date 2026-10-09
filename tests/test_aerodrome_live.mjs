@@ -1,4 +1,4 @@
-// signer_aerodrome.mjs against Base mainnet: reads and dry runs only (no --execute
+// venues/aerodrome/signer.mjs against Base mainnet: reads and dry runs only (no --execute
 // anywhere in this file), on a WETH/USDC pool of each known Slipstream deployment, and a
 // refusal of a pool of a deployment the registry does not hold. The wallet is a throwaway key made in a scratch directory, so
 // it is empty: the dry-run open must refuse and its simulation must revert in the token
@@ -11,7 +11,7 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 
 const dir = path.dirname(new URL(import.meta.url).pathname);
-const signer = path.join(dir, '..', 'signer_aerodrome.mjs');
+const signer = path.join(dir, '..', 'venues/aerodrome/signer.mjs');
 const CASES = [
   { name: 'initial', pool: '0xb2cc224c1c9feE385f8ad6a55b4d94E92359DC59', spacing: 100,
     factory: '0x5e7BB104d84c7CB9B682AaC2F3d509f5F406809A', nft: '0x827922686190790b37229fd06084350E74485b72' },
@@ -27,7 +27,7 @@ const PIN = '0x2b35948898e1b4897E7FC5a70e39b213dcfd0142';
 const d = fs.mkdtempSync(path.join(os.tmpdir(), 'aero-live-'));
 fs.chmodSync(d, 0o700);
 const KEY = path.join(d, 'k.secret');
-spawnSync('node', [path.join(dir, '..', 'evm_wallet.mjs'), 'create', '--path', KEY]);
+spawnSync('node', [path.join(dir, '..', 'chains/evm/wallet.mjs'), 'create', '--path', KEY]);
 test.after(() => fs.rmSync(d, { recursive: true, force: true }));
 
 function runOn(pool, args, env = {}) {

@@ -1,4 +1,4 @@
-// The Orca fallback swap (swap_orca.mjs): pure checks, no network.
+// The Orca fallback swap (venues/orca/swap.mjs): pure checks, no network.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -18,11 +18,11 @@ const { getSwapV2InstructionDataEncoder } = await import('@orca-so/whirlpools-cl
 const logged = [];
 const realLog = console.log;
 console.log = (...a) => logged.push(a.join(' '));
-const M = await import('../swap_orca.mjs');
+const M = await import('../venues/orca/swap.mjs');
 console.log = realLog;
-const { errorKind, overEndpoints, isEntry, AfterSignError } = await import('../rpc_policy.mjs');
+const { errorKind, overEndpoints, isEntry, AfterSignError } = await import('../shared/rpc_policy.mjs');
 
-const SCRIPT = fileURLToPath(new URL('../swap_orca.mjs', import.meta.url));
+const SCRIPT = fileURLToPath(new URL('../venues/orca/swap.mjs', import.meta.url));
 const SOL = M.NATIVE_MINT, USDC = M.USDC_MINT;
 const POOL = 'Czfq3xZZDmsdGdUyrNLtRhGc47cXcZtLG4crryfu44zE';
 const TOKEN = spl.TOKEN_PROGRAM_ID;
@@ -32,7 +32,7 @@ function rng(seed) { let s = seed >>> 0; return () => ((s = (s * 1664525 + 10139
 
 test('importing has no side effects', () => {
   assert.deepEqual(logged, []);
-  assert.equal(isEntry(new URL('../swap_orca.mjs', import.meta.url).href, ['node', 'other.mjs']), false);
+  assert.equal(isEntry(new URL('../venues/orca/swap.mjs', import.meta.url).href, ['node', 'other.mjs']), false);
   assert.equal(typeof M.main, 'function');
 });
 
@@ -595,7 +595,7 @@ test('sendLanded: the error text carries the message verbatim, even an empty one
 });
 
 // --- LPBOT_SLEEVE: a wallet several profiles share ------------------------------------
-// The fallback counts and sells at most the profile's sleeve, as swap_jupiter.mjs
+// The fallback counts and sells at most the profile's sleeve, as venues/jupiter/swap.mjs
 // does; a sleeve that cannot be read refuses the swap.
 function fakeConnection({ lamports = 0n, usdcRaw = 0n, wsolRaw = null }) {
   const account = (raw) => { const d = Buffer.alloc(165); d.writeBigUInt64LE(BigInt(raw), 64); return { data: d }; };

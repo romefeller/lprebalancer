@@ -1,6 +1,6 @@
 -- Re-point profile base-weth-usdc from the Aerodrome Slipstream WETH/USDC pool of the
 -- "initial" deployment (0xb2cc224c…, tickSpacing 100) to the WETH/USDC pool of the
--- "gauges-v3" deployment (0x3fe04a59…, tickSpacing 50). Evidence: evm/ADDRESSES.md.
+-- "gauges-v3" deployment (0x3fe04a59…, tickSpacing 50). Evidence: chains/evm/BASE_ADDRESSES.md.
 --
 --   psql -d rebalancer -v ON_ERROR_STOP=1 -f ops/repoint_base_cl3.sql
 --

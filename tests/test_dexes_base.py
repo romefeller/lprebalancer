@@ -165,10 +165,10 @@ class Record(unittest.TestCase):
         self.assertAlmostEqual(rec['fee'], 0.0005 * 0.95)
 
     def test_registry_is_the_signers(self):
-        # dexes.py and evm/addresses.mjs carry the same (factory, NPM) pairs
+        # dexes.py and chains/evm/base_addresses.mjs carry the same (factory, NPM) pairs
         import pathlib
         import re
-        js = (pathlib.Path(dexes.__file__).parent / 'evm' / 'addresses.mjs').read_text()
+        js = (pathlib.Path(dexes.__file__).parent / 'chains/evm/base_addresses.mjs').read_text()
         pairs = re.findall(r"factory: '(0x[0-9a-fA-F]{40})',\s*npm: '(0x[0-9a-fA-F]{40})'", js)
         self.assertEqual({f.lower(): n.lower() for f, n in pairs}, dexes.SLIPSTREAM_DEPLOYMENTS)
         self.assertEqual(len(pairs), 2)

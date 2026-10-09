@@ -1,4 +1,4 @@
-// signer_raydium.mjs: a harvest or close that lands in a fast market.
+// venues/raydium_clmm/signer.mjs: a harvest or close that lands in a fast market.
 //
 // 2026-10-07: a Raydium close, sent once with the base fee only, expired
 // unconfirmed ("block height exceeded") in a 2% drop, and the band sat out of
@@ -9,9 +9,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fc from 'fast-check';
 import { createRequire } from 'node:module';
-import { NeverLanded, priorityCuPrice } from '../tx_send.mjs';
-import { errorKind } from '../rpc_policy.mjs';
-import * as raydium from '../signer_raydium.mjs';
+import { NeverLanded, priorityCuPrice } from '../shared/tx_send.mjs';
+import { errorKind } from '../shared/rpc_policy.mjs';
+import * as raydium from '../venues/raydium_clmm/signer.mjs';
 const require = createRequire(import.meta.url);
 const { Keypair, SystemProgram, Transaction } = require('@solana/web3.js');
 

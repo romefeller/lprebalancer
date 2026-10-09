@@ -345,7 +345,7 @@ class Readers(unittest.TestCase):
 class Loop(unittest.TestCase):
     def test_the_polygon_dex_runs_the_uniswap_signer(self):
         self.assertEqual(rebalancer.SIGNERS[DEX], rebalancer.SIGNERS['uniswap-v3-unichain'])
-        self.assertTrue(rebalancer.SIGNERS[DEX].endswith('signer_uniswap.mjs'))
+        self.assertTrue(rebalancer.SIGNERS[DEX].endswith('venues/uniswap_v3/signer.mjs'))
         self.assertEqual(rebalancer.OPEN_RENT_HEADROOM[DEX], 0.0)
 
     def test_the_signer_is_told_its_chain(self):

@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 const { PublicKey, TransactionMessage, VersionedTransaction, ComputeBudgetProgram, Keypair, SystemProgram } = require('@solana/web3.js');
-const { swapRequestBody, priorityFeeLamports, verifyPriorityFee, PRIORITY_MAX_LAMPORTS } = await import('../swap_jupiter.mjs');
+const { swapRequestBody, priorityFeeLamports, verifyPriorityFee, PRIORITY_MAX_LAMPORTS } = await import('../venues/jupiter/swap.mjs');
 
 const kp = Keypair.generate();
 function tx(budget, others = 1) {

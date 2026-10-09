@@ -12,7 +12,7 @@
 // on SOL/USDC, on WIF/USDC and on a pool whose quote token is not a dollar.
 //
 // Token-2022 base tokens (DJT): every human amount and dollar figure here is
-// in UI units (token2022.mjs); `price`, `lowerPrice` and `upperPrice` stay
+// in UI units (shared/token2022.mjs); `price`, `lowerPrice` and `upperPrice` stay
 // pool-native (from the pool's own sqrt price), `uiPrice` is the price in UI
 // units. A paused mint or one with a transfer hook refuses open, harvest and
 // close.
@@ -22,16 +22,16 @@
 // is ever shown.
 //
 // Commands:
-//   node signer2.mjs balance [pool]
-//   node signer2.mjs positions
-//   node signer2.mjs status [mint]
-//   node signer2.mjs open <pool> <lowerPrice> <upperPrice> <maxA> <maxB> [--execute]
-//   node signer2.mjs harvest <mint> [--execute]
-//   node signer2.mjs close <mint> [--execute]
+//   node venues/orca/signer.mjs balance [pool]
+//   node venues/orca/signer.mjs positions
+//   node venues/orca/signer.mjs status [mint]
+//   node venues/orca/signer.mjs open <pool> <lowerPrice> <upperPrice> <maxA> <maxB> [--execute]
+//   node venues/orca/signer.mjs harvest <mint> [--execute]
+//   node venues/orca/signer.mjs close <mint> [--execute]
 import fs from 'node:fs';
 import path from 'node:path';
-import { assertNotHalted } from './halt_guard.mjs';
-import { BOT_ROOT } from './bot_root.mjs';
+import { assertNotHalted } from '../../shared/halt_guard.mjs';
+import { BOT_ROOT } from '../../bot_root.mjs';
 import {
   setRpc, setPayerFromBytes, setNativeMintWrappingStrategy,
   openConcentratedPosition, fetchPositionsForOwner,
@@ -44,9 +44,9 @@ import {
 } from '@solana/kit';
 import { fetchWhirlpool, fetchPosition, getPositionAddress } from '@orca-so/whirlpools-client';
 import { sqrtPriceToPrice } from '@orca-so/whirlpools-core';
-import { consistentOrcaFees } from './orca_fees.mjs';
-import { endpoints, overEndpoints, isEntry, AfterSignError } from './rpc_policy.mjs';
-import { readMints, rawToUi, uiToRaw, uiToNative, uiPrice, assertWritable, mintFields } from './token2022.mjs';
+import { consistentOrcaFees } from './fees.mjs';
+import { endpoints, overEndpoints, isEntry, AfterSignError } from '../../shared/rpc_policy.mjs';
+import { readMints, rawToUi, uiToRaw, uiToNative, uiPrice, assertWritable, mintFields } from '../../shared/token2022.mjs';
 
 const RPC = process.env.SOLANA_RPC_URL
   ?? (process.env.KAMINO_RPC_KEY
@@ -65,7 +65,7 @@ const NATIVE_MINT = 'So11111111111111111111111111111111111111112';
 const HEADERS = { accept: 'application/json', 'user-agent': 'Mozilla/5.0' };
 
 function guard() {
-  assertNotHalted(BOT_ROOT);                // the global HALT and this profile's (halt_guard.mjs)
+  assertNotHalted(BOT_ROOT);                // the global HALT and this profile's (shared/halt_guard.mjs)
 }
 
 // Returns the 64-byte secret key. Never logged, never returned to a caller
@@ -260,7 +260,7 @@ async function connectTo(url) {
 // Validating the connection alone is not enough: the rate limit lands on the
 // account fetch that comes afterwards, which is what made the first armed run
 // report an unreadable position on every poll.
-// A rate limit, a refusal or a transport failure moves on (rpc_policy.mjs);
+// A rate limit, a refusal or a transport failure moves on (shared/rpc_policy.mjs);
 // an answer from the chain or an error after a send is thrown at once.
 // `deps` replaces the endpoints, connect and sleep in tests.
 export async function withRpc(fn, deps = {}) {
@@ -478,7 +478,7 @@ async function status(mintArg) {
     } catch { /* reporting only: never fail a status read over the close quote */ }
     try {
       // Fees from ONE read of position, whirlpool, tick arrays and mints
-      // (orca_fees.mjs), not from the quote above: the SDK builds it from
+      // (venues/orca/fees.mjs), not from the quote above: the SDK builds it from
       // separate reads, and a tick crossed between them mixes two states
       // (on Raydium: $6,237 of fees on a $230 position, 2026-09-27). A read
       // that fails the invariants reports the settled feeOwed: stale, never

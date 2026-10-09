@@ -1,4 +1,4 @@
-// The signers' endpoint loops follow rpc_policy.mjs. 2026-09-30: a 403
+// The signers' endpoint loops follow shared/rpc_policy.mjs. 2026-09-30: a 403
 // "Indexed requests require a personal token" from solana-rpc.publicnode.com
 // failed every swap that reached it. The same list was hard-coded in each
 // signer, with its own retry regexes.
@@ -13,23 +13,23 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import { spawnSync } from 'node:child_process';
-import { JupiterError, AfterSignError, CAPS, PUBLICNODE } from '../rpc_policy.mjs';
-import * as raydium from '../signer_raydium.mjs';
-import * as dlmm from '../signer_dlmm.mjs';
-import * as pancake from '../signer_pancake.mjs';
-import * as byreal from '../signer_byreal.mjs';
-import * as orca from '../signer2.mjs';
+import { JupiterError, AfterSignError, CAPS, PUBLICNODE } from '../shared/rpc_policy.mjs';
+import * as raydium from '../venues/raydium_clmm/signer.mjs';
+import * as dlmm from '../venues/meteora_dlmm/signer.mjs';
+import * as pancake from '../venues/pancakeswap_v3/signer.mjs';
+import * as byreal from '../venues/byreal/signer.mjs';
+import * as orca from '../venues/orca/signer.mjs';
 
 const INDEXED_403 = '403 Forbidden: {"jsonrpc":"2.0","error":{"code":-32602,"message":"Indexed requests require a personal token. Get one at: https://www.allnodes.com/publicnode"}}';
 const A = 'https://a.example', B = 'https://b.example';
 
 // name: module, how to call its withRpc with test deps, tries and pause.
 const SIGNERS = {
-  'signer_raydium.mjs': { mod: raydium, run: (fn, deps) => raydium.withRpc(fn, undefined, deps), tries: 2, pauseMs: 2500 },
-  'signer_dlmm.mjs': { mod: dlmm, run: (fn, deps) => dlmm.withRpc(fn, undefined, deps), tries: 2, pauseMs: 2500 },
-  'signer_pancake.mjs': { mod: pancake, run: (fn, deps) => pancake.withRpc(fn, true, deps), tries: 3, pauseMs: 3000 },
-  'signer_byreal.mjs': { mod: byreal, run: (fn, deps) => byreal.withRpc(fn, undefined, deps), tries: 2, pauseMs: 2500 },
-  'signer2.mjs': { mod: orca, run: (fn, deps) => orca.withRpc(fn, deps), tries: 2, pauseMs: 2500 },
+  'venues/raydium_clmm/signer.mjs': { mod: raydium, run: (fn, deps) => raydium.withRpc(fn, undefined, deps), tries: 2, pauseMs: 2500 },
+  'venues/meteora_dlmm/signer.mjs': { mod: dlmm, run: (fn, deps) => dlmm.withRpc(fn, undefined, deps), tries: 2, pauseMs: 2500 },
+  'venues/pancakeswap_v3/signer.mjs': { mod: pancake, run: (fn, deps) => pancake.withRpc(fn, true, deps), tries: 3, pauseMs: 3000 },
+  'venues/byreal/signer.mjs': { mod: byreal, run: (fn, deps) => byreal.withRpc(fn, undefined, deps), tries: 2, pauseMs: 2500 },
+  'venues/orca/signer.mjs': { mod: orca, run: (fn, deps) => orca.withRpc(fn, deps), tries: 2, pauseMs: 2500 },
 };
 
 // A run over [A, B] that records every endpoint reached and every pause.
@@ -60,7 +60,7 @@ const FATAL = {
 for (const [name, s] of Object.entries(SIGNERS)) {
   test(`${name}: static: uses rpc_policy, no hard-coded list, no own regexes`, () => {
     const src = fs.readFileSync(new URL(`../${name}`, import.meta.url), 'utf8');
-    assert.ok(src.includes("from './rpc_policy.mjs'"), 'imports rpc_policy');
+    assert.ok(src.includes("from '../../shared/rpc_policy.mjs'"), 'imports rpc_policy');
     assert.ok(!src.includes('solana-rpc.publicnode.com'), 'no hard-coded publicnode');
     assert.ok(/export const ENDPOINTS = endpoints\([^)]*\{ indexed: true \}\);/.test(src), 'indexed endpoint list');
     assert.ok(/overEndpoints\(urls,/.test(src), 'withRpc runs overEndpoints');
@@ -135,7 +135,7 @@ async function oneAttempt(s, body) {
 }
 
 test('signer2: a failed SDK callback is never rotated or retried', async () => {
-  const r = await oneAttempt(SIGNERS['signer2.mjs'], () => orca.sendOnce({ callback: async () => { throw new Error('fetch failed'); } }));
+  const r = await oneAttempt(SIGNERS['venues/orca/signer.mjs'], () => orca.sendOnce({ callback: async () => { throw new Error('fetch failed'); } }));
   await assert.rejects(r.p, e => e instanceof AfterSignError && /\(not retried\): fetch failed/.test(e.message));
   assert.equal(r.n(), 1);
   assert.equal(await orca.sendOnce({ callback: async () => 'SIG' }), 'SIG');
@@ -143,7 +143,7 @@ test('signer2: a failed SDK callback is never rotated or retried', async () => {
 
 test('dlmm: a first send that fails is never rotated; a later one is a partial result', async () => {
   const conn = { sendTransaction: async () => { throw new Error('429 Too Many Requests'); } };
-  const r = await oneAttempt(SIGNERS['signer_dlmm.mjs'], () => dlmm.sendAll(conn, [{}], []));
+  const r = await oneAttempt(SIGNERS['venues/meteora_dlmm/signer.mjs'], () => dlmm.sendAll(conn, [{}], []));
   await assert.rejects(r.p, e => e instanceof AfterSignError && /\(not retried\): 429/.test(e.message));
   assert.equal(r.n(), 1);
   let k = 0;
@@ -162,11 +162,11 @@ function fakeTx() { return { message: {}, sign() {}, serialize: () => Buffer.all
 test('pancake: a send or confirm failure is never rotated', async () => {
   const base = { getLatestBlockhash: async () => ({ blockhash: 'x', lastValidBlockHeight: 1 }) };
   const noSend = { ...base, sendRawTransaction: async () => { throw new Error('fetch failed'); } };
-  let r = await oneAttempt(SIGNERS['signer_pancake.mjs'], () => pancake.sendOne(noSend, fakeTx(), [], []));
+  let r = await oneAttempt(SIGNERS['venues/pancakeswap_v3/signer.mjs'], () => pancake.sendOne(noSend, fakeTx(), [], []));
   await assert.rejects(r.p, e => e instanceof AfterSignError && !e.sent && /\(not retried\): fetch failed/.test(e.message));
   assert.equal(r.n(), 1);
   const noConfirm = { ...base, sendRawTransaction: async () => 'SIG', confirmTransaction: async () => { throw new Error('429 Too Many Requests'); } };
-  r = await oneAttempt(SIGNERS['signer_pancake.mjs'], () => pancake.sendOne(noConfirm, fakeTx(), [], []));
+  r = await oneAttempt(SIGNERS['venues/pancakeswap_v3/signer.mjs'], () => pancake.sendOne(noConfirm, fakeTx(), [], []));
   await assert.rejects(r.p, e => e instanceof pancake.SentError && e.sent && e.signatures[0] === 'SIG');
   assert.equal(r.n(), 1);
 });
@@ -187,12 +187,12 @@ test('raydium: a failed execute is marked sent and never rotated', async () => {
   const log = console.log; console.log = () => {};
   try {
     const built = { execute: async () => { throw new Error('fetch failed'); } };
-    const r = await oneAttempt(SIGNERS['signer_raydium.mjs'], () => raydium.sendAll([built], {}));
+    const r = await oneAttempt(SIGNERS['venues/raydium_clmm/signer.mjs'], () => raydium.sendAll([built], {}));
     await assert.rejects(r.p, e => e.sent === true && /fetch failed/.test(e.message));
     assert.equal(r.n(), 1);
     let k = 0;
     const two = { execute: async () => { if (k++) throw new Error('429 Too Many Requests'); return { txId: 'SIG1' }; } };
-    const r2 = await oneAttempt(SIGNERS['signer_raydium.mjs'], () => raydium.sendAll([two, two], {}));
+    const r2 = await oneAttempt(SIGNERS['venues/raydium_clmm/signer.mjs'], () => raydium.sendAll([two, two], {}));
     await assert.rejects(r2.p, e => e.sent === true && /partial send: 1\/2/.test(e.message));
     assert.equal(r2.n(), 1);
   } finally { console.log = log; }

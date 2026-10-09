@@ -1,5 +1,5 @@
 // Rebalancer — the Orca fallback swap. One job: the same `rebalance` as
-// swap_jupiter.mjs, through one Orca Whirlpool and no aggregator API. When
+// venues/jupiter/swap.mjs, through one Orca Whirlpool and no aggregator API. When
 // Jupiter's free API refuses (429, outage), the loop can call this script with
 // the same arguments and read the same JSON. Same conventions as the signers
 // (SIGNER_CONTRACT.md): HALT guard, key read from WALLET_SECRET_PATH and never
@@ -7,12 +7,12 @@
 // dry run by default.
 //
 // Command:
-//   node swap_orca.mjs rebalance <mintA> <mintB> <targetUsdA> <targetUsdB> [--execute] [--pool <whirlpool>]
+//   node venues/orca/swap.mjs rebalance <mintA> <mintB> <targetUsdA> <targetUsdB> [--execute] [--pool <whirlpool>]
 //
 // Without --pool the pair must be in DEFAULT_POOLS. The pool must be owned by
 // the Whirlpool program and hold exactly mintA and mintB, else nothing runs.
 //
-// Environment (as swap_jupiter.mjs gets it from rebalancer.chain):
+// Environment (as venues/jupiter/swap.mjs gets it from rebalancer.chain):
 //   WALLET_SECRET_PATH, SOLANA_RPC_URL, LPBOT_SLIPPAGE_BPS, LPBOT_GAS_RESERVE_SOL,
 //   LPBOT_TOKEN_HINTS {"<mint>": {usd, decimals, symbol}}, LPBOT_MAX_VALUE_LOSS,
 //   LPBOT_MAX_IMPACT, LPBOT_PRIORITY_MAX_LAMPORTS.
@@ -21,7 +21,7 @@
 //
 // Order of work, all before any signature:
 //   HALT -> pool owner and mints -> decimals from chain -> balances (gas reserve
-//   kept) -> planRebalance (rebalance_plan.mjs) -> SDK exact-in
+//   kept) -> planRebalance (shared/rebalance_plan.mjs) -> SDK exact-in
 //   quote at LPBOT_SLIPPAGE_BPS -> quote check, value check at the hint prices,
 //   price impact -> instructions -> instruction allow-list and swap-data check
 //   -> priority fee cap -> simulation with balance deltas -> (dry run: report).
@@ -40,14 +40,14 @@
 // so every endpoint from rpc_policy.endpoints() can serve it.
 import fs from 'node:fs';
 import path from 'node:path';
-import { assertNotHalted } from './halt_guard.mjs';
-import { BOT_ROOT } from './bot_root.mjs';
+import { assertNotHalted } from '../../shared/halt_guard.mjs';
+import { BOT_ROOT } from '../../bot_root.mjs';
 import { createRequire } from 'node:module';
 
-import { endpoints, overEndpoints, JupiterError, AfterSignError, isEntry } from './rpc_policy.mjs';
-import { priorityFeeLamports, verifyPriorityFee, PRIORITY_MAX_LAMPORTS, parseSleeve, sleeveCap } from './swap_jupiter.mjs';
-import { planRebalance, TARGET_TOLERANCE } from './rebalance_plan.mjs';
-import { NeverLanded, sendUntilLanded } from './tx_send.mjs';
+import { endpoints, overEndpoints, JupiterError, AfterSignError, isEntry } from '../../shared/rpc_policy.mjs';
+import { priorityFeeLamports, verifyPriorityFee, PRIORITY_MAX_LAMPORTS, parseSleeve, sleeveCap } from '../jupiter/swap.mjs';
+import { planRebalance, TARGET_TOLERANCE } from '../../shared/rebalance_plan.mjs';
+import { NeverLanded, sendUntilLanded } from '../../shared/tx_send.mjs';
 
 const require = createRequire(import.meta.url);
 const { Connection, Keypair, PublicKey, VersionedTransaction, TransactionMessage, TransactionInstruction,
@@ -374,7 +374,7 @@ function splAmount(data) {
 
 // Raw balance the swap can spend: the ATA for an SPL token; lamports plus the
 // wSOL ATA for SOL. The gas reserve is kept back from native SOL. Capped at
-// LPBOT_SLEEVE, as in swap_jupiter.mjs: a wallet several profiles share must
+// LPBOT_SLEEVE, as in venues/jupiter/swap.mjs: a wallet several profiles share must
 // not let this fallback sell another profile's tokens.
 export async function sellable(connection, owner, info) {
   let raw;

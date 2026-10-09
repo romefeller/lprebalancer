@@ -1,16 +1,16 @@
 // The EVM LP wallet: create it once, then read its address.
 //
-//   node evm_wallet.mjs create  [--path <file>]   new key, printed: the checksummed address only
-//   node evm_wallet.mjs address [--path <file>]   the address of the key on disk
+//   node chains/evm/wallet.mjs create  [--path <file>]   new key, printed: the checksummed address only
+//   node chains/evm/wallet.mjs address [--path <file>]   the address of the key on disk
 //
 // The key comes from viem's generatePrivateKey: @noble/curves secp256k1.utils.randomPrivateKey
-// over crypto.getRandomValues, the OS CSPRNG. It is written by evm/keyfile.mjs: mode 0600, O_CREAT|O_EXCL, linked
+// over crypto.getRandomValues, the OS CSPRNG. It is written by chains/evm/keyfile.mjs: mode 0600, O_CREAT|O_EXCL, linked
 // into place atomically, never over an existing file. Nothing here prints, logs or returns
 // the key: stdout carries the address, stderr carries `ERROR: <message>` that names paths
 // only. Default path: /home/ubuntu/.kamino-keys/evm-wallet.secret (outside the repository).
 import { generatePrivateKey, privateKeyToAddress } from 'viem/accounts';
-import { DEFAULT_KEY_PATH, readKey, writeNewKey } from './evm/keyfile.mjs';
-import { isEntry } from './rpc_policy.mjs';
+import { DEFAULT_KEY_PATH, readKey, writeNewKey } from './keyfile.mjs';
+import { isEntry } from '../../shared/rpc_policy.mjs';
 
 function keyPath(args) {
   const i = args.indexOf('--path');

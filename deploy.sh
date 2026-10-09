@@ -14,7 +14,7 @@
 # second run changes nothing):
 #   1. preflight: the live tree is clean (git status) and holds the merged
 #      code; it compiles; no HALT; the keys exist (never read here, except
-#      the EVM key's address, through evm_wallet.mjs, which prints no key)
+#      the EVM key's address, through chains/evm/wallet.mjs, which prints no key)
 #   2. schema: sql/020 and sql/021 (additive: the running bot keeps working)
 #   3. wallets sol-lp and base-lp; sol-usdc joins sol-lp as its residual owner
 #      with deposit mint SOL; the new profiles get every tuning column of
@@ -121,7 +121,7 @@ SKIP = {'id', 'name', 'active', 'pool', 'pair_label', 'token_a', 'token_b', 'dex
         'rebalance_swap', 'payout_enabled', 'profit_wallet', 'payout_mint', 'execute_dexes', 'gas_reserve_sol',
         'signer_env'}
 # Opt-ins a pool's signer needs (config.SIGNER_ENV_ALLOWED): the DJT/USDC Orca
-# pool is adaptive-fee, which signer2.mjs opens only with LPBOT_ORCA_ADAPTIVE=1.
+# pool is adaptive-fee, which venues/orca/signer.mjs opens only with LPBOT_ORCA_ADAPTIVE=1.
 SIGNER_ENV = {'djt-usdc': {'LPBOT_ORCA_ADAPTIVE': '1'}}
 # Native gas kept back, per chain: SOL as sol-usdc keeps it; on Base 0.003 ETH
 # (~$8) pays hundreds of L2 transactions.
@@ -181,7 +181,7 @@ def base_address():
     key = os.environ['DEPLOY_EVM_KEY']
     if not os.path.exists(key):
         return None
-    r = subprocess.run(['node', os.path.join(CODE, 'evm_wallet.mjs'), 'address', '--path', key],
+    r = subprocess.run(['node', os.path.join(CODE, 'chains/evm/wallet.mjs'), 'address', '--path', key],
                        capture_output=True, text=True, timeout=60)
     out = r.stdout.strip()
     return out if r.returncode == 0 and out.startswith('0x') and len(out) == 42 else None
@@ -288,6 +288,8 @@ def enabled():
         print(r['name'])
 
 
+# The rollback reads positions with the code `git revert` brought back, which
+# kept every signer at the top of the tree.
 SCRIPTS = {'orca': 'signer2.mjs', 'meteora-dlmm': 'signer_dlmm.mjs', 'raydium-clmm': 'signer_raydium.mjs',
            'byreal': 'signer_byreal.mjs', 'pancakeswap-v3-solana': 'signer_pancake.mjs'}
 
@@ -357,7 +359,9 @@ preflight() {
   done
   [ ! -e "$LIVE/HALT" ] || die "$LIVE/HALT exists: the operator halted the bot; deploy after it is lifted"
   python3 -m py_compile "$LIVE"/*.py || die 'python does not compile'
-  for f in "$LIVE"/*.mjs; do node --check "$f" || die "$f does not parse"; done
+  # every script of the bot, in its venue, chain or shared folder too
+  while IFS= read -r f; do node --check "$f" || die "$f does not parse"; done \
+    < <(find "$LIVE" -name '*.mjs' -not -path '*/node_modules/*' -not -path '*/tests/*' -not -path '*/.claude/*')
   if [ -e "$EVM_KEY" ]; then
     mode=$(stat -c %a "$EVM_KEY")
     [ "$mode" = 600 ] || die "$EVM_KEY has mode $mode, not 600"

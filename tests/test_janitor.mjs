@@ -1,4 +1,4 @@
-// janitor.mjs: which empty accounts may be closed, and that a close tx can
+// chains/solana/janitor.mjs: which empty accounts may be closed, and that a close tx can
 // only return rent to the wallet.
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -7,7 +7,7 @@ import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 const { Keypair, PublicKey, Transaction, SystemProgram } = require('@solana/web3.js');
 const spl = require('@solana/spl-token');
-const { planClose, closeInstructions, verifyCloseTx, TOKEN_PROGRAMS, MAX_PER_TX } = await import('../janitor.mjs');
+const { planClose, closeInstructions, verifyCloseTx, TOKEN_PROGRAMS, MAX_PER_TX } = await import('../chains/solana/janitor.mjs');
 
 const OWNER = Keypair.generate().publicKey.toBase58();
 const OTHER = Keypair.generate().publicKey.toBase58();

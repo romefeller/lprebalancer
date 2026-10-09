@@ -1,4 +1,4 @@
-// signer_uniswap.mjs end to end on an anvil fork of Unichain: rebalance (best of the v3
+// venues/uniswap_v3/signer.mjs end to end on an anvil fork of Unichain: rebalance (best of the v3
 // pool and the hookless v4 pool) -> open -> fees from another trader -> harvest -> close
 // -> pinned send -> run-dir HALT, with --execute, against a LOCAL fork only. The wallets are
 // anvil's public test accounts, funded on the fork from the pool's own token balances
@@ -15,10 +15,10 @@ import path from 'node:path';
 import net from 'node:net';
 import { spawn, spawnSync } from 'node:child_process';
 import { encodeFunctionData, parseAbi } from 'viem';
-import { V3, V4, USDC, HYPE } from '../evm/unichain.mjs';
+import { V3, V4, USDC, HYPE } from '../chains/evm/unichain.mjs';
 
 const dir = path.dirname(new URL(import.meta.url).pathname);
-const signer = path.join(dir, '..', 'signer_uniswap.mjs');
+const signer = path.join(dir, '..', 'venues/uniswap_v3/signer.mjs');
 const POOL = '0x5d3e7f5dA38FBf476E8B36E3b90D02FC4C1A08C3';
 const FORK_FROM = process.env.LPBOT_UNICHAIN_FORK_URL ?? 'https://unichain-rpc.publicnode.com';
 const LP = { key: '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80', addr: '0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266' };

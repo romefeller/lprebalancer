@@ -6,7 +6,7 @@ import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 const { PublicKey, TransactionMessage, VersionedTransaction, SystemProgram, Keypair } = require('@solana/web3.js');
 process.env.LPBOT_SLIPPAGE_BPS = '100';
-const { verifyQuote, verifyTxShape } = await import('../swap_jupiter.mjs');
+const { verifyQuote, verifyTxShape } = await import('../venues/jupiter/swap.mjs');
 
 const SOL = { mint: 'So11111111111111111111111111111111111111112', symbol: 'SOL', decimals: 9, usdPrice: 120 };
 const USDC = { mint: 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', symbol: 'USDC', decimals: 6, usdPrice: 1 };
