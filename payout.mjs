@@ -19,6 +19,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { assertNotHalted } from './halt_guard.mjs';
+import { BOT_ROOT } from './bot_root.mjs';
 import { createRequire } from 'node:module';
 
 import { readMints, rawToUi, uiToRaw, writeRefusal } from './token2022.mjs';
@@ -31,7 +32,6 @@ const require = createRequire(import.meta.url);
 const { ComputeBudgetProgram, Connection, Keypair, PublicKey, SystemProgram, Transaction } = require('@solana/web3.js');
 const spl = require('@solana/spl-token');
 
-const DIR = path.dirname(new URL(import.meta.url).pathname);
 const RPC = process.env.SOLANA_RPC_URL ?? process.env.LPBOT_RPC ?? 'https://api.mainnet-beta.solana.com';
 const PROFIT = process.env.LPBOT_PROFIT_WALLET ?? '';
 // The pin lives in the service environment, not in the database: a database
@@ -56,7 +56,7 @@ export function payoutCuPrice(recent, units = CU_LIMIT, cap = PRIORITY_MAX_LAMPO
 }
 
 function guard() {
-  assertNotHalted(DIR);                     // the global HALT and this profile's (halt_guard.mjs)
+  assertNotHalted(BOT_ROOT);                // the global HALT and this profile's (halt_guard.mjs)
 }
 
 async function secretBytes() {

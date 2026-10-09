@@ -36,6 +36,7 @@ import { SLIPPAGE_REFUSAL } from './slippage.mjs';
 import { endpoints, overEndpoints, isEntry } from './rpc_policy.mjs';
 import path from 'node:path';
 import { assertNotHalted } from './halt_guard.mjs';
+import { BOT_ROOT } from './bot_root.mjs';
 import { createRequire } from 'node:module';
 import { waitTurn } from './jupiter_gate.mjs';
 
@@ -52,7 +53,6 @@ const { Connection, Keypair, PublicKey } = require('@solana/web3.js');
 // console.info. The loop parses stdout, so route those lines to stderr.
 console.info = (...a) => console.error(...a);
 
-const DIR = path.dirname(new URL(import.meta.url).pathname);
 // A keyed endpoint from the environment first. Indexed reads
 // (getParsedTokenAccountsByOwner) never go to an endpoint that refuses them.
 export const ENDPOINTS = endpoints(process.env, { indexed: true });
@@ -80,7 +80,7 @@ const PROGRAM_NAMES = {
 };
 
 function guard() {
-  assertNotHalted(DIR);                     // the global HALT and this profile's (halt_guard.mjs)
+  assertNotHalted(BOT_ROOT);                // the global HALT and this profile's (halt_guard.mjs)
 }
 
 async function secretBytes() {

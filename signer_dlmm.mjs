@@ -34,6 +34,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { assertNotHalted } from './halt_guard.mjs';
+import { BOT_ROOT } from './bot_root.mjs';
 import { createRequire } from 'node:module';
 import { waitTurn } from './jupiter_gate.mjs';
 import { endpoints, overEndpoints, isEntry, AfterSignError } from './rpc_policy.mjs';
@@ -48,7 +49,6 @@ const { StrategyType } = dlmmPkg;
 const { Connection, Keypair, PublicKey, Transaction, sendAndConfirmTransaction } = require('@solana/web3.js');
 const { BN } = require('@coral-xyz/anchor');
 
-const DIR = path.dirname(new URL(import.meta.url).pathname);
 // A keyed endpoint from the environment first. Indexed reads
 // (getParsedTokenAccountsByOwner) never go to an endpoint that refuses them.
 export const ENDPOINTS = endpoints(process.env, { indexed: true });
@@ -67,7 +67,7 @@ const JUPITER = 'https://lite-api.jup.ag';
 const HEADERS = { accept: 'application/json', 'user-agent': 'Mozilla/5.0' };
 
 function guard() {
-  assertNotHalted(DIR);                     // the global HALT and this profile's (halt_guard.mjs)
+  assertNotHalted(BOT_ROOT);                // the global HALT and this profile's (halt_guard.mjs)
 }
 
 async function secretBytes() {

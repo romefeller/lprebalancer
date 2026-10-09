@@ -47,6 +47,7 @@ import { endpoints, overEndpoints, isEntry } from './rpc_policy.mjs';
 import { readMints, rawToUi, uiToNative, uiPrice, assertWritable, mintFields } from './token2022.mjs';
 import path from 'node:path';
 import { assertNotHalted } from './halt_guard.mjs';
+import { BOT_ROOT } from './bot_root.mjs';
 import { createRequire } from 'node:module';
 import { waitTurn } from './jupiter_gate.mjs';
 import { NeverLanded, priorityCuPrice, sendUntilLanded } from './tx_send.mjs';
@@ -61,7 +62,6 @@ const { Connection, Keypair, PublicKey } = require('@solana/web3.js');
 const BN = require('bn.js');
 const Decimal = require('decimal.js');
 
-const DIR = path.dirname(new URL(import.meta.url).pathname);
 // A keyed endpoint from the environment first. Indexed reads
 // (getParsedTokenAccountsByOwner) never go to an endpoint that refuses them.
 export const ENDPOINTS = endpoints(process.env, { indexed: true });
@@ -103,7 +103,7 @@ if (!CLMM_PROGRAM_ID.equals(PROGRAM_ID)) {
 }
 
 function guard() {
-  assertNotHalted(DIR);                     // the global HALT and this profile's (halt_guard.mjs)
+  assertNotHalted(BOT_ROOT);                // the global HALT and this profile's (halt_guard.mjs)
 }
 
 async function secretBytes() {

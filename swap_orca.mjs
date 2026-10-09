@@ -41,6 +41,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { assertNotHalted } from './halt_guard.mjs';
+import { BOT_ROOT } from './bot_root.mjs';
 import { createRequire } from 'node:module';
 
 import { endpoints, overEndpoints, JupiterError, AfterSignError, isEntry } from './rpc_policy.mjs';
@@ -55,8 +56,7 @@ const spl = require('@solana/spl-token');
 
 export { priorityFeeLamports, verifyPriorityFee, PRIORITY_MAX_LAMPORTS };
 
-const DIR = path.dirname(new URL(import.meta.url).pathname);
-export const HALT = path.join(DIR, 'HALT');
+export const HALT = path.join(BOT_ROOT, 'HALT');
 // No indexed read here (see the header): every endpoint is eligible.
 const ENDPOINTS = endpoints(process.env, { indexed: false });
 

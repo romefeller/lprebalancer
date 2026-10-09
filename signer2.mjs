@@ -31,6 +31,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { assertNotHalted } from './halt_guard.mjs';
+import { BOT_ROOT } from './bot_root.mjs';
 import {
   setRpc, setPayerFromBytes, setNativeMintWrappingStrategy,
   openConcentratedPosition, fetchPositionsForOwner,
@@ -47,7 +48,6 @@ import { consistentOrcaFees } from './orca_fees.mjs';
 import { endpoints, overEndpoints, isEntry, AfterSignError } from './rpc_policy.mjs';
 import { readMints, rawToUi, uiToRaw, uiToNative, uiPrice, assertWritable, mintFields } from './token2022.mjs';
 
-const DIR = path.dirname(new URL(import.meta.url).pathname);
 const RPC = process.env.SOLANA_RPC_URL
   ?? (process.env.KAMINO_RPC_KEY
     ? `https://mainnet.helius-rpc.com/?api-key=${process.env.KAMINO_RPC_KEY}`
@@ -65,7 +65,7 @@ const NATIVE_MINT = 'So11111111111111111111111111111111111111112';
 const HEADERS = { accept: 'application/json', 'user-agent': 'Mozilla/5.0' };
 
 function guard() {
-  assertNotHalted(DIR);                     // the global HALT and this profile's (halt_guard.mjs)
+  assertNotHalted(BOT_ROOT);                // the global HALT and this profile's (halt_guard.mjs)
 }
 
 // Returns the 64-byte secret key. Never logged, never returned to a caller

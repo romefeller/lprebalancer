@@ -39,6 +39,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { assertNotHalted } from './halt_guard.mjs';
+import { BOT_ROOT } from './bot_root.mjs';
 import { createPublicClient, http, getAddress, isAddress, encodeFunctionData, decodeEventLog, keccak256 } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 import { base } from 'viem/chains';
@@ -49,7 +50,6 @@ import { baseEndpoints, overBase, evmErrorKind } from './evm/rpc.mjs';
 import * as A from './evm/addresses.mjs';
 import * as M from './evm/clmath.mjs';
 
-const DIR = path.dirname(new URL(import.meta.url).pathname);
 const DEX = 'aerodrome-slipstream';
 const DEADLINE_S = 300;                 // past the latest block's timestamp
 const RECEIPT_TIMEOUT_MS = 120_000;
@@ -79,7 +79,7 @@ export function settings(env = process.env) {
 
 // HALT in this script's directory halts every profile; LPBOT_RUN_DIR/HALT halts one.
 export function guard(env = process.env) {
-  assertNotHalted(DIR, env);                // halt_guard.mjs: one rule for every signer
+  assertNotHalted(BOT_ROOT, env);           // halt_guard.mjs: one rule for every signer
 }
 
 function poolArg(explicit) {

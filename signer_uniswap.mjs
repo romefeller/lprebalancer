@@ -38,6 +38,7 @@
 //   node signer_uniswap.mjs wrap <amount> [--execute]                (native coin -> its wrapped token)
 import path from 'node:path';
 import { assertNotHalted } from './halt_guard.mjs';
+import { BOT_ROOT } from './bot_root.mjs';
 import { createPublicClient, http, getAddress, isAddress, encodeFunctionData, encodeAbiParameters, decodeEventLog, keccak256 } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 import { isEntry } from './rpc_policy.mjs';
@@ -47,7 +48,6 @@ import { overBase, evmErrorKind } from './evm/rpc.mjs';
 import { chainModule } from './evm/chains.mjs';
 import * as M from './evm/clmath.mjs';
 
-const DIR = path.dirname(new URL(import.meta.url).pathname);
 // The chain module: Unichain unless LPBOT_CHAIN names another (evm/chains.mjs).
 let U = chainModule(process.env.LPBOT_CHAIN);
 // Tests switch the chain without a new process. Returns the module.
@@ -84,7 +84,7 @@ export function settings(env = process.env) {
 
 // HALT in this script's directory halts every profile; LPBOT_RUN_DIR/HALT halts one.
 export function guard(env = process.env) {
-  assertNotHalted(DIR, env);
+  assertNotHalted(BOT_ROOT, env);
 }
 
 function poolArg(explicit) {

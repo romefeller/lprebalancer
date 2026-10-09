@@ -17,13 +17,13 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { assertNotHalted } from './halt_guard.mjs';
+import { BOT_ROOT } from './bot_root.mjs';
 import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
 const { Connection, Keypair, PublicKey, Transaction, sendAndConfirmTransaction } = require('@solana/web3.js');
 const spl = require('@solana/spl-token');
 
-const DIR = path.dirname(new URL(import.meta.url).pathname);
 const RPC = process.env.SOLANA_RPC_URL ?? process.env.LPBOT_RPC ?? 'https://api.mainnet-beta.solana.com';
 export const MAX_PER_TX = 8;
 export const TOKEN_PROGRAMS = [spl.TOKEN_PROGRAM_ID.toBase58(), spl.TOKEN_2022_PROGRAM_ID.toBase58()];
@@ -69,7 +69,7 @@ export function verifyCloseTx(tx, owner, plan) {
 }
 
 function guard() {
-  assertNotHalted(DIR);                     // the global HALT and this profile's (halt_guard.mjs)
+  assertNotHalted(BOT_ROOT);                // the global HALT and this profile's (halt_guard.mjs)
 }
 
 async function secretBytes() {
