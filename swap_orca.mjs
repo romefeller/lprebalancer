@@ -25,8 +25,9 @@
 //   quote at LPBOT_SLIPPAGE_BPS -> quote check, value check at the hint prices,
 //   price impact -> instructions -> instruction allow-list and swap-data check
 //   -> priority fee cap -> simulation with balance deltas -> (dry run: report).
-// With --execute: HALT again, quote age, sign, send ONCE, confirm against
-// lastValidBlockHeight. After the signature nothing is retried.
+// With --execute: HALT again, quote age, sign, send and re-send the same
+// signed bytes until they confirm or lastValidBlockHeight passes. Never a
+// second transaction.
 //
 // SOL: the SDK's 'ata' wrapping strategy. The wSOL ATA is created if missing,
 // funded with the SOL to sell (transfer + SyncNative) and closed at the end, so
@@ -35,7 +36,7 @@
 // wrapped. Its balance counts as SOL for the same reason.
 //
 // Reads: getAccountInfo / getMultipleAccounts / getEpochInfo / simulate /
-// getRecentPrioritizationFees only. No indexed read (getTokenAccountsByOwner),
+// getRecentPrioritizationFees / getSignatureStatuses / getBlockHeight only. No indexed read (getTokenAccountsByOwner),
 // so every endpoint from rpc_policy.endpoints() can serve it.
 import fs from 'node:fs';
 import path from 'node:path';
@@ -45,6 +46,7 @@ import { createRequire } from 'node:module';
 import { endpoints, overEndpoints, JupiterError, AfterSignError, isEntry } from './rpc_policy.mjs';
 import { priorityFeeLamports, verifyPriorityFee, PRIORITY_MAX_LAMPORTS, parseSleeve, sleeveCap } from './swap_jupiter.mjs';
 import { planRebalance, TARGET_TOLERANCE } from './rebalance_plan.mjs';
+import { NeverLanded, sendUntilLanded } from './tx_send.mjs';
 
 const require = createRequire(import.meta.url);
 const { Connection, Keypair, PublicKey, VersionedTransaction, TransactionMessage, TransactionInstruction,
@@ -81,8 +83,12 @@ export const SWAP_V2_DISCRIMINATOR = Buffer.from([43, 4, 237, 11, 26, 201, 30, 9
 
 // Pair -> whirlpool, both mint orders. SOL/USDC 0.04% (tick spacing 4), the
 // deepest Orca SOL/USDC pool and the bot's seed pool (db.SEED_POOL).
+// DJT/USDC: the swing's DJT pool, so the DJT a switch back to SOL/USDC
+// leaves behind can be sold while Jupiter refuses (2026-10-09).
+export const DJT_MINT = 'DJTu7vi8norVzdVAffgvb39VP7wjKeTsgaMBJrzfxvoF';
 export const DEFAULT_POOLS = {
   [`${NATIVE_MINT}/${USDC_MINT}`]: 'Czfq3xZZDmsdGdUyrNLtRhGc47cXcZtLG4crryfu44zE',
+  [`${DJT_MINT}/${USDC_MINT}`]: '7gkB2D1SqhUYgKrSpDU5cma4tK9efijHouYituABdJcG',
 };
 export function defaultPool(mintA, mintB) {
   return DEFAULT_POOLS[`${mintA}/${mintB}`] ?? DEFAULT_POOLS[`${mintB}/${mintA}`] ?? null;
@@ -500,21 +506,28 @@ async function performSwap(ctx, pool, sellInfo, buyInfo, rawIn, execute, extra) 
   const age = Date.now() - quotedAt;
   if (age > QUOTE_MAX_AGE_MS) throw new Refused(`quote is ${(age / 1000).toFixed(1)}s old at send time (limit ${QUOTE_MAX_AGE_MS / 1000}s); refusing`);
   tx.sign([payer]);
-  return sendOnce(connection, tx, blockhash, lastValidBlockHeight, report);
+  return sendLanded(connection, tx, lastValidBlockHeight, report);
 }
 
-// From the signature on, the transaction may be on chain: one send, no retry.
-export async function sendOnce(connection, tx, blockhash, lastValidBlockHeight, report, log = s => console.log(s)) {
+// From the signature on, the transaction may be on chain. The same signed
+// bytes are re-sent until they confirm or the blockhash expires
+// (tx_send.sendUntilLanded); never a new transaction. 2026-10-09: two Orca
+// swaps sent once expired unconfirmed, and one held DJT out of its band.
+// The first send failing: AfterSignError, never retried. Expired and unknown
+// to the chain: a plain error without a signature, nothing was swapped.
+// Anything else after the send: a partial report with the signature, then
+// SentError.
+export async function sendLanded(connection, tx, lastValidBlockHeight, report,
+                                 { log = s => console.log(s), sleep } = {}) {
   const raw = tx.serialize();
-  let signature = null;
+  let signature;
   try {
-    signature = await connection.sendRawTransaction(raw, { skipPreflight: false, maxRetries: 2 });
-    const conf = await connection.confirmTransaction({ signature, blockhash, lastValidBlockHeight }, 'confirmed');
-    if (conf.value?.err) throw new Error(`transaction ${signature} failed on chain: ${JSON.stringify(conf.value.err)}`);
+    signature = await sendUntilLanded(connection, raw, lastValidBlockHeight, sleep ? { sleep } : {});
   } catch (e) {
-    if (!signature) throw new AfterSignError(`send failed after signing (not retried): ${e.message ?? e}`);
-    log(JSON.stringify({ ...report, signature, sent: true, partial: true, error: String(e.message ?? e) }, null, 1));
-    throw new SentError(`sent ${signature} but could not confirm it: ${e.message}`);
+    if (e instanceof NeverLanded) throw new Error(`swap ${e.message}`);
+    if (!e.afterSend) throw new AfterSignError(`send failed after signing (not retried): ${e?.message ?? e}`);
+    log(JSON.stringify({ ...report, signature: e.signature, sent: true, partial: true, error: String(e.message ?? e) }, null, 1));
+    throw new SentError(`sent ${e.signature} but could not confirm it: ${e.message}`);
   }
   const out = { ...report, signature, sent: true };
   log(JSON.stringify(out, null, 1));

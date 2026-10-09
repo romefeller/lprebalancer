@@ -73,11 +73,13 @@ TARGETS = {
     'jupiter_gate_js': ('jupiter_gate.mjs', ['take', 'reserve', 'waitTurn'], NODE_TESTS('test_jupiter_gate.mjs')),
     'one_outcome': ('rebalancer.py', ['record_health', 'chain', 'balance_wallet', 'sweep_foreign'],
                     PY_TESTS('test_jupiter_gate', 'test_health', 'test_deploy_all', 'test_deploy_idle', 'test_sweep',
-                             'test_multi_loop', 'test_scaled', 'test_review_edges')),
+                             'test_multi_loop', 'test_scaled', 'test_review_edges', 'test_orca_fallback_pool')),
+    # 2026-10-09 DJT halt: the Orca fallback's pool, the left-behind sale's fallback, the one-side hold.
+    'orca_fallback': ('rebalancer.py', ['fallback_pool_args', 'one_side_short'], PY_TESTS('test_orca_fallback_pool')),
     'token_facts': ('dexes.py', ['jupiter_token', '_get'], PY_TESTS('test_jupiter_gate.LessJupiterTraffic', 'test_jupiter_gate.Gate')),
     'swap_orca': ('swap_orca.mjs', ['guard', 'toRaw', 'parseHints', 'checkPool', 'direction', 'planSwap', 'spotOutPerIn',
                                     'priceImpact', 'valueLossOk', 'verifyQuote', 'checkImpact', 'chooseCuPrice', 'cuLimit',
-                                    'withWsolClose', 'decodeSwapV2', 'verifyTxShape', 'checkDeltas', 'noopReport', 'sendOnce'],
+                                    'withWsolClose', 'decodeSwapV2', 'verifyTxShape', 'checkDeltas', 'noopReport', 'sendLanded'],
                   NODE_TESTS('test_swap_orca.mjs')),
     'resilience': ('rebalancer.py', ['health_key', 'counts_as_failure', 'chain', 'failover_pick', 'venue_failover',
                                      'voluntary_move_allowed', 'idle_deploys_left', 'deploy_idle'],
@@ -217,7 +219,7 @@ TARGETS = {
     'swing_tick': ('swing.py', ['tick', 'tick_all', 'main', 'feed', 'rows', 'left_behind'],
                    PY_TESTS('test_swing.Tick', 'test_swing.TickMore')),
     'swing_loop': ('rebalancer.py', ['left_behind', 'repoint_with_leftovers', 'sell_left_behind', 'operator_target'],
-                   PY_TESTS('test_swing', 'test_multi_loop', 'test_rebalancer')),
+                   PY_TESTS('test_swing', 'test_multi_loop', 'test_rebalancer', 'test_orca_fallback_pool')),
     # rebalance() as a whole: 2026-10-02, 38 survivors in lines older than the swing (harvest, close retries,
     # the 24 h windows, failure counts) are open work, not equivalents.
     'swing_rebalance': ('rebalancer.py', ['rebalance'],
@@ -314,6 +316,8 @@ SQL_TARGETS = {'deposit_db', 'unichain_book', 'unichain_quote', 'band_profile', 
 # The report prints each survivor's key: copy it here with a reason. The line
 # number is not in the key, so an edit above a mutant keeps its entry valid.
 EQUIVALENT = {
+    ('swing_loop', 'sell_left_behind', 'drop operand 0', 'if (SWAP_FALLBACK and SWAP_FALLBACK in SIGNERS and (err or not out)', 0):
+        "the fallback off is '', and '' in SIGNERS is False: the next operand alone gives the same answer",
     ('open_leftover', 'deploy_idle', 'drop operand 0', "if 'balanceA' not in wbal or wbal.get('walletUsd') is None:", 0):
         'deployable_usd returns None for a read without balanceA, and deploy_idle returns False on it two lines later',
     ('v3_fee_loop', 'sample_fee_growth', 'const 0->1', "if time.time() - state.get('last_fee_sample', 0) < config.VENUE_SAMPLE_S:", 0):

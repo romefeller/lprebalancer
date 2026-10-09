@@ -2924,6 +2924,32 @@ SWAP_RATE_LIMIT_PAUSES = (30, 60)
 # an Orca whirlpool (swap_orca.mjs), so a Jupiter outage or rate limit does not
 # open a lopsided band (owner, 2026-10-01). '' turns the fallback off.
 SWAP_FALLBACK = os.environ.get('LPBOT_SWAP_FALLBACK', 'orca-swap')
+# A failed swap that leaves a side the band needs under this share of the
+# capital opens nothing: Orca refuses a zero side (0x177c, LiquidityZero) and
+# three such refusals halted the swing on DJT (2026-10-09 13:47Z).
+OPEN_SIDE_MIN = 0.02
+
+
+def fallback_pool_args(mint_a, mint_b):
+    """--pool for the Orca fallback swap of mint_a/mint_b: the held pool when
+    it is an Orca whirlpool of exactly that pair, else nothing (swap_orca's
+    DEFAULT_POOLS). Without it the fallback knew SOL/USDC only and refused
+    DJT/USDC while Jupiter answered 429 (2026-10-09). Pure but for config."""
+    if config.DEX != 'orca':
+        return []
+    try:
+        (ma, _), (mb, _) = pool_tokens()
+    except Exception:
+        return []
+    return ['--pool', config.POOL] if {ma, mb} == {wallets.norm(mint_a), wallets.norm(mint_b)} else []
+
+
+def one_side_short(usd_a, usd_b, frac_a, frac_b, capital_usd):
+    """Whether a side the band wants (its target share > 0) holds under
+    OPEN_SIDE_MIN of the capital: an open from it is refused or deposits a
+    sliver. Pure."""
+    floor = OPEN_SIDE_MIN * max(capital_usd, 0.0)
+    return (frac_a > 0 and usd_a < floor) or (frac_b > 0 and usd_b < floor)
 
 
 def balance_wallet(state, bal, rec, share_a=None):
@@ -3020,12 +3046,22 @@ def balance_wallet(state, bal, rec, share_a=None):
             and counts_as_failure(err or 'no result')
             and (err or not out) and not (out or {}).get('signature') and not (out or {}).get('partial')):
         notify('swap_fallback', reason=f'Jupiter failed without sending ({err or "no result"}); swapping on Orca')
-        out, err = chain('rebalance', mint_a, mint_b, target_a, target_b, '--execute', dex=SWAP_FALLBACK,
-                         extra_env=env, record=False)
+        out, err = chain('rebalance', mint_a, mint_b, target_a, target_b, '--execute',
+                         *fallback_pool_args(mint_a, mint_b), dex=SWAP_FALLBACK, extra_env=env, record=False)
     record_health('swap', out, err)
     if (err or not out) and not (out or {}).get('signature') and not (out or {}).get('partial'):
-        # Nothing was sent. Open with what the wallet holds: a smaller
-        # position earning fees beats capital idle until the next poll.
+        # Nothing was sent. A side the band needs is (almost) empty: hold, no
+        # failure counted, the next poll swaps again. An open would be refused
+        # and three refusals write HALT (2026-10-09: DJT 0, USDC $13.70).
+        if one_side_short(usd_a, usd_b, frac_a, frac_b, C):
+            notify('swap_skipped', reason=f'swap failed without sending ({err or "no result"}); '
+                                          f'holding: a side the band needs is under {OPEN_SIDE_MIN:.0%} '
+                                          f'of the capital, swapping again at the next poll',
+                   usd_a=round(usd_a, 2), usd_b=round(usd_b, 2))
+            db.event('swap_skipped', f"hold, one side short | {err or 'no result'}")
+            return None
+        # Otherwise open with what the wallet holds: a smaller position
+        # earning fees beats capital idle until the next poll.
         notify('swap_skipped', reason=f'swap failed without sending ({err or "no result"}); opening with the wallet as it is')
         db.event('swap_skipped', f"{err or 'no result'} | full: {LAST_CHAIN_ERROR.get('text', '')}")
         state['open_unbalanced'] = True; save(state)   # its leftover is not tolerance: deploy_idle deploys it
@@ -3451,8 +3487,16 @@ def sell_left_behind(state, force=False):
         if amt <= 0 or (px.get(m) and usd < SWEEP_MIN_USD):
             state['left_behind'] = [x for x in state['left_behind'] if x != m]; save(state)
             continue
-        out, err = chain('rebalance', m, quote, '0', '1000000', '--execute', dex='jupiter',
-                         extra_env={'LPBOT_SLEEVE': json.dumps({m: cap, quote: 0.0})})
+        sleeve = {'LPBOT_SLEEVE': json.dumps({m: cap, quote: 0.0})}
+        out, err = chain('rebalance', m, quote, '0', '1000000', '--execute', dex='jupiter', extra_env=sleeve)
+        if (SWAP_FALLBACK and SWAP_FALLBACK in SIGNERS and (err or not out)
+                and not (out or {}).get('signature') and not (out or {}).get('partial')):
+            # Jupiter sent nothing (429, outage): the same sale on an Orca
+            # whirlpool. 2026-10-09: 1.6 SOL sat unsold 2 h after the DJT switch.
+            notify('swap_fallback', reason=f'Jupiter failed without sending ({err or "no result"}); '
+                                           f'selling the leftover on Orca', mint=m)
+            out, err = chain('rebalance', m, quote, '0', '1000000', '--execute', *fallback_pool_args(m, quote),
+                             dex=SWAP_FALLBACK, extra_env=sleeve)
         if out and out.get('signature') and not err:
             state['left_behind'] = [x for x in state['left_behind'] if x != m]; save(state)
             db.event('LEFT_BEHIND_SOLD', f"{m} {amt:.9f} -> {quote} {out['signature']}")

@@ -632,7 +632,9 @@ class SellLeftBehind(unittest.TestCase):
                                             {DJT: 9.0, tml.MU: 9.0, tml.JITO: 9.0}, answers=answers)
         self.assertIs(out, True)                                                    # JITO sold
         self.assertEqual(st_['left_behind'], [DJT])
-        self.assertEqual([e for e, _ in told], ['left_behind_unsold', 'LEFT_BEHIND_SOLD'])
+        # Jupiter sent nothing for DJT: the Orca fallback tries it too (2026-10-09), and fails here
+        self.assertEqual([e for e, _ in told], ['swap_fallback', 'left_behind_unsold', 'LEFT_BEHIND_SOLD'])
+        self.assertEqual(len([a for a, _ in calls if a[1] == DJT]), 2)               # Jupiter, then Orca
         out, st_, _, _ = self.run_it([DJT], {DJT: 5.0}, {DJT: 9.0}, answers={DJT: ({'signature': 's'}, 'late')})
         self.assertEqual((out, st_['left_behind']), (False, [DJT]))                # a signature with an error
 

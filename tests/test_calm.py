@@ -167,16 +167,19 @@ class Loop(unittest.TestCase):
                 self.assertEqual(after['balanceA'], 1.0)
 
     def test_a_swap_that_sent_nothing_still_lets_the_open_run(self):
-        state = {'failures': 0}
-        b = self.bal(0.06, 300.0)
-        with mock.patch.object(rebalancer, 'chain', lambda *a, **k: (None, 'impact too high')), \
-                mock.patch.object(rebalancer, 'notify', lambda *a, **k: None), \
-                mock.patch.object(rebalancer, 'save', lambda s: None), \
-                mock.patch.object(rebalancer.db, 'event', lambda *a: None), \
-                mock.patch.object(rebalancer.config, 'REBALANCE_SWAP', True), \
-                mock.patch.object(rebalancer.config, 'CAPITAL_USD', 190.0):
-            self.assertIs(rebalancer.balance_wallet(state, b, self.REC), b)
-        self.assertEqual(state['failures'], 0)
+        # Both sides hold something (SOL short of half): the open runs lopsided.
+        # A side under OPEN_SIDE_MIN holds instead (test_orca_fallback_pool, 2026-10-09).
+        for b, opens in ((self.bal(0.6, 300.0), True), (self.bal(0.06, 300.0), False)):
+            state = {'failures': 0}
+            with mock.patch.object(rebalancer, 'chain', lambda *a, **k: (None, 'impact too high')), \
+                    mock.patch.object(rebalancer, 'notify', lambda *a, **k: None), \
+                    mock.patch.object(rebalancer, 'save', lambda s: None), \
+                    mock.patch.object(rebalancer.db, 'event', lambda *a: None), \
+                    mock.patch.object(rebalancer.config, 'REBALANCE_SWAP', True), \
+                    mock.patch.object(rebalancer.config, 'CAPITAL_USD', 190.0):
+                out = rebalancer.balance_wallet(state, b, self.REC)
+            self.assertIs(out, b if opens else None)
+            self.assertEqual(state['failures'], 0)
 
     def test_a_partial_swap_opens_nothing_and_counts(self):
         state = {'failures': 0}

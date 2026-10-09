@@ -382,35 +382,70 @@ function signed() {
 }
 const REPORT = { sold: { amount: 1 }, bought: { amount: 2 }, swapUsdValue: 1, priceImpactPct: 0, routePlan: ['Orca Whirlpool'], signature: null, sent: false };
 
-test('sendOnce: a send that throws without a signature is AfterSignError, sent once', async () => {
-  let sends = 0;
-  const conn = { sendRawTransaction: async () => { sends++; throw new Error('fetch failed'); }, confirmTransaction: async () => assert.fail('no confirm') };
+// A connection for sendLanded: the signature is known after `landsAfter`
+// status reads (never when null); the block height rises 10 per read.
+function landing({ landsAfter = null, err = null, start = 100, firstSendThrows = false, knownLate = false } = {}) {
+  const c = { sends: [], reads: 0, height: start };
+  c.sendRawTransaction = async (raw, opts) => {
+    c.sends.push(opts);
+    if (c.sends.length === 1 && firstSendThrows) throw firstSendThrows === true ? new Error('fetch failed') : firstSendThrows;
+    return 'SIG1';
+  };
+  c.getSignatureStatuses = async (sigs, opts) => {
+    if (opts?.searchTransactionHistory) return { value: [knownLate ? { confirmationStatus: 'finalized', err } : null] };
+    c.reads += 1;
+    return { value: [landsAfter !== null && c.reads > landsAfter ? { confirmationStatus: 'confirmed', err } : null] };
+  };
+  c.getBlockHeight = async () => (c.height += 10);
+  c.confirmTransaction = async () => assert.fail('sendLanded never waits on confirmTransaction');
+  return c;
+}
+const fast = { sleep: async () => {} };
+
+test('sendLanded: a send that throws without a signature is AfterSignError, sent once', async () => {
+  const conn = landing({ firstSendThrows: true });
   const out = [];
-  await assert.rejects(M.sendOnce(conn, signed(), 'bh', 100, REPORT, s => out.push(s)), e => e instanceof AfterSignError && /not retried/.test(e.message));
-  assert.equal(sends, 1);
+  await assert.rejects(M.sendLanded(conn, signed(), 1_000, REPORT, { log: s => out.push(s), ...fast }),
+                       e => e instanceof AfterSignError && /not retried/.test(e.message));
+  assert.equal(conn.sends.length, 1);
   assert.deepEqual(out, []);
 });
 
-test('sendOnce: sent but unconfirmed reports partial with the signature', async () => {
-  let sends = 0;
-  const conn = { sendRawTransaction: async () => { sends++; return 'SIG1'; }, confirmTransaction: async () => { throw new Error('block height exceeded'); } };
-  const out = [];
-  await assert.rejects(M.sendOnce(conn, signed(), 'bh', 100, REPORT, s => out.push(s)), e => e instanceof M.SentError && errorKind(e) === 'fatal');
-  assert.equal(sends, 1);
-  const j = JSON.parse(out[0]);
-  assert.equal(j.partial, true); assert.equal(j.signature, 'SIG1'); assert.equal(j.sent, true); assert.match(j.error, /block height/);
+test('sendLanded: the same signed bytes are re-sent until they land (2026-10-09 expiry)', async () => {
+  const sent = [];
+  const conn = landing({ landsAfter: 3 });
+  const raw0 = conn.sendRawTransaction;
+  conn.sendRawTransaction = async (raw, opts) => { sent.push(Buffer.from(raw).toString('hex')); return raw0(raw, opts); };
+  const res = await M.sendLanded(conn, signed(), 10_000, REPORT, { log: () => {}, ...fast });
+  assert.equal(res.signature, 'SIG1'); assert.equal(res.sent, true); assert.equal(res.partial, undefined);
+  assert.equal(sent.length, 4, 'one send and three re-sends before the fourth read sees it');
+  assert.equal(new Set(sent).size, 1, 'never a new transaction');
 });
 
-test('sendOnce: an on-chain failure is partial too; success has the caller\'s JSON shape', async () => {
-  const fail = { sendRawTransaction: async () => 'SIG2', confirmTransaction: async () => ({ value: { err: { InstructionError: [3, { Custom: 6000 }] } } }) };
+test('sendLanded: expired and unknown to the chain is a plain error, no signature, nothing logged', async () => {
   const out = [];
-  await assert.rejects(M.sendOnce(fail, signed(), 'bh', 100, REPORT, s => out.push(s)), M.SentError);
-  assert.equal(JSON.parse(out[0]).partial, true);
-  let confirmArgs;
-  const ok = { sendRawTransaction: async () => 'SIG3', confirmTransaction: async (a) => { confirmArgs = a; return { value: { err: null } }; } };
-  const res = await M.sendOnce(ok, signed(), 'BH', 4242, REPORT, () => {});
-  assert.deepEqual(confirmArgs, { signature: 'SIG3', blockhash: 'BH', lastValidBlockHeight: 4242 });
-  assert.equal(res.sent, true); assert.equal(res.signature, 'SIG3'); assert.equal(res.partial, undefined);
+  await assert.rejects(M.sendLanded(landing({ landsAfter: null, start: 200 }), signed(), 100, REPORT, { log: s => out.push(s), ...fast }), e => {
+    assert.strictEqual(e.constructor, Error);
+    assert.match(e.message, /^swap expired: .*nothing was sent$/);
+    assert.ok(!(e instanceof M.SentError) && !(e instanceof AfterSignError));
+    return true;
+  });
+  assert.deepEqual(out, []);
+});
+
+test('sendLanded: landed after the block height passed is a success, not an expiry', async () => {
+  const res = await M.sendLanded(landing({ landsAfter: null, start: 200, knownLate: true }), signed(), 100, REPORT, { log: () => {}, ...fast });
+  assert.equal(res.signature, 'SIG1'); assert.equal(res.sent, true);
+});
+
+test('sendLanded: an on-chain failure is partial with the signature; success has the caller\'s JSON shape', async () => {
+  const out = [];
+  await assert.rejects(M.sendLanded(landing({ landsAfter: 0, err: { InstructionError: [3, { Custom: 6000 }] } }), signed(), 1_000, REPORT,
+                                    { log: s => out.push(s), ...fast }), e => e instanceof M.SentError && errorKind(e) === 'fatal');
+  const j = JSON.parse(out[0]);
+  assert.equal(j.partial, true); assert.equal(j.signature, 'SIG1'); assert.equal(j.sent, true); assert.match(j.error, /failed on chain/);
+  const res = await M.sendLanded(landing({ landsAfter: 0 }), signed(), 4242, REPORT, { log: () => {}, ...fast });
+  assert.equal(res.sent, true); assert.equal(res.signature, 'SIG1'); assert.equal(res.partial, undefined);
   for (const k of ['sold', 'bought', 'swapUsdValue', 'priceImpactPct', 'routePlan', 'signature', 'sent']) assert.ok(k in res, k);
   assert.deepEqual(res.routePlan, ['Orca Whirlpool']);
 });
@@ -538,15 +573,25 @@ test('verifyTxShape: lookup tables refused; an empty or missing list passes', ()
   assert.throws(() => M.verifyTxShape(withTable, want), /lookup tables/);
 });
 
-test('sendOnce: the error text carries the message verbatim, even an empty one', async () => {
-  const noSig = { sendRawTransaction: async () => { throw new Error(''); }, confirmTransaction: async () => assert.fail('no confirm') };
-  await assert.rejects(M.sendOnce(noSig, signed(), 'bh', 100, REPORT, () => {}), e => e instanceof AfterSignError && e.message === 'send failed after signing (not retried): ');
+test('sendLanded: the injected sleep paces every re-send', async () => {
+  const waits = [];
+  await M.sendLanded(landing({ landsAfter: 2 }), signed(), 10_000, REPORT, { log: () => {}, sleep: async ms => { waits.push(ms); } });
+  assert.deepEqual(waits, [2_000, 2_000]);
+});
+
+test('sendLanded: an empty error after the send is logged as it is', async () => {
+  const conn = landing({ landsAfter: 0 });
+  conn.getSignatureStatuses = async () => { throw new Error(''); };
   const out = [];
-  const unconf = { sendRawTransaction: async () => 'SIG4', confirmTransaction: async () => { throw new Error(''); } };
-  await assert.rejects(M.sendOnce(unconf, signed(), 'bh', 100, REPORT, s => out.push(s)), M.SentError);
-  assert.equal(JSON.parse(out[0]).error, '');
-  const str = { sendRawTransaction: async () => { throw 'boom'; }, confirmTransaction: async () => assert.fail('no confirm') };
-  await assert.rejects(M.sendOnce(str, signed(), 'bh', 100, REPORT, () => {}), e => e.message === 'send failed after signing (not retried): boom');
+  await assert.rejects(M.sendLanded(conn, signed(), 1_000, REPORT, { log: s => out.push(s), ...fast }), M.SentError);
+  assert.strictEqual(JSON.parse(out[0]).error, '');
+});
+
+test('sendLanded: the error text carries the message verbatim, even an empty one', async () => {
+  await assert.rejects(M.sendLanded(landing({ firstSendThrows: new Error('') }), signed(), 1_000, REPORT, { log: () => {}, ...fast }),
+                       e => e instanceof AfterSignError && e.message === 'send failed after signing (not retried): ');
+  await assert.rejects(M.sendLanded(landing({ firstSendThrows: 'boom' }), signed(), 1_000, REPORT, { log: () => {}, ...fast }),
+                       e => e instanceof AfterSignError && e.message === 'send failed after signing (not retried): boom');
 });
 
 // --- LPBOT_SLEEVE: a wallet several profiles share ------------------------------------

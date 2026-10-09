@@ -177,7 +177,8 @@ class SwapRetry(unittest.TestCase):
 
     def test_a_program_failure_or_a_sent_swap_is_not_retried(self):
         out, calls, state = self.go([(None, 'PriceSlippageCheck (6017): price moved beyond the slippage limit')])
-        self.assertEqual(len(calls), 1); self.assertEqual(state['failures'], 0); self.assertIsNotNone(out)
+        # 0.06 SOL is the reserve: the band's SOL side is empty, so it holds (2026-10-09), no failure counted
+        self.assertEqual(len(calls), 1); self.assertEqual(state['failures'], 0); self.assertIsNone(out)
         _, calls, state = self.go([({'signature': 's', 'partial': True}, 'confirm timed out')])
         self.assertEqual(len(calls), 1); self.assertEqual(state['failures'], 1)
 
