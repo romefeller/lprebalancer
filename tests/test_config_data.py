@@ -11,7 +11,7 @@ ROOT = _fixtures.ROOT
 SOLANA = json.loads((ROOT / 'chains/solana/solana.json').read_text())
 NOT_CODE = {'node_modules', '.git', '.claude', 'tests', 'research', 'ops', 'sql'}
 # The all-zero key is the System program's id and also "no mint" in pool
-# accounts (dexes.NULL_MINT): too common a value to police.
+# accounts (venue_api.NULL_MINT): too common a value to police.
 UNPOLICED = {SOLANA['programs']['system']}
 
 

@@ -32,7 +32,7 @@ CHAINS = {
         'rewards': True,
         # harvests measured from their transactions (txfees.py reads Solana)
         'txfees': True,
-        # on-chain venue ranking (dexes.fee_states)
+        # on-chain venue ranking (solana_state.fee_states)
         'venues': True,
         # the JSON-RPC method that proves an endpoint answers (rebalancer.probe_rpc)
         'probe': 'getSlot',

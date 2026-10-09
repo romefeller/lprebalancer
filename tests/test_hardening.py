@@ -208,7 +208,7 @@ class Security(unittest.TestCase):
                 mock.patch.object(rebalancer, 'wallet', lambda p: {'sol': 0.3, 'owner': OWNER}), \
                 mock.patch.object(rebalancer.txfees, 'fetch', lambda rpc, s, **k: harvest_tx(
                     '4qQeZ5LwSz6HuupUu8jCtgXyW1mYQcNbFAW1sWZp89HL', 100.0)), \
-                mock.patch.object(rebalancer.dexes, 'jupiter_prices', lambda m: {'4qQeZ5LwSz6HuupUu8jCtgXyW1mYQcNbFAW1sWZp89HL': 2.76}), \
+                mock.patch.object(rebalancer.jupiter_api, 'jupiter_prices', lambda m: {'4qQeZ5LwSz6HuupUu8jCtgXyW1mYQcNbFAW1sWZp89HL': 2.76}), \
                 mock.patch.object(rebalancer, 'chain', chain), \
                 mock.patch.object(rebalancer, 'save', lambda s: None), \
                 mock.patch.object(rebalancer, 'notify', lambda ev, **kw: notes.append(ev)):

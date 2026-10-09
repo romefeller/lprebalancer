@@ -67,8 +67,8 @@ class Sweep(unittest.TestCase):
         it = iter(answers)
         state = {} if state is None else state
         with mock.patch.object(rebalancer.audit, 'token_accounts', lambda url, owner: accounts), \
-                mock.patch.object(rebalancer.dexes, 'jupiter_prices', lambda ms: {m: PRICES.get(m, 0.0) for m in ms}), \
-                mock.patch.object(rebalancer.dexes, 'jupiter_token', lambda m: FACTS.get(m)), \
+                mock.patch.object(rebalancer.jupiter_api, 'jupiter_prices', lambda ms: {m: PRICES.get(m, 0.0) for m in ms}), \
+                mock.patch.object(rebalancer.jupiter_api, 'jupiter_token', lambda m: FACTS.get(m)), \
                 mock.patch.object(rebalancer, 'pool_tokens', lambda: pool), \
                 mock.patch.object(rebalancer, 'chain', lambda *a, **k: (calls.append((a, k)) or next(it))), \
                 mock.patch.object(rebalancer, 'save', lambda s: None), \
@@ -122,8 +122,8 @@ class Sweep(unittest.TestCase):
         with mock.patch.object(rebalancer, 'wallet_mints', lambda: {'OTHER'}), \
                 mock.patch.object(rebalancer, 'housekeeper', lambda chore: True), \
                 mock.patch.object(rebalancer.audit, 'token_accounts', lambda url, owner: accounts), \
-                mock.patch.object(rebalancer.dexes, 'jupiter_prices', lambda ms: (asked.append(list(ms)) or {})), \
-                mock.patch.object(rebalancer.dexes, 'jupiter_token', lambda m: FACTS.get(m)), \
+                mock.patch.object(rebalancer.jupiter_api, 'jupiter_prices', lambda ms: (asked.append(list(ms)) or {})), \
+                mock.patch.object(rebalancer.jupiter_api, 'jupiter_token', lambda m: FACTS.get(m)), \
                 mock.patch.object(rebalancer, 'pool_tokens', lambda: ((SOL, 'SOL'), (USDC, 'USDC'))), \
                 mock.patch.object(rebalancer, 'chain', lambda *a, **k: (None, 'no')), \
                 mock.patch.object(rebalancer, 'save', lambda s: None), \
@@ -210,9 +210,9 @@ class SweepAsksLittle(unittest.TestCase):
     def ask(self, accounts, prices):
         priced, facts = [], []
         with mock.patch.object(rebalancer.audit, 'token_accounts', lambda url, owner: accounts), \
-                mock.patch.object(rebalancer.dexes, 'jupiter_prices',
+                mock.patch.object(rebalancer.jupiter_api, 'jupiter_prices',
                                   lambda ms: priced.append(list(ms)) or {m: prices[m] for m in ms if m in prices}), \
-                mock.patch.object(rebalancer.dexes, 'jupiter_token', lambda m: facts.append(m) or {'verified': True}), \
+                mock.patch.object(rebalancer.jupiter_api, 'jupiter_token', lambda m: facts.append(m) or {'verified': True}), \
                 mock.patch.object(rebalancer, 'pool_tokens', lambda: ((SOL, 'SOL'), (USDC, 'USDC'))), \
                 mock.patch.object(rebalancer, 'chain', lambda *a, **k: ({'signature': 'SW'}, None)), \
                 mock.patch.object(rebalancer, 'save', lambda s: None), \

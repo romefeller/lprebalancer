@@ -12,6 +12,9 @@ from unittest import mock
 
 import _fixtures  # noqa: F401
 import dexes
+from venues import api as venue_api
+from venues import evm
+from venues.aerodrome import pools as aerodrome_pools
 
 POOL = '0xb2cc224c1c9fee385f8ad6a55b4d94e92359dc59'
 POOL_V3 = '0x3fe04a59ebd38cf06080a6f60a98d124eb59392a'
@@ -38,22 +41,22 @@ def fake_calls(factory=FACTORY, nft=NPM, pool=POOL, spacing=100, tick=-197314, s
     """A stand-in for evm_calls answering the pool's, tokens' and factory's selectors.
     The factory maps (WETH, USDC, `spacing`) to `maps_to` (default: the pool)."""
     answers = {
-        dexes._SEL['factory']: '0x' + word(int(factory, 16)),
-        dexes._SEL['nft']: '0x' + word(int(nft, 16)),
-        dexes._SEL['token0']: '0x' + word(int(WETH, 16)),
-        dexes._SEL['token1']: '0x' + word(int(USDC, 16)),
-        dexes._SEL['tickSpacing']: '0x' + word(spacing),
-        dexes._SEL['fee']: '0x' + word(500),
-        dexes._SEL['unstakedFee']: '0x' + word(50000),
-        dexes._SEL['liquidity']: '0x' + word(4 * 10 ** 18),
-        dexes._SEL['stakedLiquidity']: '0x' + word(3 * 10 ** 18),
-        dexes._SEL['slot0']: '0x' + word(sqrt_p) + word(tick) + word(1) * 4,
+        evm._SEL['factory']: '0x' + word(int(factory, 16)),
+        evm._SEL['nft']: '0x' + word(int(nft, 16)),
+        evm._SEL['token0']: '0x' + word(int(WETH, 16)),
+        evm._SEL['token1']: '0x' + word(int(USDC, 16)),
+        evm._SEL['tickSpacing']: '0x' + word(spacing),
+        evm._SEL['fee']: '0x' + word(500),
+        evm._SEL['unstakedFee']: '0x' + word(50000),
+        evm._SEL['liquidity']: '0x' + word(4 * 10 ** 18),
+        evm._SEL['stakedLiquidity']: '0x' + word(3 * 10 ** 18),
+        evm._SEL['slot0']: '0x' + word(sqrt_p) + word(tick) + word(1) * 4,
     }
-    tokens = {(WETH.lower(), dexes._SEL['decimals']): '0x' + word(18),
-              (USDC.lower(), dexes._SEL['decimals']): '0x' + word(6),
-              (WETH.lower(), dexes._SEL['symbol']): abi_string('WETH'),
-              (USDC.lower(), dexes._SEL['symbol']): abi_string('USDC')}
-    get_pool = dexes._SEL['getPool'] + word(int(WETH, 16)) + word(int(USDC, 16)) + word(spacing)
+    tokens = {(WETH.lower(), evm._SEL['decimals']): '0x' + word(18),
+              (USDC.lower(), evm._SEL['decimals']): '0x' + word(6),
+              (WETH.lower(), evm._SEL['symbol']): abi_string('WETH'),
+              (USDC.lower(), evm._SEL['symbol']): abi_string('USDC')}
+    get_pool = evm._SEL['getPool'] + word(int(WETH, 16)) + word(int(USDC, 16)) + word(spacing)
 
     def calls(pairs, urls=None):
         out = []
@@ -72,44 +75,44 @@ def fake_calls(factory=FACTORY, nft=NPM, pool=POOL, spacing=100, tick=-197314, s
 
 class Failures(unittest.TestCase):
     def test_a_pool_of_an_unknown_factory_is_refused(self):
-        with mock.patch.object(dexes, 'evm_calls', fake_calls(factory=GAUGE_CAPS_FACTORY)):
+        with mock.patch.object(evm, 'evm_calls', fake_calls(factory=GAUGE_CAPS_FACTORY)):
             with self.assertRaisesRegex(ValueError, 'not a pool of a known Slipstream factory'):
-                dexes.slipstream_state(POOL)
+                aerodrome_pools.slipstream_state(POOL)
             self.assertIsNone(dexes.pool('aerodrome-slipstream', POOL))
 
     def test_a_position_manager_of_another_deployment_is_refused(self):
         for factory, nft in ((FACTORY, NPM_V3), (FACTORY_V3, NPM), (FACTORY, '0x' + '11' * 20)):
             with self.subTest(factory=factory, nft=nft), \
-                    mock.patch.object(dexes, 'evm_calls', fake_calls(factory=factory, nft=nft)):
+                    mock.patch.object(evm, 'evm_calls', fake_calls(factory=factory, nft=nft)):
                 with self.assertRaisesRegex(ValueError, 'names position manager'):
-                    dexes.slipstream_state(POOL)
+                    aerodrome_pools.slipstream_state(POOL)
 
     def test_a_pool_the_factory_does_not_map_back_is_refused(self):
         # a contract that answers like a pool and names a real factory, which knows another pool
         for maps_to in (POOL_V3, '0x' + '00' * 20):
-            with self.subTest(maps_to=maps_to), mock.patch.object(dexes, 'evm_calls', fake_calls(maps_to=maps_to)):
+            with self.subTest(maps_to=maps_to), mock.patch.object(evm, 'evm_calls', fake_calls(maps_to=maps_to)):
                 with self.assertRaisesRegex(ValueError, 'does not map'):
-                    dexes.slipstream_state(POOL)
+                    aerodrome_pools.slipstream_state(POOL)
                 self.assertIsNone(dexes.pool('aerodrome-slipstream', POOL))
 
     def test_get_pool_is_asked_of_the_pools_own_factory_with_its_spacing(self):
         asked = []
-        with mock.patch.object(dexes, 'evm_calls', fake_calls(factory=FACTORY_V3, nft=NPM_V3, pool=POOL_V3, spacing=50, asked=asked)):
-            dexes.slipstream_state(POOL_V3)
-        gets = [(to, data) for to, data in asked if data.startswith(dexes._SEL['getPool'])]
-        self.assertEqual(gets, [(FACTORY_V3, dexes._SEL['getPool'] + word(int(WETH, 16)) + word(int(USDC, 16)) + word(50))])
+        with mock.patch.object(evm, 'evm_calls', fake_calls(factory=FACTORY_V3, nft=NPM_V3, pool=POOL_V3, spacing=50, asked=asked)):
+            aerodrome_pools.slipstream_state(POOL_V3)
+        gets = [(to, data) for to, data in asked if data.startswith(evm._SEL['getPool'])]
+        self.assertEqual(gets, [(FACTORY_V3, evm._SEL['getPool'] + word(int(WETH, 16)) + word(int(USDC, 16)) + word(50))])
 
     def test_get_pool_encodes_a_negative_spacing_as_int24_twos_complement(self):
-        to, data = dexes._get_pool_call(FACTORY, WETH, USDC, -50)
+        to, data = aerodrome_pools._get_pool_call(FACTORY, WETH, USDC, -50)
         self.assertEqual((to, data[-64:]), (FACTORY, 'f' * 62 + 'ce'))
 
     def test_chain_down_means_no_record_not_a_guess(self):
-        with mock.patch.object(dexes, 'evm_calls', side_effect=RuntimeError('all Base RPC endpoints failed')):
+        with mock.patch.object(evm, 'evm_calls', side_effect=RuntimeError('all Base RPC endpoints failed')):
             self.assertIsNone(dexes.pool('aerodrome-slipstream', POOL))
 
     def test_gecko_down_keeps_the_chain_record_with_zero_volume(self):
-        with mock.patch.object(dexes, 'evm_calls', fake_calls()), \
-                mock.patch.object(dexes, '_get', side_effect=ValueError('no json')):
+        with mock.patch.object(evm, 'evm_calls', fake_calls()), \
+                mock.patch.object(venue_api, '_get', side_effect=ValueError('no json')):
             rec = dexes.pool('aerodrome-slipstream', POOL)
         self.assertEqual((rec['volume_24h_usd'], rec['tvl_usd']), (0.0, 0.0))
         self.assertAlmostEqual(rec['price'], 2699.1, delta=1)
@@ -120,10 +123,10 @@ class Failures(unittest.TestCase):
         errs = _server(lambda body: (200, [{'jsonrpc': '2.0', 'id': r['id'], 'error': {'code': 3, 'message': 'execution reverted'}}
                                            for r in body]))
         try:
-            out = dexes.evm_calls([(WETH, '0x313ce567'), (USDC, '0x313ce567')], urls=[bad.url, good.url])
+            out = evm.evm_calls([(WETH, '0x313ce567'), (USDC, '0x313ce567')], urls=[bad.url, good.url])
             self.assertEqual(out, ['0x' + word(7)] * 2)
             with self.assertRaisesRegex(RuntimeError, 'all Base RPC endpoints failed.*execution reverted'):
-                dexes.evm_calls([(WETH, '0x313ce567')], urls=[bad.url, errs.url])
+                evm.evm_calls([(WETH, '0x313ce567')], urls=[bad.url, errs.url])
         finally:
             for s in (bad, good, errs):
                 s.shutdown()
@@ -133,8 +136,8 @@ class Failures(unittest.TestCase):
 class Record(unittest.TestCase):
     def test_usual_shape_and_unstaked_fee(self):
         gecko = {'attributes': {'reserve_in_usd': '8867502.83', 'volume_usd': {'h24': '81341491.01'}}}
-        with mock.patch.object(dexes, 'evm_calls', fake_calls()), \
-                mock.patch.object(dexes, '_get', return_value={'data': gecko}):
+        with mock.patch.object(evm, 'evm_calls', fake_calls()), \
+                mock.patch.object(venue_api, '_get', return_value={'data': gecko}):
             rec = dexes.pool('aerodrome-slipstream', POOL)
         self.assertEqual(rec['dex'], 'aerodrome-slipstream')
         self.assertEqual(rec['kind'], 'clmm')
@@ -153,10 +156,10 @@ class Record(unittest.TestCase):
         self.assertEqual(rec['reward_mints'], [])
 
     def test_second_deployment_pool_same_shape_spacing_50(self):
-        with mock.patch.object(dexes, 'evm_calls', fake_calls(factory=FACTORY_V3, nft=NPM_V3, pool=POOL_V3, spacing=50)), \
-                mock.patch.object(dexes, '_get', side_effect=ValueError('no json')):
+        with mock.patch.object(evm, 'evm_calls', fake_calls(factory=FACTORY_V3, nft=NPM_V3, pool=POOL_V3, spacing=50)), \
+                mock.patch.object(venue_api, '_get', side_effect=ValueError('no json')):
             rec = dexes.pool('aerodrome-slipstream', POOL_V3)
-        with mock.patch.object(dexes, 'evm_calls', fake_calls()), mock.patch.object(dexes, '_get', side_effect=ValueError('no json')):
+        with mock.patch.object(evm, 'evm_calls', fake_calls()), mock.patch.object(venue_api, '_get', side_effect=ValueError('no json')):
             old = dexes.pool('aerodrome-slipstream', POOL)
         self.assertEqual(sorted(rec), sorted(old))
         self.assertEqual(rec['address'], '0x3FE04A59Ebd38cF06080a6F60a98D124eb59392A')
@@ -170,7 +173,7 @@ class Record(unittest.TestCase):
         import re
         js = (pathlib.Path(dexes.__file__).parent / 'chains/evm/base_addresses.mjs').read_text()
         pairs = re.findall(r"factory: '(0x[0-9a-fA-F]{40})',\s*npm: '(0x[0-9a-fA-F]{40})'", js)
-        self.assertEqual({f.lower(): n.lower() for f, n in pairs}, dexes.SLIPSTREAM_DEPLOYMENTS)
+        self.assertEqual({f.lower(): n.lower() for f, n in pairs}, aerodrome_pools.SLIPSTREAM_DEPLOYMENTS)
         self.assertEqual(len(pairs), 2)
 
     def test_never_on_the_solana_board(self):
@@ -181,25 +184,25 @@ class Record(unittest.TestCase):
 
 class Primitives(unittest.TestCase):
     def test_keccak256_vectors(self):
-        self.assertEqual(dexes.keccak256(b'').hex(), 'c5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470')
-        self.assertEqual(dexes.keccak256(b'abc').hex(), '4e03657aea45a94fc7d47ba826c8d667c0d1e6e33a64a036ec44f58fa12d6c45')
+        self.assertEqual(evm.keccak256(b'').hex(), 'c5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470')
+        self.assertEqual(evm.keccak256(b'abc').hex(), '4e03657aea45a94fc7d47ba826c8d667c0d1e6e33a64a036ec44f58fa12d6c45')
         # two blocks (more than the 136-byte rate); the value is viem's keccak256 of the same input
-        self.assertEqual(dexes.keccak256(b'a' * 200).hex(), '96ea54061def936c4be90b518992fdc6f12f535068a256229aca54267b4d084d')
+        self.assertEqual(evm.keccak256(b'a' * 200).hex(), '96ea54061def936c4be90b518992fdc6f12f535068a256229aca54267b4d084d')
 
     def test_checksum_matches_eip55(self):
         # EIP-55's own test vectors
         for a in ('0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed', '0xfB6916095ca1df60bB79Ce92cE3Ea74c37c5d359',
                   '0xdbF03B407c01E7cD3CBea99509d93f8DDDC8C6FB', '0xD1220A0cf47c7B9Be7A2E6BA89F429762e7b9aDb', USDC):
-            self.assertEqual(dexes.checksum_address(a.lower()), a)
+            self.assertEqual(evm.checksum_address(a.lower()), a)
         for bad in ('0x12', 'zz' * 20, '0x' + 'g' * 40):
             with self.assertRaises(ValueError):
-                dexes.checksum_address(bad)
+                evm.checksum_address(bad)
 
     def test_abi_decoding(self):
-        self.assertEqual(dexes._abi_string(abi_string('USDC')), 'USDC')
-        self.assertEqual(dexes._abi_string('0x' + b'MKR'.hex().ljust(64, '0')), 'MKR')    # bytes32 symbol
-        self.assertEqual(dexes._signed(int(word(-197314), 16), 24), -197314)
-        self.assertEqual(dexes._signed(100, 24), 100)
+        self.assertEqual(evm._abi_string(abi_string('USDC')), 'USDC')
+        self.assertEqual(evm._abi_string('0x' + b'MKR'.hex().ljust(64, '0')), 'MKR')    # bytes32 symbol
+        self.assertEqual(evm._signed(int(word(-197314), 16), 24), -197314)
+        self.assertEqual(evm._signed(100, 24), 100)
 
 
 def _server(handler):

@@ -10,7 +10,7 @@ from hypothesis import given, strategies as st
 import _fixtures  # noqa: F401  (first: it puts lp_bot on the path)
 import calm
 import config
-import dexes
+from venues import solana_state
 import rebalancer
 
 STATUS = {'price': 100.0, 'lowerPrice': 99.0, 'upperPrice': 101.0, 'whirlpool': 'POOL'}
@@ -158,14 +158,14 @@ class Boundaries(unittest.TestCase):
 
 class PoolPrice(unittest.TestCase):
     def test_the_price_from_the_sqrt_price(self):
-        sp = int((120.0 * 1e-3) ** 0.5 * dexes.Q64)
-        with mock.patch.object(dexes, 'fee_states', return_value={'P': {'sqrt_price': sp, 'dec_a': 9, 'dec_b': 6}}):
+        sp = int((120.0 * 1e-3) ** 0.5 * solana_state.Q64)
+        with mock.patch.object(solana_state, 'fee_states', return_value={'P': {'sqrt_price': sp, 'dec_a': 9, 'dec_b': 6}}):
             self.assertAlmostEqual(rebalancer.pool_price_now('raydium-clmm', 'P'), 120.0, places=6)
 
     def test_no_state_or_a_failure_is_none(self):
-        with mock.patch.object(dexes, 'fee_states', return_value={}):
+        with mock.patch.object(solana_state, 'fee_states', return_value={}):
             self.assertIsNone(rebalancer.pool_price_now('meteora-dlmm', 'P'))
-        with mock.patch.object(dexes, 'fee_states', side_effect=OSError('rpc')):
+        with mock.patch.object(solana_state, 'fee_states', side_effect=OSError('rpc')):
             self.assertIsNone(rebalancer.pool_price_now('raydium-clmm', 'P'))
 
 

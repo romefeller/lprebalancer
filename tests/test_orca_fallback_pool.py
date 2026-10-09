@@ -201,7 +201,7 @@ class LeftBehind(Patched):
         with mock.patch.object(rebalancer, 'chain', fake), \
                 mock.patch.object(rebalancer, 'claim_mints', lambda: ({SOL, DJT, USDC}, None, False)), \
                 mock.patch.object(rebalancer.wallets, 'read_balances', lambda *a: ({SOL: 1.6676}, None)), \
-                mock.patch.object(rebalancer.dexes, 'jupiter_prices', lambda m: prices or {}), \
+                mock.patch.object(rebalancer.jupiter_api, 'jupiter_prices', lambda m: prices or {}), \
                 mock.patch.object(rebalancer, 'notify', lambda *a, **k: self.notes.append((a, k))), \
                 mock.patch.object(rebalancer, 'save', lambda s: None), \
                 mock.patch.object(rebalancer.db, 'event', lambda *a: None):

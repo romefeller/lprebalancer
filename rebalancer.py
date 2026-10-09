@@ -83,6 +83,11 @@ import health
 import config
 import db
 import dexes
+from venues import api as venue_api
+from venues import solana_state
+from venues.jupiter import prices as jupiter_api
+from venues.meteora_dlmm import pools as meteora_pools
+from venues.uniswap_v3 import pools as uniswap_pools
 import engine
 import fees
 import guards
@@ -415,7 +420,7 @@ def record_health(key, out, err):
 
 
 USDC_MINT = chains.SOLANA['usdc_mint']
-PROBE_QUOTE = (f'{dexes.JUPITER}/swap/v1/quote?inputMint={fees.NATIVE_MINT}&outputMint={USDC_MINT}'
+PROBE_QUOTE = (f'{jupiter_api.JUPITER}/swap/v1/quote?inputMint={fees.NATIVE_MINT}&outputMint={USDC_MINT}'
                '&amount=10000000&slippageBps=50')                  # 0.01 SOL: a quote, never a swap
 
 
@@ -423,7 +428,7 @@ def jupiter_answers():
     """(ok, why): whether Jupiter quotes a small SOL to USDC swap now. Read-only,
     one gated request (jupgate). Never raises."""
     try:
-        d = dexes._get(PROBE_QUOTE, timeout=15)
+        d = venue_api._get(PROBE_QUOTE, timeout=15)
     except Exception as e:
         return False, f'{type(e).__name__}: {tidy(e)}'
     try:
@@ -1319,7 +1324,7 @@ def distribute_rewards(state, position, signatures=()):
     target = fees.NATIVE_MINT if gas_low else config.PAYOUT_MINT
     if not target:
         return None
-    prices = dexes.jupiter_prices(mints)
+    prices = jupiter_api.jupiter_prices(mints)
     done = []
     for m in mints:
         out, err = chain('balance', m, dex='payout')
@@ -2022,13 +2027,13 @@ def sweep_foreign(state, bal):
         others = [a['mint'] for a in accounts if a['amount'] > 0 and a['mint'] not in mine]
         if not others:
             return []
-        prices = dexes.jupiter_prices(others)
+        prices = jupiter_api.jupiter_prices(others)
         # Facts only for what is worth a sweep: dust is never swapped, so its
         # token search is wasted Jupiter budget (2026-10-01). Valued in UI
         # units, so a scaled mint's multiplier counts (audit.human).
         worth = {a['mint'] for a in accounts if a['mint'] in prices
                  and audit.human(a) * float(prices[a['mint']] or 0.0) >= SWEEP_MIN_USD}
-        facts = {m: dexes.jupiter_token(m) for m in others if m in worth}
+        facts = {m: jupiter_api.jupiter_token(m) for m in others if m in worth}
         plan = plan_sweep(accounts, mine, rewards, prices, facts)
         target = mint_b if mint_b != fees.NATIVE_MINT else mint_a
         done = []
@@ -2511,8 +2516,8 @@ def pool_price_now(dex, pool):
     pool's own units as the bands are, or None for a venue without the fee
     layout (Meteora DLMM) or on any failure."""
     try:
-        st = dexes.fee_states([(dex, pool)])[pool]           # a pool without the layout: KeyError, None
-        sp = int(st['sqrt_price']) / dexes.Q64
+        st = solana_state.fee_states([(dex, pool)])[pool]           # a pool without the layout: KeyError, None
+        sp = int(st['sqrt_price']) / solana_state.Q64
         return sp * sp * 10.0 ** (int(st['dec_a']) - int(st['dec_b']))
     except Exception:
         return None
@@ -2672,7 +2677,7 @@ def hot_pause_view(pool, usd_a, usd_b, choice):
         bars = db.tape_load(pool, t0)
         if bars is None:
             return out
-        out['ratio'] = calm.fee_loss_ratio(dexes.fee_yield(first, last, usd_a, usd_b), bars[0], bars[4], t0, t1)
+        out['ratio'] = calm.fee_loss_ratio(solana_state.fee_yield(first, last, usd_a, usd_b), bars[0], bars[4], t0, t1)
     except Exception as e:
         notify('hot_pause_unread', reason=f'{type(e).__name__}: {tidy(e)}')
         return out
@@ -3138,7 +3143,7 @@ def best_band_for(pool, dex=None):
         p = None
     if not p:
         return None
-    out = engine.ladder(p, engine.candles(pool), dexes.feasible_bands(p, config.BANDS),
+    out = engine.ladder(p, engine.candles(pool), meteora_pools.feasible_bands(p, config.BANDS),
                         config.CAPITAL_USD, config.SWAP_COST, policy=config.policy())
     if not out:
         return None
@@ -3262,7 +3267,7 @@ def venue_candidates():
         mints = None
     out = {config.POOL: (config.DEX, config.POOL, None)}
     for r in rows or []:
-        if r.get('skipped') or not r.get('screen_ok') or r.get('dex') not in dexes.FEE_LAYOUT_DEXES:
+        if r.get('skipped') or not r.get('screen_ok') or r.get('dex') not in solana_state.FEE_LAYOUT_DEXES:
             continue
         pair = {(r.get('token_a') or {}).get('address'), (r.get('token_b') or {}).get('address')}
         if mints and not config.ALLOW_SWAP and pair != mints:
@@ -3278,7 +3283,7 @@ def sample_fee_growth(state, status=None):
     Uniswap v3 venue (Unichain, Polygon) the held pool's own counters are
     sampled, so the hot pause has its fee side (2026-10-08)."""
     if not config.CAPS.get('venues'):
-        if config.DEX in dexes.UNISWAP_V3:
+        if config.DEX in uniswap_pools.UNISWAP_V3:
             sample_v3_fee_growth(state)
         return
     if time.time() - state.get('last_fee_sample', 0) < config.VENUE_SAMPLE_S:
@@ -3286,7 +3291,7 @@ def sample_fee_growth(state, status=None):
     state['last_fee_sample'] = time.time(); save(state)
     try:
         cands = venue_candidates()
-        states = dexes.fee_states([(d, a) for d, a, _ in cands])
+        states = solana_state.fee_states([(d, a) for d, a, _ in cands])
         for d, a, _ in cands:
             if a in states:
                 db.record_fee_state(d, a, states[a])
@@ -3305,7 +3310,7 @@ def sample_v3_fee_growth(state):
         return
     state['last_fee_sample'] = time.time(); save(state)
     try:
-        st = dexes.uniswap_v3_fee_state(config.POOL, dex=config.DEX)
+        st = uniswap_pools.uniswap_v3_fee_state(config.POOL, dex=config.DEX)
         db.record_fee_state(config.DEX, config.POOL, st)
         state.pop('fee_sample_failed_told', None)
     except Exception as e:
@@ -3323,7 +3328,7 @@ def reward_prices(mints, max_age=REWARD_PRICE_MAX_AGE_S):
     (up to six hours old) when the free API rate-limits: a missing price
     valued PancakeSwap's CAKE at nothing in the first live ranking."""
     try:
-        fresh = dexes.jupiter_prices(mints)
+        fresh = jupiter_api.jupiter_prices(mints)
     except Exception:
         fresh = {}
     now = time.time()
@@ -3343,8 +3348,8 @@ def venue_income(pool, usd_a, usd_b, band=1.01):
     rw_mints = [m for m, _ in (last.get('rewards') or [])]
     rw_usd = reward_prices(rw_mints) if rw_mints else {}
     if rw_mints:
-        dexes.mint_decimals(rw_mints)
-    inc = dexes.band_income(first, last, secs, band, usd_a, usd_b, rw_usd)
+        solana_state.mint_decimals(rw_mints)
+    inc = solana_state.band_income(first, last, secs, band, usd_a, usd_b, rw_usd)
     if not inc:
         return None
     return dict(inc, total_pct_day=inc['fee_pct_day'] + inc['reward_pct_day'], hours=round(secs / HOUR_S, 1))
@@ -3509,7 +3514,7 @@ def sell_left_behind(state, force=False):
         notify('left_behind_unsold', reason='balance unreadable', mints=todo)
         return False
     try:
-        px = dexes.jupiter_prices(todo)
+        px = jupiter_api.jupiter_prices(todo)
     except Exception:
         px = {}
     sold = False

@@ -571,8 +571,8 @@ class Loop(Fixture):
                     {'mint': USDC, 'amount': 10 ** 7, 'decimals': 6, 'lamports': 2039280}]
         swaps = []
         with mock.patch.object(audit, 'token_accounts', lambda url, owner: accounts), \
-                mock.patch.object(rebalancer.dexes, 'jupiter_prices', lambda ms: {m: USD.get(m, 0.0) for m in ms}), \
-                mock.patch.object(rebalancer.dexes, 'jupiter_token', lambda m: {'verified': True, 'symbol': m[:4]}), \
+                mock.patch.object(rebalancer.jupiter_api, 'jupiter_prices', lambda ms: {m: USD.get(m, 0.0) for m in ms}), \
+                mock.patch.object(rebalancer.jupiter_api, 'jupiter_token', lambda m: {'verified': True, 'symbol': m[:4]}), \
                 mock.patch.object(rebalancer, 'chain', lambda *a, **k: (swaps.append(a), ({'signature': 'sw'}, None))[1]):
             with self.as_profile('e2e-mu'):
                 self.assertEqual(rebalancer.sweep_foreign({}, {'owner': ADDRESS}), [])     # not the residual owner

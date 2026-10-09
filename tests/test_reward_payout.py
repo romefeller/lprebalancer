@@ -79,7 +79,7 @@ class Run:
                 mock.patch.object(rebalancer, 'wallet', lambda p: dict(bal)), \
                 mock.patch.object(rebalancer, 'wallet_mints', lambda: set(theirs)), \
                 mock.patch.object(txfees, 'fetch', lambda rpc, s, **k: harvest(brought)), \
-                mock.patch.object(rebalancer.dexes, 'jupiter_prices', lambda ms: {RAY: price} if price else {}), \
+                mock.patch.object(rebalancer.jupiter_api, 'jupiter_prices', lambda ms: {RAY: price} if price else {}), \
                 mock.patch.object(rebalancer, 'chain', chain), \
                 mock.patch.object(rebalancer, 'save', lambda s: None), \
                 mock.patch.object(rebalancer, 'notify', lambda ev, **k: self.notes.append((ev, k))), \

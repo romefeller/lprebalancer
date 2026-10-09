@@ -39,6 +39,9 @@ import numpy as np
 
 import chains
 import db
+from venues.jupiter import prices as jupiter_api
+from venues.meteora_dlmm import pools as meteora_pools
+from venues.orca import pools as orca_pools
 
 ROOT = pathlib.Path(__file__).resolve().parent
 UA = ('Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 '
@@ -208,8 +211,7 @@ def is_stable(tok):
 def as_record(pool):
     """Accept either the normalised record or Orca's raw pool dict."""
     if 'tokenA' in pool and 'token_a' not in pool:
-        import dexes
-        return dexes.from_orca(pool)
+        return orca_pools.from_orca(pool)
     return pool
 
 
@@ -875,7 +877,6 @@ def score_board(records, capital, bands, swap_cost=SWAP_COST, max_rebal_per_day=
     scaled down where the pool's own last-24h fees say the model's fee share
     is stale (see realised_check).
     """
-    import dexes
     seen, todo, out = set(), [], []
     for rec in records:
         if not rec.get('address') or rec['address'] in seen:
@@ -910,7 +911,7 @@ def score_board(records, capital, bands, swap_cost=SWAP_COST, max_rebal_per_day=
     quotes = {}
     need = [r['token_b']['address'] for r, _ in todo if stable_quote(r) is None]
     if need:
-        quotes = dexes.jupiter_prices(need)
+        quotes = jupiter_api.jupiter_prices(need)
 
     ts_series, vol_series = [], []
     for i, (rec, base) in enumerate(todo):
@@ -925,7 +926,7 @@ def score_board(records, capital, bands, swap_cost=SWAP_COST, max_rebal_per_day=
         if not cd:
             out.append({**base, 'skipped': 'fewer than 240 hourly candles'})
             continue
-        res = ladder(rec, cd, dexes.feasible_bands(rec, bands), capital, swap_cost,
+        res = ladder(rec, cd, meteora_pools.feasible_bands(rec, bands), capital, swap_cost,
                      quote_usd=quote_usd, policy=policy)
         if not res:
             c = concentration(rec, quote_usd)
@@ -966,7 +967,7 @@ def score_board(records, capital, bands, swap_cost=SWAP_COST, max_rebal_per_day=
                 continue
             m = tok['address']
             if m not in facts_cache:
-                facts_cache[m] = dexes.jupiter_token(m)
+                facts_cache[m] = jupiter_api.jupiter_token(m)
             facts[side] = facts_cache[m]
         r['facts'] = facts
         r['screen_ok'], r['screen_reason'] = screening_verdict(r, facts)

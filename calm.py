@@ -589,7 +589,7 @@ def p_touch_width(bars, k, horizon_minutes):
 
 def fee_loss_ratio(fee_yield, ts, close, t0, t1, min_cover=0.8):
     """Fees over in-band loss for any centred band in [t0, t1]: the fee yield
-    per full-range dollar (dexes.fee_yield) over the sum of r^2/8 of the
+    per full-range dollar (solana_state.fee_yield) over the sum of r^2/8 of the
     five-minute closes of the bars inside the window. Below 1 the band lost
     more to the price path than it earned. None when the fees are unknown, the
     bars cover less than `min_cover` of the window, or nothing moved."""

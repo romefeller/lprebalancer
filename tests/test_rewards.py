@@ -11,7 +11,12 @@ import numpy as np
 import _fixtures
 _fixtures.ensure_profile()
 
-import dexes       # noqa: E402
+from venues import api as venue_api       # noqa: E402
+from venues import solana_state       # noqa: E402
+from venues.jupiter import prices as jupiter_api       # noqa: E402
+from venues.meteora_dlmm import pools as meteora_pools       # noqa: E402
+from venues.orca import pools as orca_pools       # noqa: E402
+from venues.raydium_clmm import pools as raydium_pools       # noqa: E402
 import engine      # noqa: E402
 import fees        # noqa: E402
 import rebalancer  # noqa: E402
@@ -25,25 +30,25 @@ class Parse(unittest.TestCase):
     def test_orca_counts_only_live_programs(self):
         live = {'rewards': [{'mint': 'M1', 'active': True, 'emissionsPerSecond': '0.5'}],
                 'stats': {'24h': {'rewards': '120.5'}}}
-        self.assertEqual(dexes.orca_rewards(live), {'reward_usd_day': 120.5, 'reward_mints': ['M1']})
+        self.assertEqual(orca_pools.orca_rewards(live), {'reward_usd_day': 120.5, 'reward_mints': ['M1']})
         dead = {'rewards': [{'mint': 'M1', 'active': False, 'emissionsPerSecond': '0'}],
                 'stats': {'24h': {'rewards': '5'}}}
-        self.assertEqual(dexes.orca_rewards(dead)['reward_usd_day'], 0.0)
+        self.assertEqual(orca_pools.orca_rewards(dead)['reward_usd_day'], 0.0)
 
     def test_raydium_apr_to_dollars_and_ended_programs(self):
         p = {'tvl': 3_650_000, 'day': {'rewardApr': [10, 0]},
              'rewardDefaultInfos': [{'mint': {'address': RAY}, 'perSecond': '10', 'endTime': time.time() + 999}]}
-        r = dexes.raydium_rewards(p)
+        r = raydium_pools.raydium_rewards(p)
         self.assertAlmostEqual(r['reward_usd_day'], 1000.0); self.assertEqual(r['reward_mints'], [RAY])
         p['rewardDefaultInfos'][0]['endTime'] = time.time() - 10
-        self.assertEqual(dexes.raydium_rewards(p)['reward_usd_day'], 0.0)
+        self.assertEqual(raydium_pools.raydium_rewards(p)['reward_usd_day'], 0.0)
 
     def test_meteora_farm_and_null_mints(self):
         p = {'tvl': 365_000, 'has_farm': True, 'farm_apr': 20.0,
-             'reward_mint_x': 'MX', 'reward_mint_y': dexes.NULL_MINT}
-        r = dexes.meteora_rewards(p)
+             'reward_mint_x': 'MX', 'reward_mint_y': venue_api.NULL_MINT}
+        r = meteora_pools.meteora_rewards(p)
         self.assertAlmostEqual(r['reward_usd_day'], 200.0); self.assertEqual(r['reward_mints'], ['MX'])
-        self.assertEqual(dexes.meteora_rewards({'has_farm': False, 'farm_apr': 20, 'tvl': 1})['reward_usd_day'], 0.0)
+        self.assertEqual(meteora_pools.meteora_rewards({'has_farm': False, 'farm_apr': 20, 'tvl': 1})['reward_usd_day'], 0.0)
 
 
 class Board(unittest.TestCase):
@@ -151,7 +156,7 @@ class Sweep(unittest.TestCase):
                 mock.patch.object(rebalancer, 'wallet', lambda p: {'sol': sol, 'owner': OWNER}), \
                 mock.patch.object(rebalancer, 'wallet_mints', lambda: set(theirs)), \
                 mock.patch.object(rebalancer.txfees, 'fetch', lambda rpc, s, **k: harvest_tx(RAY, brought)), \
-                mock.patch.object(rebalancer.dexes, 'jupiter_prices', lambda m: {RAY: price}), \
+                mock.patch.object(rebalancer.jupiter_api, 'jupiter_prices', lambda m: {RAY: price}), \
                 mock.patch.object(rebalancer, 'chain', chain), \
                 mock.patch.object(rebalancer, 'save', lambda s: None), \
                 mock.patch.object(rebalancer, 'notify', lambda *a, **k: None), \
@@ -213,30 +218,30 @@ class ChainRewards(unittest.TestCase):
     def slot(self, state, open_t, end_t, eps, mint_bytes):
         b = bytes([state]) + open_t.to_bytes(8, 'little') + end_t.to_bytes(8, 'little') + bytes(8)
         b += int(eps * 2 ** 64).to_bytes(16, 'little') + bytes(16) + mint_bytes + bytes(32 * 2 + 16)
-        assert len(b) == dexes.REWARD_INFO_LEN
+        assert len(b) == solana_state.REWARD_INFO_LEN
         return b
 
     def test_decode_live_and_ended_slots(self):
         now = 1_790_000_000
         mint = bytes(range(1, 33))
-        raw = bytes(dexes.REWARD_INFOS_OFFSET) + self.slot(2, now - 10, now + 10, 1000.5, mint) \
-            + self.slot(3, now - 100, now - 1, 50.0, mint) + bytes(dexes.REWARD_INFO_LEN)
-        out = dexes.decode_rewards(raw, now=now)
+        raw = bytes(solana_state.REWARD_INFOS_OFFSET) + self.slot(2, now - 10, now + 10, 1000.5, mint) \
+            + self.slot(3, now - 100, now - 1, 50.0, mint) + bytes(solana_state.REWARD_INFO_LEN)
+        out = solana_state.decode_rewards(raw, now=now)
         self.assertEqual(len(out), 1); self.assertAlmostEqual(out[0][1], 1000.5, places=3)
-        self.assertEqual(out[0][0], dexes.b58(mint))
-        self.assertEqual(dexes.decode_rewards(b'', now=now), [])
+        self.assertEqual(out[0][0], solana_state.b58(mint))
+        self.assertEqual(solana_state.decode_rewards(b'', now=now), [])
 
     def test_chain_rewards_priced_by_mint_decimals(self):
         now_mint = bytes(range(1, 33))
         import time as _t
-        raw = bytes(dexes.REWARD_INFOS_OFFSET) + self.slot(2, 0, int(_t.time()) + 999, 1e6, now_mint) \
-            + bytes(dexes.REWARD_INFO_LEN * 2)
-        m = dexes.b58(now_mint)
+        raw = bytes(solana_state.REWARD_INFOS_OFFSET) + self.slot(2, 0, int(_t.time()) + 999, 1e6, now_mint) \
+            + bytes(solana_state.REWARD_INFO_LEN * 2)
+        m = solana_state.b58(now_mint)
         mint_acct = bytes(44) + bytes([6]) + bytes(40)
         recs = [{'address': 'P', 'reward_usd_day': 0.0, 'reward_mints': []}]
-        with mock.patch.object(dexes, 'jupiter_prices', lambda ms: {m: 2.0}), \
-                mock.patch.object(dexes, 'pool_accounts', lambda addrs: {m: mint_acct}):
-            dexes.attach_chain_rewards(recs, {'P': raw})
+        with mock.patch.object(jupiter_api, 'jupiter_prices', lambda ms: {m: 2.0}), \
+                mock.patch.object(solana_state, 'pool_accounts', lambda addrs: {m: mint_acct}):
+            solana_state.attach_chain_rewards(recs, {'P': raw})
         # 1e6 raw/s at 6 decimals = 1 token/s -> 86400/day at $2
         self.assertAlmostEqual(recs[0]['reward_usd_day'], 172800.0)
         self.assertEqual(recs[0]['reward_mints'], [m])

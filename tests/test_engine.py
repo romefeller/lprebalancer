@@ -7,6 +7,7 @@ import numpy as np
 
 import _fixtures  # noqa: F401
 import engine
+from venues.jupiter import prices as jupiter_api
 
 
 class Clmm(unittest.TestCase):
@@ -329,8 +330,8 @@ class Board(unittest.TestCase):
         ]
         import dexes
         with mock.patch.object(engine, 'candles', lambda a: (ts, px, vol)), \
-                mock.patch.object(dexes, 'jupiter_prices', lambda m: {'w': 1.0}), \
-                mock.patch.object(dexes, 'jupiter_token',
+                mock.patch.object(jupiter_api, 'jupiter_prices', lambda m: {'w': 1.0}), \
+                mock.patch.object(jupiter_api, 'jupiter_token',
                                   lambda m: {'name': 'dogwifhat', 'verified': True, 'tags': []}):
             board = engine.score_board(recs, 190.0, (1.05, 1.12), min_tvl=2.5e5,
                                        blocked=lambda r: 'adaptive' if r.get('adaptive_fee') else None)

@@ -24,6 +24,8 @@ import health      # noqa: E402
 import jupgate     # noqa: E402
 import rebalancer  # noqa: E402
 from test_deploy_all import bal, SOL, USDC  # noqa: E402
+from venues import api as venue_api
+from venues.jupiter import prices as jupiter_api
 
 ROOT = pathlib.Path(rebalancer.__file__).resolve().parent
 
@@ -111,11 +113,11 @@ class Gate(unittest.TestCase):
     def test_only_jupiter_requests_take_a_slot(self):
         seen = []
         import dexes
-        with mock.patch.object(dexes.jupgate, 'wait_turn', lambda *a, **k: seen.append(1)), \
-                mock.patch.object(dexes.subprocess, 'run', lambda *a, **k: mock.Mock(stdout='{}')):
-            dexes._get('https://lite-api.jup.ag/price/v3?ids=x')
-            dexes._get('https://api.geckoterminal.com/x')
-            dexes._get('https://api.jup.ag/swap/v1/quote')
+        with mock.patch.object(venue_api.jupgate, 'wait_turn', lambda *a, **k: seen.append(1)), \
+                mock.patch.object(venue_api.subprocess, 'run', lambda *a, **k: mock.Mock(stdout='{}')):
+            venue_api._get('https://lite-api.jup.ag/price/v3?ids=x')
+            venue_api._get('https://api.geckoterminal.com/x')
+            venue_api._get('https://api.jup.ag/swap/v1/quote')
         self.assertEqual(len(seen), 2)
 
     # --- exact edges of the lock and the slot (mutation gaps, 2026-10-01) ---
@@ -207,8 +209,8 @@ class Gate(unittest.TestCase):
         seen = []
         def run(argv, **k):
             seen.append((argv, k)); return mock.Mock(stdout='{"a": 1}')
-        with mock.patch.object(dexes.subprocess, 'run', run):
-            self.assertEqual(dexes._get('https://api.geckoterminal.com/x'), {'a': 1})
+        with mock.patch.object(venue_api.subprocess, 'run', run):
+            self.assertEqual(venue_api._get('https://api.geckoterminal.com/x'), {'a': 1})
         argv, k = seen[0]
         self.assertEqual(argv[argv.index('--max-time') + 1], '40')
         self.assertEqual(k, {'capture_output': True, 'text': True})
@@ -514,8 +516,8 @@ class LessJupiterTraffic(unittest.TestCase):
 
     def setUp(self):
         import dexes
-        self.dexes = dexes
-        dexes._TOKEN_FACTS.clear()
+        self.jupiter = jupiter_api
+        jupiter_api._TOKEN_FACTS.clear()
 
     tearDown = setUp
 
@@ -523,21 +525,21 @@ class LessJupiterTraffic(unittest.TestCase):
         calls = []
         def fake(m):
             calls.append(m); return {'verified': True} if m != 'MISS' else None
-        with mock.patch.object(self.dexes, '_jupiter_token', fake):
+        with mock.patch.object(self.jupiter, '_jupiter_token', fake):
             t = 1_000_000.0
-            self.assertEqual(self.dexes.jupiter_token('A', now=t), {'verified': True})
-            self.assertEqual(self.dexes.jupiter_token('A', now=t + 6 * 3600 - 1), {'verified': True})
+            self.assertEqual(self.jupiter.jupiter_token('A', now=t), {'verified': True})
+            self.assertEqual(self.jupiter.jupiter_token('A', now=t + 6 * 3600 - 1), {'verified': True})
             self.assertEqual(calls, ['A'])
-            self.dexes.jupiter_token('A', now=t + 6 * 3600)                   # expired: asked again
-            self.assertIsNone(self.dexes.jupiter_token('MISS', now=t)); self.dexes.jupiter_token('MISS', now=t)
+            self.jupiter.jupiter_token('A', now=t + 6 * 3600)                   # expired: asked again
+            self.assertIsNone(self.jupiter.jupiter_token('MISS', now=t)); self.jupiter.jupiter_token('MISS', now=t)
         self.assertEqual(calls, ['A', 'A', 'MISS', 'MISS'])
 
     def test_the_cache_is_bounded(self):
-        with mock.patch.object(self.dexes, '_jupiter_token', lambda m: {'m': m}), \
-                mock.patch.object(self.dexes, 'TOKEN_FACTS_MAX', 3):
+        with mock.patch.object(self.jupiter, '_jupiter_token', lambda m: {'m': m}), \
+                mock.patch.object(self.jupiter, 'TOKEN_FACTS_MAX', 3):
             for i in range(5):
-                self.dexes.jupiter_token(f'M{i}', now=float(i))
-        self.assertEqual(sorted(self.dexes._TOKEN_FACTS), ['M2', 'M3', 'M4'])           # the oldest left first
+                self.jupiter.jupiter_token(f'M{i}', now=float(i))
+        self.assertEqual(sorted(self.jupiter._TOKEN_FACTS), ['M2', 'M3', 'M4'])           # the oldest left first
 
     def test_the_sweep_asks_only_about_tokens_worth_sweeping(self):
         asked = []
@@ -545,8 +547,8 @@ class LessJupiterTraffic(unittest.TestCase):
                     {'mint': 'NOPRICE', 'amount': 10 ** 9, 'decimals': 6}]
         with mock.patch.object(rebalancer, 'pool_tokens', lambda: (('SOLM', 'SOL'), ('USDCM', 'USDC'))), \
                 mock.patch.object(rebalancer.audit, 'token_accounts', lambda url, owner: accounts), \
-                mock.patch.object(rebalancer.dexes, 'jupiter_prices', lambda ms: {'DUST': 1.0, 'RICH': 1.0}), \
-                mock.patch.object(rebalancer.dexes, 'jupiter_token', lambda m: asked.append(m) or {'verified': False}), \
+                mock.patch.object(rebalancer.jupiter_api, 'jupiter_prices', lambda ms: {'DUST': 1.0, 'RICH': 1.0}), \
+                mock.patch.object(rebalancer.jupiter_api, 'jupiter_token', lambda m: asked.append(m) or {'verified': False}), \
                 mock.patch.object(rebalancer, 'save', lambda s: None), \
                 mock.patch.object(rebalancer, 'notify', lambda *a, **k: None):
             rebalancer.sweep_foreign({'last_sweep': 0}, {'owner': 'OWNER', 'balanceA': 1, 'price': 100})
@@ -624,9 +626,9 @@ class BreakerProbe(unittest.TestCase):
     def test_jupiter_answers_reads_the_quote(self):
         for d, ok in (({'outAmount': '1180000'}, True), ({'outAmount': '0'}, False), ({'error': 'Rate limit'}, False),
                       (None, False), ([], False), ({'outAmount': 'x'}, False)):
-            with mock.patch.object(rebalancer.dexes, '_get', lambda url, **k: d):
+            with mock.patch.object(rebalancer.venue_api, '_get', lambda url, **k: d):
                 self.assertEqual(rebalancer.jupiter_answers()[0], ok, d)
-        with mock.patch.object(rebalancer.dexes, '_get', side_effect=ValueError('bad json')):
+        with mock.patch.object(rebalancer.venue_api, '_get', side_effect=ValueError('bad json')):
             self.assertEqual(rebalancer.jupiter_answers()[0], False)
         self.assertIn('/swap/v1/quote?', rebalancer.PROBE_QUOTE); self.assertIn('amount=10000000', rebalancer.PROBE_QUOTE)
 

@@ -1,5 +1,5 @@
 """The pause in bad HOT moments (sql/029): the fee / in-band-loss ratio
-(dexes.fee_yield, calm.fee_loss_ratio), the pause's state machine
+(solana_state.fee_yield, calm.fee_loss_ratio), the pause's state machine
 (calm.hot_pause_step), the signal (rebalancer.hot_pause_view), the close
 (rebalancer.hot_pause) and the wait (rebalancer.hot_paused)."""
 import datetime as dt
@@ -14,7 +14,7 @@ from hypothesis import given, settings, strategies as st
 import _fixtures  # noqa: F401  (first: it puts lp_bot on the path)
 import calm
 import config
-import dexes
+from venues import solana_state
 import rebalancer
 
 Q64 = 2 ** 64
@@ -32,22 +32,22 @@ class FeeYield(unittest.TestCase):
         a, b = sample(0, 0, 0.5), sample(2 * Q64, 3 * Q64, 0.5)
         fee = 2 / 1e9 * 120.0 + 3 / 1e6 * 1.0
         full = 2 * 0.5 / 1e6 * 1.0
-        self.assertAlmostEqual(dexes.fee_yield(a, b, 120.0, 1.0), fee / full)
+        self.assertAlmostEqual(solana_state.fee_yield(a, b, 120.0, 1.0), fee / full)
 
     def test_both_counters_are_differences_and_both_prices_count(self):
         a, b = sample(5 * Q64, 4 * Q64, 0.5), sample(7 * Q64, 10 * Q64, 0.5)
         fee = 2 / 1e9 * 120.0 + 6 / 1e6 * 2.0
-        self.assertAlmostEqual(dexes.fee_yield(a, b, 120.0, 2.0), fee / (2 * 0.5 / 1e6 * 2.0))
+        self.assertAlmostEqual(solana_state.fee_yield(a, b, 120.0, 2.0), fee / (2 * 0.5 / 1e6 * 2.0))
 
     def test_counters_wrap_at_u128(self):
         a, b = sample(2 ** 128 - Q64, 0), sample(Q64, 0)
-        self.assertAlmostEqual(dexes.fee_yield(a, b, 1e9, 1e6), (2 * 1.0) / (2 * 1.0))
+        self.assertAlmostEqual(solana_state.fee_yield(a, b, 1e9, 1e6), (2 * 1.0) / (2 * 1.0))
 
     def test_unpriced_or_empty_is_none(self):
         a, b = sample(0, 0), sample(Q64, Q64)
-        self.assertIsNone(dexes.fee_yield(a, b, 0.0, 1.0))
-        self.assertIsNone(dexes.fee_yield(a, b, 1.0, None))
-        self.assertIsNone(dexes.fee_yield(a, sample(Q64, Q64, 0.0), 1.0, 1.0))
+        self.assertIsNone(solana_state.fee_yield(a, b, 0.0, 1.0))
+        self.assertIsNone(solana_state.fee_yield(a, b, 1.0, None))
+        self.assertIsNone(solana_state.fee_yield(a, sample(Q64, Q64, 0.0), 1.0, 1.0))
 
     def test_matches_the_position_fee_formula(self):
         # A position of L raw liquidity earns L * dg; its full-range value is 2 L sqrt(p).
@@ -55,7 +55,7 @@ class FeeYield(unittest.TestCase):
         a, b = sample(0, 0, sp), sample(7 * Q64 // 10 ** 6, 9 * Q64 // 10 ** 4, sp)
         fee_pos = L * (int(b['g0']) / Q64 / 1e9 * 120.0 + int(b['g1']) / Q64 / 1e6)
         full_pos = 2 * L * sp / 1e6
-        self.assertAlmostEqual(dexes.fee_yield(a, b, 120.0, 1.0), fee_pos / full_pos, places=12)
+        self.assertAlmostEqual(solana_state.fee_yield(a, b, 120.0, 1.0), fee_pos / full_pos, places=12)
 
 
 class FeeLossRatio(unittest.TestCase):
@@ -145,7 +145,7 @@ class View(unittest.TestCase):
             reads.append(('tape', pool, since)); return bars
         with mock.patch.object(rebalancer.db, 'fee_state_span', span_f), \
                 mock.patch.object(rebalancer.db, 'tape_load', tape_f), \
-                mock.patch.object(rebalancer.dexes, 'fee_yield',
+                mock.patch.object(rebalancer.solana_state, 'fee_yield',
                                   lambda f, l, a, b: (reads.append(('yield', a, b)) or ratio_y)), \
                 mock.patch.object(rebalancer, 'notify', lambda ev, **kw: told.append(ev)), \
                 mock.patch.object(config, 'HOT_PAUSE_HOT_PCT', 2.0), \

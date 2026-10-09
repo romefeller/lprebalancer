@@ -25,6 +25,9 @@ import calm
 import chains
 import db
 import dexes
+from venues import api as venue_api
+from venues import evm
+from venues.uniswap_v3 import pools as uniswap_pools
 import engine
 import rebalancer
 import wallets
@@ -53,19 +56,19 @@ def abi_string(s):
 def fake_calls(factory=FACTORY, maps_to=None, fee=500, asked=None, liquidity=10 ** 15, tick=-299_000):
     """A stand-in for evm_calls answering the pool's, tokens' and factory's selectors."""
     answers = {
-        dexes._SEL['factory']: '0x' + word(int(factory, 16)),
-        dexes._SEL['token0']: '0x' + word(int(WPOL, 16)),
-        dexes._SEL['token1']: '0x' + word(int(USDT0, 16)),
-        dexes._SEL['fee']: '0x' + word(fee),
-        dexes._SEL['tickSpacing']: '0x' + word(10),
-        dexes._SEL['liquidity']: '0x' + word(liquidity),
-        dexes._SEL['slot0']: '0x' + word(SQRT_P) + word(tick) + word(1) * 5,
+        evm._SEL['factory']: '0x' + word(int(factory, 16)),
+        evm._SEL['token0']: '0x' + word(int(WPOL, 16)),
+        evm._SEL['token1']: '0x' + word(int(USDT0, 16)),
+        evm._SEL['fee']: '0x' + word(fee),
+        evm._SEL['tickSpacing']: '0x' + word(10),
+        evm._SEL['liquidity']: '0x' + word(liquidity),
+        evm._SEL['slot0']: '0x' + word(SQRT_P) + word(tick) + word(1) * 5,
     }
-    tokens = {(WPOL.lower(), dexes._SEL['decimals']): '0x' + word(18),
-              (USDT0.lower(), dexes._SEL['decimals']): '0x' + word(6),
-              (WPOL.lower(), dexes._SEL['symbol']): abi_string('WPOL'),
-              (USDT0.lower(), dexes._SEL['symbol']): abi_string('USDT0')}
-    get_pool = dexes._SEL['getPool_v3'] + word(int(WPOL, 16)) + word(int(USDT0, 16)) + word(fee)
+    tokens = {(WPOL.lower(), evm._SEL['decimals']): '0x' + word(18),
+              (USDT0.lower(), evm._SEL['decimals']): '0x' + word(6),
+              (WPOL.lower(), evm._SEL['symbol']): abi_string('WPOL'),
+              (USDT0.lower(), evm._SEL['symbol']): abi_string('USDT0')}
+    get_pool = evm._SEL['getPool_v3'] + word(int(WPOL, 16)) + word(int(USDT0, 16)) + word(fee)
 
     def calls(pairs, urls=None, timeout=20, chain='Base'):
         if asked is not None:
@@ -84,32 +87,32 @@ def fake_calls(factory=FACTORY, maps_to=None, fee=500, asked=None, liquidity=10 
 
 class PoolFailures(unittest.TestCase):
     def test_a_pool_of_the_unichain_factory_is_refused_on_polygon(self):
-        with mock.patch.object(dexes, 'evm_calls', fake_calls(factory=UNICHAIN_FACTORY)):
+        with mock.patch.object(evm, 'evm_calls', fake_calls(factory=UNICHAIN_FACTORY)):
             with self.assertRaisesRegex(ValueError, 'not a pool of the Uniswap v3 factory on Polygon'):
-                dexes.uniswap_v3_state(POOL, dex=DEX)
+                uniswap_pools.uniswap_v3_state(POOL, dex=DEX)
             self.assertIsNone(dexes.pool(DEX, POOL))
 
     def test_a_polygon_pool_is_refused_as_a_unichain_pool(self):
-        with mock.patch.object(dexes, 'evm_calls', fake_calls()):
+        with mock.patch.object(evm, 'evm_calls', fake_calls()):
             with self.assertRaisesRegex(ValueError, 'on Unichain'):
-                dexes.uniswap_v3_state(POOL)
+                uniswap_pools.uniswap_v3_state(POOL)
 
     def test_a_pool_the_factory_does_not_map_back_is_refused(self):
-        with mock.patch.object(dexes, 'evm_calls', fake_calls(maps_to='0x' + '12' * 20)):
+        with mock.patch.object(evm, 'evm_calls', fake_calls(maps_to='0x' + '12' * 20)):
             with self.assertRaisesRegex(ValueError, 'does not map'):
-                dexes.uniswap_v3_state(POOL, dex=DEX)
+                uniswap_pools.uniswap_v3_state(POOL, dex=DEX)
 
     def test_every_endpoint_failing_names_polygon(self):
-        with mock.patch.object(dexes.urllib.request, 'urlopen', side_effect=OSError('refused')):
+        with mock.patch.object(evm.urllib.request, 'urlopen', side_effect=OSError('refused')):
             with self.assertRaisesRegex(RuntimeError, 'all Polygon RPC endpoints failed'):
-                dexes.uniswap_v3_state(POOL, urls=('http://127.0.0.1:9',), dex=DEX)
+                uniswap_pools.uniswap_v3_state(POOL, urls=('http://127.0.0.1:9',), dex=DEX)
 
     def test_reads_go_to_polygon_endpoints_and_the_override_comes_first(self):
         asked = []
-        with mock.patch.object(dexes, 'evm_calls', fake_calls(asked=asked)), \
+        with mock.patch.object(evm, 'evm_calls', fake_calls(asked=asked)), \
                 mock.patch.dict(os.environ, {'LPBOT_POLYGON_RPC': 'https://own.example',
                                              'LPBOT_UNICHAIN_RPC': 'https://uni.example'}):
-            dexes.uniswap_v3_state(POOL, dex=DEX)
+            uniswap_pools.uniswap_v3_state(POOL, dex=DEX)
         self.assertTrue(asked)
         for urls, chain in asked:
             self.assertEqual(chain, 'Polygon')
@@ -125,7 +128,7 @@ class PoolFailures(unittest.TestCase):
         def get(url, accept=None):
             seen.append(url)
             raise RuntimeError('gecko down')
-        with mock.patch.object(dexes, 'evm_calls', fake_calls()), mock.patch.object(dexes, '_get', get):
+        with mock.patch.object(evm, 'evm_calls', fake_calls()), mock.patch.object(venue_api, '_get', get):
             rec = dexes.pool(DEX, POOL)
         self.assertEqual((rec['tvl_usd'], rec['volume_24h_usd']), (0.0, 0.0))
         self.assertEqual(seen, [f'https://api.geckoterminal.com/api/v2/networks/polygon_pos/pools/{POOL}'])
@@ -134,11 +137,11 @@ class PoolFailures(unittest.TestCase):
 class PoolRecord(unittest.TestCase):
     def test_the_record_shape_and_price(self):
         gecko = {'attributes': {'reserve_in_usd': '1290000', 'volume_usd': {'h24': '3000000'}}}
-        with mock.patch.object(dexes, 'evm_calls', fake_calls()), \
-                mock.patch.object(dexes, '_get', return_value={'data': gecko}):
+        with mock.patch.object(evm, 'evm_calls', fake_calls()), \
+                mock.patch.object(venue_api, '_get', return_value={'data': gecko}):
             rec = dexes.pool(DEX, POOL)
         self.assertEqual((rec['dex'], rec['kind'], rec['chain'], rec['pair']), (DEX, 'clmm', 'polygon', 'WPOL/USDT0'))
-        self.assertEqual(rec['address'], dexes.checksum_address(POOL))
+        self.assertEqual(rec['address'], evm.checksum_address(POOL))
         self.assertEqual((rec['token_a']['symbol'], rec['token_a']['decimals']), ('WPOL', 18))
         self.assertEqual((rec['token_b']['symbol'], rec['token_b']['decimals']), ('USDT0', 6))
         self.assertAlmostEqual(rec['price'], 0.1, places=9)                 # USDT0 per WPOL
@@ -149,10 +152,10 @@ class PoolRecord(unittest.TestCase):
         self.assertEqual(engine.stable_quote(rec), 1.0)
 
     def test_dexes_names_both_venues_once(self):
-        self.assertIs(dexes.SINGLE['uniswap-v3-unichain'], dexes.uniswap_v3_pool)
-        self.assertIs(dexes.SINGLE[DEX], dexes.uniswap_v3_polygon_pool)
+        self.assertIs(dexes.SINGLE['uniswap-v3-unichain'], uniswap_pools.uniswap_v3_pool)
+        self.assertIs(dexes.SINGLE[DEX], uniswap_pools.uniswap_v3_polygon_pool)
         self.assertNotIn(DEX, dexes.ADAPTERS)                              # never on the Solana board
-        self.assertEqual(dexes.UNISWAP_V3[DEX]['chain'], 'polygon')
+        self.assertEqual(uniswap_pools.UNISWAP_V3[DEX]['chain'], 'polygon')
 
 
 class ChainRow(unittest.TestCase):

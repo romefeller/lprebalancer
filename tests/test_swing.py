@@ -308,7 +308,7 @@ class Loop(tml.Fixture):
         band = {'band': 1.05, 'net_day_pct': 0.1, 'rebal_per_day': 0.1}
         for p in (mock.patch.object(rebalancer.dexes, 'pool', lambda dex, pool: dict(tml.pool_record_for(pool),
                                                                                        adaptive_fee=(dex == 'orca'))),
-                  mock.patch.object(rebalancer.dexes, 'jupiter_prices', lambda ms: {m: USD.get(m, 0.0) for m in ms}),
+                  mock.patch.object(rebalancer.jupiter_api, 'jupiter_prices', lambda ms: {m: USD.get(m, 0.0) for m in ms}),
                   mock.patch.object(rebalancer, 'best_band_for', lambda pool, dex=None: dict(
                       band, price=POOLS[pool]['price'], record=tml.pool_record_for(pool), all_runs=[band])),
                   mock.patch.object(config, 'reload', self.reload)):
@@ -541,7 +541,7 @@ class SellLeftBehind(unittest.TestCase):
         with mock.patch.object(rebalancer, 'claim_mints', lambda: (None if mints is None else list(mints), 'why', shared)), \
                 mock.patch.object(rebalancer, 'pool_tokens', lambda: tokens), \
                 mock.patch.object(rebalancer.wallets, 'read_balances', lambda *a: None if have is None else (have, 1)), \
-                mock.patch.object(rebalancer.dexes, 'jupiter_prices', lambda ms: px if px is not None else {}), \
+                mock.patch.object(rebalancer.jupiter_api, 'jupiter_prices', lambda ms: px if px is not None else {}), \
                 mock.patch.object(rebalancer, 'chain', chain), mock.patch.object(rebalancer, 'save', lambda s: None), \
                 mock.patch.object(rebalancer.db, 'event', lambda *a: None), \
                 mock.patch.object(rebalancer, 'notify', lambda ev, **kw: told.append((ev, kw))), \

@@ -76,7 +76,8 @@ TARGETS = {
                              'test_multi_loop', 'test_scaled', 'test_review_edges', 'test_orca_fallback_pool')),
     # 2026-10-09 DJT halt: the Orca fallback's pool, the left-behind sale's fallback, the one-side hold.
     'orca_fallback': ('rebalancer.py', ['fallback_pool_args', 'one_side_short'], PY_TESTS('test_orca_fallback_pool')),
-    'token_facts': ('dexes.py', ['jupiter_token', '_get'], PY_TESTS('test_jupiter_gate.LessJupiterTraffic', 'test_jupiter_gate.Gate')),
+    'token_facts': ('venues/jupiter/prices.py', ['jupiter_token'], PY_TESTS('test_jupiter_gate.LessJupiterTraffic', 'test_jupiter_gate.Gate')),
+    'venue_get': ('venues/api.py', ['_get'], PY_TESTS('test_jupiter_gate.LessJupiterTraffic', 'test_jupiter_gate.Gate')),
     'swap_orca': ('venues/orca/swap.mjs', ['guard', 'toRaw', 'parseHints', 'checkPool', 'direction', 'planSwap', 'spotOutPerIn',
                                     'priceImpact', 'valueLossOk', 'verifyQuote', 'checkImpact', 'chooseCuPrice', 'cuLimit',
                                     'withWsolClose', 'decodeSwapV2', 'verifyTxShape', 'checkDeltas', 'noopReport', 'sendLanded'],
@@ -260,7 +261,7 @@ TARGETS = {
     # 2026-10-08: a 9-decimal request rounded up past an 18-decimal holding is the holding
     'evm_cap_held': ('chains/evm/clmath.mjs', ['capToHeld'], NODE_TESTS('test_uniswap_polygon.mjs')),
     # the hot pause's fee side on Uniswap v3 venues (2026-10-08)
-    'v3_fee_pool': ('dexes.py', ['v3_fee_state', 'uniswap_v3_fee_state'], PY_TESTS('test_polygon_hot_pause', 'test_hot_pause')),
+    'v3_fee_pool': ('venues/uniswap_v3/pools.py', ['v3_fee_state', 'uniswap_v3_fee_state'], PY_TESTS('test_polygon_hot_pause', 'test_hot_pause')),
     # an open's leftover into the position where the venue can add (2026-10-08)
     'open_leftover': ('rebalancer.py', ['adds_open_leftover', 'deploy_idle', 'idle_deploys_left'],
                       PY_TESTS('test_deploy_leftover', 'test_deploy_idle', 'test_increase_idle')),
@@ -276,7 +277,7 @@ TARGETS = {
                             'test_hardening.LiquidityViewExact')),
     'liq_window': ('db.py', ['pool_stats_summary'], PY_TESTS('test_db.PoolStatsWindow', 'test_hardening.LiquiditySmoothed')),
     'pause_math': ('calm.py', ['fee_loss_ratio', 'hot_pause_step'], PY_TESTS('test_hot_pause')),
-    'pause_yield': ('dexes.py', ['fee_yield'], PY_TESTS('test_hot_pause')),
+    'pause_yield': ('venues/solana_state.py', ['fee_yield'], PY_TESTS('test_hot_pause')),
     'pause_loop': ('rebalancer.py', ['hot_pause_on', 'hot_pause_view', 'hot_pause_swap', 'hot_pause', 'hot_pause_close', 'hot_paused',
                                      'macro_view', 'macro_hold'], PY_TESTS('test_hot_pause')),
     'macro_db': ('db.py', ['macro_event_near', 'macro_next_ts'], PY_TESTS('test_hot_pause')),
@@ -285,7 +286,7 @@ TARGETS = {
     # Unichain / Uniswap v3 (2026-10-04): the pool lookup, the endpoint, and the money
     # figures of a pool whose stablecoin is token A (USDC/HYPE: quote 1/price, the hold
     # benchmarks on the HYPE's dollar price).
-    'unichain_pool': ('dexes.py', ['_uniswap_rpcs', 'uniswap_v3_state', 'from_uniswap_v3', 'uniswap_v3_pool',
+    'unichain_pool': ('venues/uniswap_v3/pools.py', ['_uniswap_rpcs', 'uniswap_v3_state', 'from_uniswap_v3', 'uniswap_v3_pool',
                                    'uniswap_v3_polygon_pool'],
                       PY_TESTS('test_unichain', 'test_polygon')),
     'unichain_config': ('config.py', ['public_rpc'], PY_TESTS('test_unichain.ConfigEndpoint')),

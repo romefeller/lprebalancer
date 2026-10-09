@@ -8,11 +8,11 @@ from unittest import mock
 import _fixtures
 _fixtures.ensure_profile()
 
-import dexes       # noqa: E402
+from venues import solana_state       # noqa: E402
 import rebalancer  # noqa: E402
 
 SOL, USDC = 'So11111111111111111111111111111111111111112', 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'
-B58 = dexes.b58
+B58 = solana_state.b58
 
 
 def b58decode(s):
@@ -27,7 +27,7 @@ def b58decode(s):
 
 def raydium_account(sqrt_q64, g0, g1, dec_a=9, dec_b=6):
     o = 8 + 1 + 32 * 7
-    raw = bytearray(dexes.REWARD_INFOS_OFFSET + 3 * dexes.REWARD_INFO_LEN)
+    raw = bytearray(solana_state.REWARD_INFOS_OFFSET + 3 * solana_state.REWARD_INFO_LEN)
     raw[73:105] = b58decode(SOL); raw[105:137] = b58decode(USDC)
     raw[o] = dec_a; raw[o + 1] = dec_b
     raw[o + 20:o + 36] = sqrt_q64.to_bytes(16, 'little')
@@ -48,20 +48,20 @@ SQRT = int(math.sqrt(121.0 * 1e-3) * 2 ** 64)       # SOL at $121 in raw units (
 
 class Decode(unittest.TestCase):
     def test_both_layouts(self):
-        r = dexes.decode_fee_state(raydium_account(SQRT, 5, 7), 'raydium')
+        r = solana_state.decode_fee_state(raydium_account(SQRT, 5, 7), 'raydium')
         self.assertEqual((r['g0'], r['g1'], r['dec_a'], r['dec_b']), (5, 7, 9, 6))
         self.assertEqual((r['mint_a'], r['mint_b']), (SOL, USDC))
-        o = dexes.decode_fee_state(orca_account(SQRT, 11, 13), 'orca')
+        o = solana_state.decode_fee_state(orca_account(SQRT, 11, 13), 'orca')
         self.assertEqual((o['g0'], o['g1'], o['mint_a'], o['mint_b']), (11, 13, SOL, USDC))
-        self.assertIsNone(dexes.decode_fee_state(b'short', 'raydium'))
-        self.assertIsNone(dexes.decode_fee_state(b'short', 'orca'))
+        self.assertIsNone(solana_state.decode_fee_state(b'short', 'raydium'))
+        self.assertIsNone(solana_state.decode_fee_state(b'short', 'orca'))
 
     def test_orca_decimals_come_from_the_mints(self):
-        with mock.patch.object(dexes, 'pool_accounts', lambda addrs: {
+        with mock.patch.object(solana_state, 'pool_accounts', lambda addrs: {
                 'P': orca_account(SQRT, 1, 1), SOL: bytes(44) + bytes([9]), USDC: bytes(44) + bytes([6])}
                 if 'P' in addrs else {SOL: bytes(44) + bytes([9]), USDC: bytes(44) + bytes([6])}):
-            dexes._MINT_DECIMALS.clear()
-            st = dexes.fee_states([('orca', 'P'), ('meteora-dlmm', 'M')])
+            solana_state._MINT_DECIMALS.clear()
+            st = solana_state.fee_states([('orca', 'P'), ('meteora-dlmm', 'M')])
         self.assertEqual((st['P']['dec_a'], st['P']['dec_b']), (9, 6)); self.assertNotIn('M', st)
 
 
@@ -72,19 +72,19 @@ class Income(unittest.TestCase):
     def test_matches_a_direct_calculation(self):
         # a unit of raw liquidity earning 1 raw USDC per day: compare to its +/-1% value
         g1 = 2 ** 64                                         # +1 raw USDC per unit L
-        inc = dexes.band_income(self.state(0, 0), self.state(0, g1), 86400, 1.01, 121.0, 1.0)
+        inc = solana_state.band_income(self.state(0, 0), self.state(0, g1), 86400, 1.01, 121.0, 1.0)
         sp = SQRT / 2 ** 64; sa, sb = sp / math.sqrt(1.01), sp * math.sqrt(1.01)
         value = (1 / sp - 1 / sb) / 1e9 * 121.0 + (sp - sa) / 1e6
         self.assertAlmostEqual(inc['fee_pct_day'], (1e-6 / value) * 100, places=9)
 
     def test_wrap_around_and_narrower_bands_earn_more(self):
         near = 2 ** 128 - 2 ** 60
-        wrapped = dexes.band_income(self.state(near, 0), self.state(2 ** 60, 0), 3600, 1.01, 121.0, 1.0)
-        plain = dexes.band_income(self.state(0, 0), self.state(2 ** 61, 0), 3600, 1.01, 121.0, 1.0)
+        wrapped = solana_state.band_income(self.state(near, 0), self.state(2 ** 60, 0), 3600, 1.01, 121.0, 1.0)
+        plain = solana_state.band_income(self.state(0, 0), self.state(2 ** 61, 0), 3600, 1.01, 121.0, 1.0)
         self.assertAlmostEqual(wrapped['fee_pct_day'], plain['fee_pct_day'])
-        wide = dexes.band_income(self.state(0, 0), self.state(2 ** 61, 0), 3600, 1.05, 121.0, 1.0)
+        wide = solana_state.band_income(self.state(0, 0), self.state(2 ** 61, 0), 3600, 1.05, 121.0, 1.0)
         self.assertGreater(plain['fee_pct_day'], wide['fee_pct_day'] * 4)
-        self.assertIsNone(dexes.band_income(self.state(0, 0), self.state(1, 1), 0, 1.01, 121.0, 1.0))
+        self.assertIsNone(solana_state.band_income(self.state(0, 0), self.state(1, 1), 0, 1.01, 121.0, 1.0))
 
 
 class Sampling(unittest.TestCase):
@@ -105,7 +105,7 @@ class Sampling(unittest.TestCase):
                 mock.patch.object(rebalancer.config, 'ALLOW_SWAP', False):
             got = {a for _, a, _ in rebalancer.venue_candidates()}
             self.assertEqual(got, {'HELD', 'R2'})           # Meteora: no counters; X1: other pair; U1: unscreened
-            with mock.patch.object(rebalancer.dexes, 'fee_states', lambda pools: calls.append(pools) or {}), \
+            with mock.patch.object(rebalancer.solana_state, 'fee_states', lambda pools: calls.append(pools) or {}), \
                     mock.patch.object(rebalancer, 'save', lambda s: None), \
                     mock.patch.object(rebalancer.config, 'VENUE_SAMPLE_S', 600):
                 st = {'last_fee_sample': time.time() - 30}
@@ -136,11 +136,11 @@ class Ledger(unittest.TestCase):
 class RewardPrices(unittest.TestCase):
     def test_a_failed_fetch_uses_the_last_good_price_for_six_hours(self):
         rebalancer._REWARD_PX.clear()
-        with mock.patch.object(rebalancer.dexes, 'jupiter_prices', lambda m: {'CAKE': 2.7}):
+        with mock.patch.object(rebalancer.jupiter_api, 'jupiter_prices', lambda m: {'CAKE': 2.7}):
             self.assertEqual(rebalancer.reward_prices(['CAKE']), {'CAKE': 2.7})
-        with mock.patch.object(rebalancer.dexes, 'jupiter_prices', lambda m: {}):
+        with mock.patch.object(rebalancer.jupiter_api, 'jupiter_prices', lambda m: {}):
             self.assertEqual(rebalancer.reward_prices(['CAKE']), {'CAKE': 2.7})
         rebalancer._REWARD_PX['CAKE'] = (time.time() - 7 * 3600, 2.7)
-        with mock.patch.object(rebalancer.dexes, 'jupiter_prices', lambda m: {}):
+        with mock.patch.object(rebalancer.jupiter_api, 'jupiter_prices', lambda m: {}):
             self.assertEqual(rebalancer.reward_prices(['CAKE']), {})
         rebalancer._REWARD_PX.clear()
