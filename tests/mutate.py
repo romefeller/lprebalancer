@@ -76,6 +76,10 @@ TARGETS = {
                              'test_multi_loop', 'test_scaled', 'test_review_edges', 'test_orca_fallback_pool')),
     # 2026-10-09 DJT halt: the Orca fallback's pool, the left-behind sale's fallback, the one-side hold.
     'orca_fallback': ('rebalancer.py', ['fallback_pool_args', 'one_side_short'], PY_TESTS('test_orca_fallback_pool')),
+    # 2026-10-09: DJT in CALM never; the bot publishes the open pool's mode, swing.py keeps SOL on CALM.
+    'swing_calm': ('swing.py', ['open_calm', 'wanted'], PY_TESTS('test_swing_calm', 'test_swing')),
+    'swing_regime': ('rebalancer.py', ['swing_open_pool', 'swing_regime_record', 'publish_swing_regime'],
+                     PY_TESTS('test_swing_calm')),
     'token_facts': ('dexes.py', ['jupiter_token', '_get'], PY_TESTS('test_jupiter_gate.LessJupiterTraffic', 'test_jupiter_gate.Gate')),
     'swap_orca': ('swap_orca.mjs', ['guard', 'toRaw', 'parseHints', 'checkPool', 'direction', 'planSwap', 'spotOutPerIn',
                                     'priceImpact', 'valueLossOk', 'verifyQuote', 'checkImpact', 'chooseCuPrice', 'cuLimit',
@@ -316,6 +320,12 @@ SQL_TARGETS = {'deposit_db', 'unichain_book', 'unichain_quote', 'band_profile', 
 # The report prints each survivor's key: copy it here with a reason. The line
 # number is not in the key, so an edit above a mutant keeps its entry valid.
 EQUIVALENT = {
+    ('swing_calm', 'open_calm', 'return None', 'return False', 0):
+        'tick reads it through bool() and `not`: None and False are the same answer',
+    ('swing_calm', 'open_calm', 'const 0->1', "if now_s - float(view.get('at') or 0) > REGIME_MAX_AGE_S:", 0):
+        'a view without a time: now - 0 and now - 1 are both decades past REGIME_MAX_AGE_S',
+    ('swing_regime', 'swing_regime_record', 'drop operand 1', "keep = (prev or {}).get('last_calm_at') if (prev or {}).get('pool') == pool else None", 0):
+        'prev None fails the pool test first, so the kept value is read only from a real prev',
     ('swing_loop', 'sell_left_behind', 'drop operand 0', 'if (SWAP_FALLBACK and SWAP_FALLBACK in SIGNERS and (err or not out)', 0):
         "the fallback off is '', and '' in SIGNERS is False: the next operand alone gives the same answer",
     ('open_leftover', 'deploy_idle', 'drop operand 0', "if 'balanceA' not in wbal or wbal.get('walletUsd') is None:", 0):

@@ -2548,6 +2548,58 @@ def reopen_width(k, pool, price):
     return config.REOPEN_WIDEN_BAND
 
 
+SWING_REGIME_F = 'swing_regime.json'   # run/<profile>/: the swing's open pool's mode, for swing.py
+
+
+def swing_open_pool():
+    """(dex, pool) the swing row opens on in market hours (DJT/USDC), or None
+    for a profile that is not a swing."""
+    if not config.SWING_POOLS:
+        return None
+    with db.cursor() as cur:
+        cur.execute('select open_dex, open_pool from swing where profile = %s and enabled', (config.PROFILE,))
+        r = cur.fetchone()
+    return (r['open_dex'], r['open_pool']) if r else None
+
+
+def swing_regime_record(prev, mode, pool, now):
+    """The next swing_regime.json from the previous one: the open pool's
+    mode now, and last_calm_at, the last time it was CALM (kept across
+    polls, so swing.py can wait before it returns to the pool). Pure."""
+    keep = (prev or {}).get('last_calm_at') if (prev or {}).get('pool') == pool else None
+    return {'pool': pool, 'mode': mode, 'at': now, 'last_calm_at': now if mode == 'CALM' else keep}
+
+
+def publish_swing_regime(price_held):
+    """Write the swing's open pool's regime mode for swing.py (owner,
+    2026-10-09: DJT in CALM must never happen; CALM puts the swing on
+    SOL/USDC). On the open pool: the held pool's own width choice; on the
+    other pool: the open pool's tape, at its last price. A failed read
+    writes nothing: swing.py treats an old file as no view."""
+    target = swing_open_pool()
+    if not target:
+        return None
+    dex, pool = target
+    price = price_held if pool == config.POOL and price_held else (dexes.pool(dex, pool) or {}).get('price')
+    if not price:
+        return None
+    choice = regime_choice_now(pool, price)
+    mode = 'STALE' if choice is None else 'CALM' if choice <= config.REGIME_WIDTHS[0] else \
+        'WARM' if choice <= 1.02 else 'HOT'
+    f = RUN / SWING_REGIME_F
+    try:
+        prev = json.loads(f.read_text())
+    except Exception:
+        prev = None
+    rec = swing_regime_record(prev, mode, pool, time.time())
+    tmp = f.with_suffix('.tmp')
+    tmp.write_text(json.dumps(rec))
+    tmp.replace(f)
+    if (prev or {}).get('mode') != mode:
+        notify('swing_regime', pool=pool, mode=mode, was=(prev or {}).get('mode'))
+    return rec
+
+
 def regime_choice_now(pool, price, pair=None):
     """The regime's width for a fresh band at `price` on `pool`, or None."""
     if not config.REGIME_ENABLED:
@@ -4170,6 +4222,10 @@ def main():
             time.sleep(config.POLL_SECONDS)
             continue
         state['read_failures'] = 0; save(state)
+        try:
+            publish_swing_regime(status.get('price'))
+        except Exception as e:
+            print(f'swing regime unread: {type(e).__name__}: {tidy(e)}', flush=True)
         if not profile_enabled():
             if not status.get('positionMint'):
                 notify('disabled', reason='profile disabled and holds no position: the process stops')
