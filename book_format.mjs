@@ -162,8 +162,22 @@ const SECRETS = [
   [/((?:private[_ -]?key|secret[_ -]?key|secret|mnemonic|seed)\\?["']?\s*[:=]\s*\\?["']?)(?:0x)?[0-9a-fA-F]{64}/gi, '$1***'],
 ];
 
-export function redact(text) {
-  return SECRETS.reduce((t, [re, to]) => t.replace(re, to), String(text));
+// The values the bridge's own environment holds under a *_KEY, *_TOKEN,
+// *_SECRET or *_PASSWORD name (the keyed RPC's key, the bot token share its
+// EnvironmentFile): masked wherever they appear, whatever their shape.
+const SECRET_ENV_NAME = /(?:KEY|TOKEN|SECRET|PASSWORD)$/i;
+const SECRET_MIN_LEN = 12;                // shorter is not a key; masking '1' would eat every text
+export function secretValues(env = process.env) {
+  return Object.entries(env)
+    .filter(([k, v]) => SECRET_ENV_NAME.test(k) && typeof v === 'string' && v.trim().length >= SECRET_MIN_LEN)
+    .map(([, v]) => v.trim())
+    .sort((a, b) => b.length - a.length);                 // a value that contains another is masked whole
+}
+
+export function redact(text, secrets = secretValues()) {
+  let t = SECRETS.reduce((t, [re, to]) => t.replace(re, to), String(text));
+  for (const v of secrets) t = t.split(v).join('***');
+  return t;
 }
 
 // The daily PORTFOLIO (stats.portfolio()): every active pool by wallet (named

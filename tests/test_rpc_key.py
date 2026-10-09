@@ -3,10 +3,14 @@ shown in a feed row, a log line or an event, and replaced by the public
 endpoint at startup when it does not answer."""
 import io
 import json
+import os
 import pathlib
+import re
 import tempfile
 import unittest
 from unittest import mock
+
+from hypothesis import given, settings, strategies as st
 
 import _fixtures
 _fixtures.ensure_profile()
@@ -102,6 +106,76 @@ class Probe(unittest.TestCase):
         src = pathlib.Path(rebalancer.__file__).read_text()
         i = src.index('def main():')
         self.assertLess(src.index('    probe_rpc()', i), src.index('    state = load()', i))
+
+
+# --- every secret the environment names, whatever its shape (review, 2026-10-09) ----------
+# The api-key regex knew one shape. A key in a URL's path (Alchemy, QuickNode),
+# the Telegram bot token, a DSN password: masked by the NAME of the variable
+# that holds them, never by guessing at their content.
+WORD = st.text(alphabet=st.characters(whitelist_categories=('Lu', 'Ll', 'Nd'), max_codepoint=0x24f), min_size=12, max_size=64)
+AROUND = st.text(max_size=24)
+
+
+class ValueRedaction(unittest.TestCase):
+    @settings(max_examples=200, deadline=None)
+    @given(secret=WORD, before=AROUND, after=AROUND)
+    def test_a_named_secret_never_survives(self, secret, before, after):
+        env = {'FOO_API_KEY': secret, 'BAR_TOKEN': f' {secret} ', 'LPBOT_UNICHAIN_RPC': f'https://x.g.alchemy.com/v2/{secret}'}
+        with mock.patch.dict(os.environ, env):
+            out = rebalancer.redact(before + secret + after)
+            vals = db.secret_values()
+        self.assertNotIn(secret, out); self.assertIn('***', out)
+        self.assertIn(secret, vals); self.assertIn(f'v2/{secret}', vals)
+        self.assertEqual(vals, sorted(vals, key=len, reverse=True))
+
+    @settings(max_examples=200, deadline=None)
+    @given(text=st.text(max_size=80))
+    def test_without_secrets_text_is_unchanged(self, text):
+        if not re.search(r'api[-_]?key=|password=', text, re.I):
+            self.assertEqual(db.redact(text, secrets=[]), text)
+
+    def test_only_secret_named_variables_count(self):
+        env = {'WALLET_SECRET_PATH': '/home/u/.kamino-keys/bot-wallet.secret', 'LPBOT_POLYGON_KEY_PATH': '/home/u/.kamino-keys/p.secret',
+               'SHORT_KEY': 'abc', 'LPBOT_PROFIT_WALLET_PIN': '8funmDkPNBtjqfNkBEoBF16eBfyQ4vMAFrs4Nyys5D1h',
+               'SOLANA_RPC_URL': 'https://api.mainnet-beta.solana.com', 'LPBOT_POLYGON_RPC': 'https://polygon-bor-rpc.publicnode.com/',
+               'LPBOT_DSN': 'dbname=rebalancer'}
+        self.assertEqual(db.secret_values(env), [])
+
+    def test_edges_of_the_name_rule(self):
+        self.assertEqual(db.secret_values({'X_KEY': None, 'Y_TOKEN': ''}), [])                  # an unset value is no secret
+        self.assertEqual(db.secret_values({'LPBOT_RPC': 'mainnet-not-a-url-at-all'}), [])       # an RPC name without a URL
+        self.assertEqual(db.secret_values({'LPBOT_DOCS': 'https://docs.example.com/a/much/longer/path'}), [])   # a URL under another name
+        self.assertEqual(db.secret_values({'A_KEY': 'exactly12chr', 'B_KEY': 'only11chars'}), ['exactly12chr'])
+        self.assertEqual(db.secret_values({'LPBOT_RPC': 'https://h/k1234567890://x'}), ['k1234567890://x'])
+        self.assertEqual(db.secret_values({'LPBOT_RPC': 'https://user:p@ss0123456789@rpc.example.com'}), ['user:p@ss0123456789'])
+
+    def test_keyed_urls_and_passwords(self):
+        env = {'LPBOT_RPC': 'https://mainnet.helius-rpc.com/?api-key=0123abcd-4567', 'LPBOT_BASE_RPC': 'https://user:pw0123456789ab@rpc.example.com/x',
+               'LPBOT_UNICHAIN_RPC': 'https://unichain.g.alchemy.com/v2/AlchemyKey0123456789'}
+        vals = db.secret_values(env)
+        self.assertIn('?api-key=0123abcd-4567', vals); self.assertIn('user:pw0123456789ab', vals); self.assertIn('v2/AlchemyKey0123456789', vals)
+        self.assertEqual(db.redact('at https://unichain.g.alchemy.com/v2/AlchemyKey0123456789 now', vals),
+                         'at https://unichain.g.alchemy.com/*** now')
+        self.assertEqual(db.redact('dbname=rebalancer password=hunter2 host=db', []), 'dbname=rebalancer password=*** host=db')
+        with mock.patch.dict(os.environ, {'TELEGRAM_BOT_TOKEN': '123456789:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw'}):
+            self.assertEqual(rebalancer.redact('fetch https://api.telegram.org/bot123456789:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw/x'),
+                             'fetch https://api.telegram.org/bot***/x')
+
+    def test_the_feed_and_the_events_table_never_show_a_named_secret(self):
+        _fixtures.reset_ledger()
+        secret = 'QuickNodeToken0123456789abcdef'
+        with mock.patch.dict(os.environ, {'QUICKNODE_TOKEN': secret}), tempfile.TemporaryDirectory() as d:
+            feed = pathlib.Path(d) / 'events.jsonl'
+            out = io.StringIO()
+            with mock.patch.object(rebalancer, 'FEED', feed), mock.patch('sys.stdout', out):
+                rebalancer.notify('open_failed', reason=f'fetch failed at https://x.quiknode.pro/{secret}/')
+            db.event('swap_skipped', f'boom {secret}')
+            with db.cursor() as cur:
+                cur.execute("select detail from events where kind = 'swap_skipped'")
+                detail = cur.fetchone()['detail']
+            text = feed.read_text()
+        self.assertNotIn(secret, text); self.assertNotIn(secret, out.getvalue())
+        self.assertEqual(detail, 'boom ***')
 
 
 if __name__ == '__main__':

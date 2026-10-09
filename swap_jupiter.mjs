@@ -317,6 +317,31 @@ export function verifyTxShape(tx, payerKey) {
   return true;
 }
 
+// Instructions a swap never needs at the top level, and that a built
+// transaction could carry without moving a balance the simulation compares:
+// a delegate (Approve), a new owner or close authority (SetAuthority) or a
+// Burn on the Token programs; an Assign of an account to another program on
+// the System program. Each is named by its first data byte (Token) or its
+// u32 index (System).
+const TOKEN_PROGRAMS = new Set(['TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA', 'TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb']);
+const SYSTEM_PROGRAM = '11111111111111111111111111111111';
+export const REFUSED_TOKEN_IX = new Map([[4, 'Approve'], [6, 'SetAuthority'], [8, 'Burn'], [13, 'ApproveChecked'], [15, 'BurnChecked']]);
+export const REFUSED_SYSTEM_IX = new Map([[1, 'Assign'], [10, 'AssignWithSeed']]);
+export function verifyInstructions(tx) {
+  const keys = tx.message.staticAccountKeys.map(k => k.toBase58());
+  for (const ix of tx.message.compiledInstructions) {
+    const pid = keys[ix.programIdIndex];
+    const d = Buffer.from(ix.data);
+    if (TOKEN_PROGRAMS.has(pid) && d.length >= 1 && REFUSED_TOKEN_IX.has(d[0])) {
+      throw new Error(`transaction carries a Token ${REFUSED_TOKEN_IX.get(d[0])} instruction; refusing`);
+    }
+    if (pid === SYSTEM_PROGRAM && d.length >= 4 && REFUSED_SYSTEM_IX.has(d.readUInt32LE(0))) {
+      throw new Error(`transaction carries a System ${REFUSED_SYSTEM_IX.get(d.readUInt32LE(0))} instruction; refusing`);
+    }
+  }
+  return true;
+}
+
 function splAmount(b64) {
   const buf = Buffer.from(b64, 'base64');
   return buf.length >= 72 ? buf.readBigUInt64LE(64) : 0n;
@@ -448,6 +473,7 @@ async function performSwap({ connection, payer }, inInfo, outInfo, amountHuman, 
   checkImpact(view);
   const { built, tx } = await buildSwapTx(quote, payer);
   verifyTxShape(tx, payer.publicKey.toBase58());
+  verifyInstructions(tx);
   verifyPriorityFee(tx);
   const verified = await verifyBalances(connection, payer, tx, inInfo, outInfo, rawIn, quote);
   const report = {

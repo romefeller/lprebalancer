@@ -553,7 +553,9 @@ async function main() {
   save(state);
   console.error('telegram_bridge running');
   for (;;) {
-    try { await tailAll(state, DIR, (row) => send(message(row)), save); } catch (e) { console.error('tail:', redact(e.message)); }
+    // Every message is redacted once more here: a feed row is written by
+    // another process, whose redaction this one does not vouch for.
+    try { await tailAll(state, DIR, (row) => send(redact(message(row))), save); } catch (e) { console.error('tail:', redact(e.message)); }
     await new Promise(s => setTimeout(s, 5000));
   }
 }

@@ -973,11 +973,49 @@ def health_all():
     return out
 
 
-_SECRET_IN_URL = re.compile(r'(api[-_]?key=)[^&\s"\'<>]+', re.I)
+# --- secrets: what no event, feed row or log line may show ---------------------
+# A secret is known by the NAME of the environment variable that holds it, never
+# by its content: *_KEY, *_TOKEN, *_SECRET, *_PASSWORD (a *_PATH names where a
+# key lives, not the key). An RPC URL (*_RPC, *_RPC_URL) may carry its key in
+# the path (Alchemy, QuickNode) rather than in `api-key=`: everything after the
+# host is masked then. A DSN may carry `password=`.
+SECRET_IN_URL = re.compile(r'(api[-_]?key=|password=)[^&\s"\'<>]+', re.I)
+SECRET_ENV_NAME = re.compile(r'(?:KEY|TOKEN|SECRET|PASSWORD)$', re.I)
+RPC_ENV_NAME = re.compile(r'RPC(?:_URL)?$', re.I)
+SECRET_MIN_LEN = 12          # shorter is not a key; masking "1" would eat every text
+
+
+def secret_values(env=None):
+    """The secret strings the environment holds, longest first (a value that
+    contains another is masked whole): the values of the secret-named
+    variables, and the part after the host of every keyed RPC URL. Pure."""
+    env = os.environ if env is None else env
+    out = set()
+    for k, v in env.items():
+        v = (v or '').strip()
+        if SECRET_ENV_NAME.search(k):
+            out.add(v)
+        elif RPC_ENV_NAME.search(k) and '://' in v:
+            rest = v.split('://', 1)[1]
+            host, _, tail = rest.partition('/')
+            out.add(tail)
+            if '@' in host:
+                out.add(host.rsplit('@', 1)[0])            # user:password@host
+    return sorted((v for v in out if len(v) >= SECRET_MIN_LEN), key=len, reverse=True)
+
+
+def redact(text, secrets=None):
+    """`text` with every secret replaced by ***: the api-key (or password)
+    of a URL, and every value of secret_values() (the service environment's
+    by default). Pure given `secrets`."""
+    s = SECRET_IN_URL.sub(r'\1***', str(text))
+    for v in (secret_values() if secrets is None else secrets):
+        s = s.replace(v, '***')
+    return s
 
 
 def event(kind, detail=''):
-    detail = _SECRET_IN_URL.sub(r'\1***', str(detail))      # the keyed RPC URL never reaches the table
+    detail = redact(detail)                                  # no secret ever reaches the table
     with cursor(commit=True) as cur:
         cur.execute('insert into events (ts, kind, detail, profile) values (%s,%s,%s,%s)',
                     (now(), kind, detail[:2000], CONTEXT.get('profile')))

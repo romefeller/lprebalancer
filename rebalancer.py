@@ -133,6 +133,7 @@ def stamp():
 NOISE = re.compile(r'^\s*bigint: Failed to load bindings|^\s*\(node:\d+\) \[?\w*\]? ?(Experimental|Deprecation)Warning'
                    r'|^\s*\(Use `node --trace-')
 LAST_CHAIN_ERROR = {}             # {'args', 'text'}: the last signer failure in full, for the events table
+SIGNER_ENV_WITHHELD = ('TELEGRAM_',)     # environment prefixes no signer gets (_chain)
 
 
 def tidy(err, limit=140):
@@ -213,13 +214,11 @@ def emoji_for(event, payload=None):
     return '▫️'
 
 
-SECRET_IN_URL = re.compile(r'(api[-_]?key=)[^&\s"\'<>]+', re.I)
-
-
 def redact(text):
-    """Text with every api-key in a URL replaced by ***. The keyed RPC URL
-    carries the Helius key; no feed row, log line or event may show it."""
-    return SECRET_IN_URL.sub(r'\1***', str(text))
+    """Text with every secret replaced by *** (db.redact): the api-key of a
+    URL and every value the service environment holds under a *_KEY, *_TOKEN
+    or *_SECRET name. No feed row, log line or event may show one."""
+    return db.redact(text)
 
 
 def halted():
@@ -695,7 +694,9 @@ def _chain(*args, dex=None, timeout=420, extra_env=None):
     # The profile's own signer gets its opt-ins (config.SIGNER_ENV); no other
     # script does.
     own = config.SIGNER_ENV if (dex or config.DEX) == config.DEX else {}
-    env = dict(os.environ, **own,
+    # The bridge's Telegram token shares the EnvironmentFile; no signer needs it.
+    base = {k: v for k, v in os.environ.items() if not k.startswith(SIGNER_ENV_WITHHELD)}
+    env = dict(base, **own,
                WALLET_SECRET_PATH=config.WALLET,
                SOLANA_RPC_URL=config.RPC,
                LPBOT_RPC=config.RPC,
@@ -2996,6 +2997,14 @@ def balance_wallet(state, bal, rec, share_a=None):
     mint_b = (rec.get('token_b') or {}).get('address')
     if not (chains.is_address(config.CHAIN, mint_a) and chains.is_address(config.CHAIN, mint_b)):
         notify('swap_skipped', reason='pool record has no mints')
+        return bal
+    # The record comes from a DEX's API; the signer read the pool itself. A
+    # record that names tokens the pool does not hold would swap the capital
+    # into them: no swap then (security review, 2026-10-09).
+    on_chain = {wallets.norm(bal.get('mintA')), wallets.norm(bal.get('mintB'))}
+    if None not in on_chain and on_chain != {wallets.norm(mint_a), wallets.norm(mint_b)}:
+        notify('swap_skipped', reason='the pool record names tokens the pool does not hold; no swap',
+               record=sorted({wallets.norm(mint_a), wallets.norm(mint_b)}), chain=sorted(on_chain))
         return bal
     # The swap script keeps the gas reserve out of what it sells, but not the
     # open's rent headroom: the native side's target carries it, or an open
