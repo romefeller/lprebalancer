@@ -49,6 +49,7 @@ import { endpoints, overEndpoints, JupiterError, AfterSignError } from '../../sh
 import { waitTurn } from './gate.mjs';
 import { readMints, rawToUi, uiToRaw, writeRefusal } from '../../shared/token2022.mjs';
 import { planRebalance, TARGET_TOLERANCE } from '../../shared/rebalance_plan.mjs';
+import SOLANA from '../../chains/solana/solana.json' with { type: 'json' };
 const require = createRequire(import.meta.url);
 const { Connection, Keypair, PublicKey, VersionedTransaction } = require('@solana/web3.js');
 const spl = require('@solana/spl-token');
@@ -62,7 +63,7 @@ const GAS_RESERVE_SOL = Number(process.env.LPBOT_GAS_RESERVE_SOL ?? 0.05);
 const MAX_IMPACT = Number(process.env.LPBOT_MAX_IMPACT ?? 0.01);   // ratio: 0.01 = 1%
 const QUOTE_MAX_AGE_MS = 20_000;
 
-const NATIVE_MINT = 'So11111111111111111111111111111111111111112';
+const NATIVE_MINT = SOLANA.native_mint;
 const JUPITER = 'https://lite-api.jup.ag';
 const HEADERS = { accept: 'application/json', 'user-agent': 'Mozilla/5.0' };
 
@@ -243,7 +244,7 @@ export function swapRequestBody(quote, payerKey) {
 // compute-unit price (micro-lamports), from its ComputeBudget instructions.
 // Without a SetComputeUnitLimit the runtime default of 200k units per
 // instruction applies, capped at 1.4M.
-const COMPUTE_BUDGET = 'ComputeBudget111111111111111111111111111111';
+const COMPUTE_BUDGET = SOLANA.programs.compute_budget;
 export function priorityFeeLamports(tx) {
   const keys = tx.message.staticAccountKeys.map(k => k.toBase58());
   let limit = null, price = 0n, others = 0;
@@ -277,12 +278,12 @@ function stripInternal(quote) { const { __quotedAt, ...q } = quote; return q; }
 // without checking what it does. A compromised or intercepted API could have
 // drained the wallet. Every check below runs before `sign`, dry run included.
 export const ALLOWED_PROGRAMS = new Set([
-  'JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4',   // Jupiter aggregator v6
-  '11111111111111111111111111111111',              // System
-  'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA',   // Token
-  'TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb',   // Token-2022
-  'ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL',  // Associated Token Account
-  'ComputeBudget111111111111111111111111111111',   // Compute budget
+  SOLANA.programs.jupiter_v6,
+  SOLANA.programs.system,
+  SOLANA.programs.token,
+  SOLANA.programs.token_2022,
+  SOLANA.programs.associated_token,
+  SOLANA.programs.compute_budget,
 ]);
 export const MAX_VALUE_LOSS = Number(process.env.LPBOT_MAX_VALUE_LOSS ?? 0.02);   // 2% below fair value
 const SOL_OVERHEAD_LAMPORTS = 10_000_000;           // fees + temporary account rent, 0.01 SOL at most
@@ -323,8 +324,8 @@ export function verifyTxShape(tx, payerKey) {
 // Burn on the Token programs; an Assign of an account to another program on
 // the System program. Each is named by its first data byte (Token) or its
 // u32 index (System).
-const TOKEN_PROGRAMS = new Set(['TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA', 'TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb']);
-const SYSTEM_PROGRAM = '11111111111111111111111111111111';
+const TOKEN_PROGRAMS = new Set([SOLANA.programs.token, SOLANA.programs.token_2022]);
+const SYSTEM_PROGRAM = SOLANA.programs.system;
 export const REFUSED_TOKEN_IX = new Map([[4, 'Approve'], [6, 'SetAuthority'], [8, 'Burn'], [13, 'ApproveChecked'], [15, 'BurnChecked']]);
 export const REFUSED_SYSTEM_IX = new Map([[1, 'Assign'], [10, 'AssignWithSeed']]);
 export function verifyInstructions(tx) {

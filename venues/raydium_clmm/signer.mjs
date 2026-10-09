@@ -51,6 +51,7 @@ import { BOT_ROOT } from '../../bot_root.mjs';
 import { createRequire } from 'node:module';
 import { waitTurn } from '../jupiter/gate.mjs';
 import { NeverLanded, priorityCuPrice, sendUntilLanded } from '../../shared/tx_send.mjs';
+import SOLANA from '../../chains/solana/solana.json' with { type: 'json' };
 
 // The SDK's ESM build loads under Node 24, but the CommonJS build is used so
 // that this file, the SDK and web3.js share one copy of PublicKey and BN.
@@ -71,11 +72,11 @@ const SLIPPAGE_BPS = Number(process.env.LPBOT_SLIPPAGE_BPS ?? 100);
 const GAS_RESERVE_SOL = Number(process.env.LPBOT_GAS_RESERVE_SOL ?? 0.02);
 
 const DEX = 'raydium-clmm';
-const PROGRAM_ID = new PublicKey('CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK');
-const NATIVE_MINT = 'So11111111111111111111111111111111111111112';
+const PROGRAM_ID = new PublicKey(SOLANA.programs.raydium_clmm);
+const NATIVE_MINT = SOLANA.native_mint;
 // Stablecoins by MINT (USDC, USDT, PYUSD, USDS). A symbol comes from API or token metadata an
 // attacker controls: a fake "USDC" priced at $1 would defeat every dollar cap (review 2026-09-26).
-const STABLE_MINTS = new Set(['EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', 'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB', '2b1kV6DkPAnxd5ixfnxCpjxmKwqjjaYmCZfHsFu24GXo', 'USDSwr9ApdHk5bvJKMjzff41FfuX8bSxdKcR81vTwcA']);
+const STABLE_MINTS = new Set(Object.values(SOLANA.stable_mints));
 const RAYDIUM_API = 'https://api-v3.raydium.io';
 const JUPITER = 'https://lite-api.jup.ag';
 const HEADERS = { accept: 'application/json', 'user-agent': 'Mozilla/5.0' };

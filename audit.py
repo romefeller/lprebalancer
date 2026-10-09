@@ -34,21 +34,23 @@ import time
 import urllib.request
 import uuid
 
+import chains
 import engine
 import wallets
 
-NATIVE = 'So11111111111111111111111111111111111111112'
-USDC = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'
-TOKEN_PROGRAMS = ('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA', 'TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb')
+PROGRAMS = chains.SOLANA['programs']
+NATIVE = chains.SOLANA['native_mint']
+USDC = chains.SOLANA['usdc_mint']
+TOKEN_PROGRAMS = (PROGRAMS['token'], PROGRAMS['token_2022'])
 # Programs of the bot's own operations: a transaction that calls one and is
 # signed by the wallet is the bot's, recorded or not.
 BOT_PROGRAMS = {
-    'CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK': 'raydium',
-    'whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc': 'orca',
-    'LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo': 'meteora',
-    'JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4': 'jupiter',
-    'REALQqNEomY6cQGZJUGwywTBD2UmDT32rZcNnfxQ5N2': 'byreal',
-    'HpNfyc2Saw7RKkQd8nEL4khUcuPhQ7WwY1B2qjx8jxFq': 'pancake',
+    PROGRAMS['raydium_clmm']: 'raydium',
+    PROGRAMS['orca_whirlpool']: 'orca',
+    PROGRAMS['meteora_dlmm']: 'meteora',
+    PROGRAMS['jupiter_v6']: 'jupiter',
+    PROGRAMS['byreal_clmm']: 'byreal',
+    PROGRAMS['pancakeswap_v3']: 'pancake',
 }
 DUST_LAMPORTS = 10_000          # a spam transfer moves a few lamports, never more
 DUST_USDC = 0.01                # an unsigned USDC transfer in of at most this is spam, not capital
@@ -213,7 +215,7 @@ def payout_received(tx, profit_wallet, mint, amount):
     return abs(got - amount) <= PAYOUT_TOLERANCE
 
 
-DLMM_PROGRAM = 'LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo'
+DLMM_PROGRAM = PROGRAMS['meteora_dlmm']
 
 
 def check_positions(db_open_mints, chain_nft_mints, db_open_dexes, dlmm_live, db_open_profiles=None):

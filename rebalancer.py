@@ -393,7 +393,7 @@ def record_health(key, out, err):
         health.record_success(key)
 
 
-USDC_MINT = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'
+USDC_MINT = chains.SOLANA['usdc_mint']
 PROBE_QUOTE = (f'{dexes.JUPITER}/swap/v1/quote?inputMint={fees.NATIVE_MINT}&outputMint={USDC_MINT}'
                '&amount=10000000&slippageBps=50')                  # 0.01 SOL: a quote, never a swap
 

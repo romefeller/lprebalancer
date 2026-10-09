@@ -15,7 +15,9 @@ import json
 import time
 import urllib.request
 
-NATIVE_MINT = 'So11111111111111111111111111111111111111112'
+import chains
+
+NATIVE_MINT = chains.SOLANA['native_mint']
 
 
 def _raw(balances, holder, mint):

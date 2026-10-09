@@ -80,9 +80,9 @@ class FallbackPoolArgs(Patched):
             self.assertEqual(rebalancer.fallback_pool_args(DJT, USDC), [])
 
     def test_the_orca_script_knows_djt_usdc_without_the_flag(self):
-        src = (_fixtures.ROOT / 'venues/orca/swap.mjs').read_text()
-        self.assertIn("[`${DJT_MINT}/${USDC_MINT}`]: '7gkB2D1SqhUYgKrSpDU5cma4tK9efijHouYituABdJcG'", src)
-        self.assertIn(f"export const DJT_MINT = '{DJT}'", src)
+        venue = json.loads((_fixtures.ROOT / 'venues/orca/venue.json').read_text())
+        pools = {(p['mint_a'], p['mint_b']): p['pool'] for p in venue['fallback_pools']}
+        self.assertEqual(pools[(DJT, USDC)], DJT_POOL)
 
 
 # --- B: the side the band needs ---------------------------------------------------------

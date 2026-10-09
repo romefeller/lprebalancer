@@ -3,7 +3,7 @@
 // DEX it is on.
 //
 // Byreal is Bybit's Solana DEX, a Raydium CLMM fork (program
-// REALQqNEomY6cQGZJUGwywTBD2UmDT32rZcNnfxQ5N2). A position is a Token-2022
+// id: chains/solana/solana.json, byreal_clmm). A position is a Token-2022
 // NFT whose PersonalPosition PDA holds [tickLower, tickUpper) and liquidity,
 // exactly as on Raydium. Built on @byreal-io/byreal-clmm-sdk 0.2.2: its
 // `Chain` client reads pool and position state, computes uncollected fees
@@ -39,6 +39,7 @@ import { assertNotHalted } from '../../shared/halt_guard.mjs';
 import { BOT_ROOT } from '../../bot_root.mjs';
 import { createRequire } from 'node:module';
 import { waitTurn } from '../jupiter/gate.mjs';
+import SOLANA from '../../chains/solana/solana.json' with { type: 'json' };
 
 const require = createRequire(import.meta.url);
 // The SDK's ESM entry loads cleanly under Node 24. BN and Decimal come from
@@ -62,20 +63,20 @@ const MAX_USD = Number(process.env.LPBOT_MAX_USD ?? 260);
 const SLIPPAGE_BPS = Number(process.env.LPBOT_SLIPPAGE_BPS ?? 100);
 const GAS_RESERVE_SOL = Number(process.env.LPBOT_GAS_RESERVE_SOL ?? 0.02);
 
-const NATIVE_MINT = 'So11111111111111111111111111111111111111112';
+const NATIVE_MINT = SOLANA.native_mint;
 // Stablecoins by MINT (USDC, USDT, PYUSD, USDS). A symbol comes from API or token metadata an
 // attacker controls: a fake "USDC" priced at $1 would defeat every dollar cap (review 2026-09-26).
-const STABLE_MINTS = new Set(['EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', 'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB', '2b1kV6DkPAnxd5ixfnxCpjxmKwqjjaYmCZfHsFu24GXo', 'USDSwr9ApdHk5bvJKMjzff41FfuX8bSxdKcR81vTwcA']);
+const STABLE_MINTS = new Set(Object.values(SOLANA.stable_mints));
 const BYREAL_API = 'https://api2.byreal.io/byreal/api/dex/v2';
 const JUPITER = 'https://lite-api.jup.ag';
 const HEADERS = { accept: 'application/json', 'user-agent': 'Mozilla/5.0' };
 const PROGRAM_NAMES = {
-  ComputeBudget111111111111111111111111111111: 'ComputeBudget',
-  '11111111111111111111111111111111': 'System',
-  TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA: 'Token',
-  TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb: 'Token-2022',
-  ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL: 'AssociatedToken',
-  MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr: 'Memo',
+  [SOLANA.programs.compute_budget]: 'ComputeBudget',
+  [SOLANA.programs.system]: 'System',
+  [SOLANA.programs.token]: 'Token',
+  [SOLANA.programs.token_2022]: 'Token-2022',
+  [SOLANA.programs.associated_token]: 'AssociatedToken',
+  [SOLANA.programs.memo]: 'Memo',
   [BYREAL_CLMM_PROGRAM_ID.toBase58()]: 'ByrealClmm',
 };
 

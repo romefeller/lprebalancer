@@ -37,6 +37,7 @@ concentration, and each DEX kind has its own route to it (see `concentration`).
 import json, math, pathlib, subprocess, threading, time
 import numpy as np
 
+import chains
 import db
 
 ROOT = pathlib.Path(__file__).resolve().parent
@@ -189,15 +190,9 @@ def screening_verdict(rec, facts, majors=MAJORS):
 STABLES = {'USDC', 'USDT', 'PYUSD', 'USDS', 'DAI', 'FDUSD', 'USDE'}      # display only
 # Identity is the MINT, never the symbol: a symbol is whatever an API or a
 # token's own metadata says (security review, 2026-09-26).
-STABLE_MINTS = {'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v',   # USDC
-                'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB',   # USDT
-                '2b1kV6DkPAnxd5ixfnxCpjxmKwqjjaYmCZfHsFu24GXo',   # PYUSD
-                'USDSwr9ApdHk5bvJKMjzff41FfuX8bSxdKcR81vTwcA',    # USDS
-                '0x833589fcd6edb6e08f4c7c32d4f71b54bda02913',     # USDC on Base (lower case)
-                '0x078d782b760474a361dda0af3839290b0ef57ad6',     # USDC on Unichain (lower case)
-                '0xc2132d05d31c914a87c6611c10748aeb04b58e8f',     # USDT0 on Polygon (lower case)
-                '0x3c499c542cef5e3811e1192ce70d8cc03d5c3359'}     # USDC on Polygon (lower case)
-MAJOR_MINTS = STABLE_MINTS | {'So11111111111111111111111111111111111111112'}   # + SOL
+# Every chain's stablecoins, from its row in chains.py.
+STABLE_MINTS = {m for c in chains.CHAINS.values() for m in c.get('stable_mints', ())}
+MAJOR_MINTS = STABLE_MINTS | {chains.SOLANA['native_mint']}   # + SOL
 
 
 def is_stable(tok):

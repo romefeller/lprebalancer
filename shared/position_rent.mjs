@@ -1,7 +1,8 @@
 // Refundable rent for Raydium-layout positions. Each address is counted once.
 import { PublicKey } from '@solana/web3.js';
+import SOLANA from '../chains/solana/solana.json' with { type: 'json' };
 
-const TOKEN_2022 = new PublicKey('TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb');
+const TOKEN_2022 = new PublicKey(SOLANA.programs.token_2022);
 
 export async function positionRent(connection, owner, nftMints, programId,
                                    { refundMint = false } = {}) {

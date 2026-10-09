@@ -2,7 +2,7 @@
 // the same output fields as venues/orca/signer.mjs and venues/meteora_dlmm/signer.mjs, so the loop
 // cannot tell which DEX it is on.
 //
-// PancakeSwap's Solana CLMM (program HpNfyc2Saw7RKkQd8nEL4khUcuPhQ7WwY1B2qjx8jxFq)
+// PancakeSwap's Solana CLMM (program id: chains/solana/solana.json, pancakeswap_v3)
 // is a fork of Raydium's amm_v3. Its on-chain Anchor IDL (account
 // CAD7TZySgk4RkqyAkGu3bJFvf8itWsfTtpViRK8TJrKf, program name "amm_v3") lists
 // the same instruction names, discriminators (sha256("global:<name>")[0..8]),
@@ -59,6 +59,7 @@ import { assertNotHalted } from '../../shared/halt_guard.mjs';
 import { BOT_ROOT } from '../../bot_root.mjs';
 import { createRequire } from 'node:module';
 import { waitTurn } from '../jupiter/gate.mjs';
+import SOLANA from '../../chains/solana/solana.json' with { type: 'json' };
 
 // The project is "type": "commonjs"; the SDK's CommonJS build resolves cleanly.
 const require = createRequire(import.meta.url);
@@ -90,12 +91,12 @@ const GAS_RESERVE_SOL = Number(process.env.LPBOT_GAS_RESERVE_SOL ?? 0.02);
 const PRIORITY_MICROLAMPORTS = Number(process.env.LPBOT_PRIORITY_MICROLAMPORTS ?? 20000);
 const CU_LIMIT = 600_000;
 
-const PROGRAM = new PublicKey('HpNfyc2Saw7RKkQd8nEL4khUcuPhQ7WwY1B2qjx8jxFq');
+const PROGRAM = new PublicKey(SOLANA.programs.pancakeswap_v3);
 const DEX = 'pancakeswap-v3-solana';
-const NATIVE_MINT = 'So11111111111111111111111111111111111111112';
+const NATIVE_MINT = SOLANA.native_mint;
 // Stablecoins by MINT (USDC, USDT, PYUSD, USDS). A symbol comes from API or token metadata an
 // attacker controls: a fake "USDC" priced at $1 would defeat every dollar cap (review 2026-09-26).
-const STABLE_MINTS = new Set(['EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', 'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB', '2b1kV6DkPAnxd5ixfnxCpjxmKwqjjaYmCZfHsFu24GXo', 'USDSwr9ApdHk5bvJKMjzff41FfuX8bSxdKcR81vTwcA']);
+const STABLE_MINTS = new Set(Object.values(SOLANA.stable_mints));
 const GECKO = 'https://api.geckoterminal.com/api/v2/networks/solana/pools';
 const JUPITER = 'https://lite-api.jup.ag';
 const HEADERS = { accept: 'application/json', 'user-agent': 'Mozilla/5.0' };

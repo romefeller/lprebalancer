@@ -25,6 +25,7 @@ import { createRequire } from 'node:module';
 import { readMints, rawToUi, uiToRaw, writeRefusal } from '../../shared/token2022.mjs';
 import { isEntry } from '../../shared/rpc_policy.mjs';
 import { NeverLanded, priorityCuPrice, sendUntilLanded, REBROADCAST_MS } from '../../shared/tx_send.mjs';
+import SOLANA from '../../chains/solana/solana.json' with { type: 'json' };
 
 export { NeverLanded, sendUntilLanded, REBROADCAST_MS };
 
@@ -38,7 +39,7 @@ const PROFIT = process.env.LPBOT_PROFIT_WALLET ?? '';
 // write alone cannot redirect payouts (security review, 2026-09-26).
 const PIN = process.env.LPBOT_PROFIT_WALLET_PIN ?? '';
 const GAS_RESERVE_SOL = Number(process.env.LPBOT_GAS_RESERVE_SOL ?? 0.05);
-const NATIVE_MINT = 'So11111111111111111111111111111111111111112';
+const NATIVE_MINT = SOLANA.native_mint;
 
 // The priority fee. 2026-10-02: two payouts sent with none, and sent once,
 // expired unconfirmed ("block height exceeded") while the swaps beside them,

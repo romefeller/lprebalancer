@@ -14,7 +14,9 @@ The owner's rule (2026-09-26):
 Nothing here is specific to a pair: the payout mint and the pool's two mints
 arrive as arguments, and the native mint is Solana's, not a choice.
 """
-NATIVE_MINT = 'So11111111111111111111111111111111111111112'
+import chains
+
+NATIVE_MINT = chains.SOLANA['native_mint']
 
 
 def split(fees, payout_mint, sol_before, gas_reserve):

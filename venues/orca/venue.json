@@ -1,0 +1,12 @@
+{
+  "about": "The Orca fallback swap (venues/orca/swap.mjs): the whirlpool it trades in for a pair it is not told to use (--pool), both mint orders.",
+  "fallback_pools": [
+    {"pair": "SOL/USDC", "note": "0.04%, tick spacing 4: the deepest Orca SOL/USDC pool and the seed pool (db.SEED_POOL)",
+     "mint_a": "So11111111111111111111111111111111111111112", "mint_b": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+     "pool": "Czfq3xZZDmsdGdUyrNLtRhGc47cXcZtLG4crryfu44zE"},
+    {"pair": "DJT/USDC", "note": "the swing's DJT pool: the DJT a switch back to SOL/USDC leaves behind sells while Jupiter refuses (2026-10-09)",
+     "mint_a": "DJTu7vi8norVzdVAffgvb39VP7wjKeTsgaMBJrzfxvoF", "mint_b": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+     "pool": "7gkB2D1SqhUYgKrSpDU5cma4tK9efijHouYituABdJcG"}
+  ],
+  "fallback_stable_mints": ["EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB"]
+}

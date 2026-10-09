@@ -39,6 +39,7 @@ import { createRequire } from 'node:module';
 import { waitTurn } from '../jupiter/gate.mjs';
 import { endpoints, overEndpoints, isEntry, AfterSignError } from '../../shared/rpc_policy.mjs';
 import { readMints, rawToUi, uiToNative, uiPrice, assertWritable, mintFields } from '../../shared/token2022.mjs';
+import SOLANA from '../../chains/solana/solana.json' with { type: 'json' };
 
 // The package's ESM build imports a directory and fails to load under Node 24;
 // the CommonJS build resolves cleanly.
@@ -58,10 +59,10 @@ const SLIPPAGE_BPS = Number(process.env.LPBOT_SLIPPAGE_BPS ?? 100);
 const GAS_RESERVE_SOL = Number(process.env.LPBOT_GAS_RESERVE_SOL ?? 0.02);
 const POSITION_MAX_LENGTH = 1400;      // bins per position, the program's limit
 
-const NATIVE_MINT = 'So11111111111111111111111111111111111111112';
+const NATIVE_MINT = SOLANA.native_mint;
 // Stablecoins by MINT (USDC, USDT, PYUSD, USDS). A symbol comes from API or token metadata an
 // attacker controls: a fake "USDC" priced at $1 would defeat every dollar cap (review 2026-09-26).
-const STABLE_MINTS = new Set(['EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', 'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB', '2b1kV6DkPAnxd5ixfnxCpjxmKwqjjaYmCZfHsFu24GXo', 'USDSwr9ApdHk5bvJKMjzff41FfuX8bSxdKcR81vTwcA']);
+const STABLE_MINTS = new Set(Object.values(SOLANA.stable_mints));
 const METEORA = 'https://dlmm.datapi.meteora.ag';
 const JUPITER = 'https://lite-api.jup.ag';
 const HEADERS = { accept: 'application/json', 'user-agent': 'Mozilla/5.0' };

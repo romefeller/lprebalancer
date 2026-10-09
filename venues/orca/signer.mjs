@@ -47,6 +47,7 @@ import { sqrtPriceToPrice } from '@orca-so/whirlpools-core';
 import { consistentOrcaFees } from './fees.mjs';
 import { endpoints, overEndpoints, isEntry, AfterSignError } from '../../shared/rpc_policy.mjs';
 import { readMints, rawToUi, uiToRaw, uiToNative, uiPrice, assertWritable, mintFields } from '../../shared/token2022.mjs';
+import SOLANA from '../../chains/solana/solana.json' with { type: 'json' };
 
 const RPC = process.env.SOLANA_RPC_URL
   ?? (process.env.KAMINO_RPC_KEY
@@ -61,7 +62,7 @@ const SLIPPAGE_BPS = Number(process.env.LPBOT_SLIPPAGE_BPS ?? 100);
 // WIF/USDC position still needs SOL to close itself.
 const GAS_RESERVE_SOL = Number(process.env.LPBOT_GAS_RESERVE_SOL ?? 0.02);
 
-const NATIVE_MINT = 'So11111111111111111111111111111111111111112';
+const NATIVE_MINT = SOLANA.native_mint;
 const HEADERS = { accept: 'application/json', 'user-agent': 'Mozilla/5.0' };
 
 function guard() {
@@ -173,7 +174,7 @@ async function simulate(rpc, signer, instructions) {
 // dollar figure the bot reports into nonsense.
 // Stablecoins by MINT (USDC, USDT, PYUSD, USDS). A symbol comes from API or token metadata an
 // attacker controls: a fake "USDC" priced at $1 would defeat every dollar cap (review 2026-09-26).
-const STABLE_MINTS = new Set(['EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', 'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB', '2b1kV6DkPAnxd5ixfnxCpjxmKwqjjaYmCZfHsFu24GXo', 'USDSwr9ApdHk5bvJKMjzff41FfuX8bSxdKcR81vTwcA']);
+const STABLE_MINTS = new Set(Object.values(SOLANA.stable_mints));
 
 // Priced by MINT, never by GeckoTerminal's idea of which token is the quote.
 // Gecko orders a pair by its own convention, so its quote_token_price_usd on

@@ -4,13 +4,19 @@ audits), so a profile on another chain skips the step instead of failing it.
 
 Adding a chain is a row here plus a signer that speaks SIGNER_CONTRACT.md.
 """
+import json
+import pathlib
 import re
+
+# Solana addresses: mints, stablecoins and program ids, one file for Python and Node.
+SOLANA = json.loads((pathlib.Path(__file__).parent / 'chains' / 'solana' / 'solana.json').read_text())
 
 CHAINS = {
     'solana': {
         'native_symbol': 'SOL', 'native_decimals': 9, 'gecko_network': 'solana',
         # the mint the signers report native SOL as (balanceA/balanceB)
-        'native_mint': 'So11111111111111111111111111111111111111112',
+        'native_mint': SOLANA['native_mint'],
+        'stable_mints': tuple(SOLANA['stable_mints'].values()),
         # wallet-wide housekeeping, run by the wallet's residual owner only
         'sweep': True, 'janitor': True, 'audit': True,
         # the board: other pools and venues on this chain
@@ -37,6 +43,7 @@ CHAINS = {
         'native_symbol': 'ETH', 'native_decimals': 18, 'gecko_network': 'base',
         # native ETH counts as WETH (SIGNER_CONTRACT additions, EVM signer)
         'native_mint': '0x4200000000000000000000000000000000000006',
+        'stable_mints': ('0x833589fcd6edb6e08f4c7c32d4f71b54bda02913',),        # USDC (lower case)
         'sweep': False, 'janitor': False, 'audit': False,
         'scanner': False,
         'payout': True,
@@ -56,6 +63,7 @@ CHAINS = {
         'native_symbol': 'ETH', 'native_decimals': 18, 'gecko_network': 'unichain',
         # native ETH counts as WETH, as on Base (the EVM signers report it so)
         'native_mint': '0x4200000000000000000000000000000000000006',
+        'stable_mints': ('0x078d782b760474a361dda0af3839290b0ef57ad6',),        # USDC (lower case)
         'sweep': False, 'janitor': False, 'audit': False,
         'scanner': False,
         'payout': True,
@@ -78,6 +86,8 @@ CHAINS = {
         # the wrapped native token, a pool token here: native POL above the
         # profile's native_keep is wrapped into it (rebalancer.wrap_native)
         'wrapped_native': '0x0d500b1d8e8ef31e21c99d1db9a6444d3adf1270',
+        'stable_mints': ('0xc2132d05d31c914a87c6611c10748aeb04b58e8f',          # USDT0 (lower case)
+                         '0x3c499c542cef5e3811e1192ce70d8cc03d5c3359'),         # USDC (lower case)
         'sweep': False, 'janitor': False, 'audit': False,
         'scanner': False,
         'payout': True,

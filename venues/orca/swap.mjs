@@ -48,6 +48,8 @@ import { endpoints, overEndpoints, JupiterError, AfterSignError, isEntry } from 
 import { priorityFeeLamports, verifyPriorityFee, PRIORITY_MAX_LAMPORTS, parseSleeve, sleeveCap } from '../jupiter/swap.mjs';
 import { planRebalance, TARGET_TOLERANCE } from '../../shared/rebalance_plan.mjs';
 import { NeverLanded, sendUntilLanded } from '../../shared/tx_send.mjs';
+import SOLANA from '../../chains/solana/solana.json' with { type: 'json' };
+import VENUE from './venue.json' with { type: 'json' };
 
 const require = createRequire(import.meta.url);
 const { Connection, Keypair, PublicKey, VersionedTransaction, TransactionMessage, TransactionInstruction,
@@ -70,31 +72,26 @@ const CU_DRAFT_LIMIT = 1_400_000;
 const CU_PRICE_FLOOR = 20_000;                 // micro-lamports per unit
 const CU_PRICE_DEFAULT = 50_000;               // when the node reports no recent fees
 
-export const NATIVE_MINT = 'So11111111111111111111111111111111111111112';
-export const USDC_MINT = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
-export const WHIRLPOOL_PROGRAM = 'whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc';
-const COMPUTE_BUDGET = 'ComputeBudget111111111111111111111111111111';
-const SYSTEM = '11111111111111111111111111111111';
-const TOKEN = 'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA';
-const TOKEN_2022 = 'TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb';
-const ATA = 'ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL';
+export const NATIVE_MINT = SOLANA.native_mint;
+export const USDC_MINT = SOLANA.usdc_mint;
+export const WHIRLPOOL_PROGRAM = SOLANA.programs.orca_whirlpool;
+const COMPUTE_BUDGET = SOLANA.programs.compute_budget;
+const SYSTEM = SOLANA.programs.system;
+const TOKEN = SOLANA.programs.token;
+const TOKEN_2022 = SOLANA.programs.token_2022;
+const ATA = SOLANA.programs.associated_token;
 export const ALLOWED_PROGRAMS = new Set([COMPUTE_BUDGET, SYSTEM, TOKEN, TOKEN_2022, ATA, WHIRLPOOL_PROGRAM]);
 export const SWAP_V2_DISCRIMINATOR = Buffer.from([43, 4, 237, 11, 26, 201, 30, 98]);
 
-// Pair -> whirlpool, both mint orders. SOL/USDC 0.04% (tick spacing 4), the
-// deepest Orca SOL/USDC pool and the bot's seed pool (db.SEED_POOL).
-// DJT/USDC: the swing's DJT pool, so the DJT a switch back to SOL/USDC
-// leaves behind can be sold while Jupiter refuses (2026-10-09).
-export const DJT_MINT = 'DJTu7vi8norVzdVAffgvb39VP7wjKeTsgaMBJrzfxvoF';
-export const DEFAULT_POOLS = {
-  [`${NATIVE_MINT}/${USDC_MINT}`]: 'Czfq3xZZDmsdGdUyrNLtRhGc47cXcZtLG4crryfu44zE',
-  [`${DJT_MINT}/${USDC_MINT}`]: '7gkB2D1SqhUYgKrSpDU5cma4tK9efijHouYituABdJcG',
-};
+// Pair -> whirlpool, keyed "mintA/mintB" as venue.json lists it (defaultPool
+// also tries the other order).
+export const DEFAULT_POOLS = Object.fromEntries(VENUE.fallback_pools.map(p => [`${p.mint_a}/${p.mint_b}`, p.pool]));
 export function defaultPool(mintA, mintB) {
   return DEFAULT_POOLS[`${mintA}/${mintB}`] ?? DEFAULT_POOLS[`${mintB}/${mintA}`] ?? null;
 }
 
-const STABLE_MINTS = new Set([USDC_MINT, 'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB']);
+// USDC and USDT only: the venue signers also count PYUSD and USDS as stable.
+const STABLE_MINTS = new Set(VENUE.fallback_stable_mints);
 
 // A refusal or an Orca/SDK answer is the same on every endpoint. JupiterError
 // is rpc_policy's class for "an API answer, not an RPC problem": always fatal
