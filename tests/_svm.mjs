@@ -124,7 +124,8 @@ export class Fork {
       getBalance: async (k) => fork.balance(k),
       getMinimumBalanceForRentExemption: async (n) => Number(fork.svm.minimumBalanceForRentExemption(BigInt(n))),
       getLatestBlockhash: async () => ({ blockhash: fork.svm.latestBlockhash(), lastValidBlockHeight: 1e12 }),
-      getSlot: async () => Number(fork.svm.getClock().slot),
+      // the newest slot the fork's SlotHashes knows, as mainnet's finalized slot is
+      getSlot: async () => fork.recentSlot(),
       // What a signer sends: run at once; a failure throws with the program's
       // logs, as a node's preflight would.
       sendRawTransaction: async (raw) => {

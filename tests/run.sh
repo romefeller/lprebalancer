@@ -20,4 +20,4 @@ else
 fi
 node --test test_uniswap.mjs test_uniswap_fork.mjs test_uniswap_polygon.mjs test_uniswap_polygon_fork.mjs test_halt_guard.mjs test_payout_send.mjs test_sleeve.mjs test_swap_orca.mjs test_jupiter_gate.mjs test_signer_helpers.mjs test_security.mjs test_payout_pin.mjs test_slippage.mjs test_fee_snapshot.mjs test_orca_fees.mjs test_priority_fee.mjs test_janitor.mjs test_book_format.mjs test_rpc_policy.mjs test_signer_rpc.mjs test_token2022.mjs test_signer_stocks.mjs test_signer_stocks_live.mjs test_aerodrome.mjs test_evm_wallet.mjs test_aerodrome_live.mjs test_aerodrome_fork.mjs test_telegram_bridge.mjs test_increase.mjs test_raydium_landing.mjs test_jupiter_key.mjs test_vault_policy.mjs
 # the vault fork tests read mainnet heavily: one file at a time
-node --test --test-concurrency=1 test_vault_fork.mjs test_vault_dlmm_fork.mjs
+node --test --test-concurrency=1 test_vault_fork.mjs test_vault_dlmm_fork.mjs test_vault_cli_fork.mjs
