@@ -28,7 +28,7 @@ const POOL = new PublicKey('BGm1tav58oGcsQJehL9WXBFXF7D27vZsKefj4xJKD5Y');      
 const OTHER = new PublicKey('5rCf1DM8LjKTw4YqhnoLcngyZYeNnQqztScTogYHAS6');       // SOL/USDC, not approved
 const USDC = new PublicKey('EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v');
 
-async function vaultOnFork() {
+async function vaultOnFork({ usdc = 200_000_000n } = {}) {
   const fork = new Fork();
   await Promise.all([fork.program(sq.PROGRAM_ID), fork.program(DLMM_PROGRAM)]);
   await fork.syncClock();
@@ -47,7 +47,7 @@ async function vaultOnFork() {
   // the owner's deposit: SOL and USDC
   fork.fund(vault, 2);
   await fork.clone([USDC]);
-  fork.tokenAccount(getAssociatedTokenAddressSync(USDC, vault, true), USDC, vault, 200_000_000n);
+  fork.tokenAccount(getAssociatedTokenAddressSync(USDC, vault, true), USDC, vault, usdc);
   const keyFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'vault-')), 'policy.json');
   fs.writeFileSync(keyFile, JSON.stringify([...policyKey.secretKey]));
   const env = { LPBOT_VAULT_SETTINGS: settings.toBase58(), LPBOT_VAULT_POLICIES: policies.join(','),
@@ -230,4 +230,42 @@ test('the DLMM signer runs a vault with its usual commands', { timeout: 300_000 
   const back = await value();
   assert.ok(back > before * 0.97, `vault worth ${back.toFixed(2)} USDC after, ${before.toFixed(2)} before`);
   assert.equal(fork.get(getAssociatedTokenAddressSync(NATIVE_MINT, vault, true)), null, 'no WSOL left wrapped');
+});
+
+// The loop's swap, on the vault's own pool: a vault holding only SOL ends
+// near half SOL, half USDC, worth what it was.
+test('rebalance: the DLMM signer swaps a vault to its targets on the approved pool', { timeout: 300_000 }, async () => {
+  const { fork, connection, acting, vault, payer } = await vaultOnFork({ usdc: 0n });
+  const signer = await import('../venues/meteora_dlmm/signer.mjs');
+  const deps = { urls: ['fork'], connectFn: async () => ({ connection, payer, acting }), sleep: async () => {} };
+  process.env.LPBOT_POOL = POOL.toBase58();
+  delete process.env.LPBOT_TOKEN_HINTS;
+  const dlmm = await DLMM.create(connection, POOL);
+  const px = Number((await dlmm.getActiveBin()).pricePerToken);
+  const half = (2 - 0.005) * px / 2;
+  const log = console.log; console.log = () => {};
+  let out;
+  try { out = await signer.rebalance(NATIVE_MINT.toBase58(), USDC.toBase58(), half.toFixed(2), half.toFixed(2), true, deps); }
+  finally { console.log = log; }
+  assert.equal(out.sent, true, JSON.stringify(out));
+  assert.ok(!out.partial);
+  const usdcNow = Number(fork.tokenAmount(getAssociatedTokenAddressSync(USDC, vault, true))) / 1e6;
+  const solNow = fork.balance(vault) / 1e9;
+  assert.ok(Math.abs(usdcNow - half) / half < 0.05, `USDC ${usdcNow} vs target ${half}`);
+  assert.ok((solNow * px + usdcNow) > 2 * px * 0.985, 'the swap kept the value');
+  assert.ok(solNow >= 0.005, 'the vault kept its floor');
+});
+
+test('rebalance: a price the pool does not pay is refused before anything is signed', { timeout: 300_000 }, async () => {
+  const { connection, acting, payer } = await vaultOnFork({ usdc: 0n });
+  const signer = await import('../venues/meteora_dlmm/signer.mjs');
+  const deps = { urls: ['fork'], connectFn: async () => ({ connection, payer, acting }), sleep: async () => {} };
+  process.env.LPBOT_POOL = POOL.toBase58();
+  const dlmm = await DLMM.create(connection, POOL);
+  const px = Number((await dlmm.getActiveBin()).pricePerToken);
+  // the loop's hint says SOL is worth ten times the pool's price
+  process.env.LPBOT_TOKEN_HINTS = JSON.stringify({ [NATIVE_MINT.toBase58()]: { usd: px * 10, decimals: 9 }, [USDC.toBase58()]: { usd: 1, decimals: 6 } });
+  try {
+    await assert.rejects(signer.rebalance(NATIVE_MINT.toBase58(), USDC.toBase58(), '50', '50', true, deps), /below fair value/);
+  } finally { delete process.env.LPBOT_TOKEN_HINTS; }
 });

@@ -36,6 +36,7 @@
 //   node venues/meteora_dlmm/signer.mjs open <pool> <lowerPrice> <upperPrice> <maxA> <maxB> [--execute]
 //   node venues/meteora_dlmm/signer.mjs harvest <position> [--execute]
 //   node venues/meteora_dlmm/signer.mjs close <position> [--execute]
+//   node venues/meteora_dlmm/signer.mjs rebalance <mintA> <mintB> <targetUsdA> <targetUsdB> [--execute]
 import fs from 'node:fs';
 import path from 'node:path';
 import { assertNotHalted } from '../../shared/halt_guard.mjs';
@@ -46,6 +47,9 @@ import { endpoints, overEndpoints, isEntry, AfterSignError } from '../../shared/
 import { readMints, rawToUi, uiToNative, uiPrice, assertWritable, mintFields } from '../../shared/token2022.mjs';
 import SOLANA from '../../chains/solana/solana.json' with { type: 'json' };
 import { actingAccount } from '../../chains/solana/vault/account.mjs';
+import { planRebalance, TARGET_TOLERANCE } from '../../shared/rebalance_plan.mjs';
+import { planSwap, valueLossOk, checkImpact, parseHints, noopReport, Refused, MAX_VALUE_LOSS } from '../orca/swap.mjs';
+import { parseSleeve, sleeveCap } from '../jupiter/swap.mjs';
 import { JUPITER, jupiterHeaders } from '../jupiter/api.mjs';
 
 // The package's ESM build imports a directory and fails to load under Node 24;
@@ -55,6 +59,7 @@ const dlmmPkg = require('@meteora-ag/dlmm');
 const DLMM = dlmmPkg.default ?? dlmmPkg;
 const { StrategyType } = dlmmPkg;
 const { Connection, Keypair, PublicKey } = require('@solana/web3.js');
+const spl = require('@solana/spl-token');
 const { BN } = require('@coral-xyz/anchor');
 
 // A keyed endpoint from the environment first. Indexed reads
@@ -520,6 +525,100 @@ export async function close(address, execute, deps) {
   }, undefined, deps);
 }
 
+// --- rebalance: a swap on this pool -----------------------------------------
+
+// What `owner` may sell of one token, in human units: the profile's sleeve
+// (LPBOT_SLEEVE) of what it holds, less the native reserve. A vault is a PDA,
+// so its token accounts are derived off the curve.
+async function sellable(connection, acting, info) {
+  const ata = spl.getAssociatedTokenAddressSync(new PublicKey(info.mint), acting.owner, true, new PublicKey(info.program));
+  const a = await connection.getAccountInfo(ata);
+  let raw = a ? a.data.readBigUInt64LE(64) : 0n;
+  if (info.mint === NATIVE_MINT) raw += BigInt(await connection.getBalance(acting.owner));
+  const total = sleeveCap(Number(raw) / 10 ** info.decimals, info.mint, parseSleeve(process.env.LPBOT_SLEEVE));
+  const reserve = info.mint !== NATIVE_MINT ? 0 : acting.mode === 'vault' ? Math.max(GAS_RESERVE_SOL, VAULT_SOL_FLOOR) : GAS_RESERVE_SOL;
+  const avail = Math.max(0, total - reserve);
+  return { total, avail, usd: avail * info.usdPrice };
+}
+// The loop's `rebalance` (SWAP_HOOK.md) on the profile's own pool. A vault may
+// swap only on pools its owners approved, so a vault profile's swaps come here
+// rather than to Jupiter (lp/signers.route); a key wallet may use it too. Same
+// plan (shared/rebalance_plan.mjs), the same value and impact checks and the
+// same report fields as venues/orca/swap.mjs.
+export async function rebalance(mintA, mintB, targetA, targetB, execute, deps) {
+  const pool = poolArg();
+  const tA = Number(targetA), tB = Number(targetB);
+  if (!(tA >= 0 && tB >= 0)) throw new Refused(`targets must be non-negative dollars, got ${targetA} ${targetB}`);
+  if (mintA === mintB) throw new Refused('mintA and mintB are the same token');
+  const hints = parseHints(process.env.LPBOT_TOKEN_HINTS);
+  return withRpc(async ({ connection, acting }) => {
+    const dlmm = await DLMM.create(connection, new PublicKey(pool));
+    const info = await describe(pool, dlmm, connection);
+    assertWritable(info.mints);
+    if (new Set([mintA, mintB, info.mintA, info.mintB]).size !== 2) {
+      throw new Refused(`swap ${mintA}/${mintB} is not this pool's pair (${info.mintA}/${info.mintB}); refusing`);
+    }
+    if (info.multiplierA !== 1 || info.multiplierB !== 1) throw new Refused('a scaled Token-2022 mint: no swap here; refusing');
+    // Prices: the loop's hints (the prices it sized the targets with), else
+    // the pool's own price and the quote token's USD value.
+    const side = (mint) => {
+      const x = mint === info.mintA;
+      const decimals = x ? info.decimalsA : info.decimalsB;
+      const h = hints.get(mint);
+      if (h && h.decimals !== decimals) throw new Refused(`${h.symbol ?? mint} decimals ${h.decimals} disagree with the chain's ${decimals}; refusing`);
+      const own = info.quoteUsd == null ? null : x ? info.uiPrice * info.quoteUsd : info.quoteUsd;
+      return { mint, symbol: x ? info.symbolA : info.symbolB, decimals, usdPrice: h?.usdPrice ?? own,
+        program: x ? info.tokenProgramA : info.tokenProgramB };
+    };
+    const infoA = side(mintA), infoB = side(mintB);
+    for (const i of [infoA, infoB]) if (i.usdPrice == null) throw new Refused(`no USD price for ${i.symbol}; cannot size a rebalance`);
+    const [balA, balB] = await Promise.all([sellable(connection, acting, infoA), sellable(connection, acting, infoB)]);
+    const balances = { owner: acting.owner.toBase58(), custody: acting.mode,
+      A: { mint: infoA.mint, symbol: infoA.symbol, amount: balA.total, sellable: balA.avail, usd: Number(balA.usd.toFixed(4)), usdPrice: infoA.usdPrice },
+      B: { mint: infoB.mint, symbol: infoB.symbol, amount: balB.total, sellable: balB.avail, usd: Number(balB.usd.toFixed(4)), usdPrice: infoB.usdPrice },
+      targetUsdA: tA, targetUsdB: tB };
+    const plan = planRebalance(balA.usd, balB.usd, tA, tB);
+    const s = plan && planSwap(plan, infoA, infoB, balA.avail, balB.avail);
+    if (!plan || !(s.rawIn > 0n)) {
+      const out = noopReport(plan ? 'the amount to sell rounds to zero' : `both sides within ${TARGET_TOLERANCE * 100}% of target or nothing to sell`, balances);
+      console.log(JSON.stringify(out, null, 1));
+      return out;
+    }
+    const swapForY = s.sellInfo.mint === info.mintA;
+    const quote = dlmm.swapQuote(new BN(s.rawIn.toString()), swapForY, new BN(SLIPPAGE_BPS), await dlmm.getBinArrayForSwap(swapForY));
+    if (BigInt(quote.consumedInAmount.toString()) !== s.rawIn) throw new Refused('the pool cannot take the whole amount in its loaded bins; refusing');
+    const human = (raw, d) => Number(BigInt(raw.toString())) / 10 ** d;
+    const inUsd = human(s.rawIn, s.sellInfo.decimals) * s.sellInfo.usdPrice;
+    const estUsd = human(quote.outAmount, s.buyInfo.decimals) * s.buyInfo.usdPrice;
+    const minUsd = human(quote.minOutAmount, s.buyInfo.decimals) * s.buyInfo.usdPrice;
+    if (!valueLossOk(inUsd, estUsd)) throw new Refused(`the pool pays $${estUsd.toFixed(4)} for $${inUsd.toFixed(4)}; more than ${MAX_VALUE_LOSS * 100}% below fair value; refusing`);
+    if (!valueLossOk(inUsd, minUsd, MAX_VALUE_LOSS + SLIPPAGE_BPS / 1e4)) throw new Refused(`the pool pays $${minUsd.toFixed(4)} at worst for $${inUsd.toFixed(4)}; refusing`);
+    const impact = Number(quote.priceImpact.toString()) / 100;          // the SDK gives percent
+    checkImpact(impact);
+    const built = await dlmm.swap({ inToken: new PublicKey(s.sellInfo.mint), outToken: new PublicKey(s.buyInfo.mint),
+      inAmount: new BN(s.rawIn.toString()), minOutAmount: quote.minOutAmount, lbPair: new PublicKey(pool),
+      user: acting.owner, binArraysPubkey: quote.binArraysPubkey });
+    const report = { ...balances, mode: plan.mode, sellSide: plan.sellSide, buySide: plan.buySide,
+      pool, dex: 'meteora-dlmm', routePlan: ['Meteora DLMM'],
+      sold: { mint: s.sellInfo.mint, symbol: s.sellInfo.symbol, amount: s.amount, usd: Number(inUsd.toFixed(4)) },
+      bought: { mint: s.buyInfo.mint, symbol: s.buyInfo.symbol, amount: human(quote.outAmount, s.buyInfo.decimals), usd: Number(estUsd.toFixed(4)) },
+      minOutAmount: human(quote.minOutAmount, s.buyInfo.decimals), priceImpactPct: Number(impact.toFixed(8)),
+      slippageBps: SLIPPAGE_BPS, swapUsdValue: Number(inUsd.toFixed(4)), signature: null, sent: false };
+    if (!execute) {
+      const simulation = await simulate(connection, acting, built.instructions, []);
+      console.log(JSON.stringify({ ...report, simulation }, null, 1));
+      console.log('DRY RUN — swap built and simulated. Pass --execute to sign and send.');
+      return report;
+    }
+    guard();
+    const r = await sendAll(connection, [built], acting);
+    const out = { ...report, signature: r.sigs[0] ?? null, sent: true };
+    if (r.error) { out.partial = true; out.error = r.error; process.exitCode = 1; }
+    console.log(JSON.stringify(out, null, 1));
+    return out;
+  }, undefined, deps);
+}
+
 async function main() {
   const args = process.argv.slice(2);
   const execute = args.includes('--execute');
@@ -532,6 +631,7 @@ async function main() {
   if (cmd === 'harvest') return harvest(rest[0], execute);
   if (cmd === 'close') return close(rest[0], execute);
   if (cmd === 'open') return open(rest[0], rest[1], rest[2], rest[3], rest[4], execute);
+  if (cmd === 'rebalance') return rebalance(rest[0], rest[1], rest[2], rest[3], execute);
   if (cmd === 'pool') {
     const pool = poolArg(rest[0]);
     const connection = new Connection(ENDPOINTS[0], 'confirmed');
@@ -540,7 +640,7 @@ async function main() {
   }
   console.log('commands: balance [pool] | positions | status [position] | pool [pool] | '
     + 'open <pool> <lo> <hi> <maxA> <maxB> [--execute] | harvest <position> [--execute] '
-    + '| close <position> [--execute]   (pool via --pool or LPBOT_POOL)');
+    + '| close <position> [--execute] | rebalance <mintA> <mintB> <usdA> <usdB> [--execute]   (pool via --pool or LPBOT_POOL)');
 }
 
 // The CLI runs only when node starts this file; a test import runs nothing.
