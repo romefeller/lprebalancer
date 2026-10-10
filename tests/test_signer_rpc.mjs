@@ -142,19 +142,28 @@ test('signer2: a failed SDK callback is never rotated or retried', async () => {
 });
 
 test('dlmm: a first send that fails is never rotated; a later one is a partial result', async () => {
-  const conn = { sendTransaction: async () => { throw new Error('429 Too Many Requests'); } };
-  const r = await oneAttempt(SIGNERS['venues/meteora_dlmm/signer.mjs'], () => dlmm.sendAll(conn, [{}], []));
+  // the acting account signs (chains/solana/vault/account.mjs); a stand-in here
+  const acting = { transaction: () => ({ serialize: () => Buffer.alloc(1) }) };
+  const blockhash = async () => ({ blockhash: 'x', lastValidBlockHeight: 1 });
+  const conn = { getLatestBlockhash: blockhash, sendRawTransaction: async () => { throw new Error('429 Too Many Requests'); } };
+  const r = await oneAttempt(SIGNERS['venues/meteora_dlmm/signer.mjs'], () => dlmm.sendAll(conn, [{ instructions: [] }], acting));
   await assert.rejects(r.p, e => e instanceof AfterSignError && /\(not retried\): 429/.test(e.message));
   assert.equal(r.n(), 1);
   let k = 0;
   const conn2 = {
-    sendTransaction: async () => { if (k++) throw new Error('fetch failed'); return 'SIG1'; },
+    getLatestBlockhash: blockhash,
+    sendRawTransaction: async () => { if (k++) throw new Error('fetch failed'); return 'SIG1'; },
     confirmTransaction: async () => ({ value: { err: null } }),
-    getSignatureStatus: async () => ({ value: { err: null, confirmationStatus: 'confirmed' } }),
-    getLatestBlockhash: async () => ({ blockhash: 'x', lastValidBlockHeight: 1 }),
   };
-  const out = await dlmm.sendAll(conn2, [{ recentBlockhash: 'x', lastValidBlockHeight: 1 }, {}], []);
+  const out = await dlmm.sendAll(conn2, [{ instructions: [] }, { instructions: [] }], acting);
   assert.deepEqual(out.sigs, ['SIG1']); assert.match(out.error, /fetch failed/);
+});
+
+test('dlmm: a transaction that fails on chain is a failed send, not a signature', async () => {
+  const acting = { transaction: () => ({ serialize: () => Buffer.alloc(1) }) };
+  const conn = { getLatestBlockhash: async () => ({ blockhash: 'x', lastValidBlockHeight: 1 }),
+    sendRawTransaction: async () => 'SIG', confirmTransaction: async () => ({ value: { err: { InstructionError: [0, 'Custom'] } } }) };
+  await assert.rejects(dlmm.sendIxs(conn, acting, []), /SIG failed/);
 });
 
 function fakeTx() { return { message: {}, sign() {}, serialize: () => Buffer.alloc(1) }; }

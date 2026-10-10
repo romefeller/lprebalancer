@@ -12,8 +12,8 @@ import path from 'node:path';
 
 const require = createRequire(import.meta.url);
 const { LiteSvm, Account } = require('litesvm/dist/internal');
-const { Connection, PublicKey, Transaction, Keypair, AddressLookupTableAccount } = require('@solana/web3.js');
-const { AccountLayout, TOKEN_PROGRAM_ID } = require('@solana/spl-token');
+const { Connection, PublicKey, Transaction, Keypair, AddressLookupTableAccount, VersionedTransaction } = require('@solana/web3.js');
+const { AccountLayout, TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID } = require('@solana/spl-token');
 
 const bs58 = require('bs58').default;
 // memcmp filter bytes come as base58 text from most SDKs
@@ -125,6 +125,23 @@ export class Fork {
       getMinimumBalanceForRentExemption: async (n) => Number(fork.svm.minimumBalanceForRentExemption(BigInt(n))),
       getLatestBlockhash: async () => ({ blockhash: fork.svm.latestBlockhash(), lastValidBlockHeight: 1e12 }),
       getSlot: async () => Number(fork.svm.getClock().slot),
+      // What a signer sends: run at once; a failure throws with the program's
+      // logs, as a node's preflight would.
+      sendRawTransaction: async (raw) => {
+        const tx = VersionedTransaction.deserialize(raw);
+        const r = await fork.sendSigned(tx);
+        if (!r.ok) throw new Error(`fork: transaction failed\n${r.logs.join('\n')}`);
+        return bs58.encode(tx.signatures[0]);
+      },
+      confirmTransaction: async () => ({ value: { err: null } }),
+      getMultipleParsedAccounts: async (ks) => main.getMultipleParsedAccounts(ks),
+      getParsedTokenAccountsByOwner: async (owner, { mint }) => ({ value: [...fork.seen].flatMap(k => {
+        const a = fork.get(k);
+        if (!a || !(a.owner.equals(TOKEN_PROGRAM_ID) || a.owner.equals(TOKEN_2022_PROGRAM_ID)) || a.data.length < AccountLayout.span) return [];
+        const t = AccountLayout.decode(a.data.subarray(0, AccountLayout.span));
+        if (!t.owner.equals(new PublicKey(owner)) || !t.mint.equals(new PublicKey(mint))) return [];
+        return [{ pubkey: new PublicKey(k), account: { data: { parsed: { info: { tokenAmount: { amount: String(t.amount) } } } } } }];
+      }) }),
       getAddressLookupTable: async (k) => {
         const [a] = await read([new PublicKey(k)]);
         return { value: a ? new AddressLookupTableAccount({ key: new PublicKey(k), state: AddressLookupTableAccount.deserialize(a.data) }) : null };
@@ -160,7 +177,8 @@ export class Fork {
     const keys = this.keysOf(tx);
     await this.connection().getMultipleAccountsInfo(keys);
     for (const k of keys) this.seen.add(k.toBase58());
-    const r = tx instanceof Transaction ? this.svm.sendLegacyTransaction(tx.serialize()) : this.svm.sendVersionedTransaction(tx.serialize());
+    const legacy = tx instanceof Transaction || tx.version === 'legacy';
+    const r = legacy ? this.svm.sendLegacyTransaction(tx.serialize()) : this.svm.sendVersionedTransaction(tx.serialize());
     this.svm.expireBlockhash();
     const failed = typeof r.err === 'function';
     const meta = failed ? r.meta() : r;
@@ -191,8 +209,8 @@ export class Fork {
   // Every account a transaction names, its lookup tables resolved.
   keysOf(tx) {
     if (tx instanceof Transaction) return tx.compileMessage().accountKeys;
-    const m = tx.message, keys = [...m.staticAccountKeys];
-    for (const l of m.addressTableLookups) {
+    const m = tx.message, keys = [...(m.staticAccountKeys ?? m.accountKeys)];
+    for (const l of m.addressTableLookups ?? []) {
       const table = AddressLookupTableAccount.deserialize(this.get(l.accountKey).data);
       for (const i of [...l.writableIndexes, ...l.readonlyIndexes]) keys.push(table.addresses[i]);
     }

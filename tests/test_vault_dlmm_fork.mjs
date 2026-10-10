@@ -64,6 +64,21 @@ async function vaultOnFork() {
   return { fork, connection, acting, owner, payer, vault, settings, policies, env, policyKey };
 }
 
+// An outside trader swaps through the pool both ways, so positions in the
+// active bins earn real fees.
+async function trade(fork, dlmm) {
+  const trader = fork.wallet(500);
+  for (const [inToken, outToken, amount] of [[NATIVE_MINT, USDC, 200e9], [USDC, NATIVE_MINT, 20_000e6]]) {
+    await dlmm.refetchStates();
+    const swapForY = inToken.equals(NATIVE_MINT);
+    const q = dlmm.swapQuote(new BN(amount), swapForY, new BN(500), await dlmm.getBinArrayForSwap(swapForY));
+    const t = await dlmm.swap({ inToken, outToken, inAmount: new BN(amount), minOutAmount: new BN(0), lbPair: POOL,
+      user: trader.publicKey, binArraysPubkey: q.binArraysPubkey });
+    const r = await fork.send(t.instructions, trader);
+    assert.ok(r.ok, r.logs.join('\n'));
+  }
+}
+
 // Run what an SDK built, the way a signer will: wrapped, signed, sent.
 async function run(fork, acting, ixs, extra = []) {
   const r = await fork.sendSigned(acting.transaction(ixs, fork.svm.latestBlockhash(), extra));
@@ -96,17 +111,7 @@ test('a vault opens, harvests, swaps on and closes a DLMM position', { timeout: 
   assert.ok(fork.tokenAmount(usdc) < 200_000_000n, 'the USDC side came from the vault');
   assert.ok(payerSol0 - fork.balance(payer.publicKey) < 200_000_000, 'the payer paid fees and rent only');
 
-  // an outside trader swaps through the pool: the position earns fees
-  const trader = fork.wallet(500);
-  for (const [inToken, outToken, amount] of [[NATIVE_MINT, USDC, 200e9], [USDC, NATIVE_MINT, 20_000e6]]) {
-    await dlmm.refetchStates();
-    const swapForY = inToken.equals(NATIVE_MINT);
-    const q = dlmm.swapQuote(new BN(amount), swapForY, new BN(500), await dlmm.getBinArrayForSwap(swapForY));
-    const t = await dlmm.swap({ inToken, outToken, inAmount: new BN(amount), minOutAmount: new BN(0), lbPair: POOL,
-      user: trader.publicKey, binArraysPubkey: q.binArraysPubkey });
-    const r = await fork.send(t.instructions, trader);
-    assert.ok(r.ok, r.logs.join('\n'));
-  }
+  await trade(fork, dlmm);                            // the position earns fees
   const usdcPreHarvest = fork.tokenAmount(usdc);
   const claim = await dlmm.claimAllSwapFee({ owner: vault, positions: (await dlmm.getPositionsByUserAndLbPair(vault)).userPositions });
   assert.ok(claim.length > 0);
@@ -175,4 +180,54 @@ test('the bot stops when the policy on chain is not the one it was built for', {
   await assert.rejects(actingAccount({ connection, payer, venue: 'meteora-dlmm', env }), PolicyMismatch);
   // with the config updated to match, it acts again
   await actingAccount({ connection, payer, venue: 'meteora-dlmm', env: { ...env, LPBOT_VAULT_POOLS: `${POOL},${OTHER}` } });
+});
+
+// The DLMM signer itself, called as the loop calls it, in vault mode: the
+// same commands and output fields; the vault owns, the key pays.
+test('the DLMM signer runs a vault with its usual commands', { timeout: 300_000 }, async () => {
+  const { fork, connection, acting, vault, payer } = await vaultOnFork();
+  const signer = await import('../venues/meteora_dlmm/signer.mjs');
+  const deps = { urls: ['fork'], connectFn: async () => ({ connection, payer, acting }), sleep: async () => {} };
+  const said = [];
+  const log = console.log;
+  const out = async (fn) => { said.length = 0; console.log = (x) => said.push(x); try { await fn(); } finally { console.log = log; }
+    return JSON.parse(said.find(x => typeof x === 'string' && x.startsWith('{')) ?? 'null'); };
+  process.env.LPBOT_POOL = POOL.toBase58();
+  process.env.LPBOT_MAX_USD = '100000';
+
+  const value = async () => {               // the vault's holdings in USDC at the pool price
+    await dlmm.refetchStates();
+    const px = Number((await dlmm.getActiveBin()).pricePerToken);
+    return fork.balance(vault) / 1e9 * px + Number(fork.tokenAmount(getAssociatedTokenAddressSync(USDC, vault, true))) / 1e6;
+  };
+  const dlmm = await DLMM.create(connection, POOL);
+  const before = await value();
+  const b = await out(() => signer.balance(undefined, deps));
+  assert.equal(b.owner, vault.toBase58());
+  assert.equal(b.custody, 'vault');
+  assert.equal(b.balanceB, 200);
+  assert.ok(b.gasSol > 0.5 && b.sol > 1.9);
+
+  const price = Number((await dlmm.getActiveBin()).pricePerToken);
+  const opened = await out(() => signer.open(POOL.toBase58(), String(price * 0.99), String(price * 1.01), '1', '100', true, deps));
+  assert.equal(opened.sent, true, JSON.stringify(opened));
+  assert.ok(!opened.partial);
+
+  const st = await out(() => signer.status(undefined, deps));
+  assert.equal(st.positionMint, opened.positionMint);
+  assert.equal(st.inRange, true);
+  assert.ok(st.positionUsd > 0);
+
+  await trade(fork, dlmm);
+  const h = await out(() => signer.harvest(opened.positionMint, true, deps));
+  assert.ok(h.harvested === opened.positionMint && !h.partial, JSON.stringify(h));
+
+  const c = await out(() => signer.close(opened.positionMint, true, deps));
+  assert.ok(c.closed === opened.positionMint && !c.partial, JSON.stringify(c));
+  const after = await out(() => signer.status(undefined, deps));
+  assert.equal(after.positions, 0);
+  // the trades moved the price, so the mix changed; the value came home
+  const back = await value();
+  assert.ok(back > before * 0.97, `vault worth ${back.toFixed(2)} USDC after, ${before.toFixed(2)} before`);
+  assert.equal(fork.get(getAssociatedTokenAddressSync(NATIVE_MINT, vault, true)), null, 'no WSOL left wrapped');
 });

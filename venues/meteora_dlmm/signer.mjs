@@ -24,6 +24,11 @@
 // printed. The pool comes from --pool <address> or LPBOT_POOL: a position on
 // DLMM is only readable through its pool.
 //
+// Vault mode (LPBOT_VAULT_SETTINGS set; chains/solana/vault/account.mjs): the
+// money and positions belong to a Squads vault the owners control, the key
+// above only pays fees and rent, and every instruction that needs the vault
+// runs through the vault's policy. `owner` below is whoever owns the money.
+//
 // Commands:
 //   node venues/meteora_dlmm/signer.mjs balance [pool]
 //   node venues/meteora_dlmm/signer.mjs positions
@@ -40,6 +45,7 @@ import { waitTurn } from '../jupiter/gate.mjs';
 import { endpoints, overEndpoints, isEntry, AfterSignError } from '../../shared/rpc_policy.mjs';
 import { readMints, rawToUi, uiToNative, uiPrice, assertWritable, mintFields } from '../../shared/token2022.mjs';
 import SOLANA from '../../chains/solana/solana.json' with { type: 'json' };
+import { actingAccount } from '../../chains/solana/vault/account.mjs';
 import { JUPITER, jupiterHeaders } from '../jupiter/api.mjs';
 
 // The package's ESM build imports a directory and fails to load under Node 24;
@@ -48,7 +54,7 @@ const require = createRequire(import.meta.url);
 const dlmmPkg = require('@meteora-ag/dlmm');
 const DLMM = dlmmPkg.default ?? dlmmPkg;
 const { StrategyType } = dlmmPkg;
-const { Connection, Keypair, PublicKey, Transaction, sendAndConfirmTransaction } = require('@solana/web3.js');
+const { Connection, Keypair, PublicKey } = require('@solana/web3.js');
 const { BN } = require('@coral-xyz/anchor');
 
 // A keyed endpoint from the environment first. Indexed reads
@@ -59,6 +65,9 @@ const MAX_USD = Number(process.env.LPBOT_MAX_USD ?? 260);
 const SLIPPAGE_BPS = Number(process.env.LPBOT_SLIPPAGE_BPS ?? 100);
 const GAS_RESERVE_SOL = Number(process.env.LPBOT_GAS_RESERVE_SOL ?? 0.02);
 const POSITION_MAX_LENGTH = 1400;      // bins per position, the program's limit
+// SOL a vault keeps for itself: its own rent-exempt minimum and the rent of
+// a WSOL account the SDK opens for a swap. Never deposited.
+const VAULT_SOL_FLOOR = 0.005;
 
 const NATIVE_MINT = SOLANA.native_mint;
 // Stablecoins by MINT (USDC, USDT, PYUSD, USDS). A symbol comes from API or token metadata an
@@ -161,7 +170,8 @@ async function connect(url) {
   guard();
   const connection = new Connection(url, 'confirmed');
   const payer = Keypair.fromSecretKey(await secretBytes());
-  return { connection, payer };
+  const acting = await actingAccount({ connection, payer, venue: 'meteora-dlmm' });
+  return { connection, payer, acting };
 }
 
 // Run the whole operation over the endpoints (shared/rpc_policy.mjs). A rate limit,
@@ -183,24 +193,26 @@ async function splBalance(connection, owner, mint, decimals, multiplier, lamport
   return rawToUi(raw, decimals, multiplier);
 }
 
-async function balance(poolExplicit) {
+export async function balance(poolExplicit, deps) {
   const pool = poolArg(poolExplicit);
-  return withRpc(async ({ connection, payer }) => {
+  return withRpc(async ({ connection, payer, acting }) => {
     const dlmm = await DLMM.create(connection, new PublicKey(pool));
     const info = await describe(pool, dlmm, connection);
-    const lamports = await connection.getBalance(payer.publicKey);
-    const out = { owner: payer.publicKey.toBase58(), sol: lamports / 1e9, pool, dex: 'meteora-dlmm',
+    const lamports = await connection.getBalance(acting.owner);
+    // gasSol: what pays the fees (the owner itself unless a vault holds the money)
+    const gasSol = acting.mode === 'vault' ? (await connection.getBalance(payer.publicKey)) / 1e9 : lamports / 1e9;
+    const out = { owner: acting.owner.toBase58(), custody: acting.mode, sol: lamports / 1e9, gasSol, pool, dex: 'meteora-dlmm',
       tokenA: info.symbolA, tokenB: info.symbolB, price: info.price, uiPrice: info.uiPrice,
       quoteUsd: info.quoteUsd, nativeSide: info.nativeSide, ...mintFields(...info.mints) };
-    out.balanceA = await splBalance(connection, payer.publicKey, info.mintA, info.decimalsA, info.multiplierA, lamports);
-    out.balanceB = await splBalance(connection, payer.publicKey, info.mintB, info.decimalsB, info.multiplierB, lamports);
+    out.balanceA = await splBalance(connection, acting.owner, info.mintA, info.decimalsA, info.multiplierA, lamports);
+    out.balanceB = await splBalance(connection, acting.owner, info.mintB, info.decimalsB, info.multiplierB, lamports);
     const inQuote = out.balanceA * info.uiPrice + out.balanceB;
     const solUsd = info.nativeSide ? null : await tokenUsd(NATIVE_MINT);
     out.walletUsd = info.quoteUsd == null ? null
       : Number((inQuote * info.quoteUsd + (info.nativeSide ? 0 : out.sol * (solUsd ?? 0))).toFixed(4));
     console.log(JSON.stringify(out, null, 1));
     return out;
-  });
+  }, undefined, deps);
 }
 
 // Amounts in UI units, valued at the UI price; band and price pool-native.
@@ -274,12 +286,12 @@ async function solUsd(info) {
   return tokenUsd(NATIVE_MINT);
 }
 
-async function status(positionArg) {
+export async function status(positionArg, deps) {
   const pool = poolArg();
-  return withRpc(async ({ connection, payer }) => {
+  return withRpc(async ({ connection, acting }) => {
     const dlmm = await DLMM.create(connection, new PublicKey(pool));
     const info = await describe(pool, dlmm, connection);
-    const { userPositions } = await dlmm.getPositionsByUserAndLbPair(payer.publicKey);
+    const { userPositions } = await dlmm.getPositionsByUserAndLbPair(acting.owner);
     if (!userPositions.length
         || (positionArg && !userPositions.some(p => p.publicKey.toBase58() === positionArg))) {
       console.log(JSON.stringify({ positions: 0, positionMint: null, pool }, null, 1));
@@ -291,14 +303,14 @@ async function status(positionArg) {
     out.rentUsd = su != null ? Number((out.rentSol * su).toFixed(4)) : null;
     console.log(JSON.stringify(out, null, 1));
     return out;
-  });
+  }, undefined, deps);
 }
 
 async function positions() {
   const pool = poolArg();
-  return withRpc(async ({ connection, payer }) => {
+  return withRpc(async ({ connection, acting }) => {
     const dlmm = await DLMM.create(connection, new PublicKey(pool));
-    const { userPositions } = await dlmm.getPositionsByUserAndLbPair(payer.publicKey);
+    const { userPositions } = await dlmm.getPositionsByUserAndLbPair(acting.owner);
     console.log(JSON.stringify(userPositions.map(p => ({
       address: p.publicKey.toBase58(), pool,
       lowerBinId: p.positionData.lowerBinId, upperBinId: p.positionData.upperBinId,
@@ -307,14 +319,25 @@ async function positions() {
   });
 }
 
+// Sign `ixs` for `acting` on a fresh blockhash, send, and wait for
+// `confirmed`. Returns the signature; throws if it failed on chain.
+export async function sendIxs(connection, acting, ixs, extra = []) {
+  const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('confirmed');
+  const tx = acting.transaction(ixs, blockhash, extra);
+  const signature = await connection.sendRawTransaction(tx.serialize());
+  const r = await connection.confirmTransaction({ signature, blockhash, lastValidBlockHeight }, 'confirmed');
+  if (r?.value?.err) throw new Error(`transaction ${signature} failed: ${JSON.stringify(r.value.err)}`);
+  return signature;
+}
+
 // Sends in order. Throws only if NOTHING was sent; after the first send a
 // failure comes back as {sigs, error} so the caller reports a partial result
 // instead of letting withRpc retry the whole operation.
-export async function sendAll(connection, txs, signers) {
+export async function sendAll(connection, txs, acting) {
   const sigs = [];
   for (const tx of Array.isArray(txs) ? txs : [txs]) {
     try {
-      sigs.push(await sendAndConfirmTransaction(connection, tx, signers, { commitment: 'confirmed' }));
+      sigs.push(await sendIxs(connection, acting, tx.instructions));
     } catch (e) {
       // Nothing confirmed, but the send may still reach a node: never
       // rotated, never retried (AfterSignError).
@@ -332,15 +355,13 @@ function reportSent(base, r) {
 }
 
 // Simulate one built transaction without sending it. Signing is local; the
-// report carries the program's verdict, so a dry run proves the instructions.
-// A wallet without the tokens fails here on the token transfer ("insufficient
-// funds"), after every account and instruction has been checked.
-async function simulate(connection, ixs, signers, feePayer) {
+// report carries the program's verdict, so a dry run proves the instructions
+// (in vault mode, the policy's verdict too). A wallet without the tokens
+// fails here on the token transfer ("insufficient funds"), after every
+// account and instruction has been checked.
+async function simulate(connection, acting, ixs, extra) {
   try {
-    const tx = new Transaction().add(...ixs);
-    tx.feePayer = feePayer;
-    tx.recentBlockhash = (await connection.getLatestBlockhash('confirmed')).blockhash;
-    tx.sign(...signers);
+    const tx = acting.transaction(ixs, (await connection.getLatestBlockhash('confirmed')).blockhash, extra);
     const res = await connection.simulateTransaction(tx);
     const logs = res.value.logs ?? [];
     return { ok: res.value.err == null, err: res.value.err == null ? null : JSON.stringify(res.value.err),
@@ -352,17 +373,10 @@ async function simulate(connection, ixs, signers, feePayer) {
   }
 }
 
-// The keypairs a transaction needs: the payer, plus the new position's key
-// when an instruction expects its signature.
-function signersOf(ixs, part, payer) {
-  return ixs.some(ix => ix.keys.some(k => k.isSigner && k.pubkey.equals(part.positionKeypair.publicKey)))
-    ? [payer, part.positionKeypair] : [payer];
-}
-
 // maxA and maxB are UI amounts (what the wallet shows); the deposit is sized
 // in pool-native units at the pool price and reported back in UI units.
-async function open(pool, lower, upper, maxA, maxB, execute) {
-  return withRpc(async ({ connection, payer }) => {
+export async function open(pool, lower, upper, maxA, maxB, execute, deps) {
+  return withRpc(async ({ connection, payer, acting }) => {
     const dlmm = await DLMM.create(connection, new PublicKey(pool));
     const info = await describe(pool, dlmm, connection);
     assertWritable(info.mints);
@@ -384,7 +398,11 @@ async function open(pool, lower, upper, maxA, maxB, execute) {
     // the bins below, so the deposit is whatever amounts are handed in. Take a
     // 50/50 split in quote terms, bounded by both caps.
     const price = info.price;
-    const capA = uiToNative(Number(maxA), info.multiplierA), capB = uiToNative(Number(maxB), info.multiplierB);
+    let capA = uiToNative(Number(maxA), info.multiplierA), capB = uiToNative(Number(maxB), info.multiplierB);
+    if (acting.mode === 'vault' && info.nativeSide) {
+      const spare = Math.max(0, (await connection.getBalance(acting.owner)) / 1e9 - VAULT_SOL_FLOOR);
+      if (info.nativeSide === 'A') capA = Math.min(capA, spare); else capB = Math.min(capB, spare);
+    }
     let amtA = Math.min(capA, capB / price);
     let amtB = Math.min(capB, amtA * price);
     amtA = Math.min(amtA, amtB / price);
@@ -398,7 +416,7 @@ async function open(pool, lower, upper, maxA, maxB, execute) {
       new BN(Math.floor(amtA * 10 ** info.decimalsA).toString()),
       new BN(Math.floor(amtB * 10 ** info.decimalsB).toString()),
       { minBinId, maxBinId, strategyType: StrategyType.Spot },
-      payer.publicKey, payer.publicKey, SLIPPAGE_BPS / 100);
+      acting.owner, payer.publicKey, SLIPPAGE_BPS / 100);
     const parts = built.instructionsByPositions;
     const txCount = parts.reduce((n, p) => n + p.transactionInstructions.length, 0);
     const report = {
@@ -419,7 +437,7 @@ async function open(pool, lower, upper, maxA, maxB, execute) {
     if (!execute) {
       // The first transaction only: the later ones act on the position it creates.
       const first = parts[0]?.transactionInstructions[0];
-      const simulation = first ? await simulate(connection, first, signersOf(first, parts[0], payer), payer.publicKey) : null;
+      const simulation = first ? await simulate(connection, acting, first, [parts[0].positionKeypair]) : null;
       console.log(JSON.stringify({ ...report, simulation, simulated: first ? `1 of ${txCount}` : 'none', sent: false }, null, 1));
       console.log('DRY RUN — instructions built. Pass --execute to sign and send.');
       return;
@@ -432,9 +450,7 @@ async function open(pool, lower, upper, maxA, maxB, execute) {
     try {
       for (const part of parts) {
         for (const ixs of part.transactionInstructions) {
-          const tx = new Transaction().add(...ixs);
-          tx.feePayer = payer.publicKey;
-          sigs.push(await sendAndConfirmTransaction(connection, tx, signersOf(ixs, part, payer), { commitment: 'confirmed' }));
+          sigs.push(await sendIxs(connection, acting, ixs, [part.positionKeypair]));
         }
       }
     } catch (e) {
@@ -444,7 +460,7 @@ async function open(pool, lower, upper, maxA, maxB, execute) {
       return;
     }
     console.log(JSON.stringify({ ...report, sent: true, signature: sigs[sigs.length - 1], signatures: sigs }, null, 1));
-  });
+  }, undefined, deps);
 }
 
 // All of the wallet's positions on the pool, provided the one named is among
@@ -457,35 +473,35 @@ async function findPositions(dlmm, owner, address) {
   return userPositions;
 }
 
-async function harvest(address, execute) {
+export async function harvest(address, execute, deps) {
   const pool = poolArg();
-  return withRpc(async ({ connection, payer }) => {
+  return withRpc(async ({ connection, acting }) => {
     const dlmm = await DLMM.create(connection, new PublicKey(pool));
     assertWritable(await poolMints(connection, [dlmm.tokenX.publicKey.toBase58(), dlmm.tokenY.publicKey.toBase58()]));
-    const ps = await findPositions(dlmm, payer.publicKey, address);
-    const txs = await dlmm.claimAllSwapFee({ owner: payer.publicKey, positions: ps });
+    const ps = await findPositions(dlmm, acting.owner, address);
+    const txs = await dlmm.claimAllSwapFee({ owner: acting.owner, positions: ps });
     if (!execute) {
       console.log(JSON.stringify({ mint: address, transactions: txs.length, sent: false }, null, 1));
       console.log('DRY RUN — pass --execute to collect fees.');
       return;
     }
     if (!txs.length) { console.log(JSON.stringify({ harvested: address, signature: null, note: 'nothing to claim' }, null, 1)); return; }
-    reportSent({ harvested: address }, await sendAll(connection, txs, [payer]));
-  });
+    reportSent({ harvested: address }, await sendAll(connection, txs, acting));
+  }, undefined, deps);
 }
 
-async function close(address, execute) {
+export async function close(address, execute, deps) {
   const pool = poolArg();
-  return withRpc(async ({ connection, payer }) => {
+  return withRpc(async ({ connection, acting }) => {
     const dlmm = await DLMM.create(connection, new PublicKey(pool));
     assertWritable(await poolMints(connection, [dlmm.tokenX.publicKey.toBase58(), dlmm.tokenY.publicKey.toBase58()]));
-    const ps = await findPositions(dlmm, payer.publicKey, address);
+    const ps = await findPositions(dlmm, acting.owner, address);
     // All liquidity out, fees claimed, accounts closed: one batch per position.
     const txs = [];
     for (const p of ps) {
       const d = p.positionData;
       txs.push(...await dlmm.removeLiquidity({
-        user: payer.publicKey, position: p.publicKey,
+        user: acting.owner, position: p.publicKey,
         fromBinId: d.lowerBinId, toBinId: d.upperBinId,
         bps: new BN(10000), shouldClaimAndClose: true,
       }));
@@ -500,8 +516,8 @@ async function close(address, execute) {
       console.log('DRY RUN — close instructions built. Pass --execute to send.');
       return;
     }
-    reportSent({ closed: address }, await sendAll(connection, txs, [payer]));
-  });
+    reportSent({ closed: address }, await sendAll(connection, txs, acting));
+  }, undefined, deps);
 }
 
 async function main() {
