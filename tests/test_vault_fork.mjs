@@ -43,7 +43,7 @@ async function setup() {
     { kind: 'policyCreate', seed: 1, policy: wrapPolicy(vault), signers: [{ key: policyKey.publicKey }] },
     { kind: 'removeSigner', key: bot.publicKey },
   ] });
-  const r = fork.send([create, settle], bot);
+  const r = await fork.send([create, settle], bot);
   assert.ok(r.ok, r.logs.join('\n'));
   return { fork, owner, bot, policyKey, settings, vault, policy };
 }
@@ -65,9 +65,9 @@ test('the policy key wraps vault SOL into the vault\'s own WSOL account', async 
   fork.fund(vault, 0.5);
   const ata = getAssociatedTokenAddressSync(NATIVE_MINT, vault, true);
   // the token account exists first (created by the payer, owned by the vault)
-  assert.ok(fork.send([createAssociatedTokenAccountIdempotentInstruction(bot.publicKey, ata, vault, NATIVE_MINT)], bot).ok);
+  assert.ok((await fork.send([createAssociatedTokenAccountIdempotentInstruction(bot.publicKey, ata, vault, NATIVE_MINT)], bot)).ok);
   const ixs = [SystemProgram.transfer({ fromPubkey: vault, toPubkey: ata, lamports: 100_000_000 }), createSyncNativeInstruction(ata)];
-  const r = fork.send([sq.policyExecuteIx({ policy, signer: policyKey.publicKey, vault, ixs, indices: [0, 1] })], bot, [policyKey]);
+  const r = await fork.send([sq.policyExecuteIx({ policy, signer: policyKey.publicKey, vault, ixs, indices: [0, 1] })], bot, [policyKey]);
   assert.ok(r.ok, r.logs.join('\n'));
   assert.equal(fork.get(ata).data.readBigUInt64LE(64), 100_000_000n);
 });
@@ -77,11 +77,11 @@ test('the program refuses the same transfer to an account the vault does not own
   fork.fund(vault, 0.5);
   const thief = Keypair.generate().publicKey;
   const theirs = getAssociatedTokenAddressSync(NATIVE_MINT, thief);
-  assert.ok(fork.send([createAssociatedTokenAccountIdempotentInstruction(bot.publicKey, theirs, thief, NATIVE_MINT)], bot).ok);
+  assert.ok((await fork.send([createAssociatedTokenAccountIdempotentInstruction(bot.publicKey, theirs, thief, NATIVE_MINT)], bot)).ok);
   // a wallet fails the owner-program check, a token account the owner-field check
   for (const to of [thief, theirs]) {
     const ixs = [SystemProgram.transfer({ fromPubkey: vault, toPubkey: to, lamports: 100_000_000 })];
-    const r = fork.send([sq.policyExecuteIx({ policy, signer: policyKey.publicKey, vault, ixs, indices: [0] })], bot, [policyKey]);
+    const r = await fork.send([sq.policyExecuteIx({ policy, signer: policyKey.publicKey, vault, ixs, indices: [0] })], bot, [policyKey]);
     assert.ok(!r.ok, `transfer to ${to.toBase58()} went through`);
     assert.match(r.logs.join('\n'), /IllegalAccountOwner|ProgramInteractionInvalidNumericValue/);
   }
@@ -92,8 +92,8 @@ test('the bot key alone can neither use the policy nor act as an owner', async (
   const { fork, bot, vault, policy, settings } = await setup();
   fork.fund(vault, 0.5);
   const ixs = [SystemProgram.transfer({ fromPubkey: vault, toPubkey: bot.publicKey, lamports: 100_000_000 })];
-  assert.ok(!fork.send([sq.policyExecuteIx({ policy, signer: bot.publicKey, vault, ixs, indices: [0] })], bot).ok);
-  assert.ok(!fork.send([sq.ownerExecuteIx({ settings, signers: [bot.publicKey], vault, ixs })], bot).ok);
+  assert.ok(!(await fork.send([sq.policyExecuteIx({ policy, signer: bot.publicKey, vault, ixs, indices: [0] })], bot)).ok);
+  assert.ok(!(await fork.send([sq.ownerExecuteIx({ settings, signers: [bot.publicKey], vault, ixs })], bot)).ok);
   assert.equal(fork.balance(vault), 500_000_000);
 });
 
@@ -102,7 +102,7 @@ test('the owner withdraws alone, with no policy and no bot', async () => {
   fork.fund(vault, 0.5);
   const before = fork.balance(owner.publicKey);
   const ixs = [SystemProgram.transfer({ fromPubkey: vault, toPubkey: owner.publicKey, lamports: 400_000_000 })];
-  const r = fork.send([sq.ownerExecuteIx({ settings, signers: [owner.publicKey], vault, ixs })], owner);
+  const r = await fork.send([sq.ownerExecuteIx({ settings, signers: [owner.publicKey], vault, ixs })], owner);
   assert.ok(r.ok, r.logs.join('\n'));
   assert.equal(fork.balance(vault), 100_000_000);
   assert.equal(fork.balance(owner.publicKey) - before, 400_000_000 - 5000);
@@ -113,21 +113,21 @@ test('the owner revokes the bot alone: the policy keeps only the owner, the bot 
   fork.fund(vault, 0.5);
   // Removing the policy refunds its rent to the bot's payer, which would have
   // to sign; an update needs only the owners.
-  const r = fork.send([sq.settingsSyncIx({ settings, signers: [owner.publicKey], rentPayer: owner.publicKey, extra: [policy], actions: [
+  const r = await fork.send([sq.settingsSyncIx({ settings, signers: [owner.publicKey], rentPayer: owner.publicKey, extra: [policy], actions: [
     { kind: 'policyUpdate', address: policy, policy: wrapPolicy(vault), signers: [{ key: owner.publicKey }] }] })], owner);
   assert.ok(r.ok, r.logs.join('\n'));
   assert.deepEqual(sq.decodePolicyHead(fork.get(policy).data).signers.map(x => x.key.toBase58()), [owner.publicKey.toBase58()]);
   const ata = getAssociatedTokenAddressSync(NATIVE_MINT, vault, true);
-  assert.ok(fork.send([createAssociatedTokenAccountIdempotentInstruction(bot.publicKey, ata, vault, NATIVE_MINT)], bot).ok);
+  assert.ok((await fork.send([createAssociatedTokenAccountIdempotentInstruction(bot.publicKey, ata, vault, NATIVE_MINT)], bot)).ok);
   const ixs = [SystemProgram.transfer({ fromPubkey: vault, toPubkey: ata, lamports: 1 }), createSyncNativeInstruction(ata)];
-  assert.ok(!fork.send([sq.policyExecuteIx({ policy, signer: policyKey.publicKey, vault, ixs, indices: [0, 1] })], bot, [policyKey]).ok);
+  assert.ok(!(await fork.send([sq.policyExecuteIx({ policy, signer: policyKey.publicKey, vault, ixs, indices: [0, 1] })], bot, [policyKey])).ok);
 });
 
 test('the bot\'s payer closes a policy and takes its rent back', async () => {
   const { fork, owner, bot, policy, settings } = await setup();
   // A removal is a settings change: the owners sign it, the payer signs for the refund.
   const before = fork.balance(bot.publicKey);
-  const r = fork.send([sq.settingsSyncIx({ settings, signers: [owner.publicKey], rentPayer: bot.publicKey, extra: [policy],
+  const r = await fork.send([sq.settingsSyncIx({ settings, signers: [owner.publicKey], rentPayer: bot.publicKey, extra: [policy],
     actions: [{ kind: 'policyRemove', address: policy }] })], bot, [owner]);
   assert.ok(r.ok, r.logs.join('\n'));
   assert.equal(fork.get(policy), null);

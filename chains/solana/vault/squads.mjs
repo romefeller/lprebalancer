@@ -171,6 +171,13 @@ function putProgramInteraction(w, p) {
   w.vec([], () => {});                           // no spending limits
 }
 
+// The bytes of a ProgramInteraction policy as the program stores them: the
+// same layout as its creation payload while it has no spending limits. The
+// bot compares these with the policy on chain before it acts (policyState).
+export function encodeProgramInteraction(policy) {
+  const w = new Writer(); putProgramInteraction(w, policy); return w.done();
+}
+
 // --- the inner instructions of a synchronous transaction ---------------------
 
 // Compile instructions against one flat account list, the way the program
@@ -332,12 +339,21 @@ export function decodeSettings(data) {
   return s;
 }
 
-// The head of a policy account: whose it is and who may use it. The policy
-// state after it is read back only by the fork tests, through the program.
+// The head of a policy account: whose it is and who may use it.
 export function decodePolicyHead(data) {
   const r = expectAccount(data, 'policy');
   return {
     settings: r.key(), seed: r.u64(), bump: r.u8(), transactionIndex: r.u64(), staleTransactionIndex: r.u64(),
     signers: r.vec(r => ({ key: r.key(), permissions: r.u8() })), threshold: r.u16(), timeLock: r.u32(),
+    stateOffset: 8 + r.o,
   };
+}
+
+// True when the policy on chain is exactly `policy`: a ProgramInteraction
+// state with these bytes. Anything else (another kind, an owner's edit, a
+// spending limit) is not the policy the bot was built for.
+export function policyStateIs(data, policy) {
+  const { stateOffset } = decodePolicyHead(data);
+  const want = Buffer.concat([Buffer.from([3]), encodeProgramInteraction(policy)]);
+  return Buffer.from(data.subarray(stateOffset, stateOffset + want.length)).equals(want);
 }

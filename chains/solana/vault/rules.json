@@ -1,0 +1,214 @@
+{
+  "_doc": [
+    "What the bot may do with a vault, per venue. vault/policy.mjs compiles a venue's rules",
+    "plus 'common' and 'payout' into policies on chain, as many as their size needs (one",
+    "settings transaction carries one policy, so each must fit a transaction).",
+    "Each pin names an account of the instruction by position and the role it must play:",
+    "  pool          one of the pools the owners approved for this vault",
+    "  vault         the vault itself",
+    "  vaultToken    an account whose token-owner field is the vault. Enough where the",
+    "                instruction moves tokens into it: the token program rejects anything",
+    "                that is not a real token account",
+    "  vaultWsol     the same, and owned by the SPL Token program: for a plain SOL transfer,",
+    "                which no token program checks",
+    "  vaultOrPayer  the vault, or the bot's payer (rent the payer paid goes back to it)",
+    "  payout        a token account of a payout wallet (profit wallet, fee wallet)",
+    "  none          the venue program itself: the placeholder for an empty optional account",
+    "Only accounts money can flow to are pinned, plus the pool. The vault's own signature",
+    "  (the wallet of an associated token account is pinned the same way: index 2 = vault)",
+    "needs no pin: no other account can sign as the vault. An instruction not listed here",
+    "cannot run through the vault. Discriminators are the venue programs' own",
+    "(Anchor: sha256('global:<name>')[0..8]).",
+    "A rule with \"opens\": true creates accounts that later instructions are checked",
+    "against. The program checks every instruction of a call before it runs any, so such",
+    "an instruction ends its call and the next one starts after it has run."
+  ],
+  "common": [
+    {
+      "program": "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL",
+      "name": "open a token account for the vault (associated, idempotent; the vault pays its own rent)",
+      "discriminator": {
+        "type": "u8",
+        "value": 1
+      },
+      "pins": [
+        {
+          "index": 2,
+          "role": "vault"
+        }
+      ],
+      "opens": true
+    },
+    {
+      "program": "11111111111111111111111111111111",
+      "name": "wrap SOL (transfer into a WSOL account of the vault)",
+      "discriminator": {
+        "type": "u32",
+        "value": 2
+      },
+      "pins": [
+        {
+          "index": 1,
+          "role": "vaultWsol"
+        }
+      ]
+    },
+    {
+      "program": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+      "name": "unwrap SOL (close a WSOL account back into the vault)",
+      "discriminator": {
+        "type": "u8",
+        "value": 9
+      },
+      "pins": [
+        {
+          "index": 1,
+          "role": "vault"
+        }
+      ]
+    }
+  ],
+  "payout": [
+    {
+      "program": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+      "name": "pay out (TransferChecked to a payout wallet only)",
+      "discriminator": {
+        "type": "u8",
+        "value": 12
+      },
+      "pins": [
+        {
+          "index": 2,
+          "role": "payout"
+        }
+      ]
+    }
+  ],
+  "venues": {
+    "meteora-dlmm": {
+      "program": "LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo",
+      "instructions": [
+        {
+          "name": "initialize_position2",
+          "discriminator": "8f13f291d50f6873",
+          "pins": [
+            {
+              "index": 2,
+              "role": "pool"
+            }
+          ]
+        },
+        {
+          "name": "rebalance_liquidity",
+          "discriminator": "5c04b0c177b95309",
+          "pins": [
+            {
+              "index": 1,
+              "role": "pool"
+            },
+            {
+              "index": 3,
+              "role": "vaultToken"
+            },
+            {
+              "index": 4,
+              "role": "vaultToken"
+            }
+          ]
+        },
+        {
+          "name": "remove_liquidity_by_range2",
+          "discriminator": "cc02c391359191cd",
+          "pins": [
+            {
+              "index": 1,
+              "role": "pool"
+            },
+            {
+              "index": 3,
+              "role": "vaultToken"
+            },
+            {
+              "index": 4,
+              "role": "vaultToken"
+            }
+          ]
+        },
+        {
+          "name": "claim_fee2",
+          "discriminator": "70bf65ab1c907fbb",
+          "pins": [
+            {
+              "index": 0,
+              "role": "pool"
+            },
+            {
+              "index": 5,
+              "role": "vaultToken"
+            },
+            {
+              "index": 6,
+              "role": "vaultToken"
+            }
+          ]
+        },
+        {
+          "name": "claim_reward2",
+          "discriminator": "be037f77b2579db7",
+          "pins": [
+            {
+              "index": 0,
+              "role": "pool"
+            },
+            {
+              "index": 5,
+              "role": "vaultToken"
+            }
+          ]
+        },
+        {
+          "name": "close_position2",
+          "discriminator": "ae5a2373ba2893e2",
+          "pins": [
+            {
+              "index": 2,
+              "role": "vaultOrPayer"
+            }
+          ]
+        },
+        {
+          "name": "close_position_if_empty",
+          "discriminator": "3b7cd4765b986e9d",
+          "pins": [
+            {
+              "index": 2,
+              "role": "vaultOrPayer"
+            }
+          ]
+        },
+        {
+          "name": "swap2",
+          "discriminator": "414b3f4ceb5b5b88",
+          "pins": [
+            {
+              "index": 0,
+              "role": "pool"
+            },
+            {
+              "index": 4,
+              "role": "vaultToken"
+            },
+            {
+              "index": 5,
+              "role": "vaultToken"
+            },
+            {
+              "index": 9,
+              "role": "none"
+            }
+          ]
+        }
+      ]
+    }
+  }
+}
