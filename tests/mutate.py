@@ -1290,7 +1290,12 @@ def worker_setup(i):
     if base.exists():
         shutil.rmtree(base)
     base.mkdir(parents=True)
-    shutil.copytree(ROOT, base / 'lp_bot', ignore=shutil.ignore_patterns('__pycache__', 'research', '*.jsonl'))
+    # node_modules, .git and agent worktrees are linked or left out, never copied:
+    # eight full copies filled the disk on 2026-10-10.
+    shutil.copytree(ROOT, base / 'lp_bot', ignore=shutil.ignore_patterns('__pycache__', 'research', '*.jsonl',
+                                                                           'node_modules', '.git', '.claude'))
+    if (ROOT / 'node_modules').is_dir():
+        (base / 'lp_bot' / 'node_modules').symlink_to(ROOT / 'node_modules')
     # The Solana packages live in the nearest node_modules above the tree that
     # holds them: the parent's for the live checkout, further up for a git
     # worktree under it (the tree's own node_modules, viem, is in the copy).
