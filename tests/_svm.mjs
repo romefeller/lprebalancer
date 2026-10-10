@@ -134,6 +134,10 @@ export class Fork {
         return bs58.encode(tx.signatures[0]);
       },
       confirmTransaction: async () => ({ value: { err: null } }),
+      // a send that returned ran in full: it is confirmed at once
+      getSignatureStatuses: async (sigs) => ({ value: sigs.map(() => ({ err: null, confirmationStatus: 'confirmed' })) }),
+      getBlockHeight: async () => 0,
+      getRecentPrioritizationFees: async () => [],
       getMultipleParsedAccounts: async (ks) => main.getMultipleParsedAccounts(ks),
       getParsedTokenAccountsByOwner: async (owner, { mint }) => ({ value: [...fork.seen].flatMap(k => {
         const a = fork.get(k);

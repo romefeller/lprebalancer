@@ -28,7 +28,7 @@ const POOL = new PublicKey('BGm1tav58oGcsQJehL9WXBFXF7D27vZsKefj4xJKD5Y');      
 const OTHER = new PublicKey('5rCf1DM8LjKTw4YqhnoLcngyZYeNnQqztScTogYHAS6');       // SOL/USDC, not approved
 const USDC = new PublicKey('EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v');
 
-async function vaultOnFork({ usdc = 200_000_000n } = {}) {
+async function vaultOnFork({ usdc = 200_000_000n, payoutWallets = [] } = {}) {
   const fork = new Fork();
   await Promise.all([fork.program(sq.PROGRAM_ID), fork.program(DLMM_PROGRAM)]);
   await fork.syncClock();
@@ -37,7 +37,8 @@ async function vaultOnFork({ usdc = 200_000_000n } = {}) {
   await fork.clone([config.treasury]);
   const owner = fork.wallet(1), payer = fork.wallet(1), policyKey = Keypair.generate();
   const seed = config.smartAccountIndex + 1n, vault = sq.vaultPda(sq.settingsPda(seed));
-  const compiled = compile('meteora-dlmm', { vault, payer: payer.publicKey, pools: [POOL] });
+  const payouts = payoutWallets.map(w => getAssociatedTokenAddressSync(USDC, w, true));
+  const compiled = compile('meteora-dlmm', { vault, payer: payer.publicKey, pools: [POOL], payouts });
   const plan = connectPlan({ creator: payer.publicKey, treasury: config.treasury, seed, owners: [owner.publicKey],
     threshold: 1, policyKey: policyKey.publicKey, compiled });
   for (const ixs of plan.txs) { const r = await fork.send(ixs, payer); assert.ok(r.ok, r.logs.join('\n')); assert.ok(r.size <= 1232); }
@@ -51,7 +52,8 @@ async function vaultOnFork({ usdc = 200_000_000n } = {}) {
   const keyFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'vault-')), 'policy.json');
   fs.writeFileSync(keyFile, JSON.stringify([...policyKey.secretKey]));
   const env = { LPBOT_VAULT_SETTINGS: settings.toBase58(), LPBOT_VAULT_POLICIES: policies.join(','),
-    LPBOT_VAULT_POLICY_KEY: keyFile, LPBOT_VAULT_POOLS: POOL.toBase58() };
+    LPBOT_VAULT_POLICY_KEY: keyFile, LPBOT_VAULT_POOLS: POOL.toBase58(), LPBOT_VAULT_PAYOUTS: payouts.join(','),
+    LPBOT_VAULT_VENUE: 'meteora-dlmm' };
   const connection = fork.connection();
   // the vault's lookup table: the pool's accounts and the vault's own
   const dlmmVenue = venue('meteora-dlmm');
@@ -61,7 +63,9 @@ async function vaultOnFork({ usdc = 200_000_000n } = {}) {
   fork.nextSlot();
   env.LPBOT_VAULT_LOOKUP = lookup.table.toBase58();
   const acting = await actingAccount({ connection, payer, venue: 'meteora-dlmm', env });
-  return { fork, connection, acting, owner, payer, vault, settings, policies, env, policyKey };
+  const payerFile = path.join(path.dirname(keyFile), 'payer.json');
+  fs.writeFileSync(payerFile, JSON.stringify([...payer.secretKey]));
+  return { fork, connection, acting, owner, payer, vault, settings, policies, env, policyKey, payerFile };
 }
 
 // An outside trader swaps through the pool both ways, so positions in the
@@ -268,4 +272,31 @@ test('rebalance: a price the pool does not pay is refused before anything is sig
   try {
     await assert.rejects(signer.rebalance(NATIVE_MINT.toBase58(), USDC.toBase58(), '50', '50', true, deps), /below fair value/);
   } finally { delete process.env.LPBOT_TOKEN_HINTS; }
+});
+
+// Payouts leave the vault only for the payout wallets the owners approved.
+test('payout: the vault pays the profit and fee wallets, and nothing else', { timeout: 300_000 }, async () => {
+  const profit = Keypair.generate().publicKey, feeWallet = Keypair.generate().publicKey;
+  const { fork, connection, vault, env, payerFile } = await vaultOnFork({ payoutWallets: [profit, feeWallet] });
+  const payout = await import('../chains/solana/payout.mjs');
+  process.env.WALLET_SECRET_PATH = payerFile;
+  const penv = { ...env, LPBOT_PROFIT_WALLET: profit.toBase58(), LPBOT_FEE_WALLET: feeWallet.toBase58() };
+  const said = [], log = console.log;
+  console.log = (x) => said.push(x);
+  try {
+    await payout.sendFromVault(USDC.toBase58(), '5', profit.toBase58(), true, { env: penv, connection });
+    await payout.sendFromVault(USDC.toBase58(), '0.5', feeWallet.toBase58(), true, { env: penv, connection });
+  } finally { console.log = log; }
+  const reports = said.filter(x => typeof x === 'string' && x.startsWith('{')).map(JSON.parse);
+  assert.ok(reports.every(r => r.sent && !r.partial && r.custody === 'vault'), JSON.stringify(reports));
+  assert.equal(fork.tokenAmount(getAssociatedTokenAddressSync(USDC, profit, true)), 5_000_000n);
+  assert.equal(fork.tokenAmount(getAssociatedTokenAddressSync(USDC, feeWallet, true)), 500_000n);
+  assert.equal(fork.tokenAmount(getAssociatedTokenAddressSync(USDC, vault, true)), 194_500_000n);
+
+  const stranger = Keypair.generate().publicKey;
+  await assert.rejects(payout.sendFromVault(USDC.toBase58(), '1', stranger.toBase58(), true, { env: penv, connection }), /neither the profit wallet nor the fee wallet/);
+  // a wallet named in the environment but never approved by the owners
+  await assert.rejects(payout.sendFromVault(USDC.toBase58(), '1', stranger.toBase58(), true,
+    { env: { ...penv, LPBOT_PROFIT_WALLET: stranger.toBase58() }, connection }), /not an approved payout account/);
+  await assert.rejects(payout.sendFromVault(NATIVE_MINT.toBase58(), '0.1', profit.toBase58(), true, { env: penv, connection }), /tokens only/);
 });

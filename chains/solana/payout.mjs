@@ -11,6 +11,14 @@
 //   node chains/solana/payout.mjs send <mint> <amount> <to> [--execute]
 //   node chains/solana/payout.mjs balance <mint>
 //
+// Vault mode (LPBOT_VAULT_SETTINGS set; chains/solana/vault/account.mjs): the
+// money is the vault's and the transfer runs through the vault's policy,
+// which lets it reach only the payout accounts the owners approved
+// (LPBOT_VAULT_PAYOUTS). The destination is the profit wallet or the fee
+// wallet (LPBOT_FEE_WALLET, the share a non-special instance pays); the
+// policy, not the environment pin, is what a database write cannot move. A
+// vault pays out tokens only: SOL can leave it only to the owners.
+//
 // `amount` is in human units of the mint: UI units, so a Token-2022 scaled
 // mint's multiplier applies (shared/token2022.mjs), as in every signer. A paused mint
 // or one with a transfer hook refuses. The recipient's associated token
@@ -26,6 +34,7 @@ import { readMints, rawToUi, uiToRaw, writeRefusal } from '../../shared/token202
 import { isEntry } from '../../shared/rpc_policy.mjs';
 import { NeverLanded, priorityCuPrice, sendUntilLanded, REBROADCAST_MS } from '../../shared/tx_send.mjs';
 import SOLANA from '../../chains/solana/solana.json' with { type: 'json' };
+import { actingAccount, vaultConfig } from './vault/account.mjs';
 
 export { NeverLanded, sendUntilLanded, REBROADCAST_MS };
 
@@ -48,6 +57,9 @@ const NATIVE_MINT = SOLANA.native_mint;
 // percentile of the recent fees on its own writable accounts, at least
 // CU_PRICE_FLOOR, and never more than PRIORITY_MAX_LAMPORTS in all.
 export const CU_LIMIT = 60_000;
+// Through a vault the transfer runs inside the Squads program, which checks
+// the policy first: about 40,000 units more.
+export const VAULT_CU_LIMIT = 120_000;
 export const CU_PRICE_FLOOR = 10_000;                       // micro-lamports per unit: 600 lamports in all
 export const PRIORITY_MAX_LAMPORTS = Number(process.env.LPBOT_PAYOUT_PRIORITY_MAX_LAMPORTS ?? 50_000);
 
@@ -82,6 +94,7 @@ function key(s, what) {
 
 async function send(mintArg, amountArg, toArg, execute) {
   guard();
+  if (vaultConfig()) return sendFromVault(mintArg, amountArg, toArg, execute);
   if (!PROFIT) throw new Error('LPBOT_PROFIT_WALLET is not set; refusing to send');
   if (!PIN) throw new Error('LPBOT_PROFIT_WALLET_PIN is not set; refusing to send');
   const to = key(toArg, 'destination');
@@ -165,13 +178,83 @@ async function send(mintArg, amountArg, toArg, execute) {
   console.log(JSON.stringify({ ...report, signature, sent: true }, null, 1));
 }
 
-// What the LP wallet holds of one mint, in human units. Read-only.
+// A payout from a vault: one TransferChecked from the vault's token account
+// to an approved payout account, through the policy. The bot's key pays the
+// fee and, once per recipient and mint, the recipient's token account rent.
+export async function sendFromVault(mintArg, amountArg, toArg, execute, { env = process.env, connection } = {}) {
+  const cfg = vaultConfig(env);
+  const to = key(toArg, 'destination');
+  const allowed = [env.LPBOT_PROFIT_WALLET, env.LPBOT_FEE_WALLET].filter(Boolean).map(a => key(a, 'payout wallet').toBase58());
+  if (!allowed.includes(to.toBase58())) throw new Error('destination is neither the profit wallet nor the fee wallet; refusing to send');
+  const amount = Number(amountArg);
+  if (!Number.isFinite(amount) || amount <= 0) throw new Error(`amount must be a positive number, got ${amountArg}`);
+  const mint = key(mintArg, 'mint');
+  if (mint.toBase58() === NATIVE_MINT) throw new Error('a vault pays out tokens only; SOL leaves it only to its owners');
+  connection ??= new Connection(RPC, 'confirmed');
+  const payer = Keypair.fromSecretKey(await secretBytes());
+  const acting = await actingAccount({ connection, payer, venue: env.LPBOT_VAULT_VENUE, env });
+  const info = await connection.getAccountInfo(mint);
+  if (!info) throw new Error(`mint ${mint.toBase58()} not found`);
+  const programId = info.owner;
+  const m = await spl.getMint(connection, mint, 'confirmed', programId);
+  const f = await facts(connection, mint);
+  const refusal = writeRefusal([f]);
+  if (refusal) throw new Error(refusal);
+  const raw = f.multiplier === 1 ? BigInt(Math.floor(amount * 10 ** m.decimals)) : uiToRaw(amount, m.decimals, f.multiplier);
+  if (raw <= 0n) throw new Error('amount rounds to zero');
+  const src = spl.getAssociatedTokenAddressSync(mint, acting.vault, true, programId);
+  const dst = spl.getAssociatedTokenAddressSync(mint, to, true, programId);
+  if (!cfg.payouts.some(k => k.equals(dst))) {
+    throw new Error(`${to.toBase58()}'s ${mint.toBase58()} account is not an approved payout account of this vault; `
+      + 'the owners approve payout wallets (vault.mjs policy)');
+  }
+  const held = await spl.getAccount(connection, src, 'confirmed', programId);
+  if (held.amount < raw) throw new Error(`the vault holds ${rawToUi(held.amount, m.decimals, f.multiplier)}, less than ${amount}`);
+  const dstExists = !!(await connection.getAccountInfo(dst));
+  let recent = [];
+  try { recent = await connection.getRecentPrioritizationFees({ lockedWritableAccounts: [src, dst] }); } catch { recent = []; }
+  const cuPrice = payoutCuPrice(recent);
+  const ixs = [
+    ComputeBudgetProgram.setComputeUnitLimit({ units: VAULT_CU_LIMIT }),
+    ComputeBudgetProgram.setComputeUnitPrice({ microLamports: cuPrice }),
+    spl.createAssociatedTokenAccountIdempotentInstruction(payer.publicKey, dst, to, mint, programId),
+    spl.createTransferCheckedInstruction(src, mint, dst, acting.vault, raw, m.decimals, [], programId),
+  ];
+  const report = { mint: mint.toBase58(), amount: rawToUi(raw, m.decimals, f.multiplier), raw: raw.toString(),
+    decimals: m.decimals, multiplier: f.multiplier, recipientAccountExisted: dstExists, custody: 'vault',
+    from: acting.vault.toBase58(), to: to.toBase58(),
+    priorityMicroLamports: cuPrice, priorityLamports: Math.ceil(cuPrice * VAULT_CU_LIMIT / 1e6) };
+  const bh = await connection.getLatestBlockhash('confirmed');
+  const tx = acting.transaction(ixs, bh.blockhash);
+  if (!execute) {
+    const sim = await connection.simulateTransaction(tx);
+    console.log(JSON.stringify({ ...report, simulation: { ok: !sim.value.err, err: sim.value.err ?? null },
+                                 signature: null, sent: false }, null, 1));
+    console.log('DRY RUN — transfer built and simulated. Pass --execute to sign and send.');
+    return;
+  }
+  guard();
+  let signature;
+  try {
+    signature = await sendUntilLanded(connection, tx.serialize(), bh.lastValidBlockHeight);
+  } catch (e) {
+    if (e instanceof NeverLanded) throw new NeverLanded(`payout ${e.message}, it is owed again`);
+    if (!e.afterSend) throw e;
+    console.log(JSON.stringify({ ...report, signature: e.signature, sent: true, partial: true, error: String(e.message ?? e) }, null, 1));
+    process.exitCode = 1;
+    return;
+  }
+  console.log(JSON.stringify({ ...report, signature, sent: true }, null, 1));
+}
+
+// What the LP wallet (or the vault) holds of one mint, in human units. Read-only.
 async function balance(mintArg) {
   const connection = new Connection(RPC, 'confirmed');
-  const payer = Keypair.fromSecretKey(await secretBytes());
+  const cfg = vaultConfig();
+  const owner = cfg ? cfg.vault : Keypair.fromSecretKey(await secretBytes()).publicKey;
   const mint = key(mintArg, 'mint');
   if (mint.toBase58() === NATIVE_MINT) {
-    const lamports = await connection.getBalance(payer.publicKey);
+    const lamports = await connection.getBalance(owner);
     console.log(JSON.stringify({ mint: NATIVE_MINT, amount: lamports / 1e9, decimals: 9 }, null, 1));
     return;
   }
@@ -179,7 +262,7 @@ async function balance(mintArg) {
   if (!info) throw new Error(`mint ${mint.toBase58()} not found`);
   const m = await spl.getMint(connection, mint, 'confirmed', info.owner);
   const f = await facts(connection, mint);
-  const ata = spl.getAssociatedTokenAddressSync(mint, payer.publicKey, false, info.owner);
+  const ata = spl.getAssociatedTokenAddressSync(mint, owner, true, info.owner);
   let raw = 0n;
   try { raw = (await spl.getAccount(connection, ata, 'confirmed', info.owner)).amount; } catch { raw = 0n; }
   console.log(JSON.stringify({ mint: mint.toBase58(), amount: rawToUi(raw, m.decimals, f.multiplier),
