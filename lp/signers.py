@@ -52,6 +52,12 @@ def housekeeper(kind):
     return bool(config.RESIDUAL_OWNER and config.CAPS.get(kind))
 
 
+def rpc_host(url):
+    """The host of an RPC URL, without a user:password@ or anything after
+    the host: what a log line may show of an endpoint. Pure."""
+    return re.sub(r'^https?://(?:[^@/?]*@)?([^/?]+).*$', r'\1', url)
+
+
 def probe_rpc(url=None, fallback=None, timeout=10):
     """Whether the configured RPC answers the chain's probe (getSlot on
     Solana, eth_blockNumber on Base). At startup: a keyed endpoint that does
@@ -72,12 +78,12 @@ def probe_rpc(url=None, fallback=None, timeout=10):
         ok, why = False, f'{type(e).__name__}: {books.redact(e)}'
     else:
         why = 'no slot in the answer'
-    host = re.sub(r'^https?://([^/?]+).*$', r'\1', url)
+    host = rpc_host(url)
     if ok:
         print(f'🔑 RPC {host} answers', flush=True)
         return url
     config.RPC = fallback
-    books.notify('rpc_fallback', host=host, reason=why[:200], using=re.sub(r'^https?://([^/?]+).*$', r'\1', fallback))
+    books.notify('rpc_fallback', host=host, reason=why[:200], using=rpc_host(fallback))
     return fallback
 
 
@@ -526,7 +532,9 @@ def mint_refusal(err):
 
 # Refusals that say nothing about the venue and need only time: the wallet's
 # lock was busy or unreachable, the claims could not be measured, a HALT.
-WAIT_REFUSAL = re.compile(r'^refused: (wallet \S+ lock|claims unmeasurable|halted)')
+# A gas price over LPBOT_EVM_MAX_GWEI holds too: the EVM signer sent nothing, and three
+# refused reopens in a spike must not write HALT (edge test, 2026-10-10).
+WAIT_REFUSAL = re.compile(r'^refused: (wallet \S+ lock|claims unmeasurable|halted|max fee \d+ wei/gas exceeds)')
 
 
 def held(err):

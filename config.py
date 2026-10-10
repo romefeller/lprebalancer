@@ -305,7 +305,14 @@ def public_rpc(chain, caps, env=os.environ):
     return env.get(caps['rpc_env']) or caps['public_rpc']
 
 
-PUBLIC_RPC = public_rpc(CHAIN, CAPS)
+def fallback_rpc(chain, caps, env=os.environ):
+    """Where the bot goes when its endpoint does not answer at startup: on
+    Solana the public endpoint (public_rpc); on another chain the row's
+    public_rpc, never the rpc_env endpoint that just failed. Pure."""
+    return public_rpc(chain, caps, env) if chain == 'solana' else caps['public_rpc']
+
+
+PUBLIC_RPC = fallback_rpc(CHAIN, CAPS)
 
 
 def keyed_rpc(env=os.environ):
@@ -318,9 +325,9 @@ def keyed_rpc(env=os.environ):
 
 
 # On Solana LPBOT_RPC wins; then the keyed Helius endpoint; then the public
-# one. On another chain only its rpc_env (in PUBLIC_RPC) counts: the shared
+# one. On another chain only its rpc_env (public_rpc) counts: the shared
 # service environment's LPBOT_RPC and SOLANA_RPC_URL name Solana endpoints.
-RPC = _env('LPBOT_RPC', str, keyed_rpc() or PUBLIC_RPC) if CHAIN == 'solana' else PUBLIC_RPC
+RPC = _env('LPBOT_RPC', str, keyed_rpc() or PUBLIC_RPC) if CHAIN == 'solana' else public_rpc(CHAIN, CAPS)
 WALLET = _env('LPBOT_WALLET', str, os.environ.get(WALLET_SECRET_ENV, ''))
 
 

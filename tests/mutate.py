@@ -74,6 +74,9 @@ TARGETS = {
     'one_outcome_swaps': ('lp/swaps.py', ['balance_wallet', 'sweep_foreign'], PY_TESTS('test_jupiter_gate', 'test_health', 'test_deploy_all', 'test_deploy_idle', 'test_sweep',
                              'test_multi_loop', 'test_scaled', 'test_review_edges', 'test_orca_fallback_pool')),
     # 2026-10-09 DJT halt: the Orca fallback's pool, the left-behind sale's fallback, the one-side hold.
+    # 2026-10-10 edge fixes: the gas refusal holds; the RPC host never shows a password.
+    'edge_fixes': ('lp/signers.py', ['held', 'rpc_host', 'probe_rpc'],
+                   PY_TESTS('test_edges_data', 'test_rpc_key', 'test_edges_moves', 'test_review_edges', 'test_scaled')),
     'orca_fallback': ('lp/swaps.py', ['fallback_pool_args', 'one_side_short'], PY_TESTS('test_orca_fallback_pool')),
     'token_facts': ('venues/jupiter/prices.py', ['jupiter_token'], PY_TESTS('test_jupiter_gate.LessJupiterTraffic', 'test_jupiter_gate.Gate')),
     'venue_get': ('venues/api.py', ['_get'], PY_TESTS('test_jupiter_gate.LessJupiterTraffic', 'test_jupiter_gate.Gate')),
@@ -316,6 +319,18 @@ SQL_TARGETS = {'deposit_db', 'unichain_book', 'unichain_quote', 'band_profile', 
 # The report prints each survivor's key: copy it here with a reason. The line
 # number is not in the key, so an edit above a mutant keeps its entry valid.
 EQUIVALENT = {
+    ('edge_fixes', 'probe_rpc', 'const 10->11', 'def probe_rpc(url=None, fallback=None, timeout=10):', 0):
+        'the probe timeout: a dead endpoint fails at once in the tests, a slow one is not modelled',
+    ('edge_fixes', 'probe_rpc', 'const 10->20', 'def probe_rpc(url=None, fallback=None, timeout=10):', 0):
+        'the probe timeout: a dead endpoint fails at once in the tests, a slow one is not modelled',
+    ('edge_fixes', 'probe_rpc', 'flip bool', "print(f'🔑 RPC {host} answers', flush=True)", 0):
+        'flush only changes when the journal line appears, not what it says',
+    ('edge_fixes', 'probe_rpc', 'const 1->0', "req = urllib.request.Request(url, data=json.dumps({'jsonrpc': '2.0', 'id': 1, 'method': method}).encode(),", 0):
+        'the JSON-RPC id of a single request: the answer is read whatever id it echoes',
+    ('edge_fixes', 'probe_rpc', 'const 1->2', "req = urllib.request.Request(url, data=json.dumps({'jsonrpc': '2.0', 'id': 1, 'method': method}).encode(),", 0):
+        'the JSON-RPC id of a single request: the answer is read whatever id it echoes',
+    ('edge_fixes', 'held', 'drop operand 0', 'return mint_refusal(err) or (bool(err) and bool(WAIT_REFUSAL.match(str(err))))', 1):
+        "without bool(err), a None error is the text 'None', which no refusal matches",
     ('swap_checks', 'verifyTxShape', '\\?\\? -> ||', "if (pid === undefined || !ALLOWED_PROGRAMS.has(pid)) throw new Error(`transaction calls ${pid ?? 'a program from a lookup table'}; refusing`);", 0):
         'the refusal text only: pid is a base58 key or undefined, never the empty string that ?? and || tell apart',
     ('swing_loop_swaps', 'sell_left_behind', 'drop operand 0', 'if (SWAP_FALLBACK and SWAP_FALLBACK in signers.SIGNERS and (err or not out)', 0):
