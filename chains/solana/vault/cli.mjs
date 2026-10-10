@@ -9,6 +9,8 @@
 //       a new vault the owners control, the venue's policies for the bot, the
 //       bot gone from the owners, the lookup table. Prints the vault's config
 //       (ops/add_vault.py stores it). Dry run by default.
+//   node chains/solana/vault/cli.mjs accounts --wallets <w>[,<w>] [--mints <m>[,<m>]]
+//       the payout token accounts of these wallets (default mint: USDC), as JSON
 //   node chains/solana/vault/cli.mjs status
 //       the vault in LPBOT_VAULT_*: owners, threshold, whether the policies on
 //       chain are the configured ones, balances.
@@ -228,6 +230,9 @@ export async function main(argv = process.argv.slice(2)) {
   if (cmd === 'keys') return keys(f._[0]);
   if (cmd === 'connect') return connect(f);
   if (cmd === 'status') return status();
+  if (cmd === 'accounts') {
+    return console.log(JSON.stringify(payoutAccounts(keysOf(f.wallets, '--wallets'), keysOf(f.mints ?? SOLANA.usdc_mint, '--mints')).map(String)));
+  }
   if (cmd === 'request') return console.log(JSON.stringify(await request(f._[0], f)));
   console.log('commands: keys <dir> | connect --owners .. --venue .. --pools .. [--payout ..] [--execute] | status '
     + '| request <withdraw|revoke|approve> --owner <k> [...]');
