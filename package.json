@@ -20,6 +20,7 @@
     "viem": "2.56.9"
   },
   "devDependencies": {
-    "fast-check": "4.10.2"
+    "fast-check": "4.10.2",
+    "litesvm": "1.4.1"
   }
 }
