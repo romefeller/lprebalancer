@@ -257,3 +257,40 @@ class Timeouts(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class DiskGuards(unittest.TestCase):
+    """A mutant that never stops writing must not fill the disk (2026-10-10)."""
+
+    def root(self):
+        root = pathlib.Path(tempfile.mkdtemp(prefix='mut_harness_'))
+        self.addCleanup(shutil.rmtree, root, True)
+        (root / 'tests').mkdir()
+        return root
+
+    def test_a_runaway_writer_stops_at_the_file_cap(self):
+        root = self.root()
+        script = ("f = open('runaway', 'wb')\n"
+                  "while True:\n    f.write(b'x' * 65536)\n")
+        with mock.patch.object(M, 'FSIZE_CAP', 1024 * 1024):
+            rc = M.run_tests(root, 'unused_test', [M.PY, '-c', script], timeout=20)
+        self.assertNotEqual(rc, 0)                                   # the test failed: the mutant counts as KILLED
+        self.assertNotEqual(rc, 'timeout')                           # stopped by the cap, not by the clock
+        self.assertLessEqual((root / 'tests' / 'runaway').stat().st_size, 1024 * 1024)
+        self.assertEqual(M.RUNNING, set())
+
+    def test_the_disk_check_compares_free_space_with_the_floor(self):
+        free = shutil.disk_usage(tempfile.gettempdir()).free
+        self.assertTrue(M.disk_low(tempfile.gettempdir(), min_free_gb=free / 1e9 + 1))
+        self.assertFalse(M.disk_low(tempfile.gettempdir(), min_free_gb=0))
+
+    def test_kill_running_stops_a_live_test(self):
+        proc = M.subprocess.Popen([M.PY, '-c', 'import time; time.sleep(300)'], start_new_session=True)
+        M.RUNNING.add(proc)
+        try:
+            with mock.patch.object(M, 'KILL_GRACE_S', 1):
+                M.kill_running()
+            proc.wait(timeout=5)
+            self.assertIsNotNone(proc.returncode)
+        finally:
+            M.RUNNING.discard(proc)

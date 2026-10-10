@@ -7,6 +7,10 @@
 #   tests/run.sh test_engine test_db                      # a subset
 set -euo pipefail
 cd "$(dirname "$0")"
+# Every temp folder of this run in one place, removed at the end: the tests
+# make one per case, and 400,000 left behind used up /tmp's inodes (2026-10-10).
+export TMPDIR="$(mktemp -d "${TMPDIR:-/tmp}/lpbot-tests.XXXXXX")"
+trap 'rm -rf "$TMPDIR"' EXIT
 export LPBOT_DSN="${LPBOT_TEST_DSN:-dbname=rebalancer_test}"
 export SOLANA_RPC_URL="${SOLANA_RPC_URL:-https://api.mainnet-beta.solana.com}"
 if [ $# -gt 0 ]; then

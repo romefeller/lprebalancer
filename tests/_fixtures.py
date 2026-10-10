@@ -4,9 +4,19 @@ Every test runs against a separate database. The guard below refuses to run if
 LPBOT_DSN points anywhere that does not end in `_test`, because the ledger
 tests truncate tables and the live book is not a fixture.
 """
+import atexit
 import os
 import pathlib
+import shutil
 import sys
+import tempfile
+
+# A test process run on its own (not through run.sh) gets its own temp folder,
+# removed when it exits; the Node scripts it starts inherit it (2026-10-10).
+if 'lpbot-tests' not in os.environ.get('TMPDIR', ''):
+    _TMP = tempfile.mkdtemp(prefix='lpbot-tests.')
+    os.environ['TMPDIR'] = tempfile.tempdir = _TMP
+    atexit.register(shutil.rmtree, _TMP, True)
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))

@@ -18,11 +18,13 @@ Exit status 0 only when every mutant is killed or listed in EQUIVALENT with a
 reason.
 """
 import ast
+import atexit
 import concurrent.futures as cf
 import copy
 import os
 import pathlib
 import re
+import resource
 import shutil
 import signal
 import subprocess
@@ -70,9 +72,11 @@ TARGETS = {
     'jupgate': ('jupgate.py', ['_take', 'reserve', 'wait_turn'], PY_TESTS('test_jupiter_gate.Gate')),
     'jupiter_gate_js': ('venues/jupiter/gate.mjs', ['take', 'reserve', 'waitTurn'], NODE_TESTS('test_jupiter_gate.mjs')),
     'one_outcome_signers': ('lp/signers.py', ['record_health', 'chain'], PY_TESTS('test_jupiter_gate', 'test_health', 'test_deploy_all', 'test_deploy_idle', 'test_sweep',
-                             'test_multi_loop', 'test_scaled', 'test_review_edges', 'test_orca_fallback_pool')),
+                             'test_multi_loop', 'test_scaled', 'test_review_edges', 'test_orca_fallback_pool',
+                             'test_hardening')),
     'one_outcome_swaps': ('lp/swaps.py', ['balance_wallet', 'sweep_foreign'], PY_TESTS('test_jupiter_gate', 'test_health', 'test_deploy_all', 'test_deploy_idle', 'test_sweep',
-                             'test_multi_loop', 'test_scaled', 'test_review_edges', 'test_orca_fallback_pool')),
+                             'test_multi_loop', 'test_scaled', 'test_review_edges', 'test_orca_fallback_pool',
+                             'test_hardening')),
     # 2026-10-09 DJT halt: the Orca fallback's pool, the left-behind sale's fallback, the one-side hold.
     # 2026-10-10 edge fixes: the gas refusal holds; the RPC host never shows a password.
     # 2026-10-10 Jupiter key: the keyed endpoint, the key in a header on stdin.
@@ -424,10 +428,6 @@ EQUIVALENT = {
         'ADDRESS[chain] checks isinstance(str) first: None and empty are both refused',
     ('swing_rebalance', 'rebalance', 'flip bool', 'swaps.sell_left_behind(state, force=True)', 0):
         'repoint_with_leftovers pops left_behind_at just before: the retry wait is already over',
-    ('payout_send', 'payoutCuPrice', '\\?\\? -> ||', 'const fees = (recent ?? []).map(r => Number(r?.prioritizationFee ?? r)).filter(f => f > 0).sort((a, b) => a - b);', 0):
-        'recent is an array, null or undefined (a failed read gives []): || and ?? agree on all three',
-    ('payout_send', 'payoutCuPrice', '\\?\\? -> ||', 'const fees = (recent ?? []).map(r => Number(r?.prioritizationFee ?? r)).filter(f => f > 0).sort((a, b) => a - b);', 1):
-        'they differ only for a fee of 0, where || gives the row object; Number(object) is NaN and f > 0 drops it as it drops 0',
     # the surrogate overlay's body, renamed _with_surrogate on 2026-10-02 (reasons as before)
     ('surrogate_overlay_tape', '_with_surrogate', 'skip if body', 'if bars is None:', 0):
         'None[0] raises inside the try, which returns bars (None) either way',
@@ -438,8 +438,6 @@ EQUIVALENT = {
     ('surrogate_overlay_tape', '_with_surrogate', 'flip bool', "print(f'surrogate tape failed: {type(e).__name__}: {e}', flush=True)", 0):
         'print flush only',
     ('surrogate_overlay_tape', '_with_surrogate', 'swap GtE->Gt', 's = tuple(c[s[0] >= now - SURROGATE_LOOKBACK_S - tuning.HOUR_S] for c in s)   # the last day only', 0):
-        'the trim is an hour beyond the fill window: a bar at its edge is never used',
-    ('surrogate_overlay_tape', '_with_surrogate', 'const 3600->3601', 's = tuple(c[s[0] >= now - SURROGATE_LOOKBACK_S - tuning.HOUR_S] for c in s)   # the last day only', 0):
         'the trim is an hour beyond the fill window: a bar at its edge is never used',
     ('surrogate_overlay_regime', 'regime_view', 'const 0->1', 'hold_left = 0', 0):
         'hold_left is read only in STALE mode on a fresh tape, where it is assigned first',
@@ -504,21 +502,13 @@ EQUIVALENT = {
     ('rewards_measured', 'distribute_rewards', 'const 0.0->1.0', "amt = min(float((out or {}).get('amount') or 0.0), float(due.get(m, 0.0)))", 1):
         'txfees.inflow answers every mint it is asked, so due holds every m of the loop: the default is never read',
     # Re-keyed 2026-10-02 (the multi-pool branch rewrote these lines; each reason checked again)
-    ('resilience_signers', 'chain', 'const 420->421', 'def chain(*args, dex=None, timeout=tuning.SIGNER_TIMEOUT_S, extra_env=None, record=True):', 0):
-        'one second more on a 420 s signer timeout',
     ('resilience_swaps', 'deploy_idle', 'swap Lt->LtE', "state['idle_deploys'] = [t for t in (state.get('idle_deploys') or []) if now - t < tuning.DAY_S] + [now]; paths.save(state)", 0):
         'only a deploy exactly 86400.0 s old differs: a float clock never lands there',
     # Re-keyed 2026-10-05 (the window and the gap moved into move_gap_ok; each reason checked again)
-    ('replay_regime', 'move_gap_ok', 'const 86400->86401', 'recent = [t for t in calm_times if now - t < tuning.DAY_S]', 0):
-        'a move older than a day passes the gap anyway: keeping it in the window changes nothing',
-    ('replay_regime', 'move_gap_ok', 'const 86400->172800', 'recent = [t for t in calm_times if now - t < tuning.DAY_S]', 0):
-        'a move older than a day passes the gap anyway: keeping it in the window changes nothing',
     ('replay_regime', 'move_gap_ok', 'swap Lt->LtE', 'recent = [t for t in calm_times if now - t < tuning.DAY_S]', 0):
         'only a move exactly 86400.0 s old differs: a float clock never lands there',
     ('replay_polls', 'poll_seen', 'swap Lt->LtE', "'gates': {'calm_times': [t for t in state.get('calm_times', []) if now - t < tuning.DAY_S],", 0):
         'only a move exactly 86400.0 s old differs: a float clock never lands there',
-    ('replay_polls', 'poll_seen', 'const 86400->86401', "'gates': {'calm_times': [t for t in state.get('calm_times', []) if now - t < tuning.DAY_S],", 0):
-        'a move one second past a day is past the gap and out of moves_left: recording it changes no verdict',
     ('resilience_regime', 'voluntary_move_allowed', 'const 0->1', "return (move_gap_ok(state.get('calm_times', []), state.get('last_rebalance', 0), now, config.CALM_MIN_GAP)", 0):
         'a last rebalance at epoch 0 or 1 is decades past the gap',
     ('quiet_overlay', 'quiet_tolerance', 'swap Lt->LtE', 'if not math.isfinite(fee) or fee < 0:', 0):
@@ -598,10 +588,6 @@ EQUIVALENT = {
     ('audit_run', 'run', 'const 0->1', "for s in sorted(sigs, key=lambda x: x.get('blockTime') or 0):", 0): 'a missing blockTime sorts first either way: real block times are ~1.8e9, never 0 or 1',
     ('audit_run', 'run', 'drop operand 1', "ts = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(tx.get('blockTime') or time.time()))", 0): 'time.gmtime(None) is the current time: the same ts',
     ('audit_run', 'run', 'const 0->1', "db.set_audit_value('flows_cursor', max(sigs, key=lambda x: x.get('blockTime') or 0)['signature'])", 0): 'a missing blockTime never wins the max against a real block time (~1.8e9)',
-    ('health', 'summary', 'const 2->3', 'order = {TRIPPED: 0, BACKOFF: 1, CLOSED: 2}', 0):
-        'the closed rank only has to sort after 0 and 1',
-    ('health', 'summary', 'const 2->4', 'order = {TRIPPED: 0, BACKOFF: 1, CLOSED: 2}', 0):
-        'the closed rank only has to sort after 0 and 1',
     ('book_lines', 'shareAgrees', '<= -> <', 'return Number.isFinite(lp) && Math.abs(lp / eq * 100 - p) <= 0.2;', 0):
         'only a difference of exactly 0.2 points differs: a float share never lands there',
     ('book_lines', 'healthLine', '\\?\\? -> ||', "return `🩺 health   ` + bad.map(x => `${x.emoji ?? (x.state === 'tripped' ? '🔴' : '🟡')} ${x.key} ${x.fails}x`", 0):
@@ -857,8 +843,6 @@ EQUIVALENT = {
         'the floor only keeps days non-zero: any tiny value rounds to tracked_days 0.0 and is under MIN_RATE_DAYS',
     ('db_stats', 'stats', 'swap GtE->Gt', 'rate = total_usd / days if (days and days >= MIN_RATE_DAYS) else None', 0):
         'only a book tracked exactly MIN_RATE_DAYS (to the microsecond of a float epoch) differs',
-    ('db_stats', 'stats', 'const 0->1', 'today = fees_between(now().replace(hour=0, minute=0, second=0, microsecond=0), None, name)', 3):
-        "midnight plus one microsecond: only a fee point in that microsecond differs",
     ('db_stats', 'stats', "sql ' desc' -> ' asc'", '# The latest snapshot, and whether the position it describes still', 0):
         "a comment: ' desc' is in 'describes'",
     ('db_stats', 'stats', "sql ' desc' -> ' asc'", '# describes money that is now in the wallet and already counted as', 0):
@@ -1328,6 +1312,31 @@ def worker_setup(i):
     return base / 'lp_bot', dbname
 
 
+# A mutant can turn a loop into one that never stops writing: twice on
+# 2026-10-10 a run filled the disk and every process on the host failed with
+# ENOSPC. Each test process may write files of at most MUT_FSIZE_MB, and the
+# run stops when the disk has less than MUT_MIN_FREE_GB free.
+FSIZE_CAP = int(os.environ.get('MUT_FSIZE_MB', 1024)) * 1024 * 1024
+MIN_FREE_GB = float(os.environ.get('MUT_MIN_FREE_GB', 10))
+RUNNING = set()                   # test processes alive now: killed on any exit of the run
+
+
+def cap_file_size():
+    """In the test process, before exec: no file over FSIZE_CAP (SIGXFSZ ends it)."""
+    resource.setrlimit(resource.RLIMIT_FSIZE, (FSIZE_CAP, FSIZE_CAP))
+
+
+def disk_low(path, min_free_gb=None):
+    """Whether the disk holding `path` has less than `min_free_gb` free."""
+    return shutil.disk_usage(path).free < (MIN_FREE_GB if min_free_gb is None else min_free_gb) * 1e9
+
+
+def kill_running(*_):
+    """Stop every test process the run started and has not reaped."""
+    for proc in list(RUNNING):
+        kill_group(proc)
+
+
 KILL_GRACE_S = 5                  # SIGTERM to SIGKILL, for a test group that outlives its timeout
 
 
@@ -1363,10 +1372,14 @@ def run_tests(copy_root, dbname, cmd, timeout=None):
     (counted as KILLED). The command runs in its own session; on a timeout
     the whole process group is killed, and after a normal exit any straggler
     of the group is too."""
+    tmp = copy_root / 'lpbot-tests.tmp'           # this run's temp files, emptied after it
+    shutil.rmtree(tmp, ignore_errors=True)
+    tmp.mkdir()
     env = dict(os.environ, LPBOT_DSN=f'dbname={dbname}', HYP_EXAMPLES=os.environ.get('HYP_EXAMPLES', '60'),
-               PYTHONDONTWRITEBYTECODE='1')
+               PYTHONDONTWRITEBYTECODE='1', TMPDIR=str(tmp))
     proc = subprocess.Popen(cmd, cwd=copy_root / 'tests', env=env, stdout=subprocess.PIPE,
-                            stderr=subprocess.PIPE, start_new_session=True)
+                            stderr=subprocess.PIPE, start_new_session=True, preexec_fn=cap_file_size)
+    RUNNING.add(proc)
     try:
         proc.communicate(timeout=TIMEOUT if timeout is None else timeout)
         return proc.returncode
@@ -1378,6 +1391,8 @@ def run_tests(copy_root, dbname, cmd, timeout=None):
             proc.communicate(timeout=KILL_GRACE_S)
         except subprocess.TimeoutExpired:
             pass
+        RUNNING.discard(proc)
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 def main(names):
@@ -1389,6 +1404,11 @@ def main(names):
     for w in warnings:
         print('  WARNING', w, flush=True)
     print(f'{len(todo)} mutants over {len(names)} targets, {WORKERS} workers', flush=True)
+    atexit.register(kill_running)                       # a killed run leaves no test behind
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
+    SCRATCH.mkdir(parents=True, exist_ok=True)
+    if disk_low(SCRATCH):
+        raise SystemExit(f'under {MIN_FREE_GB:g} GB free on the disk of {SCRATCH}: not starting')
     setups = [worker_setup(i) for i in range(WORKERS)]
     # baseline: the unmutated copy must pass every command
     for name in names:
@@ -1419,6 +1439,9 @@ def main(names):
                 k, item = queue.pop(0)
                 futs.add(ex.submit(one, free.pop(), k, item))
             done, futs = cf.wait(futs, return_when=cf.FIRST_COMPLETED)
+            if disk_low(SCRATCH):
+                queue.clear(); kill_running()
+                raise SystemExit(f'stopped: under {MIN_FREE_GB:g} GB free on the disk of {SCRATCH}')
             for d in done:
                 slot, k, rc = d.result()
                 free.append(slot)
