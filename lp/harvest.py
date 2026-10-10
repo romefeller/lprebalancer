@@ -163,10 +163,12 @@ def distribute(state, position, fee_a, fee_b):
         to = config.FEE_WALLET if share else config.PROFIT_WALLET
         key = f"fee:{p['mint']}" if share else p['mint']
         due = p['amount'] + float(owed.get(key, 0.0))
-        amt = min(due, float(held.get(p['mint']) or 0.0))
-        held[p['mint']] = float(held.get(p['mint']) or 0.0) - amt     # the profit and fee parts share one balance
-        px = p['usd'] / p['amount'] if p['usd'] is not None and p['amount'] else None
+        have = float(held.get(p['mint']) or 0.0)
+        amt = min(due, have)
+        held[p['mint']] = have - amt            # the profit and fee parts share one balance
+        px = p['usd'] / p['amount'] if p['usd'] is not None else None      # split drops parts of amount 0
         if amt <= 0:
+            owed[key] = due                     # the part before this one took all of it
             continue
         if not pin_ok:
             # The destination in the database does not match the address

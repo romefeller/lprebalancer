@@ -65,7 +65,7 @@ def register_rows(args, connected):
     settings = addresses([connected.get('settings')], 'settings')[0]
     owners = addresses(connected.get('owners'), 'owners')
     threshold = int(connected.get('threshold') or 0)
-    if not owners or not 1 <= threshold <= len(owners):
+    if not 1 <= threshold <= len(owners):
         raise Refused(f'{len(owners)} owners at threshold {threshold}')
     if set(owners) & {connected.get('payer'), connected.get('policyKey')}:
         raise Refused('a bot key is among the owners')
@@ -73,7 +73,7 @@ def register_rows(args, connected):
     wallet = (args.wallet, 'solana', vault, args.secret_env, args.label or args.wallet)
     vault_row = (args.wallet, 'squads', settings, owners, threshold, args.policy_key_env, lookup)
     policy = (args.wallet, connected['venue'], addresses(connected.get('policies'), 'policies'),
-              addresses(connected.get('pools'), 'pools'), addresses(connected.get('payouts') or [], 'payouts'))
+              addresses(connected.get('pools'), 'pools'), addresses(connected.get('payouts'), 'payouts'))
     if not policy[2] or not policy[3]:
         raise Refused('no policies or no pools')
     return wallet, vault_row, policy

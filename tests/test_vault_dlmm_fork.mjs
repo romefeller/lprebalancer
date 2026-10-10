@@ -278,6 +278,60 @@ test('rebalance: a price the pool does not pay is refused before anything is sig
   } finally { delete process.env.LPBOT_TOKEN_HINTS; }
 });
 
+test('swapSides: each side priced by the hint, else by the pool; a wrong pair or scaled mint is refused', async () => {
+  const { swapSides } = await import('../venues/meteora_dlmm/signer.mjs');
+  const info = { mintA: 'A', mintB: 'B', decimalsA: 9, decimalsB: 6, symbolA: 'SOL', symbolB: 'USDC', uiPrice: 150, quoteUsd: 1.01,
+    tokenProgramA: 'P1', tokenProgramB: 'P2', multiplierA: 1, multiplierB: 1 };
+  const sol = { mint: 'A', symbol: 'SOL', decimals: 9, usdPrice: 150 * 1.01, program: 'P1' };
+  const usdc = { mint: 'B', symbol: 'USDC', decimals: 6, usdPrice: 1.01, program: 'P2' };
+  assert.deepEqual(swapSides(info, 'A', 'B', new Map()), [sol, usdc]);
+  assert.deepEqual(swapSides(info, 'B', 'A', new Map()), [usdc, sol]);
+  assert.deepEqual(swapSides(info, 'A', 'B', new Map([['B', { decimals: 6, usdPrice: 0.99 }]])), [sol, { ...usdc, usdPrice: 0.99 }]);
+  assert.throws(() => swapSides(info, 'A', 'B', new Map([['B', { decimals: 9, usdPrice: 1 }]])), /decimals 9 disagree/);
+  // no USD value for the quote token: a hint for one side does not price the other
+  const unpriced = { ...info, quoteUsd: null };
+  assert.throws(() => swapSides(unpriced, 'A', 'B', new Map([['B', { decimals: 6, usdPrice: 1 }]])), /no USD price for SOL/);
+  assert.throws(() => swapSides(unpriced, 'A', 'B', new Map([['A', { decimals: 9, usdPrice: 150 }]])), /no USD price for USDC/);
+  assert.equal(swapSides(unpriced, 'A', 'B', new Map([['A', { decimals: 9, usdPrice: 150 }], ['B', { decimals: 6, usdPrice: 1 }]]))[0].usdPrice, 150);
+  assert.throws(() => swapSides(info, 'A', 'C', new Map()), /not this pool's pair/);
+  for (const m of [{ multiplierA: 2 }, { multiplierB: 2 }]) assert.throws(() => swapSides({ ...info, ...m }, 'A', 'B', new Map()), /scaled/);
+});
+
+test('rebalance: nothing to do is a report, never a swap; a vault keeps its floor, a key wallet its gas', { timeout: 300_000 }, async () => {
+  const { fork, connection, acting, payer, vault } = await vaultOnFork({ usdc: 0n });
+  const signer = await import('../venues/meteora_dlmm/signer.mjs');
+  process.env.LPBOT_POOL = POOL.toBase58();
+  delete process.env.LPBOT_TOKEN_HINTS;
+  delete process.env.LPBOT_SLEEVE;
+  const quiet = async (f) => { const log = console.log; console.log = () => {}; try { return await f(); } finally { console.log = log; } };
+  const ask = (a, b, as = acting) => quiet(() => signer.rebalance(NATIVE_MINT.toBase58(), USDC.toBase58(), a, b, true,
+    { urls: ['fork'], connectFn: async () => ({ connection, payer, acting: as }), sleep: async () => {} }));
+  await assert.rejects(ask('-1', '1'), /non-negative/);
+  await assert.rejects(ask('1', '-1'), /non-negative/);
+  const none = await ask('0', '0');
+  assert.equal(none.noop, true);
+  assert.match(none.reason, /within .* or nothing to sell/);
+  assert.equal(none.custody, 'vault');
+  assert.equal(none.A.symbol, 'SOL');
+  assert.equal(none.B.symbol, 'USDC');
+  assert.equal(none.A.amount, 2);
+  assert.ok(Math.abs(none.A.sellable - (2 - 0.005)) < 1e-9, `a vault keeps only its floor: ${none.A.sellable}`);
+  // a USDC target worth less than one lamport of SOL
+  const dust = await ask('1', '0.0000001');
+  assert.equal(dust.noop, true);
+  assert.match(dust.reason, /rounds to zero/);
+  assert.equal(fork.balance(vault), 2e9, 'nothing moved');
+  // the same pool for a key wallet: its own gas reserve stays, its USDC counts
+  fork.tokenAccount(getAssociatedTokenAddressSync(USDC, payer.publicKey), USDC, payer.publicKey, 3_000_000n);
+  const key = await actingAccount({ connection, payer, venue: 'meteora-dlmm', env: {} });
+  const own = await ask('0', '0', key);
+  const gas = Number(process.env.LPBOT_GAS_RESERVE_SOL ?? 0.02);
+  assert.equal(own.custody, 'key');
+  assert.ok(Math.abs(own.A.amount - own.A.sellable - gas) < 1e-9, JSON.stringify(own.A));
+  assert.equal(own.B.amount, 3);
+  assert.equal(own.B.sellable, 3);
+});
+
 // Payouts leave the vault only for the payout wallets the owners approved.
 test('payout: the vault pays the profit and fee wallets, and nothing else', { timeout: 300_000 }, async () => {
   const profit = Keypair.generate().publicKey, feeWallet = Keypair.generate().publicKey;
@@ -303,4 +357,20 @@ test('payout: the vault pays the profit and fee wallets, and nothing else', { ti
   await assert.rejects(payout.sendFromVault(USDC.toBase58(), '1', stranger.toBase58(), true,
     { env: { ...penv, LPBOT_PROFIT_WALLET: stranger.toBase58() }, connection }), /not an approved payout account/);
   await assert.rejects(payout.sendFromVault(NATIVE_MINT.toBase58(), '0.1', profit.toBase58(), true, { env: penv, connection }), /tokens only/);
+  assert.deepEqual(reports.map(r => r.recipientAccountExisted), [false, false]);
+
+  // amounts: nothing, not a number, below one unit, more than held, then exactly all of it
+  const send = (amount, conn = connection) => payout.sendFromVault(USDC.toBase58(), amount, profit.toBase58(), true, { env: penv, connection: conn });
+  for (const amount of ['0', '-1', 'x']) await assert.rejects(send(amount), /positive number/, amount);
+  await assert.rejects(send('0.0000001'), /rounds to zero/);
+  await assert.rejects(send('194.500001'), /less than 194.500001/);
+  // a send that fails before it went out is an error, never a partial
+  const down = Object.create(connection, { sendRawTransaction: { value: async () => { throw new Error('rpc down'); } } });
+  await assert.rejects(send('1', down), /rpc down/);
+  said.length = 0; console.log = (x) => said.push(x);
+  try { await send('194.5'); } finally { console.log = log; }
+  const last = said.filter(x => typeof x === 'string' && x.startsWith('{')).map(JSON.parse).at(-1);
+  assert.ok(last.sent && last.recipientAccountExisted, JSON.stringify(last));
+  assert.equal(fork.tokenAmount(getAssociatedTokenAddressSync(USDC, vault, true)), 0n);
+  assert.equal(fork.tokenAmount(getAssociatedTokenAddressSync(USDC, profit, true)), 199_500_000n);
 });

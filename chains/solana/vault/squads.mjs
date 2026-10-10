@@ -148,11 +148,11 @@ function putSettingsAction(w, a) {
       w.u8(7).u64(a.seed);
       w.u8(3);                                   // PolicyCreationPayload::ProgramInteraction
       putProgramInteraction(w, a.policy);
-      w.vec(a.signers, putSigner).u16(a.threshold ?? 1).u32(0);
+      w.vec(a.signers, putSigner).u16(1).u32(0);   // threshold 1: its one signer, no time lock
       w.option(null).option(null);               // starts now, never expires
       return;
     case 'policyUpdate':
-      w.u8(8).key(a.address).vec(a.signers, putSigner).u16(a.threshold ?? 1).u32(0);
+      w.u8(8).key(a.address).vec(a.signers, putSigner).u16(1).u32(0);
       w.u8(3); putProgramInteraction(w, a.policy);
       w.option(null);
       return;
@@ -166,7 +166,8 @@ function putSettingsAction(w, a) {
 function putProgramInteraction(w, p) {
   if (!p.constraints?.length) throw new Error('a policy without instruction constraints would allow anything');
   if (p.constraints.length > 20) throw new Error(`${p.constraints.length} instruction constraints; the program allows 20`);
-  w.u8(p.accountIndex ?? 0);
+  if (!Number.isInteger(p.accountIndex)) throw new Error('a policy names the vault index it acts for (accountIndex)');
+  w.u8(p.accountIndex);
   w.vec(p.constraints, putInstructionConstraint);
   w.option(null).option(null);                   // no pre or post hook
   w.vec([], () => {});                           // no spending limits

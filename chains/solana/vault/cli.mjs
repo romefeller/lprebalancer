@@ -201,11 +201,11 @@ export async function request(action, f, { connection = new Connection(RPC, 'con
     groups ??= [[sq.ownerExecuteIx({ settings: cfg.settings, signers: [owner], vault: cfg.vault, ixs })]];
   } else if (action === 'revoke' || action === 'approve') {
     const venue = env.LPBOT_VAULT_VENUE;
-    const payer = keysOf(f.payer ?? '', '--payer')[0];
+    const payer = keysOf(f.payer, '--payer')[0];
     if (!venue || !payer) throw new Error(`${action} needs LPBOT_VAULT_VENUE and --payer <the bot's payer key>`);
     const compiled = compile(venue, { vault: cfg.vault, payer, pools: cfg.pools, payouts: cfg.payouts });
     if (compiled.policies.length !== cfg.policies.length) throw new Error('the rules now need a different number of policies; reconnect');
-    const policyKey = keysOf(f['policy-key'] ?? '', '--policy-key')[0];
+    const policyKey = keysOf(f['policy-key'], '--policy-key')[0];
     if (action === 'approve' && !policyKey) throw new Error('approve needs --policy-key <the bot\'s policy key>');
     // Revoke keeps every rule but names the owner as the policy's only signer.
     const signer = action === 'revoke' ? owner : policyKey;

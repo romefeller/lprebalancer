@@ -55,14 +55,27 @@ class RegisterRows(unittest.TestCase):
         self.assertEqual(w, ('v-add', 'solana', VAULT, 'LPBOT_V_PAYER', 'v-add'))
         self.assertEqual(v[:5], ('v-add', 'squads', SETTINGS, [OWNER], 1))
         self.assertEqual(p, ('v-add', 'meteora-dlmm', POLICIES, [POOL], []))
+        self.assertIsNone(v[6])
+
+    def test_label_lookup_and_payouts_are_carried(self):
+        w, v, p = add_vault.register_rows(args(label='Phantom test'),
+                                          connected(lookup=PAYER, payouts=[PROFIT_USDC], threshold='1'))
+        self.assertEqual(w[4], 'Phantom test')
+        self.assertEqual(v[4:], (1, 'LPBOT_V_POLICY', PAYER))
+        self.assertEqual(p[4], [PROFIT_USDC])
+        self.assertEqual(add_vault.register_rows(args(), connected(payouts=None))[2][4], [])
+        self.assertEqual(add_vault.addresses(None, 'x'), [])
 
     def test_what_it_refuses(self):
         for over, msg in (({'sent': False}, 'dry run'), ({'venue': 'nowhere'}, 'no vault rules'),
                           ({'owners': [OWNER, PAYER]}, 'bot key'), ({'threshold': 2}, 'threshold'),
-                          ({'owners': ['not-an-address']}, 'not addresses'), ({'pools': []}, 'no policies or no pools')):
+                          ({'owners': ['not-an-address']}, 'not addresses'), ({'pools': []}, 'no policies or no pools'),
+                          ({'policies': []}, 'no policies or no pools'), ({'threshold': 0}, 'threshold'),
+                          ({'threshold': None}, 'threshold'), ({'owners': []}, 'threshold'),
+                          ({'lookup': 'not-an-address'}, 'lookup')):
             with self.subTest(over=over), self.assertRaisesRegex(add_vault.Refused, msg):
                 add_vault.register_rows(args(), connected(**over))
-        for a in (args(wallet='Bad Id'), args(secret_env='lower'), args(policy_key_env='')):
+        for a in (args(wallet='Bad Id'), args(secret_env='lower'), args(policy_key_env=''), args(secret_env=None)):
             with self.assertRaises(add_vault.Refused):
                 add_vault.register_rows(a, connected())
 
@@ -100,6 +113,20 @@ class Register(unittest.TestCase):
             add_vault.payouts(argparse.Namespace(wallet='v-add', venue='meteora-dlmm', payout=PROFIT, mints=None, apply=True))
         self.assertEqual(db.vault_row('v-add')['venues']['meteora-dlmm']['payouts'], [PROFIT_USDC])
         self.assertIn('owners approve', out.getvalue())
+
+    def test_payout_mints_and_a_dry_run(self):
+        self.write()
+        usdt = 'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB'
+        with contextlib.redirect_stdout(io.StringIO()):
+            add_vault.payouts(argparse.Namespace(wallet='v-add', venue='meteora-dlmm', payout=PROFIT, mints=usdt, apply=False))
+        self.assertEqual(db.vault_row('v-add')['venues']['meteora-dlmm']['payouts'], [])
+        with contextlib.redirect_stdout(io.StringIO()):
+            add_vault.payouts(argparse.Namespace(wallet='v-add', venue='meteora-dlmm', payout=PROFIT, mints=usdt, apply=True))
+        got = db.vault_row('v-add')['venues']['meteora-dlmm']['payouts']
+        self.assertEqual(len(got), 1)
+        self.assertNotEqual(got, [PROFIT_USDC])
+        with self.assertRaisesRegex(add_vault.Refused, 'no vault policy'):
+            add_vault.payouts(argparse.Namespace(wallet='v-none', venue='meteora-dlmm', payout=PROFIT, mints=None, apply=True))
 
     def test_payouts_for_a_venue_never_approved_are_refused(self):
         self.write()

@@ -9,7 +9,8 @@ import fc from 'fast-check';
 import * as sq from '../chains/solana/vault/squads.mjs';
 import { RULES, compile, match, plan, needsVault, NotAllowed, POLICY_BYTES } from '../chains/solana/vault/policy.mjs';
 import { vaultConfig, wrap, vaultFundsItsAccounts } from '../chains/solana/vault/account.mjs';
-import { connectPlan, connectProblems, lookupPlan } from '../chains/solana/vault/admin.mjs';
+import { connectPlan, connectProblems, lookupPlan, staticAccounts } from '../chains/solana/vault/admin.mjs';
+import { actingAccount } from '../chains/solana/vault/account.mjs';
 
 const require = createRequire(import.meta.url);
 const { Keypair, PublicKey, Transaction, TransactionInstruction, ComputeBudgetProgram, SystemProgram } = require('@solana/web3.js');
@@ -96,6 +97,21 @@ test('onboarding: every transaction fits, the bot leaves, the threshold is set l
   for (const ixs of p.txs) assert.ok(txSize(ixs, [creator]) <= 1232);
   assert.ok(p.vault.equals(sq.vaultPda(p.settings)));
   assert.deepEqual(p.policies.map(String), compiled.policies.map((_, i) => String(sq.policyPda(p.settings, i + 1))));
+  // threshold 1: the bot only leaves; the program keeps the threshold the vault was created with
+  const one = connectPlan({ creator: creator.publicKey, treasury: key(), seed: 1n, owners, threshold: 1, policyKey: key(), compiled });
+  const leaveOnly = sq.settingsSyncIx({ settings: one.settings, signers: [creator.publicKey], rentPayer: creator.publicKey,
+    actions: [{ kind: 'removeSigner', key: creator.publicKey }], extra: [] });
+  assert.deepEqual(one.txs.at(-1)[0].data, leaveOnly.data);
+  assert.ok(p.txs.at(-1)[0].data.length > leaveOnly.data.length);
+});
+
+test('lookup table addresses: each once, all of them', () => {
+  const vault = key(), mint = key(), shared = key(), pool = key();
+  const venue = { shared: () => [shared, shared] };
+  const pools = [{ accounts: [pool, shared], mints: [mint, mint] }, { accounts: [pool], mints: [mint] }];
+  const out = staticAccounts({ vault, policies: [key()], venue, pools }).map(String);
+  assert.equal(new Set(out).size, out.length);
+  for (const k of [vault, shared, pool, sq.PROGRAM_ID]) assert.ok(out.includes(String(k)));
 });
 
 test('onboarding: the bot\'s keys cannot be owners; a threshold must be reachable', () => {
@@ -140,6 +156,19 @@ test('lookup table: created once, extended only with what it lacks, every transa
   assert.equal(again.txs.length, 1);
   assert.equal(lookupPlan({ payer: payer.publicKey, recentSlot: 2, table: first.table, have: addresses, addresses }).txs.length, 0);
   assert.throws(() => lookupPlan({ payer: payer.publicKey, recentSlot: 1, addresses: Array.from({ length: 257 }, key) }), /256/);
+  assert.ok(lookupPlan({ payer: payer.publicKey, recentSlot: 1, addresses: Array.from({ length: 256 }, key) }).txs.length);
+});
+
+test('a key wallet signs its own transactions, with only the extra signers it needs', async () => {
+  const payer = Keypair.generate(), position = Keypair.generate(), bystander = Keypair.generate();
+  const acting = await actingAccount({ connection: null, payer, venue: 'meteora-dlmm', env: {} });
+  assert.equal(acting.mode, 'key');
+  assert.ok(acting.owner.equals(payer.publicKey));
+  const ix = new TransactionInstruction({ programId: DLMM, data: Buffer.alloc(1), keys: [
+    { pubkey: position.publicKey, isSigner: true, isWritable: true }, { pubkey: bystander.publicKey, isSigner: false, isWritable: true }] });
+  const tx = acting.transaction([ix], BLOCKHASH, [position, bystander]);
+  assert.deepEqual(tx.signatures.map(s => String(s.publicKey)), [payer, position].map(k => String(k.publicKey)));
+  assert.ok(tx.verifySignatures());
 });
 
 test('config: unset is no vault; half set refuses', () => {
@@ -175,6 +204,42 @@ function fixture() {
   return { vault, payer, pool, compiled, dlmm, ata, plain, budget };
 }
 
+// Rules of one venue with `n` instructions and no pins: u8 discriminators 0..n-1.
+const tiny = (n, discriminator = (i) => ({ type: 'u8', value: i })) => ({ common: [], payout: [], venues: { x: {
+  program: DLMM.toBase58(), instructions: Array.from({ length: n }, (_, i) => ({ name: `r${i}`, discriminator: discriminator(i), pins: [] })) } } });
+const encoded = (constraints) => sq.encodeProgramInteraction({ accountIndex: 0, constraints }).length;
+
+test('policies: packing fills each policy up to the byte limit exactly, and to 20 rules', () => {
+  const ctx = worst();
+  const all = compile('meteora-dlmm', ctx, RULES, 1e6).policies[0].policy.constraints;
+  const largest = Math.max(...all.map(c => encoded([c])));
+  const fits = all.map((_, k) => k + 1).filter(k => k < all.length && encoded(all.slice(0, k)) >= largest);
+  assert.ok(fits.length >= 3);
+  for (const k of fits) {
+    const limit = encoded(all.slice(0, k));
+    const { policies } = compile('meteora-dlmm', ctx, RULES, limit);
+    assert.equal(policies[0].policy.constraints.length, k, `limit ${limit}`);
+    assert.ok(policies.every(p => encoded(p.policy.constraints) <= limit));
+  }
+  assert.ok(compile('meteora-dlmm', ctx, RULES, largest));
+  assert.throws(() => compile('meteora-dlmm', ctx, RULES, largest - 1), /one rule alone is over/);
+  assert.deepEqual(compile('x', ctx, tiny(41), 1e6).policies.map(p => p.policy.constraints.length), [20, 20, 1]);
+});
+
+test('policies: a discriminator must be 8 bytes of lower-case hex', () => {
+  for (const bad of ['abcd', '0011223344556677ff', 'ABCDEF0123456789', 'zz11223344556677']) {
+    assert.throws(() => compile('x', worst(), tiny(1, () => bad)), /not 8 bytes of hex/, bad);
+  }
+  assert.equal(compile('x', worst(), tiny(1, () => 'abcdef0123456789')).policies.length, 1);
+});
+
+test('needsVault: the vault signing, nothing else', () => {
+  const vault = key(), other = key();
+  const ix = (keys) => new TransactionInstruction({ programId: DLMM, data: Buffer.alloc(1), keys });
+  assert.ok(needsVault(ix([{ pubkey: vault, isSigner: true, isWritable: false }]), vault));
+  assert.ok(!needsVault(ix([{ pubkey: vault, isSigner: false, isWritable: true }, { pubkey: other, isSigner: true, isWritable: true }]), vault));
+});
+
 test('match: an approved instruction is found; a wrong pool, an unknown one, a short one are refused', () => {
   const f = fixture();
   const m = match(f.dlmm('claim_fee2'), f.compiled);
@@ -199,6 +264,7 @@ test('plan: order and content are kept; only vault instructions are wrapped; bud
         assert.ok(!needsVault(s.ixs[0], f.vault) || s.ixs[0].programId.equals(ComputeBudgetProgram.programId));
       } else {
         assert.equal(s.indices.length, s.ixs.length);
+        s.ixs.forEach(ix => assert.ok(needsVault(ix, f.vault), 'only vault instructions are wrapped'));
         s.ixs.forEach((ix, i) => assert.ok(ix.data.subarray(0, f.compiled.policies[s.policy].index[s.indices[i]].prefix.length)
           .equals(f.compiled.policies[s.policy].index[s.indices[i]].prefix)));
         // an instruction that opens accounts is always last in its call
@@ -239,10 +305,37 @@ test('codec: inner accounts are listed once, writable if any use writes, the vau
   assert.throws(() => sq.compileInner([many], vault), /255/);
 });
 
+test('codec: every one-byte bound takes 255 and refuses 256', () => {
+  const vault = key();
+  const ix = (keys, data = Buffer.alloc(1)) => new TransactionInstruction({ programId: DLMM, data, keys });
+  const meta = (pubkey) => ({ pubkey, isSigner: false, isWritable: false });
+  const same = key();
+  // 255 instructions; 255 accounts of one instruction; 254 distinct accounts + the program = 255 entries
+  assert.equal(sq.compileInner(Array.from({ length: 255 }, () => ix([])), vault).metas.length, 1);
+  assert.throws(() => sq.compileInner(Array.from({ length: 256 }, () => ix([])), vault), /256 instructions/);
+  assert.equal(sq.compileInner([ix(Array(255).fill(meta(same)))], vault).metas.length, 2);
+  assert.throws(() => sq.compileInner([ix(Array(256).fill(meta(same)))], vault), /more than 255 accounts/);
+  assert.equal(sq.compileInner([ix(Array.from({ length: 254 }, () => meta(key())))], vault).metas.length, 255);
+  assert.throws(() => sq.compileInner([ix(Array.from({ length: 255 }, () => meta(key())))], vault), /256 accounts/);
+  assert.ok(sq.compileInner([ix([], Buffer.alloc(0xffff))], vault));
+  assert.throws(() => sq.compileInner([ix([], Buffer.alloc(0x10000))], vault), /65535/);
+});
+
+test('codec: byte constraints take eq and ne only; numbers take every operator', () => {
+  const c = (type, value, op) => ({ programId: DLMM, accounts: [], data: [{ offset: 0, type, value, op }] });
+  const bytes = Buffer.alloc(8, 1);
+  for (const op of ['eq', 'ne']) assert.ok(encoded([c('bytes', bytes, op)]));
+  for (const op of ['gt', 'gte', 'lt', 'lte']) assert.throws(() => encoded([c('bytes', bytes, op)]), /eq or ne/);
+  for (const op of sq.DATA_OPERATOR) assert.ok(encoded([c('u8', 1, op)]));
+  assert.throws(() => encoded([c('u8', 1, 'about')]), /not one of/);
+});
+
 test('codec: a policy with no constraints, or more than 20, is refused before encoding', () => {
   assert.throws(() => sq.encodeProgramInteraction({ accountIndex: 0, constraints: [] }), /allow anything/);
   const c = compile('meteora-dlmm', worst()).policies[0].policy.constraints[0];
   assert.throws(() => sq.encodeProgramInteraction({ accountIndex: 0, constraints: Array(21).fill(c) }), /20/);
+  assert.ok(sq.encodeProgramInteraction({ accountIndex: 0, constraints: Array(20).fill(c) }));
+  assert.throws(() => sq.encodeProgramInteraction({ constraints: [c] }), /accountIndex/);
 });
 
 test('the vault funds its own token accounts; anyone else\'s stay as built', () => {

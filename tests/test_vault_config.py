@@ -104,6 +104,10 @@ class SignerEnvironment(unittest.TestCase):
         self.assertEqual(env['LPBOT_VAULT_POOLS'], DLMM_POOL)
         self.assertEqual(env['LPBOT_VAULT_POLICY_KEY'], '/keys/policy.json')
         self.assertEqual(env['LPBOT_VAULT_VENUE'], 'meteora-dlmm')
+        self.assertEqual(env['LPBOT_VAULT_LOOKUP'], '')
+        with mock.patch.object(config, 'VAULT', vault(lookup=DLMM_POOL)), \
+                mock.patch.dict(os.environ, {'LPBOT_VAULT_TEST_POLICY_KEY': '/keys/policy.json'}):
+            self.assertEqual(config.vault_env('meteora-dlmm')['LPBOT_VAULT_LOOKUP'], DLMM_POOL)
 
     def test_an_unapproved_venue_or_a_missing_key_is_refused(self):
         with mock.patch.object(config, 'VAULT', vault()), \
@@ -150,6 +154,26 @@ class SignerEnvironment(unittest.TestCase):
             self.assertFalse(lp.signers.housekeeper('sweep'))
             self.assertFalse(lp.signers.housekeeper('janitor'))
 
+    def test_a_key_wallet_routes_and_keeps_house_as_its_chain_says(self):
+        caps = dict(config.CAPS, swap_via='jupiter', payout_via='venue', sweep=True, janitor=True, audit=False)
+        with mock.patch.object(config, 'VAULT', None), mock.patch.object(config, 'DEX', 'orca'), \
+                mock.patch.object(config, 'CAPS', caps), mock.patch.object(config, 'RESIDUAL_OWNER', True):
+            self.assertEqual(lp.signers.route('swap'), 'jupiter')
+            self.assertEqual(lp.signers.route('payout'), 'orca')
+            self.assertIs(lp.signers.housekeeper('sweep'), True)
+            self.assertIs(lp.signers.housekeeper('janitor'), True)
+            self.assertIs(lp.signers.housekeeper('audit'), False)
+            with mock.patch.object(config, 'RESIDUAL_OWNER', False):
+                self.assertIs(lp.signers.housekeeper('sweep'), False)
+        with mock.patch.object(config, 'VAULT', vault()), mock.patch.object(config, 'DEX', 'meteora-dlmm'), \
+                mock.patch.object(config, 'CAPS', caps), mock.patch.object(config, 'RESIDUAL_OWNER', True):
+            self.assertEqual(lp.signers.route('swap'), 'meteora-dlmm')
+            self.assertIs(lp.signers.housekeeper('audit'), False)
+            with mock.patch.object(config, 'CAPS', dict(caps, payout_via='payout')):
+                self.assertEqual(lp.signers.route('payout'), 'payout')
+            with mock.patch.object(config, 'CAPS', dict(caps, audit=True)):
+                self.assertIs(lp.signers.housekeeper('audit'), True)
+
     def test_a_venue_without_a_policy_is_refused_before_spawning(self):
         (out, err), seen = self.run_chain('status', dex='orca')
         self.assertRegex(err, 'no approved policy for orca')
@@ -169,6 +193,50 @@ class Gas(unittest.TestCase):
             # plenty of SOL in the vault does not pay the payer's fees
             self.assertFalse(lp.capital.gas_for_open(state, {'sol': 5.0, 'gasSol': need - 0.001, 'nativeSide': 'A'}))
             self.assertTrue(lp.capital.gas_for_open(state, {'sol': 0.0, 'gasSol': need, 'nativeSide': 'A'}))
+
+    def gas(self, bal, state=None, vault_on=False):
+        told = []
+        state = {} if state is None else state
+        with mock.patch.object(config, 'VAULT', vault() if vault_on else None), \
+                mock.patch.object(config, 'DEX', 'meteora-dlmm'), mock.patch.object(config, 'GAS_RESERVE_SOL', 0.05), \
+                mock.patch.object(lp.paths, 'save', lambda s: None), \
+                mock.patch.object(lp.books, 'notify', lambda *a, **k: told.append(k['reason'])), \
+                mock.patch.object(db, 'event', lambda *a, **k: None):
+            return lp.capital.gas_for_open(state, bal), told
+
+    def test_a_key_wallet_pays_gas_from_its_native_balance(self):
+        self.assertEqual(self.gas({'sol': 0.05, 'nativeSide': 'A'}), (True, []))
+        self.assertFalse(self.gas({'sol': 0.049, 'nativeSide': 'A'})[0])
+        # no plain 'sol' read: the pool's native side is the gas
+        self.assertTrue(self.gas({'balanceA': 0.05, 'balanceB': 0.0, 'nativeSide': 'A'})[0])
+        self.assertFalse(self.gas({'balanceA': 0.0, 'balanceB': 0.05, 'nativeSide': 'A'})[0])
+        self.assertTrue(self.gas({'balanceA': 0.0, 'balanceB': 0.05, 'nativeSide': 'B'})[0])
+        self.assertFalse(self.gas({'nativeSide': 'A'})[0])
+        # a pool without the native token keeps the wallet's own reserve
+        with mock.patch.object(lp.capital, 'native_reserve', lambda bal: 0.2):
+            self.assertFalse(self.gas({'sol': 0.1, 'balanceA': 1.0, 'nativeSide': None})[0])
+            self.assertTrue(self.gas({'sol': 0.2, 'nativeSide': None})[0])
+
+    def test_a_shortage_is_told_once_and_forgotten_when_topped_up(self):
+        state = {}
+        ok, told = self.gas({'gasSol': 0.0}, state, vault_on=True)
+        self.assertFalse(ok)
+        self.assertEqual(len(told), 1)
+        self.assertIn("fee payer key", told[0])
+        self.assertIn('gas_short_told', state)
+        self.assertEqual(self.gas({}, state, vault_on=True), (False, []))
+        self.assertTrue(self.gas({'gasSol': 1.0}, state, vault_on=True)[0])
+        self.assertNotIn('gas_short_told', state)
+        ok, told = self.gas({'sol': 0.0, 'nativeSide': 'A'}, {})
+        self.assertIn('in the wallet', told[0])
+
+    def test_a_key_wallets_pin_must_be_the_profit_wallet(self):
+        env = config.CAPS['pin_env']
+        cases = ((PROFIT, PROFIT, True), ('', PROFIT, False), (FEE, PROFIT, False), ('nonsense', 'nonsense', False))
+        for pin, profit, want in cases:
+            with mock.patch.object(config, 'VAULT', None), mock.patch.object(config, 'PROFIT_WALLET', profit), \
+                    mock.patch.dict(os.environ, {env: pin}):
+                self.assertIs(lp.capital.profit_wallet_pinned(), want, (pin, profit))
 
     def test_the_payout_pin_is_the_policy(self):
         with mock.patch.object(config, 'VAULT', vault()), mock.patch.object(config, 'PROFIT_WALLET', PROFIT), \
@@ -212,6 +280,13 @@ class FeeShare(unittest.TestCase):
     def test_an_unpriced_part_stays_unpriced(self):
         out = fees.fee_share([dict(self.PARTS[0], usd=None)], 1000)
         self.assertTrue(all(p['usd'] is None for p in out))
+
+    def test_a_value_follows_the_parts_price(self):
+        out = fees.fee_share([dict(self.PARTS[0], amount=4.0, usd=2.0)], 2500)
+        self.assertEqual([(p['kind'], p['amount'], p['usd']) for p in out], [('paid', 3.0, 1.5), ('fee', 1.0, 0.5)])
+
+    def test_an_empty_paid_part_makes_no_parts(self):
+        self.assertEqual(fees.fee_share([dict(self.PARTS[0], amount=0.0, usd=0.0)], 1000), [])
 
 
 class Distribute(unittest.TestCase):
@@ -258,6 +333,9 @@ class Distribute(unittest.TestCase):
         rows, calls, state = self.run_it([({'signature': 's1'}, None), ({'signature': 's2'}, None)],
                                          owed={USDC: 1.0, f'fee:{USDC}': 0.5}, usdc_held=3.5)
         self.assertLessEqual(sum(float(c[2]) for c in calls), 3.5 + 1e-9)
+        # the fee share the vault could not cover stays owed with the old one
+        self.assertAlmostEqual(state['payout_owed'][f'fee:{USDC}'], 0.8)
+        self.assertAlmostEqual(state['payout_owed'][USDC], 0.2)
 
     def test_a_special_instance_pays_no_share(self):
         rows, calls, _ = self.run_it([({'signature': 's1'}, None)], fee_bps=0)

@@ -94,15 +94,15 @@ function constraintOf(rule, ctx) {
 const size = (constraints) => encodeProgramInteraction({ accountIndex: 0, constraints }).length;
 
 // Compile `venue`'s rules for one vault: {venue, policies: [{policy, index}]},
-// the policies in the order they are created.
-export function compile(venue, ctx, rules = RULES) {
+// the policies in the order they are created, each at most `limit` bytes.
+export function compile(venue, ctx, rules = RULES, limit = POLICY_BYTES) {
   const policies = [];
   let current = null;
   for (const rule of rulesFor(venue, rules, Boolean(ctx.payouts?.length))) {
     const { constraint, entry } = constraintOf(rule, ctx);
-    if (size([constraint]) > POLICY_BYTES) throw new Error(`${rule.name}: one rule alone is over ${POLICY_BYTES} bytes`);
+    if (size([constraint]) > limit) throw new Error(`${rule.name}: one rule alone is over ${limit} bytes`);
     if (!current || current.policy.constraints.length >= MAX_CONSTRAINTS
-        || size([...current.policy.constraints, constraint]) > POLICY_BYTES) {
+        || size([...current.policy.constraints, constraint]) > limit) {
       current = { policy: { accountIndex: 0, constraints: [] }, index: [] };
       policies.push(current);
     }

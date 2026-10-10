@@ -120,7 +120,7 @@ TARGETS = {
                       NODE_TESTS('test_vault_policy.mjs', 'test_vault_dlmm_fork.mjs')),
     'vault_cli': ('chains/solana/vault/cli.mjs', ['payoutAccounts', 'request'], NODE_TESTS('test_vault_cli_fork.mjs', 'test_owner_page_fork.mjs')),
     'vault_payout': ('chains/solana/payout.mjs', ['sendFromVault'], NODE_TESTS('test_vault_dlmm_fork.mjs')),
-    'vault_swap': ('venues/meteora_dlmm/signer.mjs', ['sellable', 'rebalance'], NODE_TESTS('test_vault_dlmm_fork.mjs')),
+    'vault_swap': ('venues/meteora_dlmm/signer.mjs', ['sellable', 'swapSides', 'rebalance'], NODE_TESTS('test_vault_dlmm_fork.mjs')),
     'fee_share': ('fees.py', ['fee_share'], PY_TESTS('test_vault_config')),
     'vault_config': ('config.py', ['vault_env'], PY_TESTS('test_vault_config')),
     'vault_routing': ('lp/signers.py', ['route', 'housekeeper'], PY_TESTS('test_vault_config')),
@@ -662,6 +662,34 @@ EQUIVALENT = {
         'the JSON-RPC request id is arbitrary',
     ('distribute', 'distribute', 'swap Gt->GtE', 'if rest > 1e-9:', 0):
         'a remainder of exactly 1e-9 is not reachable in float and is below any token resolution',
+    ('vault_cli', 'request', '(?<![<>=!])<(?![<=]) -> <=', "if (!owner) throw new Error('--owner <the owner wallet that signs>');", 0):
+        "'<' inside the usage text of an error message, not an operator",
+    ('vault_cli', 'request', '(?<![<>=!-])>(?![>=]) -> >=', "if (!owner) throw new Error('--owner <the owner wallet that signs>');", 0):
+        "'>' inside the usage text of an error message, not an operator",
+    ('vault_cli', 'request', '(?<![<>=!])<(?![<=]) -> <=', "if (!to) throw new Error('withdraw needs --to <wallet>');", 0):
+        "'<' inside the usage text of an error message, not an operator",
+    ('vault_cli', 'request', '(?<![<>=!-])>(?![>=]) -> >=', "if (!to) throw new Error('withdraw needs --to <wallet>');", 0):
+        "'>' inside the usage text of an error message, not an operator",
+    ('vault_cli', 'request', '(?<![<>=!])<(?![<=]) -> <=', "if (!venue || !payer) throw new Error(`${action} needs LPBOT_VAULT_VENUE and --payer <the bot's payer key>`);", 0):
+        "'<' inside the usage text of an error message, not an operator",
+    ('vault_cli', 'request', '(?<![<>=!-])>(?![>=]) -> >=', "if (!venue || !payer) throw new Error(`${action} needs LPBOT_VAULT_VENUE and --payer <the bot's payer key>`);", 0):
+        "'>' inside the usage text of an error message, not an operator",
+    ('vault_cli', 'request', '(?<![<>=!])<(?![<=]) -> <=', "if (action === 'approve' && !policyKey) throw new Error('approve needs --policy-key <the bot\\'s policy key>');", 0):
+        "'<' inside the usage text of an error message, not an operator",
+    ('vault_cli', 'request', '(?<![<>=!-])>(?![>=]) -> >=', "if (action === 'approve' && !policyKey) throw new Error('approve needs --policy-key <the bot\\'s policy key>');", 0):
+        "'>' inside the usage text of an error message, not an operator",
+    ('vault_payout', 'sendFromVault', '\\?\\? -> ||', "connection ??= new Connection(RPC, 'confirmed');", 0):
+        'the connection is an object or not given: ?? and || agree',
+    ('vault_payout', 'sendFromVault', '\\?\\? -> ||', 'console.log(JSON.stringify({ ...report, simulation: { ok: !sim.value.err, err: sim.value.err ?? null },', 0):
+        'a simulation error is an object or null: ?? and || agree',
+    ('vault_payout', 'sendFromVault', '\\?\\? -> ||', 'console.log(JSON.stringify({ ...report, signature: e.signature, sent: true, partial: true, error: String(e.message ?? e) }, null, 1));', 0):
+        'an error message is never empty: ?? and || agree',
+    ('vault_swap', 'swapSides', '\\?\\? -> ||', 'return { mint, symbol: x ? info.symbolA : info.symbolB, decimals, usdPrice: h?.usdPrice ?? own,', 0):
+        'parseHints keeps only prices above 0: ?? and || agree',
+    ('vault_swap', 'rebalance', '\\?\\? -> ||', 'const out = { ...report, signature: r.sigs[0] ?? null, sent: true };', 0):
+        'a signature is a non-empty string or missing: ?? and || agree',
+    ('fee_share', 'fee_share', 'swap Lt->LtE', 'if not 0 < bps <= 5000:', 0):
+        'a share of 0 bps returns before this check',
     ('read_status', 'read_status', 'drop operand 1', "if not (out and out.get('positionMint')):", 0):
         'an answer without a position carries no fee figures, so the check finds nothing either way',
     ('risk', 'chi2_sf_even', 'const 0->1', 'if k <= 0 or k % 2:', 0):
@@ -922,9 +950,6 @@ EQUIVALENT_OLD = {
     # 2 mutants on this line share the old key; it hides all of them. Candidates now: 5 lines
     ('surrogate', 'fit_surrogate', 'const 0->1 @L135'):
         'bars[0] and bars[1] have the same length (the <= 0 -> <= 1 twin is killed by the sub-1 price test)',
-    # older copies give different lines. Candidates now: 19 lines
-    ('distribute', 'distribute', 'drop operand 1 @L578'):
-        'split never yields a part of amount 0, so the zero-amount guard of the price cannot bind',
     # in an older copy, 2+ mutants shared this key on the line. Candidates now: 'r2 = min(max(1.0 - ss_res / ss_tot, 0.0), 1.0)' / 'r2 = min(max(1.0 - ss_res / ss_tot, 0.0), 1.0)' #1
     ('risk', 'arch_lm', 'const 1.0->1.5 @L353'):
         'an OLS R^2 with an intercept lies in [0, 1]: the clamp never binds',

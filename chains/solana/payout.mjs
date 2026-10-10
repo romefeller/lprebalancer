@@ -200,7 +200,7 @@ export async function sendFromVault(mintArg, amountArg, toArg, execute, { env = 
   const f = await facts(connection, mint);
   const refusal = writeRefusal([f]);
   if (refusal) throw new Error(refusal);
-  const raw = f.multiplier === 1 ? BigInt(Math.floor(amount * 10 ** m.decimals)) : uiToRaw(amount, m.decimals, f.multiplier);
+  const raw = uiToRaw(amount, m.decimals, f.multiplier);
   if (raw <= 0n) throw new Error('amount rounds to zero');
   const src = spl.getAssociatedTokenAddressSync(mint, acting.vault, true, programId);
   const dst = spl.getAssociatedTokenAddressSync(mint, to, true, programId);
