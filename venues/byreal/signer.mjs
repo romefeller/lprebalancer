@@ -40,6 +40,7 @@ import { BOT_ROOT } from '../../bot_root.mjs';
 import { createRequire } from 'node:module';
 import { waitTurn } from '../jupiter/gate.mjs';
 import SOLANA from '../../chains/solana/solana.json' with { type: 'json' };
+import { JUPITER, jupiterHeaders } from '../jupiter/api.mjs';
 
 const require = createRequire(import.meta.url);
 // The SDK's ESM entry loads cleanly under Node 24. BN and Decimal come from
@@ -68,7 +69,6 @@ const NATIVE_MINT = SOLANA.native_mint;
 // attacker controls: a fake "USDC" priced at $1 would defeat every dollar cap (review 2026-09-26).
 const STABLE_MINTS = new Set(Object.values(SOLANA.stable_mints));
 const BYREAL_API = 'https://api2.byreal.io/byreal/api/dex/v2';
-const JUPITER = 'https://lite-api.jup.ag';
 const HEADERS = { accept: 'application/json', 'user-agent': 'Mozilla/5.0' };
 const PROGRAM_NAMES = {
   [SOLANA.programs.compute_budget]: 'ComputeBudget',
@@ -128,7 +128,7 @@ async function meta(pool) {
 async function tokenUsd(mint) {
   try {
     await waitTurn();                                 // one Jupiter slot (venues/jupiter/gate.mjs)
-    const j = await (await fetch(`${JUPITER}/price/v3?ids=${mint}`, { headers: HEADERS })).json();
+    const j = await (await fetch(`${JUPITER}/price/v3?ids=${mint}`, { headers: jupiterHeaders(HEADERS) })).json();
     const p = Number(j?.[mint]?.usdPrice);
     return p > 0 ? p : null;
   } catch { return null; }

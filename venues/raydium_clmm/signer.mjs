@@ -52,6 +52,7 @@ import { createRequire } from 'node:module';
 import { waitTurn } from '../jupiter/gate.mjs';
 import { NeverLanded, priorityCuPrice, sendUntilLanded } from '../../shared/tx_send.mjs';
 import SOLANA from '../../chains/solana/solana.json' with { type: 'json' };
+import { JUPITER, jupiterHeaders } from '../jupiter/api.mjs';
 
 // The SDK's ESM build loads under Node 24, but the CommonJS build is used so
 // that this file, the SDK and web3.js share one copy of PublicKey and BN.
@@ -78,7 +79,6 @@ const NATIVE_MINT = SOLANA.native_mint;
 // attacker controls: a fake "USDC" priced at $1 would defeat every dollar cap (review 2026-09-26).
 const STABLE_MINTS = new Set(Object.values(SOLANA.stable_mints));
 const RAYDIUM_API = 'https://api-v3.raydium.io';
-const JUPITER = 'https://lite-api.jup.ag';
 const HEADERS = { accept: 'application/json', 'user-agent': 'Mozilla/5.0' };
 // Legacy transactions: the SDK confirms them by polling. Its V0 path confirms
 // through a websocket subscription with a bare 60 s timeout, which a public
@@ -126,8 +126,8 @@ function poolArg(explicit) {
 // --- the pool describes itself ------------------------------------------------
 const symbolCache = new Map();
 
-async function fetchJson(url) {
-  const r = await fetch(url, { headers: HEADERS, signal: AbortSignal.timeout(8000) });
+async function fetchJson(url, headers = HEADERS) {
+  const r = await fetch(url, { headers, signal: AbortSignal.timeout(8000) });
   return r.json();
 }
 
@@ -152,7 +152,7 @@ async function symbols(pool, poolInfo) {
 async function tokenUsd(mint) {
   try {
     await waitTurn();                                 // one Jupiter slot (venues/jupiter/gate.mjs)
-    const j = await fetchJson(`${JUPITER}/price/v3?ids=${mint}`);
+    const j = await fetchJson(`${JUPITER}/price/v3?ids=${mint}`, jupiterHeaders(HEADERS));
     const p = Number(j?.[mint]?.usdPrice);
     return p > 0 ? p : null;
   } catch { return null; }

@@ -12,12 +12,14 @@ UA = ('Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 '
       '(KHTML, like Gecko) Chrome/126.0 Safari/537.36')
 
 
-def _get(url, accept='application/json', timeout=40):
+def _get(url, accept='application/json', timeout=40, secret_headers=()):
+    """GET `url` as JSON. `secret_headers` ('name: value' lines, an API key)
+    go to curl on stdin, never in its argv, which every `ps` shows."""
     if 'jup.ag' in url:
         jupgate.wait_turn()                       # one Jupiter slot across every process (jupgate.py)
     r = subprocess.run(['curl', '-s', '--max-time', str(timeout),
-                        '-H', f'accept: {accept}', '-H', f'user-agent: {UA}', url],
-                       capture_output=True, text=True)
+                        '-H', f'accept: {accept}', '-H', f'user-agent: {UA}', '-H', '@-', url],
+                       input=''.join(f'{h}\n' for h in secret_headers), capture_output=True, text=True)
     return json.loads(r.stdout)
 
 

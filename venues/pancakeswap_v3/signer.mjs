@@ -60,6 +60,7 @@ import { BOT_ROOT } from '../../bot_root.mjs';
 import { createRequire } from 'node:module';
 import { waitTurn } from '../jupiter/gate.mjs';
 import SOLANA from '../../chains/solana/solana.json' with { type: 'json' };
+import { JUPITER, jupiterHeaders } from '../jupiter/api.mjs';
 
 // The project is "type": "commonjs"; the SDK's CommonJS build resolves cleanly.
 const require = createRequire(import.meta.url);
@@ -98,7 +99,6 @@ const NATIVE_MINT = SOLANA.native_mint;
 // attacker controls: a fake "USDC" priced at $1 would defeat every dollar cap (review 2026-09-26).
 const STABLE_MINTS = new Set(Object.values(SOLANA.stable_mints));
 const GECKO = 'https://api.geckoterminal.com/api/v2/networks/solana/pools';
-const JUPITER = 'https://lite-api.jup.ag';
 const HEADERS = { accept: 'application/json', 'user-agent': 'Mozilla/5.0' };
 const GECKO_HEADERS = { accept: 'application/json;version=20230203', 'user-agent': 'Mozilla/5.0' };
 
@@ -214,7 +214,7 @@ async function symbols(pool, mintA, mintB) {
 async function tokenUsd(mint) {
   try {
     await waitTurn();                                 // one Jupiter slot (venues/jupiter/gate.mjs)
-    const j = await (await fetch(`${JUPITER}/price/v3?ids=${mint}`, { headers: HEADERS })).json();
+    const j = await (await fetch(`${JUPITER}/price/v3?ids=${mint}`, { headers: jupiterHeaders(HEADERS) })).json();
     const p = Number(j?.[mint]?.usdPrice);
     return p > 0 ? p : null;
   } catch { return null; }

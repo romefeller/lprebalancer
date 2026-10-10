@@ -5,7 +5,7 @@
 // printed, one JSON object on stdout, `ERROR: <message>` on stderr with exit 1,
 // dry run by default.
 //
-// API: Jupiter Metis Swap V1 on lite-api.jup.ag (no key). The docs mark V1 as
+// API: Jupiter Metis Swap V1, keyed or free (venues/jupiter/api.mjs). The docs mark V1 as
 // superseded by Swap V2 at api.jup.ag/swap/v2, which needs an API key and is
 // not served by lite-api; V1 still answers today (2026-09-24).
 //   GET  /swap/v1/quote?inputMint&outputMint&amount=<raw>&slippageBps&restrictIntermediateTokens=true
@@ -50,6 +50,7 @@ import { waitTurn } from './gate.mjs';
 import { readMints, rawToUi, uiToRaw, writeRefusal } from '../../shared/token2022.mjs';
 import { planRebalance, TARGET_TOLERANCE } from '../../shared/rebalance_plan.mjs';
 import SOLANA from '../../chains/solana/solana.json' with { type: 'json' };
+import { JUPITER, jupiterHeaders } from './api.mjs';
 const require = createRequire(import.meta.url);
 const { Connection, Keypair, PublicKey, VersionedTransaction } = require('@solana/web3.js');
 const spl = require('@solana/spl-token');
@@ -64,7 +65,6 @@ const MAX_IMPACT = Number(process.env.LPBOT_MAX_IMPACT ?? 0.01);   // ratio: 0.0
 const QUOTE_MAX_AGE_MS = 20_000;
 
 const NATIVE_MINT = SOLANA.native_mint;
-const JUPITER = 'https://lite-api.jup.ag';
 const HEADERS = { accept: 'application/json', 'user-agent': 'Mozilla/5.0' };
 
 function guard() {
@@ -120,11 +120,11 @@ async function jfetch(url, init) {
 }
 
 async function jget(url) {
-  return jfetch(url, { headers: HEADERS });
+  return jfetch(url, { headers: jupiterHeaders(HEADERS) });
 }
 
 async function jpost(url, body) {
-  return jfetch(url, { method: 'POST', headers: { ...HEADERS, 'content-type': 'application/json' }, body: JSON.stringify(body) });
+  return jfetch(url, { method: 'POST', headers: jupiterHeaders({ ...HEADERS, 'content-type': 'application/json' }), body: JSON.stringify(body) });
 }
 
 function assertMint(m, what) {

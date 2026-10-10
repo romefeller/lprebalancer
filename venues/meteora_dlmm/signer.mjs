@@ -40,6 +40,7 @@ import { waitTurn } from '../jupiter/gate.mjs';
 import { endpoints, overEndpoints, isEntry, AfterSignError } from '../../shared/rpc_policy.mjs';
 import { readMints, rawToUi, uiToNative, uiPrice, assertWritable, mintFields } from '../../shared/token2022.mjs';
 import SOLANA from '../../chains/solana/solana.json' with { type: 'json' };
+import { JUPITER, jupiterHeaders } from '../jupiter/api.mjs';
 
 // The package's ESM build imports a directory and fails to load under Node 24;
 // the CommonJS build resolves cleanly.
@@ -64,7 +65,6 @@ const NATIVE_MINT = SOLANA.native_mint;
 // attacker controls: a fake "USDC" priced at $1 would defeat every dollar cap (review 2026-09-26).
 const STABLE_MINTS = new Set(Object.values(SOLANA.stable_mints));
 const METEORA = 'https://dlmm.datapi.meteora.ag';
-const JUPITER = 'https://lite-api.jup.ag';
 const HEADERS = { accept: 'application/json', 'user-agent': 'Mozilla/5.0' };
 
 function guard() {
@@ -110,7 +110,7 @@ async function symbols(pool, dlmm) {
 async function tokenUsd(mint) {
   try {
     await waitTurn();                                 // one Jupiter slot (venues/jupiter/gate.mjs)
-    const j = await (await fetch(`${JUPITER}/price/v3?ids=${mint}`, { headers: HEADERS })).json();
+    const j = await (await fetch(`${JUPITER}/price/v3?ids=${mint}`, { headers: jupiterHeaders(HEADERS) })).json();
     const p = Number(j?.[mint]?.usdPrice);
     return p > 0 ? p : null;
   } catch { return null; }

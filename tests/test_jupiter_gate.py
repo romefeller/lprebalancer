@@ -218,7 +218,7 @@ class Gate(unittest.TestCase):
             self.assertEqual(venue_api._get('https://api.geckoterminal.com/x'), {'a': 1})
         argv, k = seen[0]
         self.assertEqual(argv[argv.index('--max-time') + 1], '40')
-        self.assertEqual(k, {'capture_output': True, 'text': True})
+        self.assertEqual(k, {'input': '', 'capture_output': True, 'text': True})   # no secret header: empty stdin
 
     def test_every_jupiter_call_site_takes_a_slot(self):
         for f in ('venues/pancakeswap_v3/signer.mjs', 'venues/meteora_dlmm/signer.mjs', 'venues/byreal/signer.mjs',
@@ -230,11 +230,13 @@ class Gate(unittest.TestCase):
         sw = (ROOT / 'venues/jupiter/swap.mjs').read_text()
         jf = sw[sw.index('async function jfetch'):]
         self.assertLess(jf.index('await waitTurn()'), jf.index('await fetch(url, init)'))
-        not_ours = {'node_modules', '.git', '.claude'}             # dependencies and agent worktrees
+        not_ours = {'node_modules', '.git', '.claude', 'tests'}    # dependencies, agent worktrees, tests
+        gate_or_api = {ROOT / 'venues/jupiter/gate.mjs', ROOT / 'venues/jupiter/api.mjs'}
         for f in (f for f in ROOT.rglob('*.mjs') if not not_ours & set(f.relative_to(ROOT).parts)):
             src = f.read_text()
-            if 'lite-api.jup.ag' in src and f != ROOT / 'venues/jupiter/gate.mjs':
-                self.assertIn('waitTurn', src, f'{f.relative_to(ROOT)} talks to Jupiter without the gate')
+            if 'jupiter/api.mjs' in src or "from './api.mjs'" in src:
+                if f not in gate_or_api:
+                    self.assertIn('waitTurn', src, f'{f.relative_to(ROOT)} talks to Jupiter without the gate')
 
 
 def clear():

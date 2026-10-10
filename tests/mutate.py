@@ -75,11 +75,15 @@ TARGETS = {
                              'test_multi_loop', 'test_scaled', 'test_review_edges', 'test_orca_fallback_pool')),
     # 2026-10-09 DJT halt: the Orca fallback's pool, the left-behind sale's fallback, the one-side hold.
     # 2026-10-10 edge fixes: the gas refusal holds; the RPC host never shows a password.
+    # 2026-10-10 Jupiter key: the keyed endpoint, the key in a header on stdin.
+    'jupiter_key_py': ('venues/jupiter/prices.py', ['get'], PY_TESTS('test_jupiter_key')),
+    'jupiter_key_js': ('venues/jupiter/api.mjs', ['jupiterBase', 'jupiterHeaders'], NODE_TESTS('test_jupiter_key.mjs')),
     'edge_fixes': ('lp/signers.py', ['held', 'rpc_host', 'probe_rpc'],
                    PY_TESTS('test_edges_data', 'test_rpc_key', 'test_edges_moves', 'test_review_edges', 'test_scaled')),
     'orca_fallback': ('lp/swaps.py', ['fallback_pool_args', 'one_side_short'], PY_TESTS('test_orca_fallback_pool')),
     'token_facts': ('venues/jupiter/prices.py', ['jupiter_token'], PY_TESTS('test_jupiter_gate.LessJupiterTraffic', 'test_jupiter_gate.Gate')),
-    'venue_get': ('venues/api.py', ['_get'], PY_TESTS('test_jupiter_gate.LessJupiterTraffic', 'test_jupiter_gate.Gate')),
+    'venue_get': ('venues/api.py', ['_get'], PY_TESTS('test_jupiter_gate.LessJupiterTraffic', 'test_jupiter_gate.Gate',
+                                                      'test_jupiter_key')),
     'swap_orca': ('venues/orca/swap.mjs', ['guard', 'toRaw', 'parseHints', 'checkPool', 'direction', 'planSwap', 'spotOutPerIn',
                                     'priceImpact', 'valueLossOk', 'verifyQuote', 'checkImpact', 'chooseCuPrice', 'cuLimit',
                                     'withWsolClose', 'decodeSwapV2', 'verifyTxShape', 'checkDeltas', 'noopReport', 'sendLanded'],

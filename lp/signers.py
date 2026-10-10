@@ -131,7 +131,7 @@ def jupiter_answers():
     """(ok, why): whether Jupiter quotes a small SOL to USDC swap now. Read-only,
     one gated request (jupgate). Never raises."""
     try:
-        d = venue_api._get(PROBE_QUOTE, timeout=15)
+        d = jupiter_api.get(PROBE_QUOTE, timeout=15)
     except Exception as e:
         return False, f'{type(e).__name__}: {books.tidy(e)}'
     try:

@@ -1,12 +1,23 @@
 """Jupiter: USD prices by mint and token facts. No pools."""
 
+import json
+import os
+import pathlib
 import time
 
 from venues import api as venue_api
 from venues.api import _f
 
 
-JUPITER = 'https://lite-api.jup.ag'
+VENUE = json.loads((pathlib.Path(__file__).parent / 'venue.json').read_text())
+# The keyed endpoint when the service environment holds a key, else the free one.
+JUPITER = VENUE['keyed_api'] if os.environ.get(VENUE['key_env']) else VENUE['free_api']
+
+
+def get(url, timeout=40):
+    """venue_api._get for a Jupiter URL, with the key header when there is a key."""
+    key = os.environ.get(VENUE['key_env'])
+    return venue_api._get(url, timeout=timeout, secret_headers=(f"{VENUE['key_header']}: {key}",) if key else ())
 
 
 # --- Jupiter: prices and token facts, no pools ---------------------------------
@@ -20,7 +31,7 @@ def jupiter_prices(mints):
     for i in range(0, len(mints), 50):
         chunk = mints[i:i + 50]
         try:
-            d = venue_api._get(f'{JUPITER}/price/v3?ids={",".join(chunk)}')
+            d = get(f'{JUPITER}/price/v3?ids={",".join(chunk)}')
         except Exception:
             continue
         for m in chunk:
@@ -59,7 +70,7 @@ def jupiter_token(mint, now=None):
 def _jupiter_token(mint):
     """One token-search request; the facts, or None."""
     try:
-        d = venue_api._get(f'{JUPITER}/tokens/v2/search?query={mint}')
+        d = get(f'{JUPITER}/tokens/v2/search?query={mint}')
     except Exception:
         return None
     for t in d if isinstance(d, list) else []:

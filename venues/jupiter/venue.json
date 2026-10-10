@@ -1,0 +1,7 @@
+{
+  "about": "Jupiter's API. The keyed endpoint when the service environment holds a key (key_env), else the free one, which limits requests by IP and answered 429 a dozen times an hour (2026-10-10).",
+  "keyed_api": "https://api.jup.ag",
+  "free_api": "https://lite-api.jup.ag",
+  "key_env": "JUPITER_API_KEY",
+  "key_header": "x-api-key"
+}
