@@ -26,9 +26,10 @@ import { createRequire } from 'module';
 import fs from 'node:fs/promises';
 import * as sq from './squads.mjs';
 import { compile, plan } from './policy.mjs';
+import SOLANA from '../solana.json' with { type: 'json' };
 
 const require = createRequire(import.meta.url);
-const { Keypair, PublicKey, Transaction, TransactionMessage, VersionedTransaction } = require('@solana/web3.js');
+const { Keypair, PublicKey, Transaction, TransactionInstruction, TransactionMessage, VersionedTransaction } = require('@solana/web3.js');
 
 const list = (v) => (v ?? '').split(',').map(s => s.trim()).filter(Boolean);
 
@@ -81,7 +82,7 @@ export async function actingAccount({ connection, payer, venue, env = process.en
     if (!t) throw new Error(`vault lookup table ${cfg.lookup.toBase58()} does not exist`);
     tables.push(t);
   }
-  const wrapOf = (ixs) => wrap(ixs, { ...cfg, policyKey: policyKey.publicKey }, compiled);
+  const wrapOf = (ixs) => wrap(ixs, { ...cfg, policyKey: policyKey.publicKey, payer: payer.publicKey }, compiled);
   return {
     mode: 'vault', owner: cfg.vault, payer, vault: cfg.vault, settings: cfg.settings, policies: cfg.policies, compiled,
     wrap: wrapOf,
@@ -125,9 +126,25 @@ export async function verifyPolicy(connection, cfg, policyKey, compiled) {
   });
 }
 
+// The vault pays for its own token accounts. SDKs fund an owner's associated
+// token accounts from the payer they are given, but the vault gets the rent
+// back when it closes one (a WSOL account unwrapped into the vault): each
+// cycle would move that rent from the bot's payer key into the vault. Funded
+// by the vault, it goes round within the vault. The create then needs the
+// vault's signature, so it runs through the policy's rule for it. Pure.
+export function vaultFundsItsAccounts(ixs, vault, payer) {
+  return ixs.map(ix => {
+    const create = ix.programId.toBase58() === SOLANA.programs.associated_token && (ix.data.length === 0 || ix.data[0] <= 1);
+    if (!create || !ix.keys[2]?.pubkey.equals(vault) || !ix.keys[0]?.pubkey.equals(payer)) return ix;
+    const keys = ix.keys.map((k, i) => i === 0 ? { pubkey: vault, isSigner: true, isWritable: true } : k);
+    return new TransactionInstruction({ programId: ix.programId, keys, data: Buffer.from([1]) });  // idempotent
+  });
+}
+
 // The instructions as the transaction runs them: each vault run wrapped in
 // one call to its policy, everything else as built. Pure.
 export function wrap(ixs, cfg, compiled) {
+  ixs = vaultFundsItsAccounts(ixs, cfg.vault, cfg.payer);
   return plan(ixs, cfg.vault, compiled).flatMap(step => step.policy === null ? step.ixs
     : [sq.policyExecuteIx({ policy: cfg.policies[step.policy], signer: cfg.policyKey, vault: cfg.vault, ixs: step.ixs, indices: step.indices })]);
 }

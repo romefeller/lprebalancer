@@ -206,6 +206,7 @@ test('the DLMM signer runs a vault with its usual commands', { timeout: 300_000 
   };
   const dlmm = await DLMM.create(connection, POOL);
   const before = await value();
+  const payerBefore = fork.balance(payer.publicKey);
   const b = await out(() => signer.balance(undefined, deps));
   assert.equal(b.owner, vault.toBase58());
   assert.equal(b.custody, 'vault');
@@ -230,6 +231,9 @@ test('the DLMM signer runs a vault with its usual commands', { timeout: 300_000 
   assert.ok(c.closed === opened.positionMint && !c.partial, JSON.stringify(c));
   const after = await out(() => signer.status(undefined, deps));
   assert.equal(after.positions, 0);
+  // the payer paid the position's rent at open and got it back at close, and
+  // the vault paid for its own token accounts: a cycle costs the payer fees only
+  assert.ok(payerBefore - fork.balance(payer.publicKey) < 0.0005e9, `payer spent ${(payerBefore - fork.balance(payer.publicKey)) / 1e9} SOL`);
   // the trades moved the price, so the mix changed; the value came home
   const back = await value();
   assert.ok(back > before * 0.97, `vault worth ${back.toFixed(2)} USDC after, ${before.toFixed(2)} before`);

@@ -8,7 +8,7 @@ import { createRequire } from 'module';
 import fc from 'fast-check';
 import * as sq from '../chains/solana/vault/squads.mjs';
 import { RULES, compile, match, plan, needsVault, NotAllowed, POLICY_BYTES } from '../chains/solana/vault/policy.mjs';
-import { vaultConfig, wrap } from '../chains/solana/vault/account.mjs';
+import { vaultConfig, wrap, vaultFundsItsAccounts } from '../chains/solana/vault/account.mjs';
 import { connectPlan, connectProblems, lookupPlan } from '../chains/solana/vault/admin.mjs';
 
 const require = createRequire(import.meta.url);
@@ -210,7 +210,7 @@ test('plan: order and content are kept; only vault instructions are wrapped; bud
 
 test('wrap: one policy call per step, every vault instruction inside one', () => {
   const f = fixture();
-  const cfg = { vault: f.vault, policies: f.compiled.policies.map(() => key()), policyKey: key() };
+  const cfg = { vault: f.vault, payer: f.payer, policies: f.compiled.policies.map(() => key()), policyKey: key() };
   const ixs = [f.budget(), f.ata(), f.dlmm('swap2'), f.plain(), f.dlmm('claim_fee2'), f.dlmm('close_position2')];
   const out = wrap(ixs, cfg, f.compiled);
   const calls = out.filter(ix => ix.programId.equals(sq.PROGRAM_ID));
@@ -243,4 +243,20 @@ test('codec: a policy with no constraints, or more than 20, is refused before en
   assert.throws(() => sq.encodeProgramInteraction({ accountIndex: 0, constraints: [] }), /allow anything/);
   const c = compile('meteora-dlmm', worst()).policies[0].policy.constraints[0];
   assert.throws(() => sq.encodeProgramInteraction({ accountIndex: 0, constraints: Array(21).fill(c) }), /20/);
+});
+
+test('the vault funds its own token accounts; anyone else\'s stay as built', () => {
+  const vault = key(), payer = key(), other = key(), mint = key();
+  const ATA = new PublicKey('ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL');
+  const create = (funder, wallet, data = Buffer.from([1])) => new TransactionInstruction({ programId: ATA, data, keys: [
+    { pubkey: funder, isSigner: true, isWritable: true }, { pubkey: key(), isSigner: false, isWritable: true },
+    { pubkey: wallet, isSigner: false, isWritable: false }, { pubkey: mint, isSigner: false, isWritable: false }] });
+  const [mine, plain, theirs, byOther] = vaultFundsItsAccounts(
+    [create(payer, vault), create(payer, vault, Buffer.alloc(0)), create(payer, other), create(other, vault)], vault, payer);
+  for (const ix of [mine, plain]) {
+    assert.ok(ix.keys[0].pubkey.equals(vault) && ix.keys[0].isSigner);
+    assert.deepEqual([...ix.data], [1], 'always the idempotent create');
+  }
+  assert.ok(theirs.keys[0].pubkey.equals(payer), 'a payout wallet\'s account stays funded by the payer');
+  assert.ok(byOther.keys[0].pubkey.equals(other));
 });

@@ -470,6 +470,24 @@ export async function open(pool, lower, upper, maxA, maxB, execute, deps) {
   }, undefined, deps);
 }
 
+// A position's rent goes back to the key that paid it. The payer pays it at
+// open (initializeMultiplePosition...'s payer), but the SDK's close refunds
+// the position's owner, which for a vault is the vault: each cycle would move
+// the rent from the bot's payer key into the vault. With a key wallet the
+// two are one key and nothing changes. close_position_if_empty and
+// close_position2 name the rent receiver at account 2 (the vault policy
+// pins it to vault or payer).
+const CLOSE_DISCRIMINATORS = ['3b7cd4765b986e9d', 'ae5a2373ba2893e2'];
+export function refundRentTo(ixs, payer) {
+  for (const ix of ixs) {
+    if (ix.programId.toBase58() === SOLANA.programs.meteora_dlmm
+        && CLOSE_DISCRIMINATORS.includes(Buffer.from(ix.data.subarray(0, 8)).toString('hex'))) {
+      ix.keys[2] = { ...ix.keys[2], pubkey: payer };
+    }
+  }
+  return ixs;
+}
+
 // All of the wallet's positions on the pool, provided the one named is among
 // them: the name is a check that the caller and the chain agree on which pool.
 async function findPositions(dlmm, owner, address) {
@@ -499,7 +517,7 @@ export async function harvest(address, execute, deps) {
 
 export async function close(address, execute, deps) {
   const pool = poolArg();
-  return withRpc(async ({ connection, acting }) => {
+  return withRpc(async ({ connection, payer, acting }) => {
     const dlmm = await DLMM.create(connection, new PublicKey(pool));
     assertWritable(await poolMints(connection, [dlmm.tokenX.publicKey.toBase58(), dlmm.tokenY.publicKey.toBase58()]));
     const ps = await findPositions(dlmm, acting.owner, address);
@@ -513,6 +531,7 @@ export async function close(address, execute, deps) {
         bps: new BN(10000), shouldClaimAndClose: true,
       }));
     }
+    for (const tx of txs) refundRentTo(tx.instructions, payer.publicKey);
     const tot = (k) => ps.reduce((n, p) => n + Number(p.positionData[k].toString()), 0);
     if (!execute) {
       console.log(JSON.stringify({ mint: address, positions: ps.length, transactions: txs.length,
