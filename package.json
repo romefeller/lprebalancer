@@ -21,6 +21,7 @@
   },
   "devDependencies": {
     "fast-check": "4.10.2",
+    "jsdom": "26.1.0",
     "litesvm": "1.4.1"
   }
 }

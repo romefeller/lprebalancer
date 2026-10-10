@@ -1,0 +1,258 @@
+<!doctype html>
+<!--
+  The owners' page for an lp-bot vault: sign what only owners may sign
+  (withdraw, revoke the bot, approve its pools and payout wallets).
+
+  Run it on your own computer, never from a server:
+      cd owner && python3 -m http.server 8765      then open http://localhost:8765
+  Wallets inject into http://localhost pages, not into file:// pages.
+
+  It needs nothing from the bot. The operator gives you a request (one line of
+  JSON from `chains/solana/vault/cli.mjs request ...`); the page shows every
+  instruction in it, your wallet signs, the page sends. It holds no key and
+  sends nothing your wallet did not sign.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Vault owner</title>
+<style>
+  :root { --bg: #fbfbfa; --fg: #1d1d1b; --muted: #6b6b66; --line: #e2e1dc; --card: #ffffff; --accent: #2f5d50; --warn: #9a3412; --ok: #166534; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #161615; --fg: #ecebe6; --muted: #a3a29b; --line: #34332f; --card: #1e1e1c; --accent: #7fb8a6; --warn: #fdba74; --ok: #86efac; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 15px/1.5 system-ui, sans-serif; }
+  main { max-width: 760px; margin: 0 auto; padding: 24px 16px 64px; }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  h2 { font-size: 15px; margin: 0 0 12px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+  p.lead { color: var(--muted); margin: 0 0 24px; }
+  section { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 16px; margin-bottom: 16px; }
+  button { font: inherit; padding: 8px 14px; border-radius: 8px; border: 1px solid var(--line); background: var(--card); color: var(--fg); cursor: pointer; margin: 0 8px 8px 0; }
+  button.primary { background: var(--accent); color: var(--bg); border-color: var(--accent); }
+  button:disabled { opacity: .5; cursor: default; }
+  input, textarea { font: 13px/1.4 ui-monospace, monospace; width: 100%; padding: 8px; border-radius: 8px; border: 1px solid var(--line); background: var(--bg); color: var(--fg); }
+  textarea { min-height: 96px; }
+  code, .mono { font: 13px/1.4 ui-monospace, monospace; word-break: break-all; }
+  .muted { color: var(--muted); }
+  .warn { color: var(--warn); }
+  .ok { color: var(--ok); }
+  ol.ixs { padding-left: 20px; margin: 8px 0; }
+  ol.ixs li { margin-bottom: 8px; }
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  label { display: block; margin: 8px 0 4px; color: var(--muted); }
+</style>
+</head>
+<body>
+<main>
+  <h1>Vault owner</h1>
+  <p class="lead">Sign what only an owner of your vault may sign. Read every instruction before you sign.</p>
+
+  <section>
+    <h2>1. Your wallet</h2>
+    <div id="wallets" class="row"><span class="muted">Looking for wallets…</span></div>
+    <p id="connected" class="mono muted"></p>
+  </section>
+
+  <section>
+    <h2>2. The request</h2>
+    <label for="request">Paste the request the operator gave you (one line of JSON)</label>
+    <textarea id="request" spellcheck="false"></textarea>
+    <div id="decoded"></div>
+  </section>
+
+  <section>
+    <h2>3. Sign and send</h2>
+    <label for="rpc">Solana RPC</label>
+    <input id="rpc" value="https://api.mainnet-beta.solana.com">
+    <p></p>
+    <button id="send" class="primary" disabled>Sign and send</button>
+    <div id="result"></div>
+  </section>
+</main>
+
+<script src="https://unpkg.com/@solana/web3.js@1.98.4/lib/index.iife.min.js"></script>
+<script>
+(() => {
+  const { Connection, Message, PublicKey, Transaction } = solanaWeb3;
+  const $ = (id) => document.getElementById(id);
+  const esc = (s) => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+
+  // Programs a request may call, by name. Anything else is shown as unknown.
+  const PROGRAMS = {
+    SMRTzfY6DfH5ik3TKiyLFfXexV8uSG3d2UksSCYdunG: 'Squads smart account (your vault)',
+    '11111111111111111111111111111111': 'System',
+    TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA: 'SPL Token',
+    TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb: 'SPL Token-2022',
+    ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL: 'Associated token account',
+    ComputeBudget111111111111111111111111111111: 'Compute budget',
+  };
+
+  try { const saved = localStorage.getItem('rpc'); if (saved) $('rpc').value = saved; } catch {}
+  $('rpc').addEventListener('change', () => { try { localStorage.setItem('rpc', $('rpc').value.trim()); } catch {} });
+
+  // --- wallets: the Wallet Standard (Phantom, Solflare, Backpack, ...), and
+  // the older injected providers for wallets that predate it.
+  const wallets = new Map();
+  let chosen = null;          // {name, publicKey, sign(txBytes) -> signed bytes}
+
+  function standardWallet(w) {
+    if (!w.chains?.some(c => c.startsWith('solana:')) || !w.features?.['solana:signTransaction']) return;
+    wallets.set(w.name, {
+      name: w.name, icon: w.icon,
+      async connect() {
+        const { accounts } = await w.features['standard:connect'].connect();
+        const account = accounts.find(a => a.chains?.includes('solana:mainnet')) ?? accounts[0];
+        if (!account) throw new Error('the wallet shared no account');
+        return {
+          name: w.name, publicKey: new PublicKey(account.address),
+          async sign(bytes) {
+            const [out] = await w.features['solana:signTransaction'].signTransaction({ account, transaction: bytes, chain: 'solana:mainnet' });
+            return out.signedTransaction;
+          },
+        };
+      },
+    });
+    render();
+  }
+
+  function injected(name, provider) {
+    if (!provider?.signTransaction || wallets.has(name)) return;
+    wallets.set(name, {
+      name,
+      async connect() {
+        const r = await provider.connect();
+        const publicKey = new PublicKey((r?.publicKey ?? provider.publicKey).toString());
+        return {
+          name, publicKey,
+          async sign(bytes) { return (await provider.signTransaction(Transaction.from(bytes))).serialize({ requireAllSignatures: false }); },
+        };
+      },
+    });
+    render();
+  }
+
+  const register = (...ws) => { ws.forEach(standardWallet); return () => {}; };
+  window.addEventListener('wallet-standard:register-wallet', (e) => e.detail?.({ register }));
+  window.dispatchEvent(new CustomEvent('wallet-standard:app-ready', { detail: { register } }));
+  window.addEventListener('load', () => setTimeout(() => {
+    injected('Phantom', window.phantom?.solana);
+    injected('Solflare', window.solflare);
+    injected('Backpack', window.backpack);
+    render();
+  }, 300));
+
+  function render() {
+    const box = $('wallets');
+    box.innerHTML = '';
+    if (!wallets.size) { box.innerHTML = '<span class="muted">No Solana wallet found in this browser.</span>'; return; }
+    for (const w of wallets.values()) {
+      const b = document.createElement('button');
+      b.textContent = chosen?.name === w.name ? `${w.name} ✓` : `Connect ${w.name}`;
+      b.onclick = async () => {
+        try { chosen = await w.connect(); $('connected').textContent = `${chosen.name}: ${chosen.publicKey.toBase58()}`; render(); check(); }
+        catch (e) { $('connected').innerHTML = `<span class="warn">${esc(e.message ?? e)}</span>`; }
+      };
+      box.appendChild(b);
+    }
+  }
+
+  // --- the request ----------------------------------------------------------
+  let request = null;
+
+  function decode(text) {
+    const r = JSON.parse(text);
+    if (r.kind !== 'lp-bot vault request') throw new Error('this is not a vault request');
+    if (r.network !== 'solana:mainnet') throw new Error(`network ${r.network}`);
+    if (!Array.isArray(r.messages) || !r.messages.length) throw new Error('the request holds no transaction');
+    r.parsed = r.messages.map(b64 => Message.from(Uint8Array.from(atob(b64), c => c.charCodeAt(0))));
+    for (const m of r.parsed) {
+      if (m.accountKeys[0].toBase58() !== r.owner) throw new Error('a transaction is paid by someone other than the owner named in the request');
+      const signers = m.accountKeys.slice(0, m.header.numRequiredSignatures).map(k => k.toBase58());
+      if (signers.some(s => s !== r.owner)) throw new Error(`a transaction needs another signature (${signers.join(', ')})`);
+    }
+    return r;
+  }
+
+  function show(r) {
+    const parts = [`<p><strong>${esc(r.summary)}</strong></p>`,
+      `<p class="muted">Vault <span class="mono">${esc(r.vault)}</span><br>Signed by <span class="mono">${esc(r.owner)}</span></p>`];
+    r.parsed.forEach((m, t) => {
+      parts.push(`<p class="muted">Transaction ${t + 1} of ${r.parsed.length}</p><ol class="ixs">`);
+      for (const ix of m.instructions) {
+        const program = m.accountKeys[ix.programIdIndex].toBase58();
+        const name = PROGRAMS[program] ?? `<span class="warn">unknown program</span>`;
+        const accounts = ix.accounts.map(i => m.accountKeys[i].toBase58());
+        parts.push(`<li>${name} <span class="mono muted">${esc(program)}</span><br>`
+          + `<span class="mono muted">${accounts.map(esc).join('<br>')}</span></li>`);
+      }
+      parts.push('</ol>');
+    });
+    $('decoded').innerHTML = parts.join('');
+  }
+
+  $('request').addEventListener('input', () => {
+    $('result').innerHTML = '';
+    const text = $('request').value.trim();
+    if (!text) { request = null; $('decoded').innerHTML = ''; check(); return; }
+    try { request = decode(text); show(request); }
+    catch (e) { request = null; $('decoded').innerHTML = `<p class="warn">${esc(e.message)}</p>`; }
+    check();
+  });
+
+  function check() {
+    const ready = Boolean(request && chosen);
+    $('send').disabled = !ready;
+    if (request && chosen && chosen.publicKey.toBase58() !== request.owner) {
+      $('send').disabled = true;
+      $('result').innerHTML = `<p class="warn">The connected wallet is not the owner this request names (${esc(request.owner)}).</p>`;
+    }
+  }
+
+  // Send the signed bytes and send them again every 2 s until the chain says
+  // confirmed, or the blockhash has expired with no record of them (then they
+  // never landed and never can). Status polling, no websocket: any RPC works.
+  // The bot sends the same way (shared/tx_send.mjs).
+  async function landed(connection, raw, lastValidBlockHeight, n) {
+    const signature = await connection.sendRawTransaction(raw, { skipPreflight: false, maxRetries: 0 });
+    for (;;) {
+      const st = (await connection.getSignatureStatuses([signature])).value?.[0];
+      if (st?.err) throw new Error(`transaction ${n} failed on chain: ${JSON.stringify(st.err)} (${signature})`);
+      if (st && (st.confirmationStatus === 'confirmed' || st.confirmationStatus === 'finalized')) return signature;
+      if ((await connection.getBlockHeight('confirmed')) > lastValidBlockHeight) {
+        const last = (await connection.getSignatureStatuses([signature], { searchTransactionHistory: true })).value?.[0];
+        if (last && !last.err) return signature;
+        throw new Error(`transaction ${n} expired without landing (${signature}); nothing was done, try again`);
+      }
+      await new Promise(r => setTimeout(r, 2000));
+      try { await connection.sendRawTransaction(raw, { skipPreflight: true, maxRetries: 0 }); } catch { /* the next status read decides */ }
+    }
+  }
+
+  // --- sign and send, one transaction at a time ------------------------------
+  $('send').onclick = async () => {
+    const connection = new Connection($('rpc').value.trim(), 'confirmed');
+    $('send').disabled = true;
+    const out = [];
+    try {
+      for (const [i, m] of request.parsed.entries()) {
+        const tx = Transaction.populate(m);
+        const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('confirmed');
+        tx.recentBlockhash = blockhash;
+        const signed = await chosen.sign(tx.serialize({ requireAllSignatures: false, verifySignatures: false }));
+        const signature = await landed(connection, signed, lastValidBlockHeight, i + 1);
+        out.push(`<p class="ok">Transaction ${i + 1} confirmed: <a class="mono" target="_blank" rel="noopener" href="https://solscan.io/tx/${esc(signature)}">${esc(signature)}</a></p>`);
+        $('result').innerHTML = out.join('');
+      }
+      out.push('<p class="ok"><strong>Done.</strong></p>');
+    } catch (e) {
+      out.push(`<p class="warn">${esc(e.message ?? e)}</p>`);
+      $('send').disabled = false;
+    }
+    $('result').innerHTML = out.join('');
+  };
+})();
+</script>
+</body>
+</html>
