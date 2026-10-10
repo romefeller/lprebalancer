@@ -143,68 +143,77 @@ def distribute(state, position, fee_a, fee_b):
         books.notify('payout_skipped', reason=f'fees {fee_a} {sym_a} + {fee_b} {sym_b} exceed the LP wallet; '
                                         'the fee read is wrong, nothing split')
         return None
+    # A vault's fees never refill gas: its payer key pays the fees and only
+    # the owners top it up. A non-special instance's share goes to the fee
+    # wallet (fees.fee_share).
     parts = fees.split([(mint_a, sym_a, fee_a, px_a), (mint_b, sym_b, fee_b, px_b)],
-                       wallets.norm(config.PAYOUT_MINT), sol_before, config.GAS_RESERVE_SOL)
+                       wallets.norm(config.PAYOUT_MINT), None if config.VAULT else sol_before, config.GAS_RESERVE_SOL)
+    parts = fees.fee_share(parts, config.FEE_BPS)
     owed = state.setdefault('payout_owed', {})
     held = {mint_a: bal['balanceA'], mint_b: bal['balanceB']}
     sent = []
     pin_ok = capital.profit_wallet_pinned()
     for p in parts:
-        if p['kind'] != 'paid':
+        if p['kind'] not in ('paid', 'fee'):
             db.record_payout(config.PROFILE, position, p['mint'], p['symbol'], p['amount'], p['usd'], p['kind'],
                              detail=('gas under the reserve' if p['kind'] == 'gas' else None))
             continue
-        due = p['amount'] + float(owed.get(p['mint'], 0.0))
+        # The fee share is owed and paid on its own account, to its own wallet.
+        share = p['kind'] == 'fee'
+        to = config.FEE_WALLET if share else config.PROFIT_WALLET
+        key = f"fee:{p['mint']}" if share else p['mint']
+        due = p['amount'] + float(owed.get(key, 0.0))
         amt = min(due, float(held.get(p['mint']) or 0.0))
+        held[p['mint']] = float(held.get(p['mint']) or 0.0) - amt     # the profit and fee parts share one balance
         px = p['usd'] / p['amount'] if p['usd'] is not None and p['amount'] else None
         if amt <= 0:
             continue
         if not pin_ok:
             # The destination in the database does not match the address
             # pinned in the service environment: pay nothing, keep it owed.
-            owed[p['mint']] = due
+            owed[key] = due
             db.record_payout(config.PROFILE, position, p['mint'], p['symbol'], p['amount'],
-                             p['usd'], 'owed', to_address=config.PROFIT_WALLET,
+                             p['usd'], 'owed', to_address=to,
                              detail='profit wallet does not match LPBOT_PROFIT_WALLET_PIN')
             books.notify('payout_refused', reason='profit_wallet in the database does not match the pinned address',
                          symbol=p['symbol'], owed=round(due, 6))
             continue
-        out, err = signers.chain('send', p['mint'], f'{amt:.9f}', config.PROFIT_WALLET, '--execute', dex=signers.route('payout'))
+        out, err = signers.chain('send', p['mint'], f'{amt:.9f}', to, '--execute', dex=signers.route('payout'))
         if out and out.get('signature') and not err:
             rest = due - amt
             if rest > 1e-9:
-                owed[p['mint']] = rest          # what the wallet could not cover this time
+                owed[key] = rest                # what the wallet could not cover this time
             else:
-                owed.pop(p['mint'], None)
+                owed.pop(key, None)
             db.record_payout(config.PROFILE, position, p['mint'], p['symbol'], amt,
-                             amt * px if px else None, 'paid', to_address=config.PROFIT_WALLET,
+                             amt * px if px else None, p['kind'], to_address=to,
                              signature=out['signature'])
-            sent.append({'symbol': p['symbol'], 'amount': round(amt, 6),
+            sent.append({'symbol': p['symbol'], 'amount': round(amt, 6), 'kind': p['kind'],
                          'usd': round(amt * px, 4) if px else None, 'signature': out['signature']})
         elif (out or {}).get('signature') or (out or {}).get('partial') or \
                 re.search(r'timed out|timeout|confirm', str(err), re.I):
             # It may have landed. Never owe it, or the next harvest sends it
             # twice (review, 2026-09-26). Recorded as uncertain for the book.
-            owed.pop(p['mint'], None)
+            owed.pop(key, None)
             db.record_payout(config.PROFILE, position, p['mint'], p['symbol'], amt,
-                             amt * px if px else None, 'uncertain', to_address=config.PROFIT_WALLET,
+                             amt * px if px else None, 'uncertain', to_address=to,
                              signature=(out or {}).get('signature'), detail=err)
             books.notify('payout_uncertain', reason=err, symbol=p['symbol'], amount=round(amt, 6),
                          signature=(out or {}).get('signature'))
         else:
-            owed[p['mint']] = due
+            owed[key] = due
             db.record_payout(config.PROFILE, position, p['mint'], p['symbol'], amt,
-                             amt * px if px else None, 'owed', to_address=config.PROFIT_WALLET,
+                             amt * px if px else None, 'owed', to_address=to,
                              detail=err or 'no signature')
             books.notify('payout_failed', reason=err or 'no signature', symbol=p['symbol'], owed=round(due, 6))
     paths.save(state)
     summary = {k: round(sum((x['usd'] or 0) for x in parts if x['kind'] == k), 4)
-               for k in ('paid', 'reinvested', 'gas')}
+               for k in ('paid', 'reinvested', 'gas') + (('fee',) if config.FEE_BPS else ())}
     payout_mint = wallets.norm(config.PAYOUT_MINT)
     held = [{'symbol': x['symbol'], 'amount': round(x['amount'], 6),
              'usd': round(x['usd'], 4) if x['usd'] is not None else None}
             for x in parts if x['kind'] == 'reinvested' and x['mint'] == payout_mint]
-    books.notify('PAYOUT', sent=sent, split=summary, gas_low=sol_before < config.GAS_RESERVE_SOL,
+    books.notify('PAYOUT', sent=sent, split=summary, gas_low=not config.VAULT and sol_before < config.GAS_RESERVE_SOL,
                  sol_before=round(sol_before, 6), gas_reserve=config.GAS_RESERVE_SOL, held=held, to=config.PROFIT_WALLET,
                  parts=[{k: (round(v, 6) if isinstance(v, float) else v) for k, v in x.items()} for x in parts])
     return parts

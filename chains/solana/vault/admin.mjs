@@ -3,12 +3,13 @@
 // vault.mjs sends the bot's; the owners' go to the signing page.
 import { createRequire } from 'module';
 import * as sq from './squads.mjs';
+import SOLANA from '../solana.json' with { type: 'json' };
 
 const require = createRequire(import.meta.url);
 const { PublicKey, AddressLookupTableProgram, SystemProgram } = require('@solana/web3.js');
 const { getAssociatedTokenAddressSync, TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID, ASSOCIATED_TOKEN_PROGRAM_ID } = require('@solana/spl-token');
 
-const MEMO_PROGRAM = new PublicKey('MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr');
+const MEMO_PROGRAM = new PublicKey(SOLANA.programs.memo);
 // Addresses one extend instruction carries and still fits a transaction.
 const EXTEND_CHUNK = 24;
 

@@ -56,6 +56,11 @@ CAPS = chains.caps(CHAIN)
 WALLET_ADDRESS = (_WALLET_ROW or {}).get('address')
 WALLET_SECRET_ENV = (_WALLET_ROW or {}).get('secret_env') or 'WALLET_SECRET_PATH'
 ENABLED = bool(_CFG.get('enabled'))
+# A vault wallet: the money sits in a smart account its owners control, the
+# key above only pays fees, and the bot acts through the owners' policies
+# (sql/036, chains/solana/vault/). None: the key holds the money.
+VAULT = db.vault_row(WALLET_ID) if WALLET_ID else None
+CUSTODY = 'vault' if VAULT else 'key'
 # The token whose arrival this profile deploys, and whether it holds the
 # residual of the tokens its wallet's profiles share (wallets.py).
 DEPOSIT_MINT = _CFG.get('deposit_mint')
@@ -159,6 +164,10 @@ MIN_VOLUME_24H_USD = _env('LPBOT_MIN_VOLUME', float, float(_CFG.get('min_volume_
 MIGRATE_MIN_GAIN = _env('LPBOT_MIGRATE_MIN_GAIN', float, float(_CFG.get('migrate_min_gain') or 0.5))
 # DEXes the bot may actually open positions on: the ones with a signer.
 EXECUTE_DEXES = tuple(_env('LPBOT_EXECUTE_DEXES', _list, list(_CFG.get('execute_dexes') or ['orca'])))
+# A vault acts only where its owners approved a policy.
+if VAULT and not set(EXECUTE_DEXES) <= set(VAULT['venues']):
+    raise SystemExit(f'profile {PROFILE}: execute_dexes {sorted(EXECUTE_DEXES)} include venues the vault has no '
+                     f'approved policy for (approved: {sorted(VAULT["venues"])})')
 # Stay on `pool` whatever the board says.
 POOL_PINNED = _env('LPBOT_POOL_PINNED', lambda s: s.lower() in ('1', 'true', 'yes'),
                    bool(_CFG.get('pool_pinned')))
@@ -282,6 +291,14 @@ DEPLOY_ALL = _env('LPBOT_DEPLOY_ALL', lambda s: s.lower() in ('1', 'true', 'yes'
 PAYOUT_ENABLED = _env('LPBOT_PAYOUT', lambda s: s.lower() in ('1', 'true', 'yes'), bool(_CFG.get('payout_enabled')))
 PROFIT_WALLET = _env('LPBOT_PROFIT_WALLET', str, _CFG.get('profit_wallet') or '')
 PAYOUT_MINT = _env('LPBOT_PAYOUT_MINT', str, _CFG.get('payout_mint') or '')
+# An instance of the operator's own pays nothing; any other pays fee_bps of
+# its payout-token fees to fee_wallet at each harvest. Only a vault instance
+# can pay one: the chain then lets payouts reach the approved wallets only.
+SPECIAL = bool(_CFG.get('special', True))
+FEE_BPS = int(_CFG.get('fee_bps') or 0)
+FEE_WALLET = _CFG.get('fee_wallet') or ''
+if FEE_BPS and not VAULT:
+    raise SystemExit(f'profile {PROFILE}: fee_bps {FEE_BPS} needs a vault wallet; a key wallet pays no fee share')
 # Reward tokens that are not one of the pool's own: 'payout' swaps them to
 # payout_mint and sends them (to native SOL for gas while gas is low); 'hold'
 # leaves them in the LP wallet. Balances under reward_min_usd wait.
@@ -329,6 +346,25 @@ def keyed_rpc(env=os.environ):
 # service environment's LPBOT_RPC and SOLANA_RPC_URL name Solana endpoints.
 RPC = _env('LPBOT_RPC', str, keyed_rpc() or PUBLIC_RPC) if CHAIN == 'solana' else public_rpc(CHAIN, CAPS)
 WALLET = _env('LPBOT_WALLET', str, os.environ.get(WALLET_SECRET_ENV, ''))
+
+
+def vault_env(dex):
+    """What a Solana signer needs to act for this profile's vault on `dex`
+    (chains/solana/vault/account.mjs), or {} without a vault. Raises
+    ValueError for a venue the owners approved no policy for: nothing may be
+    signed there. Pure over VAULT and the environment."""
+    if not VAULT:
+        return {}
+    v = VAULT['venues'].get(dex)
+    if not v:
+        raise ValueError(f'the vault has no approved policy for {dex} (approved: {sorted(VAULT["venues"]) or "none"})')
+    key_path = os.environ.get(VAULT['policy_key_env'], '')
+    if not key_path:
+        raise ValueError(f'{VAULT["policy_key_env"]} (the path of the vault\'s policy key) is not set')
+    return {'LPBOT_VAULT_SETTINGS': VAULT['settings'], 'LPBOT_VAULT_VENUE': dex,
+            'LPBOT_VAULT_POLICIES': ','.join(v['policies']), 'LPBOT_VAULT_POOLS': ','.join(v['pools']),
+            'LPBOT_VAULT_PAYOUTS': ','.join(v['payouts']), 'LPBOT_VAULT_LOOKUP': VAULT.get('lookup') or '',
+            'LPBOT_VAULT_POLICY_KEY': key_path}
 
 
 def require_wallet():
@@ -397,6 +433,11 @@ def summary():
         'reopen_widen_minutes': REOPEN_WIDEN_MIN,
         'payout_enabled': PAYOUT_ENABLED,
         'profit_wallet': PROFIT_WALLET or None,
+        'custody': CUSTODY,
+        'vault_venues': sorted(VAULT['venues']) if VAULT else None,
+        'special': SPECIAL,
+        'fee_bps': FEE_BPS,
+        'fee_wallet': FEE_WALLET or None,
         'payout_mint': PAYOUT_MINT or None,
         'reward_policy': REWARD_POLICY,
         'reward_min_usd': REWARD_MIN_USD,

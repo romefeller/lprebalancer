@@ -103,6 +103,22 @@ def wallet_row(wallet_id):
     return dict(r) if r else None
 
 
+def vault_row(wallet_id):
+    """The vault of wallet `wallet_id` with its approved policies per venue
+    ({venue: {policies, pools, payouts}}), or None: the wallet's key holds
+    its money (sql/036). Holds no secret."""
+    with cursor() as cur:
+        cur.execute('select wallet_id, kind, settings, owners, threshold, policy_key_env, lookup '
+                    'from vaults where wallet_id = %s', (wallet_id,))
+        v = cur.fetchone()
+        if not v:
+            return None
+        cur.execute('select venue, policies, pools, payouts from vault_policies where wallet_id = %s', (wallet_id,))
+        venues = {r['venue']: {'policies': list(r['policies']), 'pools': list(r['pools']), 'payouts': list(r['payouts'])}
+                  for r in cur.fetchall()}
+    return dict(v, owners=list(v['owners']), venues=venues)
+
+
 def wallets():
     with cursor() as cur:
         cur.execute('select id, chain, address, secret_env, label from wallets order by id')
@@ -1253,7 +1269,7 @@ def daily_line(day, profile=None, wallet_id=None):
         cur.execute('select coalesce(sum(fee_usd), 0) f from harvests where ts >= %(s)s and ts < %(e)s '
                     f"and {mint_in('harvests.mint')}", w)
         f = float(cur.fetchone()['f'])
-        cur.execute("select coalesce(sum(usd), 0) u from payouts where kind in ('paid', 'uncertain') "
+        cur.execute("select coalesce(sum(usd), 0) u from payouts where kind in ('paid', 'uncertain', 'fee') "
                     f"and ts >= %(s)s and ts < %(e)s and {PAYOUT_IN}", w)
         paid = float(cur.fetchone()['u'])
         cur.execute("select coalesce(sum(case when kind in ('deposit', 'internal_in') then usd else -usd end), 0) n "
@@ -1344,7 +1360,7 @@ def since_start(extra_usd=0.0, profile=None, wallet_id=None):
                               where kind in ('deposit', 'withdrawal', 'internal_in', 'internal_out')
                                 and ts > %(since)s and {FLOW_IN}) f""", dict(a, since=base['ts']))
         fl = cur.fetchone()
-        cur.execute("select coalesce(sum(usd), 0) u from payouts where kind in ('paid', 'uncertain') "
+        cur.execute("select coalesce(sum(usd), 0) u from payouts where kind in ('paid', 'uncertain', 'fee') "
                     f"and ts >= %(since)s and {PAYOUT_IN}", dict(a, since=base['ts']))
         paid = float(cur.fetchone()['u'])
         mixed = mixed_sides(_pairs_held(cur, a))['a']

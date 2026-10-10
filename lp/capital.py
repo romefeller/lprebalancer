@@ -116,9 +116,11 @@ def sleeve_of(bal):
             _MINTS_SEEN[config.PROFILE] = [ma, mb]
         view = wallets.sleeve(bal, config.PROFILE, ma, mb, wallets.with_self(profiles, signers.me_row(ma, mb)),
                               wallets.claims(config.WALLET_ID), config.CAPS['native_mint'])
-        if view.get('nativeSide') is not None:
+        if view.get('nativeSide') is not None and not config.VAULT:
             # This profile's pool holds the native token: every other profile
             # of the wallet pays its opens' rent from it, so it keeps that back.
+            # (A vault pays no rent, its payer key does: the signer's own
+            # nativeReserve, the vault's floor, stands.)
             view['nativeReserve'] = config.GAS_RESERVE_SOL + open_headroom(config.DEX) + sum(
                 open_headroom(p.get('dex')) for p in profiles if p['name'] != config.PROFILE)
         return view
@@ -364,7 +366,12 @@ def profit_wallet_pinned():
     """The payout destination must match the address pinned in the service
     environment, which a database write cannot change: the chain row names
     the variable (LPBOT_PROFIT_WALLET_PIN on Solana, LPBOT_EVM_PROFIT_WALLET_PIN
-    on Base). chains/solana/payout.mjs and the EVM signer check the same pin themselves."""
+    on Base). chains/solana/payout.mjs and the EVM signer check the same pin themselves.
+    A vault's pin is on chain: its policy."""
+    if config.VAULT:
+        # The vault's policy lets payouts reach only the wallets its owners
+        # approved; chains/solana/payout.mjs checks the account against it.
+        return bool(config.PROFIT_WALLET)
     pin = os.environ.get(config.CAPS['pin_env'], '')
     # an EVM address is one address in any letter case (EIP-55 checksums)
     return bool(pin) and wallets.norm(pin) == wallets.norm(config.PROFIT_WALLET) and chains.is_address(config.CHAIN, pin)
@@ -416,19 +423,26 @@ def gas_for_open(state, bal):
     reserve and rent out of the deposit, and the swap to 50/50 buys the rest;
     but every signer refuses every write below the reserve (2026-10-02: a
     SOL/USDC profile funded with USDC alone failed its open on each poll,
-    toward a halt). Short of it, it holds, says so once, counts no failure."""
+    toward a halt). Short of it, it holds, says so once, counts no failure.
+    A vault's gas is its payer key's (`gasSol`): that key pays the fees and
+    every rent, and only the owners top it up."""
     side = bal.get('nativeSide')
-    have = bal.get('sol')
-    if have is None and side is not None:
-        have = bal.get('balanceA' if side == 'A' else 'balanceB')      # the pool's native token is the gas
-    have = float(have or 0.0)
-    need = config.GAS_RESERVE_SOL if side is not None else native_reserve(bal)
+    if config.VAULT:
+        have = float(bal.get('gasSol') or 0.0)
+        need = config.GAS_RESERVE_SOL + open_headroom(config.DEX)
+    else:
+        have = bal.get('sol')
+        if have is None and side is not None:
+            have = bal.get('balanceA' if side == 'A' else 'balanceB')      # the pool's native token is the gas
+        have = float(have or 0.0)
+        need = config.GAS_RESERVE_SOL if side is not None else native_reserve(bal)
     if have >= need:
         state.pop('gas_short_told', None)
         return True
     if not state.get('gas_short_told'):
         state['gas_short_told'] = time.time(); paths.save(state)
-        why = (f'{have:.4f} {config.CAPS["native_symbol"]} in the wallet, an open on {config.DEX} needs '
+        where = "the bot's fee payer key (the owners top it up)" if config.VAULT else 'the wallet'
+        why = (f'{have:.4f} {config.CAPS["native_symbol"]} in {where}, an open on {config.DEX} needs '
                f'{need:.4f} (reserve + rent): holding until gas is topped up')
         books.notify('gas_short', reason=why)
         db.event('gas_short', why)

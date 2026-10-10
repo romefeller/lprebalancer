@@ -40,7 +40,10 @@ SIGNER_ENV_WITHHELD = ('TELEGRAM_',)     # environment prefixes no signer gets (
 def route(kind):
     """The SIGNERS key that does `kind` ('swap' or 'payout') on this chain:
     its own script on Solana (Jupiter, chains/solana/payout.mjs), the venue signer where the
-    chain row says 'venue' (Base)."""
+    chain row says 'venue' (Base). A vault swaps on its own approved pool,
+    through the venue signer: Jupiter's routes are not the owners' pools."""
+    if kind == 'swap' and config.VAULT:
+        return config.DEX
     via = config.CAPS[f'{kind}_via']
     return config.DEX if via == 'venue' else via
 
@@ -48,7 +51,10 @@ def route(kind):
 def housekeeper(kind):
     """Whether this process runs the wallet-wide chore `kind` ('sweep',
     'janitor', 'audit', 'scanner'): only the wallet's residual owner, and
-    only where the chain allows it."""
+    only where the chain allows it. A vault sweeps nothing (its swaps stay on
+    its approved pools) and has no token accounts of the key to close."""
+    if config.VAULT and kind in ('sweep', 'janitor'):
+        return False
     return bool(config.RESIDUAL_OWNER and config.CAPS.get(kind))
 
 
@@ -423,6 +429,16 @@ def _chain(*args, dex=None, timeout=tuning.SIGNER_TIMEOUT_S, extra_env=None):
     # The profile's own signer gets its opt-ins (config.SIGNER_ENV); no other
     # script does.
     own = config.SIGNER_ENV if (dex or config.DEX) == config.DEX else {}
+    # A vault profile: the vault's policies for the venue (payouts use the
+    # profile's own venue's). Aggregator swaps would leave the approved pools.
+    target = dex or config.DEX
+    if config.VAULT and target in ('jupiter', 'orca-swap'):
+        return None, 'refused: a vault swaps only on a pool its owners approved (the venue signer)'
+    try:
+        vault = config.vault_env(config.DEX if target in ('payout', 'janitor') else target)
+    except ValueError as e:
+        return None, f'refused: {e}'
+    fee = {'LPBOT_FEE_WALLET': config.FEE_WALLET} if config.FEE_BPS else {}
     # The bridge's Telegram token shares the EnvironmentFile; no signer needs it.
     base = {k: v for k, v in os.environ.items() if not k.startswith(SIGNER_ENV_WITHHELD)}
     env = dict(base, **own,
@@ -436,7 +452,7 @@ def _chain(*args, dex=None, timeout=tuning.SIGNER_TIMEOUT_S, extra_env=None):
                LPBOT_GAS_RESERVE_NATIVE=str(config.GAS_RESERVE_SOL),
                LPBOT_RUN_DIR=str(paths.RUN),
                LPBOT_CHAIN=config.CHAIN,
-               LPBOT_PROFIT_WALLET=config.PROFIT_WALLET, **(extra_env or {}))
+               LPBOT_PROFIT_WALLET=config.PROFIT_WALLET, **vault, **fee, **(extra_env or {}))
     try:
         r = subprocess.run(['node', script, *args], capture_output=True,
                            text=True, timeout=timeout, env=env)

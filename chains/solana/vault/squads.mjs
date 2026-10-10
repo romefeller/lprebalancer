@@ -15,11 +15,12 @@
 // not a transaction.
 import { createRequire } from 'module';
 import { createHash } from 'node:crypto';
+import SOLANA from '../solana.json' with { type: 'json' };
 
 const require = createRequire(import.meta.url);
 const { PublicKey, SystemProgram, TransactionInstruction } = require('@solana/web3.js');
 
-export const PROGRAM_ID = new PublicKey('SMRTzfY6DfH5ik3TKiyLFfXexV8uSG3d2UksSCYdunG');
+export const PROGRAM_ID = new PublicKey(SOLANA.programs.squads_smart_account);
 
 // Permission bits of a signer (state/settings.rs Permission). A signer needs
 // all three to act alone through a synchronous transaction.

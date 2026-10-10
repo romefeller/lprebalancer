@@ -47,3 +47,25 @@ def split(fees, payout_mint, sol_before, gas_reserve):
             amt -= g
         add(mint, sym, amt, px, 'paid' if mint == payout_mint and not gas_low else 'reinvested')
     return out
+
+
+def fee_share(parts, bps):
+    """Split each 'paid' part of `parts` (split()'s output) into what the
+    profit wallet gets and, as kind 'fee', the `bps` share a non-special
+    instance pays (owner, 2026-10-10: 10% of the USDC/USDT0 fees). Only the
+    payout token is shared: reinvested and gas parts pass as they are. Pure."""
+    if not bps:
+        return list(parts)
+    if not 0 < bps <= 5000:
+        raise ValueError(f'fee share of {bps} bps is outside 1..5000')
+    out = []
+    for p in parts:
+        if p['kind'] != 'paid':
+            out.append(p)
+            continue
+        cut = p['amount'] * bps / 10_000
+        px = p['usd'] / p['amount'] if p['usd'] is not None and p['amount'] else None
+        for amt, kind in ((p['amount'] - cut, 'paid'), (cut, 'fee')):
+            if amt > 0:
+                out.append(dict(p, amount=amt, usd=amt * px if px is not None else None, kind=kind))
+    return out

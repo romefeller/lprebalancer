@@ -207,6 +207,8 @@ export async function balance(poolExplicit, deps) {
     // gasSol: what pays the fees (the owner itself unless a vault holds the money)
     const gasSol = acting.mode === 'vault' ? (await connection.getBalance(payer.publicKey)) / 1e9 : lamports / 1e9;
     const out = { owner: acting.owner.toBase58(), custody: acting.mode, sol: lamports / 1e9, gasSol, pool, dex: 'meteora-dlmm',
+      // a vault keeps only its floor: the payer key pays every rent
+      ...(acting.mode === 'vault' ? { nativeReserve: VAULT_SOL_FLOOR } : {}),
       tokenA: info.symbolA, tokenB: info.symbolB, price: info.price, uiPrice: info.uiPrice,
       quoteUsd: info.quoteUsd, nativeSide: info.nativeSide, ...mintFields(...info.mints) };
     out.balanceA = await splBalance(connection, acting.owner, info.mintA, info.decimalsA, info.multiplierA, lamports);

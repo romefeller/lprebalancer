@@ -570,14 +570,16 @@ def run(bot, db, config, txfees, notify, now=None, wallet=None):
     def payouts():
         last = int(db.audit_value('payout_cursor') or 0)
         with db.cursor() as c:
-            c.execute("select id, token_mint, amount, signature from payouts where kind = 'paid' and id > %s "
+            # a fee share is checked like a payout, against its own recipient
+            c.execute("select id, token_mint, amount, signature, to_address from payouts "
+                      "where kind in ('paid', 'fee') and id > %s "
                       "and signature is not null and (%s::text[] is null or config_name = any(%s)) "
                       "order by id limit 30", (last, names, names))
             rows = c.fetchall()
         bad = []
         for r in rows:
             tx = txfees.fetch(url, r['signature'], tries=3)
-            if not payout_received(tx, config.PROFIT_WALLET, r['token_mint'], float(r['amount'])):
+            if not payout_received(tx, r['to_address'] or config.PROFIT_WALLET, r['token_mint'], float(r['amount'])):
                 bad.append(r['id'])
             db.set_audit_value('payout_cursor', r['id'])
         return ('fail' if bad else 'ok'), {'checked': len(rows), 'not_received': bad}

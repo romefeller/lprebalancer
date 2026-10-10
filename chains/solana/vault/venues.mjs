@@ -2,11 +2,12 @@
 // accounts every operation on a pool touches, for the vault's lookup table.
 // One entry per venue in rules.json; a venue without one cannot be approved.
 import { createRequire } from 'module';
+import SOLANA from '../solana.json' with { type: 'json' };
 
 const require = createRequire(import.meta.url);
 const { PublicKey } = require('@solana/web3.js');
 
-const DLMM_PROGRAM = new PublicKey('LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo');
+const DLMM_PROGRAM = new PublicKey(SOLANA.programs.meteora_dlmm);
 
 export const VENUES = {
   'meteora-dlmm': {

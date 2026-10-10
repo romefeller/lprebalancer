@@ -14,11 +14,12 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { encodeProgramInteraction } from './squads.mjs';
+import SOLANA from '../solana.json' with { type: 'json' };
 
 const require = createRequire(import.meta.url);
 const { PublicKey, ComputeBudgetProgram } = require('@solana/web3.js');
 
-const TOKEN_PROGRAM = new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA');
+const TOKEN_PROGRAM = new PublicKey(SOLANA.programs.token);
 // Byte 32 of an SPL token account is its owner (spl-token state.rs Account).
 const TOKEN_OWNER_OFFSET = 32;
 const MAX_CONSTRAINTS = 20;

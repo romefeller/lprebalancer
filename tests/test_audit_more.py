@@ -60,11 +60,13 @@ class SinceStartEdges(unittest.TestCase):
         snap('2026-09-25 00:00+00', 251.0, 125.0); snap('2026-09-25 00:00+00', 252.0, 126.0)
         self.assertEqual(db.since_start()['equity_usd'], 252.0)
 
-    def test_only_paid_and_uncertain_payouts_left_the_book(self):
+    def test_only_paid_uncertain_and_fee_payouts_left_the_book(self):
+        # 'fee': a non-special instance's share, sent to the fee wallet (sql/036)
         base(); snap('2026-09-23 00:00+00', 240.0, 120.0)
-        for k, v in (('paid', 1.0), ('uncertain', 0.5), ('owed', 7.0), ('reinvested', 9.0), ('gas', 3.0), ('settled', 4.0)):
+        for k, v in (('paid', 1.0), ('uncertain', 0.5), ('fee', 0.25), ('owed', 7.0), ('reinvested', 9.0), ('gas', 3.0),
+                     ('settled', 4.0)):
             pay('2026-09-22 12:00+00', v, k)
-        self.assertEqual(db.since_start()['paid_out_usd'], 1.5)
+        self.assertEqual(db.since_start()['paid_out_usd'], 1.75)
 
     def test_usdc_in_the_baseline_and_in_flows(self):
         base(sol=1.0, usdc=120.0, usd=240.0)
