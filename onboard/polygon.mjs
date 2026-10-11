@@ -9,7 +9,7 @@ import { readKey } from '../chains/evm/keyfile.mjs';
 import { clients, connect, poolOf } from '../chains/evm/vault/cli.mjs';
 import { SAFE_ABI, SENTINEL, preValidated, readState } from '../chains/evm/vault/safe.mjs';
 import * as POLYGON from '../chains/evm/polygon.mjs';
-import { Invalid, fromRaw, own, toRaw } from './intent.mjs';
+import { Invalid, fromRaw, nativeOf, own, toRaw } from './intent.mjs';
 
 const ZERO = '0x0000000000000000000000000000000000000000';
 
@@ -103,6 +103,15 @@ export async function connectVault(keys, c, f, log) {
 const erc20 = (functionName, args) => encodeFunctionData({ abi: POLYGON.ERC20_ABI, functionName, args });
 const balanceOf = (pub, token, who) => pub.readContract({ address: token, abi: POLYGON.ERC20_ABI, functionName: 'balanceOf', args: [who] });
 const call = (to, data, value = 0n) => ({ to: getAddress(to), data, value: toHex(value) });
+
+// What the owner's wallet holds of POL and of `token`, in raw units by
+// symbol (intent.mjs maxAmount).
+export async function holdings(keys, c, owner, token) {
+  const t = own(c.tokens, token);
+  const held = { [nativeOf(c)[0]]: await keys.pub.getBalance({ address: owner }) };
+  if (!t.native) held[token] = await balanceOf(keys.pub, t.address, owner);
+  return held;
+}
 
 // The deposit: a token transfer to the Safe; native POL is wrapped first
 // (the vault never wraps), then the wrapped token is sent.

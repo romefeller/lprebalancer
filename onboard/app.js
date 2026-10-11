@@ -155,6 +155,23 @@
     } catch (e) { say(e.message ?? e); }
   };
 
+  // Max: the most the connected wallet can put in with the token, as the
+  // server reads its balances (the owner's fees kept back, never above the
+  // token's max). Not enough leaves the box as it is and says why.
+  $('max').onclick = async () => {
+    say('');
+    const token = $('token').value, w = wallet;
+    $('max').disabled = true;
+    try {
+      if (!w || w.chain !== $('chain').value) throw new Error('connect a wallet on this chain first');
+      const m = await post('max', { chain: w.chain, owner: w.address, token });
+      if (wallet === w && $('token').value === token) {
+        if (m.amount) $('amount').value = m.amount; else say(m.short);
+      }
+    } catch (e) { say(e.message ?? e); }
+    $('max').disabled = false;
+  };
+
   $('sign').onclick = async () => {
     say('');
     $('progress').replaceChildren();

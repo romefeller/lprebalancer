@@ -5,7 +5,9 @@
 // key the gas in POL; the server checks that payment on chain before the bot
 // spends anything; the bot creates the Safe; the wallet wraps POL and
 // deposits the WPOL; the profile starts. Bad payments are refused; the owner
-// withdraws and revokes from the page. Skipped when anvil is missing or
+// withdraws and revokes from the page. A second owner presses Max and signs
+// with what it filled: its POL less the fees kept back for its own three
+// transactions. Skipped when anvil is missing or
 // cannot fork.
 //
 // Safety: every client points at the local anvil, and the test checks the
@@ -25,12 +27,12 @@ import { loadConfig, makeServer, polygonAdapter, pythonStore } from '../onboard/
 
 // Fresh keys: anvil's well-known test addresses carry code on Polygon
 // mainnet (EIP-7702 sweepers) that forwards any POL they receive.
-const KEYS = Object.fromEntries(['bot', 'owner', 'stranger'].map(k => [k, `0x${crypto.randomBytes(32).toString('hex')}`]));
+const KEYS = Object.fromEntries(['bot', 'owner', 'stranger', 'maxer'].map(k => [k, `0x${crypto.randomBytes(32).toString('hex')}`]));
 const acct = Object.fromEntries(Object.entries(KEYS).map(([k, v]) => [k, privateKeyToAccount(v)]));
 const FORK_URLS = process.env.LPBOT_POLYGON_FORK_URL ? [process.env.LPBOT_POLYGON_FORK_URL]
   : ['https://polygon-bor-rpc.publicnode.com', 'https://polygon.drpc.org'];
 const INVITE = 'polygon-fork-invite';
-const NAME = 'ob-poly-fork', NAME2 = 'ob-poly-two', TEMPLATE = 'ob-poly-tpl';
+const NAME = 'ob-poly-fork', NAME2 = 'ob-poly-two', NAME3 = 'ob-poly-max', TEMPLATE = 'ob-poly-tpl';
 const ERC20 = parseAbi(['function balanceOf(address) view returns (uint256)']);
 const E18 = 10n ** 18n;
 
@@ -104,7 +106,8 @@ test('fork (Polygon): pay the gas in POL, sign once, Safe and profile, wrap and 
   const cfg = loadConfig();
   const C = cfg.chains.polygon;
   C.template = TEMPLATE;
-  clean(NAME, TEMPLATE); clean(NAME2, TEMPLATE);
+  cfg.limits.creates = { ...cfg.limits.creates, max: 4 };       // four new vaults from this one address
+  clean(NAME, TEMPLATE); clean(NAME2, TEMPLATE); clean(NAME3, TEMPLATE);
   template(TEMPLATE, { chain: 'polygon', address: acct.bot.address, payoutMint: U.USDT0.toLowerCase(), profit: C.operatorWallet });
   const started = [], logs = [];
   const adapter = polygonAdapter(C, { deps: { U, account: acct.bot, pub, wallet: walletOf('bot') }, log: (o) => logs.push(o) });
@@ -118,7 +121,7 @@ test('fork (Polygon): pay the gas in POL, sign once, Safe and profile, wrap and 
     const r = await fetch(`${base}api/${p}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ invite: INVITE, ...b }) });
     return { status: r.status, json: await r.json() };
   };
-  let dom;
+  let dom, dom3;
   try {
     // --- 1. bad payments first: a request signed over the API, then refused payments ---
     const it = (await post('intent', { chain: 'polygon', owner: acct.owner.address, token: 'USDT0', amount: '10',
@@ -218,9 +221,43 @@ test('fork (Polygon): pay the gas in POL, sign once, Safe and profile, wrap and 
     const [modules] = await pub.readContract({ address: safe, abi: SAFE_ABI, functionName: 'getModulesPaginated', args: ['0x0000000000000000000000000000000000000001', 10n] });
     assert.deepEqual(modules, [], 'the Roles module is disabled');
     await wait(() => /bot revoked/.test(mineCard().textContent));
+
+    // --- 4. Max fills the box with what the wallet can put in; a Sign with it goes through ---
+    await rpc('anvil_setBalance', [acct.maxer.address, `0x${(30n * E18).toString(16)}`]);
+    const w3 = provider('maxer');
+    let p3;
+    ({ dom: dom3, $: p3 } = await openPage(base, INVITE, (w) => { w.ethereum = w3; }));
+    p3('chain').value = 'polygon';
+    p3('chain').dispatchEvent(new dom3.window.Event('change'));
+    p3('connect').click();
+    await wait(() => p3('wallet').textContent.includes(acct.maxer.address));
+    const pressMax = async () => {
+      p3('error').textContent = '';
+      p3('max').click();
+      await wait(() => !p3('max').disabled);
+    };
+    p3('token').value = 'WPOL';
+    await pressMax();
+    assert.equal(p3('error').textContent, 'not enough: you have 0 WPOL, the minimum is 20 WPOL');
+    assert.equal(p3('amount').value, '', 'the box is left as it was');
+    p3('token').value = 'POL';
+    await pressMax();
+    assert.deepEqual([p3('amount').value, p3('error').textContent], ['29.9', ''], '30 POL less 0.1 kept back for the fees');
+    p3('name').value = NAME3;
+    p3('sign').click();
+    await wait(() => /The bot runs/.test(p3('progress').textContent) || p3('error').textContent);
+    assert.equal(p3('error').textContent, '', JSON.stringify(logs.filter(l => l.event !== 'connect_report').slice(-5)));
+    assert.equal(w3.sent.length, 3, 'the gas payment, the wrap, the deposit');
+    const o3 = json(`select row_to_json(o) from rebalancer.onboard o where name = '${NAME3}'`);
+    assert.deepEqual([o3.state, o3.amount, o3.deposit], ['started', 29.9, 25.9]);
+    assert.equal(await balanceOf(U.WPOL, o3.vault), 259n * E18 / 10n);
+    const left = await pub.getBalance({ address: acct.maxer.address });
+    t.diagnostic(`after Max: ${Number(left) / 1e18} POL left of the 0.1 kept back for the three transactions`);
+    assert.ok(left > 0n && left < E18 / 10n, 'the fees came out of what Max kept back');
   } finally {
     dom?.window.close();
+    dom3?.window.close();
     server.close();
-    clean(NAME, TEMPLATE); clean(NAME2, TEMPLATE); clean('ob-poly-three', TEMPLATE);
+    clean(NAME, TEMPLATE); clean(NAME2, TEMPLATE); clean('ob-poly-three', TEMPLATE); clean(NAME3, TEMPLATE);
   }
 });

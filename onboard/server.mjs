@@ -9,7 +9,8 @@
 // chain for it), registers it and one new profile copied from the chain's
 // template. The owner's wallet then deposits; once the deposit is in the
 // vault the profile's service starts. The page also lists the owner's vaults,
-// with withdraw and revoke built for the owner's wallet to sign.
+// with withdraw and revoke built for the owner's wallet to sign, and reads
+// the wallet's balances for its Max button.
 //
 // What it never does: hold an owner's key, send a transaction the owner did
 // not sign (other than the bot's own connect), spend anything without the
@@ -44,6 +45,11 @@ export function loadConfig(file = path.join(HERE, 'onboard.json')) {
   if (raw.chains.solana) chains.solana = S.resolve(raw.chains.solana);
   if (raw.chains.polygon) chains.polygon = P.resolve(raw.chains.polygon);
   if (!(raw.fee.bps >= 0 && raw.fee.bps <= 5000)) throw new Error(`fee.bps ${raw.fee.bps}`);
+  for (const [k, c] of Object.entries(chains)) {
+    for (const [s, t] of Object.entries(c.tokens)) {
+      if (typeof t.fees !== 'string' || !/^\d+(\.\d+)?$/.test(t.fees)) throw new Error(`chains.${k}.tokens.${s}.fees: a decimal (what Max keeps back)`);
+    }
+  }
   if (!raw.service.start.some(a => a.includes('{name}'))) throw new Error('service.start must name {name}');
   if (!['127.0.0.1', '::1'].includes(raw.listen.host)) throw new Error(`listen.host ${raw.listen.host}: loopback only (Caddy proxies)`);
   return { ...raw, chains };
@@ -377,6 +383,18 @@ export function makeServer(cfg, deps) {
     return { vaults: out };
   }
 
+  // POST /api/max: the most the owner's wallet can put in with `token`
+  // (intent.mjs maxAmount), from its balances on chain. Reads only.
+  async function max(ip, body) {
+    gate(ip, body);
+    const chain = I.text(body.chain);
+    const adapter = chainOf(chain);
+    const owner = I.address(chain, body.owner, 'owner');
+    const token = I.text(body.token), c = cfg.chains[chain];
+    if (!I.own(c.tokens, token)) throw new HttpError(400, `token: one of ${Object.keys(c.tokens).join(', ')}`);
+    return { token, ...I.maxAmount(c, token, await adapter.holdings(owner, token)) };
+  }
+
   function publicConfig() {
     return { site: cfg.site, feeBps: cfg.fee.bps,
       chains: Object.fromEntries(Object.keys(deps.chains).map(k => {
@@ -388,7 +406,7 @@ export function makeServer(cfg, deps) {
       })) };
   }
 
-  const routes = { '/api/intent': intent, '/api/sign': sign, '/api/pay': pay, '/api/tx': tx, '/api/start': start, '/api/vaults': vaults };
+  const routes = { '/api/intent': intent, '/api/sign': sign, '/api/pay': pay, '/api/tx': tx, '/api/start': start, '/api/vaults': vaults, '/api/max': max };
 
   return http.createServer(async (req, res) => {
     const ip = clientOf(req);
@@ -431,6 +449,7 @@ export async function solanaAdapter(c, { connection, env = process.env, log }) {
     record: (venue, pool) => S.poolRecord(connection, venue, pool, c),
     payment: (a) => S.paymentTxs(connection, c, a), checkPayment: (sig, expect) => S.checkPayment(connection, sig, expect),
     deposit: (a) => S.depositTxs(connection, c, a), owner: (row, a) => S.ownerTxs(connection, c, row, keys, a),
+    holdings: (owner, token) => S.holdings(connection, c, owner, token),
     status: (row) => S.status(connection, c, row, keys), hasDeposit: S.hasDeposit };
 }
 
@@ -441,6 +460,7 @@ export function polygonAdapter(c, { env = process.env, deps = null, log }) {
     record: () => P.poolRecord(keys, c),
     payment: (a) => P.paymentTxs(keys, c, a), checkPayment: (hash, expect) => P.checkPayment(keys, c, hash, expect),
     deposit: (a) => P.depositTxs(keys, c, a), owner: (row, a) => P.ownerTxs(keys, c, row, a),
+    holdings: (owner, token) => P.holdings(keys, c, owner, token),
     status: (row) => P.status(keys, c, row), hasDeposit: P.hasDeposit };
 }
 

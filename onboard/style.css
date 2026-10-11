@@ -12,7 +12,9 @@ section { background: var(--card); border: 1px solid var(--line); border-radius:
 label { display: block; margin: 10px 0 4px; color: var(--muted); font-size: 14px; }
 input, select { font: inherit; width: 100%; padding: 10px; border-radius: 8px; border: 1px solid var(--line); background: var(--bg); color: var(--fg); }
 .row { display: flex; gap: 8px; }
+.row input { min-width: 0; }
 .row select { width: 8em; flex: none; }
+.row button { flex: none; margin: 0; min-width: 44px; min-height: 44px; touch-action: manipulation; }
 button { font: inherit; padding: 10px 16px; border-radius: 8px; border: 1px solid var(--line); background: var(--card); color: var(--fg); margin: 8px 8px 0 0; }
 button.primary { background: var(--accent); color: var(--bg); border-color: var(--accent); }
 button:disabled { opacity: .5; }

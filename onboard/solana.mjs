@@ -8,7 +8,7 @@ import { VENUES } from '../chains/solana/vault/venues.mjs';
 import { readKeypair } from '../chains/solana/vault/account.mjs';
 import { connect, request } from '../chains/solana/vault/cli.mjs';
 import SOLANA from '../chains/solana/solana.json' with { type: 'json' };
-import { Invalid, fromRaw, own, toRaw } from './intent.mjs';
+import { Invalid, fromRaw, nativeOf, own, toRaw } from './intent.mjs';
 
 const bs58 = createRequire(import.meta.url)('bs58').default;
 
@@ -74,6 +74,16 @@ async function tokenBalance(connection, t, owner, offCurve) {
   const ata = spl.getAssociatedTokenAddressSync(mint, owner, offCurve, program);
   const a = await connection.getAccountInfo(ata);
   return a ? spl.unpackAccount(ata, a, program).amount : 0n;
+}
+
+// What the owner's wallet holds of the native coin and of `token`, in raw
+// units by symbol (intent.mjs maxAmount). The token: its associated account,
+// the one a deposit spends from.
+export async function holdings(connection, c, owner, token) {
+  const from = new PublicKey(owner), t = own(c.tokens, token);
+  const held = { [nativeOf(c)[0]]: BigInt(await connection.getBalance(from, 'confirmed')) };
+  if (!t.native) held[token] = await tokenBalance(connection, t, from, false);
+  return held;
 }
 
 // What is wrong with a gas payment, from its status and its parsed
