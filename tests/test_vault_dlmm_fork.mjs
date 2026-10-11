@@ -40,7 +40,7 @@ async function vaultOnFork({ usdc = 200_000_000n, payoutWallets = [] } = {}) {
   const payouts = payoutWallets.map(w => getAssociatedTokenAddressSync(USDC, w, true));
   const compiled = compile('meteora-dlmm', { vault, payer: payer.publicKey, pools: [POOL], payouts });
   const plan = connectPlan({ creator: payer.publicKey, treasury: config.treasury, seed, owners: [owner.publicKey],
-    threshold: 1, policyKey: policyKey.publicKey, compiled });
+    threshold: 1, policyKey: policyKey.publicKey, venues: [compiled] });
   for (const ixs of plan.txs) { const r = await fork.send(ixs, payer); assert.ok(r.ok, r.logs.join('\n')); assert.ok(r.size <= 1232); }
   assert.deepEqual(connectProblems(fork.get(plan.settings).data,
     { owners: [owner.publicKey], threshold: 1, botKeys: [payer.publicKey, policyKey.publicKey] }), []);
@@ -57,7 +57,7 @@ async function vaultOnFork({ usdc = 200_000_000n, payoutWallets = [] } = {}) {
   const connection = fork.connection();
   // the vault's lookup table: the pool's accounts and the vault's own
   const dlmmVenue = venue('meteora-dlmm');
-  const addresses = staticAccounts({ vault, policies, venue: dlmmVenue, pools: [await dlmmVenue.poolAccounts(connection, POOL)] });
+  const addresses = staticAccounts({ vault, policies, venues: [dlmmVenue], pools: [await dlmmVenue.poolAccounts(connection, POOL)] });
   const lookup = lookupPlan({ payer: payer.publicKey, recentSlot: fork.recentSlot(), addresses });
   for (const ixs of lookup.txs) { const r = await fork.send(ixs, payer); assert.ok(r.ok, r.logs.join('\n')); assert.ok(r.size <= 1232); }
   fork.nextSlot();
@@ -69,10 +69,12 @@ async function vaultOnFork({ usdc = 200_000_000n, payoutWallets = [] } = {}) {
 }
 
 // An outside trader swaps through the pool both ways, so positions in the
-// active bins earn real fees.
+// active bins earn real fees: 200 SOL out, then all the USDC they bought back
+// in, so the price ends near where it began whatever SOL trades at.
 async function trade(fork, dlmm) {
   const trader = fork.wallet(500);
-  for (const [inToken, outToken, amount] of [[NATIVE_MINT, USDC, 200e9], [USDC, NATIVE_MINT, 20_000e6]]) {
+  for (const [inToken, outToken] of [[NATIVE_MINT, USDC], [USDC, NATIVE_MINT]]) {
+    const amount = inToken.equals(NATIVE_MINT) ? 200e9 : Number(fork.tokenAmount(getAssociatedTokenAddressSync(USDC, trader.publicKey)));
     await dlmm.refetchStates();
     const swapForY = inToken.equals(NATIVE_MINT);
     const q = dlmm.swapQuote(new BN(amount), swapForY, new BN(500), await dlmm.getBinArrayForSwap(swapForY));
@@ -97,6 +99,7 @@ test('a vault opens, harvests, swaps on and closes a DLMM position', { timeout: 
   const wsol = getAssociatedTokenAddressSync(NATIVE_MINT, vault, true), usdc = getAssociatedTokenAddressSync(USDC, vault, true);
   const dlmm = await DLMM.create(connection, POOL);
   const active = dlmm.lbPair.activeId;
+  const px0 = Number((await dlmm.getActiveBin()).pricePerToken);
   const vaultSol0 = fork.balance(vault), payerSol0 = fork.balance(payer.publicKey);
 
   const built = await dlmm.initializeMultiplePositionAndAddLiquidityByStrategy2(
@@ -140,7 +143,11 @@ test('a vault opens, harvests, swaps on and closes a DLMM position', { timeout: 
   for (const tx of close) { const r = await run(fork, acting, tx.instructions); assert.ok(r.ok, r.logs.join('\n')); }
   assert.equal((await dlmm.getPositionsByUserAndLbPair(vault)).userPositions.length, 0);
   assert.equal(fork.get(wsol), null, 'the WSOL account was closed back into the vault');
-  assert.ok(fork.balance(vault) > vaultSol0 - 100_000_000, 'the SOL came back to the vault');
+  // the trades moved the price, so the mix changed; the value came back to the vault
+  await dlmm.refetchStates();
+  const px = Number((await dlmm.getActiveBin()).pricePerToken);
+  const worth = fork.balance(vault) / 1e9 * px + Number(fork.tokenAmount(usdc)) / 1e6;
+  assert.ok(worth > (vaultSol0 / 1e9 * px0 + 200) * 0.97, `the vault is worth ${worth.toFixed(2)} USDC after, ${(vaultSol0 / 1e9 * px0 + 200).toFixed(2)} before`);
 });
 
 test('a swap paying out to someone else is refused by the program', { timeout: 240_000 }, async () => {

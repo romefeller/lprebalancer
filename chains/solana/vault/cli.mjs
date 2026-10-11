@@ -4,11 +4,12 @@
 //   node chains/solana/vault/cli.mjs keys <dir>
 //       two new keys (0600): payer.json pays fees and rent, policy.json signs
 //       the policies. Prints both public keys; the owner sends gas to the payer.
-//   node chains/solana/vault/cli.mjs connect --owners <k>[,<k>] [--threshold 1] --venue <venue>
+//   node chains/solana/vault/cli.mjs connect --owners <k>[,<k>] [--threshold 1] --venue <venue>[,<venue>]
 //       --pools <pool>[,<pool>] [--payout <wallet>[,<wallet>]] [--payout-mint <mint>] [--execute]
-//       a new vault the owners control, the venue's policies for the bot, the
-//       bot gone from the owners, the lookup table. Prints the vault's config
-//       (ops/add_vault.py stores it). Dry run by default.
+//       a new vault the owners control, each venue's policies for the bot, the
+//       bot gone from the owners, the lookup table. Each pool belongs to the
+//       venue whose program owns it; every venue needs one. Prints the vault's
+//       config (ops/add_vault.py stores it). Dry run by default.
 //   node chains/solana/vault/cli.mjs accounts --wallets <w>[,<w>] [--mints <m>[,<m>]]
 //       the payout token accounts of these wallets (default mint: USDC), as JSON
 //   node chains/solana/vault/cli.mjs status
@@ -99,14 +100,28 @@ function keys(dir) {
   console.log(JSON.stringify({ ...out, next: `send gas (SOL) to the payer ${out.payer.publicKey}; never to the policy key` }, null, 1));
 }
 
+// The approved pools of each venue: a pool is the venue's whose program owns
+// it. A pool no listed venue owns, or a venue left without one, is refused.
+export async function poolsByVenue(connection, venues, pools) {
+  const infos = await connection.getMultipleAccountsInfo(pools);
+  const out = Object.fromEntries(venues.map(v => [v, []]));
+  pools.forEach((p, i) => {
+    const v = venues.find(name => infos[i]?.owner.equals(venueOf(name).program));
+    if (!v) throw new Error(`pool ${p.toBase58()} belongs to none of ${venues.join(', ')}`);
+    out[v].push(p);
+  });
+  for (const v of venues) if (!out[v].length) throw new Error(`no pool for ${v}`);
+  return out;
+}
+
 export async function connect(f, { connection = new Connection(RPC, 'confirmed') } = {}) {
   const owners = keysOf(f.owners, '--owners');
   const threshold = Number(f.threshold ?? 1);
-  const venue = f.venue;
+  const venues = (f.venue ?? '').split(',').map(v => v.trim()).filter(Boolean);
   const pools = keysOf(f.pools, '--pools');
   const payoutWallets = keysOf(f.payout, '--payout');
   const payoutMints = keysOf(f['payout-mint'] ?? SOLANA.usdc_mint, '--payout-mint');
-  if (!venue || !pools.length) throw new Error('connect needs --venue and --pools');
+  if (!venues.length || !pools.length) throw new Error('connect needs --venue and --pools');
   const payer = await readKeypair(process.env.WALLET_SECRET_PATH ?? '');
   const policyKey = await readKeypair(process.env.LPBOT_VAULT_POLICY_KEY ?? '');
   const config = sq.decodeProgramConfig((await connection.getAccountInfo(sq.programConfigPda())).data);
@@ -114,15 +129,17 @@ export async function connect(f, { connection = new Connection(RPC, 'confirmed')
   const seed = config.smartAccountIndex + 1n;
   const vault = sq.vaultPda(sq.settingsPda(seed));
   const payouts = payoutAccounts(payoutWallets, payoutMints);
-  const compiled = compile(venue, { vault, payer: payer.publicKey, pools, payouts });
+  const approved = await poolsByVenue(connection, venues, pools);
+  // the pools are read before anything is signed: one that does not fit its venue's rules stops the connect
+  const poolInfo = await Promise.all(venues.flatMap(v => approved[v].map(p => venueOf(v).poolAccounts(connection, p))));
+  const compiled = venues.map(v => compile(v, { vault, payer: payer.publicKey, pools: approved[v], payouts }));
   const plan = connectPlan({ creator: payer.publicKey, treasury: config.treasury, seed, owners, threshold,
-    policyKey: policyKey.publicKey, compiled, memo: 'lp-bot vault' });
-  const v = venueOf(venue);
-  const lookupAddresses = staticAccounts({ vault: plan.vault, policies: plan.policies, venue: v,
-    pools: await Promise.all(pools.map(p => v.poolAccounts(connection, p))) });
+    policyKey: policyKey.publicKey, venues: compiled, memo: 'lp-bot vault' });
+  const lookupAddresses = staticAccounts({ vault: plan.vault, policies: plan.policies, venues: venues.map(venueOf), pools: poolInfo });
   const report = {
     vault: plan.vault.toBase58(), settings: plan.settings.toBase58(), owners: owners.map(String), threshold,
-    venue, policies: plan.policies.map(String), pools: pools.map(String), payouts: payouts.map(String),
+    venues: Object.fromEntries(venues.map(v => [v, { policies: plan.byVenue[v].map(String), pools: approved[v].map(String) }])),
+    payouts: payouts.map(String),
     payoutWallets: payoutWallets.map(String), payer: payer.publicKey.toBase58(), policyKey: policyKey.publicKey.toBase58(),
     transactions: plan.txs.length, lookupAddresses: lookupAddresses.length,
   };
@@ -234,7 +251,7 @@ export async function main(argv = process.argv.slice(2)) {
     return console.log(JSON.stringify(payoutAccounts(keysOf(f.wallets, '--wallets'), keysOf(f.mints ?? SOLANA.usdc_mint, '--mints')).map(String)));
   }
   if (cmd === 'request') return console.log(JSON.stringify(await request(f._[0], f)));
-  console.log('commands: keys <dir> | connect --owners .. --venue .. --pools .. [--payout ..] [--execute] | status '
+  console.log('commands: keys <dir> | connect --owners .. --venue <v>[,<v>] --pools .. [--payout ..] [--execute] | status '
     + '| request <withdraw|revoke|approve> --owner <k> [...]');
 }
 

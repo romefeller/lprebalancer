@@ -21,6 +21,14 @@
 // to setPayerFromBytes, and never printed or returned. Only the public address
 // is ever shown.
 //
+// Vault mode (LPBOT_VAULT_SETTINGS set; chains/solana/vault/account.mjs): the
+// money and positions belong to a Squads vault the owners control, the key
+// above only pays fees and position rent, and every instruction that needs
+// the vault runs through the vault's policy. The SDK builds for the vault's
+// address as a signer that never signs; ./vault.mjs turns that into what
+// the vault runs. `rebalance` is the vault's swap, on its own pool. Key mode
+// is unchanged.
+//
 // Commands:
 //   node venues/orca/signer.mjs balance [pool]
 //   node venues/orca/signer.mjs positions
@@ -28,7 +36,9 @@
 //   node venues/orca/signer.mjs open <pool> <lowerPrice> <upperPrice> <maxA> <maxB> [--execute]
 //   node venues/orca/signer.mjs harvest <mint> [--execute]
 //   node venues/orca/signer.mjs close <mint> [--execute]
+//   node venues/orca/signer.mjs rebalance <mintA> <mintB> <targetUsdA> <targetUsdB> [--execute]   (a vault's swap)
 import fs from 'node:fs';
+import { createRequire } from 'node:module';
 import path from 'node:path';
 import { assertNotHalted } from '../../shared/halt_guard.mjs';
 import { BOT_ROOT } from '../../bot_root.mjs';
@@ -36,11 +46,12 @@ import {
   setRpc, setPayerFromBytes, setNativeMintWrappingStrategy,
   openConcentratedPosition, fetchPositionsForOwner,
   closePosition, harvestPosition, closePositionInstructions, harvestPositionInstructions,
+  openPositionInstructions, swapInstructions,
 } from '@orca-so/whirlpools';
 import {
   createSolanaRpc, address, pipe, createTransactionMessage, setTransactionMessageFeePayerSigner,
   setTransactionMessageLifetimeUsingBlockhash, appendTransactionMessageInstructions,
-  signTransactionMessageWithSigners, getBase64EncodedWireTransaction,
+  signTransactionMessageWithSigners, getBase64EncodedWireTransaction, createNoopSigner,
 } from '@solana/kit';
 import { fetchWhirlpool, fetchPosition, getPositionAddress } from '@orca-so/whirlpools-client';
 import { sqrtPriceToPrice } from '@orca-so/whirlpools-core';
@@ -48,6 +59,15 @@ import { consistentOrcaFees } from './fees.mjs';
 import { endpoints, overEndpoints, isEntry, AfterSignError } from '../../shared/rpc_policy.mjs';
 import { readMints, rawToUi, uiToRaw, uiToNative, uiPrice, assertWritable, mintFields } from '../../shared/token2022.mjs';
 import SOLANA from '../../chains/solana/solana.json' with { type: 'json' };
+import { actingAccount } from '../../chains/solana/vault/account.mjs';
+import { forVault, madeSigners, signWith } from './vault.mjs';
+import { NeverLanded, sendUntilLanded } from '../../shared/tx_send.mjs';
+import { planRebalance, TARGET_TOLERANCE } from '../../shared/rebalance_plan.mjs';
+import { planSwap, verifyQuote, priceImpact, checkImpact, direction, parseHints, noopReport, Refused } from './swap.mjs';
+import { swapSides, sellable } from '../../shared/pool_swap.mjs';
+
+const require = createRequire(import.meta.url);
+const { Connection, Keypair } = require('@solana/web3.js');
 
 const RPC = process.env.SOLANA_RPC_URL
   ?? (process.env.KAMINO_RPC_KEY
@@ -61,6 +81,10 @@ const SLIPPAGE_BPS = Number(process.env.LPBOT_SLIPPAGE_BPS ?? 100);
 // Native SOL kept back for transaction fees. Not a property of the pool: a
 // WIF/USDC position still needs SOL to close itself.
 const GAS_RESERVE_SOL = Number(process.env.LPBOT_GAS_RESERVE_SOL ?? 0.02);
+// SOL a vault keeps for itself: its rent-exempt minimum and the rent of the
+// token accounts it opens (WSOL for a deposit or swap, a reward's). The payer
+// key pays the position's rent. Never deposited.
+const VAULT_SOL_FLOOR = 0.005;
 
 const NATIVE_MINT = SOLANA.native_mint;
 const HEADERS = { accept: 'application/json', 'user-agent': 'Mozilla/5.0' };
@@ -249,12 +273,19 @@ function depositQuote(p, pa, pb, capA, capB) {
 // (fetchPositionsForOwner) never go to an endpoint that refuses them.
 export const ENDPOINTS = endpoints({ SOLANA_RPC_URL: RPC }, { indexed: true });
 
+// `owner` is who the SDK builds for: the key's signer, or in vault mode the
+// vault's address as a signer that never signs (./vault.mjs).
 async function connectTo(url) {
   guard();
   await setRpc(url);
   setNativeMintWrappingStrategy('ata');   // wrap/unwrap SOL through an ATA
-  const signer = await setPayerFromBytes(await secretBytes());
-  return { signer, rpc: createSolanaRpc(url), endpoint: url };
+  const bytes = await secretBytes();
+  const signer = await setPayerFromBytes(bytes);
+  const connection = new Connection(url, 'confirmed');
+  const payer = Keypair.fromSecretKey(bytes);
+  const acting = await actingAccount({ connection, payer, venue: 'orca' });
+  const owner = acting.mode === 'vault' ? createNoopSigner(address(acting.owner.toBase58())) : signer;
+  return { signer, rpc: createSolanaRpc(url), endpoint: url, connection, payer, acting, owner };
 }
 
 // Retry the WHOLE operation across endpoints, not just the handshake.
@@ -283,6 +314,40 @@ async function connect() {
   return withRpc(async (c) => c);
 }
 
+// What the SDK built for the vault (`owner` above), as the vault runs it:
+// ./vault.mjs, wrapped through the policy (acting.transaction), signed by
+// the payer, the policy key and any keypair the SDK made.
+async function vaultTransaction(connection, acting, kitIxs) {
+  const bh = await connection.getLatestBlockhash('confirmed');
+  const tx = acting.transaction(forVault(kitIxs, acting.payer.publicKey), bh.blockhash);
+  return { tx: await signWith(tx, madeSigners(kitIxs, acting.owner)), lastValidBlockHeight: bh.lastValidBlockHeight };
+}
+
+// Send it until it lands or its blockhash expires (shared/tx_send.mjs). An
+// error after the send is never retried (AfterSignError); NeverLanded means
+// nothing went out.
+export async function sendVault(connection, acting, kitIxs) {
+  const { tx, lastValidBlockHeight } = await vaultTransaction(connection, acting, kitIxs);
+  try {
+    return await sendUntilLanded(connection, tx.serialize(), lastValidBlockHeight);
+  } catch (e) {
+    if (e instanceof NeverLanded) throw e;
+    throw new AfterSignError(`send failed after signing (not retried): ${e?.message ?? e}`);
+  }
+}
+
+async function simulateVault(connection, acting, kitIxs) {
+  try {
+    const res = await connection.simulateTransaction((await vaultTransaction(connection, acting, kitIxs)).tx);
+    const logs = res.value.logs ?? [];
+    return { ok: res.value.err == null, err: res.value.err == null ? null : JSON.stringify(res.value.err),
+      logError: logs.find(l => /Program log: (Error|AnchorError)/.test(l)) ?? null,
+      unitsConsumed: res.value.unitsConsumed ?? null, logTail: logs.slice(-4) };
+  } catch (e) {
+    return { ok: false, err: String(e?.message ?? e).slice(0, 200), unitsConsumed: null, logTail: [] };
+  }
+}
+
 // What the wallet holds. With a pool: both of its tokens, what each is worth,
 // and the whole wallet in dollars. Without one: native SOL only.
 //
@@ -290,11 +355,16 @@ async function connect() {
 // the position's mark for equity. Counting SOL alone made every idle USDC
 // balance invisible, so equity would have dropped by the withdrawn amount on
 // every close and reported a loss that never happened.
-async function balance(pool) {
+export async function balance(pool, deps) {
   const info = pool ? await poolInfo(pool) : null;
-  return withRpc(async ({ signer, rpc }) => {
-    const lamports = Number((await rpc.getBalance(signer.address).send()).value);
-    const out = { owner: signer.address, sol: lamports / 1e9 };
+  return withRpc(async ({ rpc, owner, acting, payer }) => {
+    const lamports = Number((await rpc.getBalance(owner.address).send()).value);
+    const out = { owner: owner.address, sol: lamports / 1e9 };
+    if (acting.mode === 'vault') {
+      // its payer key pays the fees and position rent (gasSol); the vault keeps its floor
+      Object.assign(out, { custody: 'vault', gasSol: Number((await rpc.getBalance(address(payer.publicKey.toBase58())).send()).value) / 1e9,
+        nativeReserve: VAULT_SOL_FLOOR });
+    }
     if (info) {
       const v = await chainView(rpc, info);
       const { usd: qUsd } = await quoteUsd(info);
@@ -303,8 +373,8 @@ async function balance(pool) {
       out.tokenA = info.symbolA; out.tokenB = info.symbolB;
       out.price = v.price; out.uiPrice = v.uiPrice; out.quoteUsd = qUsd;
       Object.assign(out, mintFields(...v.mints));
-      out.balanceA = await tokenBalance(rpc, signer.address, info.mintA, info.decimalsA, v.multiplierA, lamports);
-      out.balanceB = await tokenBalance(rpc, signer.address, info.mintB, info.decimalsB, v.multiplierB, lamports);
+      out.balanceA = await tokenBalance(rpc, owner.address, info.mintA, info.decimalsA, v.multiplierA, lamports);
+      out.balanceB = await tokenBalance(rpc, owner.address, info.mintB, info.decimalsB, v.multiplierB, lamports);
       out.nativeSide = info.mintA === NATIVE_MINT ? 'A' : info.mintB === NATIVE_MINT ? 'B' : null;
       // The pool's two tokens in quote units, then dollars; plus the gas SOL
       // when it is not already one of them. UI amounts at the UI price.
@@ -314,12 +384,12 @@ async function balance(pool) {
     }
     console.log(JSON.stringify(out, null, 1));
     return out;
-  });
+  }, deps);
 }
 
 async function positions() {
-  const { signer, rpc } = await connect();
-  const list = await fetchPositionsForOwner(rpc, signer.address);
+  const { owner, rpc } = await connect();
+  const list = await fetchPositionsForOwner(rpc, owner.address);
   console.log(JSON.stringify(list.map(p => ({
     address: p.address,
     whirlpool: p.data?.whirlpool,
@@ -331,7 +401,7 @@ async function positions() {
 
 // maxA and maxB are UI amounts (what the wallet shows); the deposit is sized
 // in pool-native units at the pool price and reported back in UI units.
-async function open(pool, lower, upper, maxA, maxB, execute) {
+export async function open(pool, lower, upper, maxA, maxB, execute, deps) {
   const info = await poolInfo(pool);
   // Opens on adaptive-fee pools were rejected with custom error 6069
   // (PriceSlippageOutOfBounds). On 2026-10-01 the instructions of
@@ -343,13 +413,20 @@ async function open(pool, lower, upper, maxA, maxB, execute) {
     throw new Error(`${info.symbolA}/${info.symbolB} is an adaptive-fee pool; this `
       + 'signer does not open on it unless LPBOT_ORCA_ADAPTIVE=1 (Whirlpool error 6069 seen). Choose another pool.');
   }
-  return withRpc(async ({ signer, rpc }) => {
+  return withRpc(async ({ signer, rpc, connection, payer, acting, owner }) => {
     const v = await chainView(rpc, info);
     assertWritable(v.mints);
-    const lamports = await rpc.getBalance(signer.address).send();
+    const vault = acting.mode === 'vault';
+    const lamports = await rpc.getBalance(address(payer.publicKey.toBase58())).send();
     if (Number(lamports.value) / 1e9 < GAS_RESERVE_SOL) {
       throw new Error(`SOL below the ${GAS_RESERVE_SOL} gas reserve; a wallet that cannot `
         + 'pay fees cannot close its own position');
+    }
+    if (vault) {
+      // the vault's SOL is the deposit's, but for its floor
+      const spare = Math.max(0, Number((await rpc.getBalance(owner.address).send()).value) / 1e9 - VAULT_SOL_FLOOR);
+      if (info.mintA === NATIVE_MINT) maxA = String(Math.min(Number(maxA), spare));
+      if (info.mintB === NATIVE_MINT) maxB = String(Math.min(Number(maxB), spare));
     }
     // Size the cap at the pool's own price rather than a constant. The old
     // constant was the SOL price on the day it was written.
@@ -373,9 +450,12 @@ async function open(pool, lower, upper, maxA, maxB, execute) {
     const estA = quote ? quote.estA * v.multiplierA : null;
     const estB = quote ? quote.estB * v.multiplierB : null;
 
-    const result = await openConcentratedPosition(
-      address(pool), param, Number(lower), Number(upper),
-      { slippageToleranceBps: SLIPPAGE_BPS, funder: signer });
+    const result = vault
+      ? await openPositionInstructions(rpc, address(pool), param, Number(lower), Number(upper),
+        { slippageToleranceBps: SLIPPAGE_BPS, funder: owner })
+      : await openConcentratedPosition(
+        address(pool), param, Number(lower), Number(upper),
+        { slippageToleranceBps: SLIPPAGE_BPS, funder: signer });
     const report = {
       pool, pair: `${info.symbolA}/${info.symbolB}`,
       lowerPrice: Number(lower), upperPrice: Number(upper),
@@ -392,22 +472,23 @@ async function open(pool, lower, upper, maxA, maxB, execute) {
       instructions: result.instructions?.length ?? 0,
     };
     if (!execute) {
-      const simulation = await simulate(rpc, signer, result.instructions);
+      const simulation = vault ? await simulateVault(connection, acting, result.instructions)
+        : await simulate(rpc, signer, result.instructions);
       console.log(JSON.stringify({ ...report, simulation, sent: false }, null, 1));
       console.log('DRY RUN — instructions built. Pass --execute to sign and send.');
       return;
     }
-    const sig = await sendOnce(result);
+    const sig = vault ? await sendVault(connection, acting, result.instructions) : await sendOnce(result);
     console.log(JSON.stringify({ ...report, sent: true, signature: sig }, null, 1));
-  });
+  }, deps);
 }
 
 // On-chain truth for one position: its band, its liquidity, and the fees it has
 // accrued but not yet collected. The bot reports these rather than simulated
 // numbers, so what reaches Telegram is what the chain says.
-async function status(mintArg) {
-  return withRpc(async ({ signer, rpc }) => {
-    const list = await fetchPositionsForOwner(rpc, signer.address);
+export async function status(mintArg, deps) {
+  return withRpc(async ({ owner, rpc }) => {
+    const list = await fetchPositionsForOwner(rpc, owner.address);
     const hydrated = list.filter(p => !p.isPositionBundle && p.data);
     // Without a position named, only the loop's own pool (LPBOT_POOL) counts:
     // one wallet holds positions for several profiles (DJT/USDC beside
@@ -466,7 +547,7 @@ async function status(mintArg) {
     // real accrued figure. Reported separately so the stale field stays visible.
     try {
       const cq = await closePositionInstructions(rpc, address(d.positionMint),
-        { slippageToleranceBps: SLIPPAGE_BPS, authority: signer });
+        { slippageToleranceBps: SLIPPAGE_BPS, authority: owner });
       if (cq?.quote) {
         // What a close would return right now: the position's mark.
         out.closeEstA = ua(cq.quote.tokenEstA);
@@ -497,17 +578,29 @@ async function status(mintArg) {
     } catch { /* reporting only: never fail a status read over fee accounting */ }
     console.log(JSON.stringify(out, null, 1));
     return out;
-  });
+  }, deps);
 }
 
-async function harvest(mint, execute) {
+export async function harvest(mint, execute, deps) {
   // Writes retry across endpoints too. A 429 here lands while the SDK is
   // FETCHING accounts to build the instruction, before anything is signed or
   // sent, so rotating endpoints is safe. The send itself is never retried
   // (sendOnce). The caller still re-reads chain state after any failure
   // rather than trusting the error alone.
-  return withRpc(async ({ signer, rpc }) => {
+  return withRpc(async ({ signer, rpc, connection, acting, owner }) => {
     assertWritable(await positionMints(rpc, mint));
+    if (acting.mode === 'vault') {
+      const ix = await harvestPositionInstructions(rpc, address(mint), { authority: owner });
+      if (!execute) {
+        console.log(JSON.stringify({ mint, instructions: ix.instructions.length,
+          feesQuote: { feeOwedA: ix.feesQuote?.feeOwedA?.toString(), feeOwedB: ix.feesQuote?.feeOwedB?.toString() },
+          simulation: await simulateVault(connection, acting, ix.instructions), sent: false }, null, 1));
+        console.log('DRY RUN — pass --execute to collect fees.');
+        return;
+      }
+      console.log(JSON.stringify({ harvested: mint, signature: await sendVault(connection, acting, ix.instructions) }, null, 1));
+      return;
+    }
     if (!execute) {
       // Build and simulate: a dry run that returns early proves nothing.
       const ix = await harvestPositionInstructions(rpc, address(mint), { authority: signer });
@@ -523,17 +616,24 @@ async function harvest(mint, execute) {
     const result = await harvestPosition(address(mint), { authority: signer });
     const sig = await sendOnce(result);
     console.log(JSON.stringify({ harvested: mint, signature: sig }, null, 1));
-  });
+  }, deps);
 }
 
-async function close(mint, execute) {
-  return withRpc(async ({ signer, rpc }) => {
+export async function close(mint, execute, deps) {
+  return withRpc(async ({ signer, rpc, connection, acting, owner }) => {
     assertWritable(await positionMints(rpc, mint));
+    const vault = acting.mode === 'vault';
+    if (vault && execute) {
+      // the position's rent goes back to the payer key, which paid it (./vault.mjs)
+      const ix = await closePositionInstructions(rpc, address(mint), { slippageToleranceBps: SLIPPAGE_BPS, authority: owner });
+      console.log(JSON.stringify({ closed: mint, signature: await sendVault(connection, acting, ix.instructions) }, null, 1));
+      return;
+    }
     if (!execute) {
       // Actually build the instructions. A dry run that returns early proves
       // nothing, and the close path is the one the bot depends on at 3am.
       const ix = await closePositionInstructions(rpc, address(mint),
-        { slippageToleranceBps: SLIPPAGE_BPS, authority: signer });
+        { slippageToleranceBps: SLIPPAGE_BPS, authority: owner });
       console.log(JSON.stringify({
         mint, instructions: ix.instructions?.length ?? 0,
         quote: ix.quote ? {
@@ -545,7 +645,7 @@ async function close(mint, execute) {
           feeOwedA: ix.feesQuote.feeOwedA?.toString(),
           feeOwedB: ix.feesQuote.feeOwedB?.toString(),
         } : null,
-        simulation: await simulate(rpc, signer, ix.instructions),
+        simulation: vault ? await simulateVault(connection, acting, ix.instructions) : await simulate(rpc, signer, ix.instructions),
         sent: false }, null, 1));
       console.log('DRY RUN — close instructions built. Pass --execute to send.');
       return;
@@ -554,7 +654,64 @@ async function close(mint, execute) {
       { slippageToleranceBps: SLIPPAGE_BPS, authority: signer });
     const sig = await sendOnce(result);
     console.log(JSON.stringify({ closed: mint, signature: sig }, null, 1));
-  });
+  }, deps);
+}
+
+// The loop's `rebalance` (SWAP_HOOK.md) for a vault, on the profile's own
+// pool (LPBOT_POOL): a vault swaps only on pools its owners approved, never
+// through Jupiter or the fallback pools of ./swap.mjs (lp/signers.route). The
+// same plan, quote, value and impact checks as ./swap.mjs. A key wallet
+// swaps through ./swap.mjs and Jupiter, as before.
+export async function rebalance(mintA, mintB, targetA, targetB, execute, deps) {
+  const pool = process.env.LPBOT_POOL;
+  if (!pool) throw new Refused('no pool: set LPBOT_POOL');
+  const tA = Number(targetA), tB = Number(targetB);
+  if (!(tA >= 0 && tB >= 0)) throw new Refused(`targets must be non-negative dollars, got ${targetA} ${targetB}`);
+  if (mintA === mintB) throw new Refused('mintA and mintB are the same token');
+  const hints = parseHints(process.env.LPBOT_TOKEN_HINTS);
+  const info = await poolInfo(pool);
+  return withRpc(async ({ rpc, connection, acting, owner }) => {
+    if (acting.mode !== 'vault') throw new Refused('rebalance here is a vault\'s swap; a key wallet swaps through venues/orca/swap.mjs');
+    const v = await chainView(rpc, info);
+    assertWritable(v.mints);
+    const [infoA, infoB] = swapSides({ ...v, quoteUsd: (await quoteUsd(info)).usd }, mintA, mintB, hints);
+    const reserves = { vaultFloor: VAULT_SOL_FLOOR, gasReserve: GAS_RESERVE_SOL };
+    const [balA, balB] = await Promise.all([sellable(connection, acting, infoA, reserves), sellable(connection, acting, infoB, reserves)]);
+    const balances = { owner: acting.owner.toBase58(), custody: acting.mode,
+      A: { mint: infoA.mint, symbol: infoA.symbol, amount: balA.total, sellable: balA.avail, usd: Number(balA.usd.toFixed(4)), usdPrice: infoA.usdPrice },
+      B: { mint: infoB.mint, symbol: infoB.symbol, amount: balB.total, sellable: balB.avail, usd: Number(balB.usd.toFixed(4)), usdPrice: infoB.usdPrice },
+      targetUsdA: tA, targetUsdB: tB };
+    const plan = planRebalance(balA.usd, balB.usd, tA, tB);
+    const s = plan && planSwap(plan, infoA, infoB, balA.avail, balB.avail);
+    if (!plan || !(s.rawIn > 0n)) {
+      const out = noopReport(plan ? 'the amount to sell rounds to zero' : `both sides within ${TARGET_TOLERANCE * 100}% of target or nothing to sell`, balances);
+      console.log(JSON.stringify(out, null, 1));
+      return out;
+    }
+    const wp = (await fetchWhirlpool(rpc, address(pool))).data;
+    const { aToB } = direction(s.sellInfo.mint, s.buyInfo.mint, String(wp.tokenMintA), String(wp.tokenMintB));
+    const built = await swapInstructions(rpc, { inputAmount: s.rawIn, mint: address(s.sellInfo.mint) }, address(pool),
+      { slippageToleranceBps: SLIPPAGE_BPS, signer: owner });
+    const values = verifyQuote(built.quote, s.sellInfo, s.buyInfo, s.rawIn);
+    const impact = priceImpact(built.quote, wp.sqrtPrice, aToB);
+    checkImpact(impact);
+    const human = (raw, d) => Number(BigInt(raw)) / 10 ** d;
+    const report = { ...balances, mode: plan.mode, sellSide: plan.sellSide, buySide: plan.buySide,
+      pool, dex: 'orca', routePlan: ['Orca Whirlpool'],
+      sold: { mint: s.sellInfo.mint, symbol: s.sellInfo.symbol, amount: s.amount, usd: Number(values.inUsd.toFixed(4)) },
+      bought: { mint: s.buyInfo.mint, symbol: s.buyInfo.symbol, amount: human(built.quote.tokenEstOut, s.buyInfo.decimals), usd: Number(values.estUsd.toFixed(4)) },
+      minOutAmount: human(built.quote.tokenMinOut, s.buyInfo.decimals), priceImpactPct: Number(impact.toFixed(8)),
+      slippageBps: SLIPPAGE_BPS, swapUsdValue: Number(values.inUsd.toFixed(4)), signature: null, sent: false };
+    if (!execute) {
+      console.log(JSON.stringify({ ...report, simulation: await simulateVault(connection, acting, built.instructions) }, null, 1));
+      console.log('DRY RUN — swap built and simulated. Pass --execute to sign and send.');
+      return report;
+    }
+    guard();
+    const out = { ...report, signature: await sendVault(connection, acting, built.instructions), sent: true };
+    console.log(JSON.stringify(out, null, 1));
+    return out;
+  }, deps);
 }
 
 async function main() {
@@ -567,6 +724,7 @@ async function main() {
   if (cmd === 'harvest') return harvest(a[0], execute);
   if (cmd === 'close') return close(a[0], execute);
   if (cmd === 'open') return open(a[0], a[1], a[2], a[3], a[4], execute);
+  if (cmd === 'rebalance') return rebalance(a[0], a[1], a[2], a[3], execute);
   if (cmd === 'pool') {
     // Read-only: no key is loaded. The API's record plus the chain's price and mint facts.
     const info = await poolInfo(a[0]);
@@ -575,7 +733,7 @@ async function main() {
   }
   console.log('commands: balance [pool] | positions | status [mint] | pool <pool> | '
     + 'open <pool> <lo> <hi> <maxA> <maxB> [--execute] | harvest <mint> [--execute] '
-    + '| close <mint> [--execute]');
+    + '| close <mint> [--execute] | rebalance <mintA> <mintB> <usdA> <usdB> [--execute]   (a vault\'s swap; pool: LPBOT_POOL)');
 }
 
 // The CLI runs only when node starts this file; a test import runs nothing.

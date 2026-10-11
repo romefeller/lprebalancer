@@ -29,11 +29,20 @@ PROFIT = '8funmDkPNBtjqfNkBEoBF16eBfyQ4vMAFrs4Nyys5D1h'
 PROFIT_USDC = 'CvkYX7aRberphM2wx2Mf2f7BomxtikEqPvsM4USGYG9z'
 
 
+RAYDIUM_POOL = '3ucNos4NbumPLZNWztqGHNFFgkHeRMBQAVemeeomsUxv'
+RAYDIUM_POLICIES = ['8sLbNZoA1cfnvMJLPfp98ZLAnFSYCFApfJKMbiXNLwxj']
+
+
 def connected(**over):
-    c = {'sent': True, 'vault': VAULT, 'settings': SETTINGS, 'owners': [OWNER], 'threshold': 1, 'venue': 'meteora-dlmm',
-         'policies': POLICIES, 'pools': [POOL], 'payouts': [], 'payer': PAYER, 'policyKey': POLICY_KEY, 'lookup': None}
+    c = {'sent': True, 'vault': VAULT, 'settings': SETTINGS, 'owners': [OWNER], 'threshold': 1,
+         'venues': {'meteora-dlmm': {'policies': POLICIES, 'pools': [POOL]}},
+         'payouts': [], 'payer': PAYER, 'policyKey': POLICY_KEY, 'lookup': None}
     c.update(over)
     return c
+
+
+def venue(policies=POLICIES, pools=(POOL,)):
+    return {'policies': list(policies), 'pools': list(pools)}
 
 
 def args(**over):
@@ -51,26 +60,35 @@ def clean():
 
 class RegisterRows(unittest.TestCase):
     def test_a_connected_vault_makes_three_rows(self):
-        w, v, p = add_vault.register_rows(args(), connected())
+        w, v, (p,) = add_vault.register_rows(args(), connected())
         self.assertEqual(w, ('v-add', 'solana', VAULT, 'LPBOT_V_PAYER', 'v-add'))
         self.assertEqual(v[:5], ('v-add', 'squads', SETTINGS, [OWNER], 1))
         self.assertEqual(p, ('v-add', 'meteora-dlmm', POLICIES, [POOL], []))
         self.assertIsNone(v[6])
+
+    def test_one_policy_row_per_venue_with_the_same_payouts(self):
+        _, _, rows = add_vault.register_rows(args(), connected(payouts=[PROFIT_USDC], venues={
+            'meteora-dlmm': venue(), 'raydium-clmm': venue(RAYDIUM_POLICIES, [RAYDIUM_POOL])}))
+        self.assertEqual(rows, [('v-add', 'meteora-dlmm', POLICIES, [POOL], [PROFIT_USDC]),
+                                ('v-add', 'raydium-clmm', RAYDIUM_POLICIES, [RAYDIUM_POOL], [PROFIT_USDC])])
 
     def test_label_lookup_and_payouts_are_carried(self):
         w, v, p = add_vault.register_rows(args(label='Phantom test'),
                                           connected(lookup=PAYER, payouts=[PROFIT_USDC], threshold='1'))
         self.assertEqual(w[4], 'Phantom test')
         self.assertEqual(v[4:], (1, 'LPBOT_V_POLICY', PAYER))
-        self.assertEqual(p[4], [PROFIT_USDC])
-        self.assertEqual(add_vault.register_rows(args(), connected(payouts=None))[2][4], [])
+        self.assertEqual(p[0][4], [PROFIT_USDC])
+        self.assertEqual(add_vault.register_rows(args(), connected(payouts=None))[2][0][4], [])
         self.assertEqual(add_vault.addresses(None, 'x'), [])
 
     def test_what_it_refuses(self):
-        for over, msg in (({'sent': False}, 'dry run'), ({'venue': 'nowhere'}, 'no vault rules'),
+        for over, msg in (({'sent': False}, 'dry run'), ({'venues': {'nowhere': venue()}}, 'no vault rules'),
+                          ({'venues': {}}, 'no venues'),
                           ({'owners': [OWNER, PAYER]}, 'bot key'), ({'threshold': 2}, 'threshold'),
-                          ({'owners': ['not-an-address']}, 'not addresses'), ({'pools': []}, 'no policies or no pools'),
-                          ({'policies': []}, 'no policies or no pools'), ({'threshold': 0}, 'threshold'),
+                          ({'owners': ['not-an-address']}, 'not addresses'),
+                          ({'venues': {'meteora-dlmm': venue(pools=())}}, 'meteora-dlmm: no policies or no pools'),
+                          ({'venues': {'meteora-dlmm': venue(), 'orca': venue(policies=())}}, 'orca: no policies or no pools'),
+                          ({'threshold': 0}, 'threshold'),
                           ({'threshold': None}, 'threshold'), ({'owners': []}, 'threshold'),
                           ({'lookup': 'not-an-address'}, 'lookup')):
             with self.subTest(over=over), self.assertRaisesRegex(add_vault.Refused, msg):
@@ -98,7 +116,7 @@ def safe_connected(**over):
 
 class SafeRows(unittest.TestCase):
     def test_a_connected_safe_makes_three_rows_on_its_chain(self):
-        w, v, p = add_vault.register_rows(args(policy_key_env='LPBOT_V_PAYER'), safe_connected())
+        w, v, (p,) = add_vault.register_rows(args(policy_key_env='LPBOT_V_PAYER'), safe_connected())
         self.assertEqual(w, ('v-add', 'polygon', SAFE, 'LPBOT_V_PAYER', 'v-add'))
         self.assertEqual(v, ('v-add', 'safe', SAFE, [EVM_OWNER], 1, 'LPBOT_V_PAYER', None))
         self.assertEqual(p, ('v-add', 'uniswap-v3-polygon', [ROLES], [WPOL_POOL], [EVM_PROFIT]))
@@ -115,7 +133,7 @@ class SafeRows(unittest.TestCase):
             add_vault.register_rows(args(), safe_connected())
         # a Solana vault's JSON is never read as an EVM one, nor the other way round
         with self.assertRaisesRegex(add_vault.Refused, 'no vault rules'):
-            add_vault.register_rows(args(), connected(venue='uniswap-v3-polygon'))
+            add_vault.register_rows(args(), connected(venues={'uniswap-v3-polygon': venue()}))
 
 
 class Register(unittest.TestCase):
@@ -131,11 +149,12 @@ class Register(unittest.TestCase):
             add_vault.register(args(json=f.name, apply=True))
 
     def test_written_and_read_back_as_the_loop_reads_it(self):
-        self.write()
+        self.write(venues={'meteora-dlmm': venue(), 'raydium-clmm': venue(RAYDIUM_POLICIES, [RAYDIUM_POOL])})
         self.assertEqual(db.wallet_row('v-add')['address'], VAULT)
         v = db.vault_row('v-add')
         self.assertEqual(v['owners'], [OWNER])
         self.assertEqual(v['venues']['meteora-dlmm']['policies'], POLICIES)
+        self.assertEqual(v['venues']['raydium-clmm'], {'policies': RAYDIUM_POLICIES, 'pools': [RAYDIUM_POOL], 'payouts': []})
 
     def test_a_dry_run_writes_nothing(self):
         with tempfile.NamedTemporaryFile('w', suffix='.json', delete=False) as f:

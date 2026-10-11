@@ -7,7 +7,7 @@ import { createHash } from 'node:crypto';
 import { createRequire } from 'module';
 import fc from 'fast-check';
 import * as sq from '../chains/solana/vault/squads.mjs';
-import { RULES, compile, match, plan, needsVault, NotAllowed, POLICY_BYTES } from '../chains/solana/vault/policy.mjs';
+import { RULES, compile, match, plan, needsVault, NotAllowed, POLICY_BYTES, instructionsOf, poolPda } from '../chains/solana/vault/policy.mjs';
 import { vaultConfig, wrap, vaultFundsItsAccounts } from '../chains/solana/vault/account.mjs';
 import { connectPlan, connectProblems, lookupPlan, staticAccounts } from '../chains/solana/vault/admin.mjs';
 import { actingAccount } from '../chains/solana/vault/account.mjs';
@@ -32,9 +32,11 @@ function txSize(ixs, signers) {
 // two payout accounts (profit wallet and fee wallet).
 const worst = () => ({ vault: key(), payer: key(), pools: [key(), key(), key()], payouts: [key(), key()] });
 
+const VENUES = Object.keys(RULES.venues);
+
 test('rules: every Anchor discriminator is the hash of its instruction name', () => {
-  for (const [venue, v] of Object.entries(RULES.venues)) {
-    for (const r of v.instructions) {
+  for (const venue of VENUES) {
+    for (const r of instructionsOf(venue)) {
       const want = createHash('sha256').update(`global:${r.name}`).digest().subarray(0, 8).toString('hex');
       assert.equal(r.discriminator, want, `${venue} ${r.name}`);
     }
@@ -42,8 +44,8 @@ test('rules: every Anchor discriminator is the hash of its instruction name', ()
 });
 
 test('rules: every pin names a known role and no account twice', () => {
-  const roles = new Set(['pool', 'vault', 'vaultToken', 'vaultWsol', 'vaultOrPayer', 'payout', 'none']);
-  const all = [...RULES.common, ...RULES.payout, ...Object.values(RULES.venues).flatMap(v => v.instructions)];
+  const roles = new Set(['pool', 'pda', 'vault', 'vaultToken', 'vaultWsol', 'vaultOrPayer', 'payout', 'none']);
+  const all = [...RULES.common, ...RULES.payout, ...VENUES.flatMap(v => instructionsOf(v))];
   for (const r of all) {
     assert.ok(r.pins.length > 0, `${r.name} pins nothing: it could send money anywhere`);
     for (const p of r.pins) assert.ok(roles.has(p.role), `${r.name}: role ${p.role}`);
@@ -51,12 +53,11 @@ test('rules: every pin names a known role and no account twice', () => {
   }
 });
 
-test('policies: each packed policy fits one create and one update transaction', () => {
+test('policies: each packed policy of every venue fits one create and one update transaction', () => {
   const ctx = worst(), payer = Keypair.generate(), owner = Keypair.generate();
   const settings = key();
-  const { policies } = compile('meteora-dlmm', ctx);
-  assert.ok(policies.length >= 2, 'the DLMM rules do not fit one policy; packing must have split them');
-  for (const [i, p] of policies.entries()) {
+  assert.ok(compile('meteora-dlmm', ctx).policies.length >= 2, 'the DLMM rules do not fit one policy; packing must have split them');
+  for (const [i, p] of VENUES.flatMap(v => compile(v, ctx).policies).entries()) {
     assert.ok(sq.encodeProgramInteraction(p.policy).length <= POLICY_BYTES);
     const address = sq.policyPda(settings, i + 1);
     const create = sq.settingsSyncIx({ settings, signers: [payer.publicKey], rentPayer: payer.publicKey, extra: [address],
@@ -70,12 +71,15 @@ test('policies: each packed policy fits one create and one update transaction', 
 
 test('policies: packing keeps every rule, in order, and is deterministic', () => {
   const ctx = worst();
-  const a = compile('meteora-dlmm', ctx), b = compile('meteora-dlmm', ctx);
-  const names = a.policies.flatMap(p => p.index.map(e => e.name));
-  const want = [...RULES.venues['meteora-dlmm'].instructions.map(r => r.name), ...RULES.common.map(r => r.name), ...RULES.payout.map(r => r.name)];
-  assert.deepEqual(names, want);
-  assert.deepEqual(a.policies.map(p => sq.encodeProgramInteraction(p.policy).toString('hex')),
-    b.policies.map(p => sq.encodeProgramInteraction(p.policy).toString('hex')));
+  for (const venue of VENUES) {
+    const a = compile(venue, ctx), b = compile(venue, ctx);
+    const names = a.policies.flatMap(p => p.index.map(e => e.name));
+    const want = [...instructionsOf(venue).map(r => r.name), ...RULES.common.map(r => r.name), ...RULES.payout.map(r => r.name)];
+    assert.deepEqual(names, want, venue);
+    assert.deepEqual(a.policies.map(p => sq.encodeProgramInteraction(p.policy).toString('hex')),
+      b.policies.map(p => sq.encodeProgramInteraction(p.policy).toString('hex')));
+    assert.ok(a.policies.every(p => p.policy.constraints.length <= 20 && sq.encodeProgramInteraction(p.policy).length <= POLICY_BYTES), venue);
+  }
 });
 
 test('policies: no payout rule without payout accounts', () => {
@@ -89,34 +93,50 @@ test('policies: a venue without rules, a role without accounts, are refused', ()
   assert.throws(() => compile('meteora-dlmm', { ...worst(), pools: [] }), /approved pool/);
 });
 
+test('onboarding of every venue at once: every transaction fits, seeds run on, each venue names its own', () => {
+  const creator = Keypair.generate(), ctx = worst();
+  const venues = VENUES.map(v => compile(v, ctx));
+  const p = connectPlan({ creator: creator.publicKey, treasury: key(), seed: 9n, owners: [key(), key()], threshold: 2, policyKey: key(), venues });
+  const n = venues.reduce((k, v) => k + v.policies.length, 0);
+  assert.equal(p.txs.length, 1 + n + 1);
+  for (const ixs of p.txs) assert.ok(txSize(ixs, [creator]) <= 1232, `${txSize(ixs, [creator])} bytes`);
+  assert.deepEqual(p.policies.map(String), Array.from({ length: n }, (_, i) => String(sq.policyPda(p.settings, i + 1))));
+  assert.deepEqual(VENUES.flatMap(v => p.byVenue[v]).map(String), p.policies.map(String));
+  VENUES.forEach((v, i) => assert.equal(p.byVenue[v].length, venues[i].policies.length));
+  assert.throws(() => connectPlan({ creator: creator.publicKey, treasury: key(), seed: 9n, owners: [key()], threshold: 1, policyKey: key(),
+    venues: [venues[0], venues[0]] }), /listed twice/);
+  assert.throws(() => connectPlan({ creator: creator.publicKey, treasury: key(), seed: 9n, owners: [key()], threshold: 1, policyKey: key(),
+    venues: [] }), /at least one venue/);
+});
+
 test('onboarding: every transaction fits, the bot leaves, the threshold is set last', () => {
   const creator = Keypair.generate(), owners = [key(), key(), key()];
   const compiled = compile('meteora-dlmm', worst());
-  const p = connectPlan({ creator: creator.publicKey, treasury: key(), seed: 672_335n, owners, threshold: 2, policyKey: key(), compiled });
+  const p = connectPlan({ creator: creator.publicKey, treasury: key(), seed: 672_335n, owners, threshold: 2, policyKey: key(), venues: [compiled] });
   assert.equal(p.txs.length, 1 + compiled.policies.length + 1);
   for (const ixs of p.txs) assert.ok(txSize(ixs, [creator]) <= 1232);
   assert.ok(p.vault.equals(sq.vaultPda(p.settings)));
   assert.deepEqual(p.policies.map(String), compiled.policies.map((_, i) => String(sq.policyPda(p.settings, i + 1))));
   // threshold 1: the bot only leaves; the program keeps the threshold the vault was created with
-  const one = connectPlan({ creator: creator.publicKey, treasury: key(), seed: 1n, owners, threshold: 1, policyKey: key(), compiled });
+  const one = connectPlan({ creator: creator.publicKey, treasury: key(), seed: 1n, owners, threshold: 1, policyKey: key(), venues: [compiled] });
   const leaveOnly = sq.settingsSyncIx({ settings: one.settings, signers: [creator.publicKey], rentPayer: creator.publicKey,
     actions: [{ kind: 'removeSigner', key: creator.publicKey }], extra: [] });
   assert.deepEqual(one.txs.at(-1)[0].data, leaveOnly.data);
   assert.ok(p.txs.at(-1)[0].data.length > leaveOnly.data.length);
 });
 
-test('lookup table addresses: each once, all of them', () => {
-  const vault = key(), mint = key(), shared = key(), pool = key();
-  const venue = { shared: () => [shared, shared] };
+test('lookup table addresses: each once, all of them, every venue\'s', () => {
+  const vault = key(), mint = key(), shared = key(), other = key(), pool = key();
+  const venues = [{ shared: () => [shared, shared] }, { shared: () => [other] }];
   const pools = [{ accounts: [pool, shared], mints: [mint, mint] }, { accounts: [pool], mints: [mint] }];
-  const out = staticAccounts({ vault, policies: [key()], venue, pools }).map(String);
+  const out = staticAccounts({ vault, policies: [key()], venues, pools }).map(String);
   assert.equal(new Set(out).size, out.length);
-  for (const k of [vault, shared, pool, sq.PROGRAM_ID]) assert.ok(out.includes(String(k)));
+  for (const k of [vault, shared, other, pool, sq.PROGRAM_ID]) assert.ok(out.includes(String(k)));
 });
 
 test('onboarding: the bot\'s keys cannot be owners; a threshold must be reachable', () => {
   const creator = key(), policyKey = key(), compiled = compile('meteora-dlmm', worst());
-  const plan = (o) => connectPlan({ creator, treasury: key(), seed: 1n, owners: [key()], threshold: 1, policyKey, compiled, ...o });
+  const plan = (o) => connectPlan({ creator, treasury: key(), seed: 1n, owners: [key()], threshold: 1, policyKey, venues: [compiled], ...o });
   assert.throws(() => plan({ owners: [creator] }), /cannot be an owner/);
   assert.throws(() => plan({ owners: [policyKey] }), /cannot be an owner/);
   assert.throws(() => plan({ owners: [] }), /at least one owner/);
@@ -352,4 +372,50 @@ test('the vault funds its own token accounts; anyone else\'s stay as built', () 
   }
   assert.ok(theirs.keys[0].pubkey.equals(payer), 'a payout wallet\'s account stays funded by the payer');
   assert.ok(byOther.keys[0].pubkey.equals(other));
+});
+
+// --- forks of a venue, reward pins, derived accounts ---------------------------
+
+const forked = (venue, extra = {}) => ({ common: [], payout: [], venues: {
+  base: { program: DLMM.toBase58(), rewards: 0, instructions: [
+    { name: 'a', discriminator: { type: 'u8', value: 1 }, pins: [{ index: 0, role: 'pool' }] },
+    { name: 'b', discriminator: { type: 'u8', value: 2 }, pins: [{ index: 1, role: 'pool' }], rewardRecipients: { first: 18, stride: 3 } }] },
+  fork: { program: key().toBase58(), like: 'base', ...venue },
+  ...extra } });
+
+test('rules: a fork takes its base\'s rules against its own program, less those it leaves out', () => {
+  const rules = forked({ rewards: 2, without: ['a'] });
+  assert.deepEqual(instructionsOf('fork', rules).map(r => r.name), ['b']);
+  const c = compile('fork', worst(), rules);
+  assert.ok(c.policies[0].index.every(e => e.programId.equals(new PublicKey(rules.venues.fork.program))));
+  assert.throws(() => instructionsOf('fork', forked({ rewards: 0, without: ['nope'] })), /no rule nope to leave out/);
+  assert.throws(() => instructionsOf('fork', forked({ like: 'ghost' })), /like ghost, which has no rules/);
+  // the base itself keeps every rule
+  assert.deepEqual(instructionsOf('base', forked({ rewards: 0 })).map(r => r.name).sort(), ['a', 'b']);
+});
+
+test('rules: one recipient pin per reward, at first + i * stride, never a pin for a reward the pools lack', () => {
+  for (const rewards of [0, 1, 2, 3]) {
+    const b = instructionsOf('fork', forked({ rewards })).find(r => r.name === 'b');
+    assert.deepEqual(b.pins, [{ index: 1, role: 'pool' }, ...[18, 21, 24].slice(0, rewards).map(index => ({ index, role: 'vaultToken' }))]);
+    assert.ok(!('rewardRecipients' in b));
+  }
+  for (const rewards of [-1, 4, 1.5, undefined]) assert.throws(() => instructionsOf('fork', forked({ rewards })), /rewards must be 0 to 3/, String(rewards));
+  // the live rules: Raydium's pools carry one reward, Byreal's none
+  const recipients = (v) => instructionsOf(v).find(r => r.name === 'decrease_liquidity_v2').pins.filter(p => p.index >= 17).map(p => p.index);
+  assert.deepEqual(recipients('raydium-clmm'), [18]);
+  assert.deepEqual(recipients('byreal'), []);
+  assert.ok(!instructionsOf('byreal').some(r => r.name === 'swap_v2'), 'Byreal leaves out swap_v2');
+});
+
+test('a pda pin names, for each approved pool, the address its venue program derives', () => {
+  const pools = [key(), key()], program = new PublicKey(RULES.venues['raydium-clmm'].program);
+  const c = compile('raydium-clmm', { ...worst(), pools });
+  const decrease = c.policies.flatMap(p => p.index).find(e => e.name === 'decrease_liquidity_v2');
+  const bitmap = decrease.accounts.find(a => a.index === 16);
+  const want = pools.map(p => PublicKey.findProgramAddressSync([Buffer.from('pool_tick_array_bitmap_extension'), p.toBuffer()], program)[0]);
+  assert.deepEqual(bitmap.keys.map(String), want.map(String));
+  assert.ok(poolPda(['x', 'pool'], pools[0], program).equals(PublicKey.findProgramAddressSync([Buffer.from('x'), pools[0].toBuffer()], program)[0]));
+  assert.throws(() => poolPda([], pools[0], program), /needs its seeds/);
+  assert.throws(() => compile('raydium-clmm', { ...worst(), pools: [] }), /approved pool/);
 });

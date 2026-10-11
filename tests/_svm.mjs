@@ -203,6 +203,16 @@ export class Fork {
         if (!t.owner.equals(new PublicKey(owner)) || !t.mint.equals(new PublicKey(mint))) return [];
         return [{ pubkey: new PublicKey(k), account: { data: { parsed: { info: { tokenAmount: { amount: String(t.amount) } } } } } }];
       }) }),
+      // the raw form, by token program or by mint (the Raydium SDK's wallet read)
+      getTokenAccountsByOwner: async (owner, filter) => ({ context: { slot: Number(fork.svm.getClock().slot) }, value: [...fork.seen].flatMap(k => {
+        const a = fork.get(k);
+        if (!a || !(a.owner.equals(TOKEN_PROGRAM_ID) || a.owner.equals(TOKEN_2022_PROGRAM_ID)) || a.data.length < AccountLayout.span || a.lamports === 0n) return [];
+        if (!new PublicKey(a.data.subarray(32, 64)).equals(new PublicKey(owner))) return [];
+        if (filter.programId && !a.owner.equals(new PublicKey(filter.programId))) return [];
+        if (filter.mint && !new PublicKey(a.data.subarray(0, 32)).equals(new PublicKey(filter.mint))) return [];
+        return [{ pubkey: new PublicKey(k), account: info(a) }];
+      }) }),
+      getEpochInfo: async () => ({ epoch: Number(fork.svm.getClock().epoch), absoluteSlot: Number(fork.svm.getClock().slot), slotIndex: 0, slotsInEpoch: 432_000 }),
       getAddressLookupTable: async (k) => {
         const [a] = await read([new PublicKey(k)]);
         return { value: a ? new AddressLookupTableAccount({ key: new PublicKey(k), state: AddressLookupTableAccount.deserialize(a.data) }) : null };
@@ -219,6 +229,43 @@ export class Fork {
       // declines them; every send still executes in full.
       simulateTransaction: async () => ({ value: { err: 'not simulated on the fork', logs: [], unitsConsumed: 0 } }),
     };
+  }
+
+  // The same fork for SDKs built on @solana/kit (Orca): each call returns
+  // {send}, answers carry base64 data and bigint lamports, as a node's do.
+  kitRpc() {
+    const conn = this.connection(), fork = this;
+    const kit = (a) => a && { data: [Buffer.from(a.data).toString('base64'), 'base64'], executable: false,
+      lamports: BigInt(a.lamports), owner: a.owner.toBase58(), rentEpoch: 0n, space: BigInt(a.data.length) };
+    const parsed = async (keys) => (await conn.getMultipleParsedAccounts(keys)).value
+      .map(a => a && { ...a, lamports: BigInt(a.lamports), owner: a.owner.toBase58() });
+    const one = async (k, cfg) => cfg?.encoding === 'jsonParsed' ? (await parsed([new PublicKey(k)]))[0] : kit(await conn.getAccountInfo(new PublicKey(k)));
+    const calls = {
+      getAccountInfo: async (k, cfg) => ({ context: { slot: 0n }, value: await one(k, cfg) }),
+      getMultipleAccounts: async (ks, cfg) => ({ context: { slot: 0n }, value: cfg?.encoding === 'jsonParsed'
+        ? await parsed(ks.map(k => new PublicKey(k)))
+        : (await conn.getMultipleAccountsInfo(ks.map(k => new PublicKey(k)))).map(kit) }),
+      getBalance: async (k) => ({ context: { slot: 0n }, value: BigInt(fork.balance(k)) }),
+      getMinimumBalanceForRentExemption: async (n) => BigInt(await conn.getMinimumBalanceForRentExemption(Number(n))),
+      getEpochInfo: async () => ({ epoch: fork.svm.getClock().epoch, absoluteSlot: fork.svm.getClock().slot }),
+      getLatestBlockhash: async () => ({ context: { slot: 0n }, value: { blockhash: fork.svm.latestBlockhash(), lastValidBlockHeight: 10n ** 12n } }),
+      // over the accounts this fork has seen, by token program or by mint
+      getTokenAccountsByOwner: async (owner, { programId, mint }, cfg) => ({ context: { slot: 0n }, value: [...fork.seen].flatMap(k => {
+        const a = fork.get(k);
+        if (!a || !(a.owner.equals(TOKEN_PROGRAM_ID) || a.owner.equals(TOKEN_2022_PROGRAM_ID)) || a.data.length < AccountLayout.span || a.lamports === 0n) return [];
+        if (programId && a.owner.toBase58() !== String(programId)) return [];
+        if (mint && new PublicKey(a.data.subarray(0, 32)).toBase58() !== String(mint)) return [];
+        if (!new PublicKey(a.data.subarray(32, 64)).equals(new PublicKey(owner))) return [];
+        const amount = String(a.data.readBigUInt64LE(64));
+        const account = cfg?.encoding === 'jsonParsed'
+          ? { ...kit(a), data: { parsed: { info: { tokenAmount: { amount } } } } } : kit(a);
+        return [{ pubkey: k, account }];
+      }) }),
+    };
+    return new Proxy({}, { get: (_, name) => (...args) => {
+      if (!calls[name]) throw new Error(`fork kit rpc: ${String(name)} is not served`);
+      return { send: () => calls[name](...args) };
+    } });
   }
 
   // An SPL token account with `amount` (raw units), as if it had been funded.

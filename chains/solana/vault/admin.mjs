@@ -13,31 +13,39 @@ const MEMO_PROGRAM = new PublicKey(SOLANA.programs.memo);
 // Addresses one extend instruction carries and still fits a transaction.
 const EXTEND_CHUNK = 24;
 
-// Connect: a new smart account owned by `owners`, with the venue's policies
+// Connect: a new smart account owned by `owners`, with each venue's policies
 // for `policyKey`, and the bot nowhere among the owners at the end.
+// `venues` = [compile(...)], one per venue the owners approve.
 //
 // The bot creates the account as a temporary owner (so the owners sign
 // nothing), adds one policy per transaction (a policy fills most of one), and
 // removes itself in the last. Until then the vault is empty: owners deposit
-// only after `vault.mjs status` shows the bot gone.
-export function connectPlan({ creator, treasury, seed, owners, threshold, policyKey, compiled, memo = null }) {
+// only after `vault.mjs status` shows the bot gone. Policy seeds run on
+// across venues in the order given; `byVenue` names each venue's policies.
+export function connectPlan({ creator, treasury, seed, owners, threshold, policyKey, venues, memo = null }) {
   if (!owners.length) throw new Error('a vault needs at least one owner');
   if (threshold < 1 || threshold > owners.length) throw new Error(`threshold ${threshold} with ${owners.length} owners`);
   if (owners.some(o => new PublicKey(o).equals(creator))) throw new Error('the bot\'s key cannot be an owner');
   if (owners.some(o => new PublicKey(o).equals(policyKey))) throw new Error('the policy key cannot be an owner');
+  if (!venues.length) throw new Error('a vault needs at least one venue');
+  if (new Set(venues.map(v => v.venue)).size !== venues.length) throw new Error('a venue is listed twice');
   // The bot alone reaches the threshold while it sets up; the real threshold
   // is set in the last transaction, after the bot has left.
   const { settings, ix: create } = sq.createSmartAccountIx({ creator, treasury, seed, threshold: 1, memo,
     signers: [...owners.map(k => ({ key: new PublicKey(k) })), { key: creator }] });
-  const policies = compiled.policies.map((_, i) => sq.policyPda(settings, i + 1));
+  const all = venues.flatMap(v => v.policies);
+  const policies = all.map((_, i) => sq.policyPda(settings, i + 1));
+  const byVenue = {};
+  let n = 0;
+  for (const v of venues) { byVenue[v.venue] = policies.slice(n, n + v.policies.length); n += v.policies.length; }
   const sync = (actions, extra) => sq.settingsSyncIx({ settings, signers: [creator], rentPayer: creator, actions, extra });
   const txs = [[create]];
-  compiled.policies.forEach((p, i) => txs.push([sync(
+  all.forEach((p, i) => txs.push([sync(
     [{ kind: 'policyCreate', seed: i + 1, policy: p.policy, signers: [{ key: policyKey }] }], [policies[i]])]));
   const leave = [{ kind: 'removeSigner', key: creator }];
   if (threshold > 1) leave.push({ kind: 'changeThreshold', threshold });
   txs.push([sync(leave, [])]);
-  return { settings, vault: sq.vaultPda(settings), policies, txs };
+  return { settings, vault: sq.vaultPda(settings), policies, byVenue, txs };
 }
 
 // What a connected vault must look like before anyone deposits: these owners
@@ -56,10 +64,11 @@ export function connectProblems(settingsData, { owners, threshold, botKeys }) {
 }
 
 // The accounts a vault's transactions on these pools share: everything but
-// signers and per-position accounts. `pools` = [{accounts, mints}] from
-// venues.mjs. Pure; the order is stable so a table only ever grows.
-export function staticAccounts({ vault, policies, venue, pools }) {
-  const out = [sq.PROGRAM_ID, ...policies, vault, ...venue.shared(),
+// signers and per-position accounts. `venues` are entries of venues.mjs,
+// `pools` = [{accounts, mints}] from their poolAccounts. Pure; the order is
+// stable so a table only ever grows.
+export function staticAccounts({ vault, policies, venues, pools }) {
+  const out = [sq.PROGRAM_ID, ...policies, vault, ...venues.flatMap(v => v.shared()),
     TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID, ASSOCIATED_TOKEN_PROGRAM_ID, SystemProgram.programId, MEMO_PROGRAM];
   for (const p of pools) {
     out.push(...p.accounts);

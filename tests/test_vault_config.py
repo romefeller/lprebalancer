@@ -125,16 +125,18 @@ class SignerEnvironment(unittest.TestCase):
                                'LPBOT_VAULT_POOLS': '0x9B08288C3Be4F62bbf8d1C20Ac9C5e6f9467d8B7',
                                'LPBOT_VAULT_PAYOUTS': '0x2b35000000000000000000000000000000000142'})
 
-    def test_a_vault_never_adds_idle_cash_to_its_position(self):
+    def test_a_safe_vault_never_adds_idle_cash_to_its_position_a_squads_vault_does(self):
         status = {'positionMint': '1', 'lowerPrice': 0.1, 'upperPrice': 0.2}
-        with mock.patch.object(config, 'VAULT', vault()), \
+        with mock.patch.object(config, 'VAULT', vault(kind='safe')), \
                 mock.patch.object(lp.swaps.calm, 'band_share_a', side_effect=AssertionError('nothing is planned')) as plan:
             self.assertIs(lp.swaps.add_idle({}, status, {'price': 0.15}, 10.0, 0.15), False)
         plan.assert_not_called()
-        with mock.patch.object(config, 'VAULT', None), \
-                mock.patch.object(lp.swaps.calm, 'band_share_a', side_effect=ValueError('out of the band')) as plan:
-            self.assertFalse(lp.swaps.add_idle({}, status, {'price': 0.15}, 10.0, 0.15))
-        plan.assert_called_once()
+        # a Squads vault's rule pins the NFT account to the vault's own: it plans the add as a key wallet does
+        for custody in (vault(), None):
+            with mock.patch.object(config, 'VAULT', custody), \
+                    mock.patch.object(lp.swaps.calm, 'band_share_a', side_effect=ValueError('out of the band')) as plan:
+                self.assertFalse(lp.swaps.add_idle({}, status, {'price': 0.15}, 10.0, 0.15))
+            plan.assert_called_once()
 
     def test_an_unapproved_venue_or_a_missing_key_is_refused(self):
         with mock.patch.object(config, 'VAULT', vault()), \
@@ -200,6 +202,31 @@ class SignerEnvironment(unittest.TestCase):
                 self.assertEqual(lp.signers.route('payout'), 'payout')
             with mock.patch.object(config, 'CAPS', dict(caps, audit=True)):
                 self.assertIs(lp.signers.housekeeper('audit'), True)
+
+    def test_a_vault_swaps_only_where_its_venue_rules_hold_a_swap(self):
+        self.assertEqual({d: lp.signers.vault_swaps(d) for d in ('meteora-dlmm', 'raydium-clmm', 'orca', 'byreal', 'nowhere')},
+                         {'meteora-dlmm': True, 'raydium-clmm': True, 'orca': True, 'byreal': False, 'nowhere': False})
+        rules = {'base': {'instructions': [{'name': 'swap_v2'}, {'name': 'open'}]},
+                 'fork': {'like': 'base'}, 'cut': {'like': 'base', 'without': ['swap_v2']}, 'plain': {'instructions': [{'name': 'open'}]}}
+        self.assertEqual([lp.signers.vault_swaps(d, rules) for d in ('base', 'fork', 'cut', 'plain')], [True, True, False, False])
+        venues = {'byreal': {'policies': POLICIES, 'pools': [DLMM_POOL], 'payouts': []}}
+        seen = {}
+
+        def fake_run(cmd, **kw):
+            seen['cmd'] = cmd
+            return mock.Mock(stdout='{"ok": true}', stderr='', returncode=0)
+        with mock.patch.object(config, 'VAULT', vault(venues)), mock.patch.object(config, 'DEX', 'byreal'), \
+                mock.patch.dict(os.environ, {'LPBOT_VAULT_TEST_POLICY_KEY': '/keys/policy.json'}), \
+                mock.patch.object(lp.signers.subprocess, 'run', fake_run):
+            out, err = lp.signers._chain('rebalance', SOL, USDC, '1', '1', dex=lp.signers.route('swap'))
+            self.assertRegex(err, '^refused: the vault rules for byreal hold no swap')
+            self.assertEqual(seen, {})
+            self.assertFalse(lp.signers.counts_as_failure(err))
+            self.assertEqual(lp.signers._chain('status'), ({'ok': True}, None))
+        # a Safe vault's swaps are its signer's own business (its role scopes them)
+        with mock.patch.object(config, 'VAULT', vault(kind='safe', venues=venues)), mock.patch.object(config, 'DEX', 'byreal'), \
+                mock.patch.object(config, 'vault_env', lambda dex: {}), mock.patch.object(lp.signers.subprocess, 'run', fake_run):
+            self.assertEqual(lp.signers._chain('rebalance', SOL, USDC, '1', '1'), ({'ok': True}, None))
 
     def test_a_venue_without_a_policy_is_refused_before_spawning(self):
         (out, err), seen = self.run_chain('status', dex='orca')

@@ -48,6 +48,23 @@ def route(kind):
     return config.DEX if via == 'venue' else via
 
 
+# The Squads vault rules (chains/solana/vault/rules.json): what each venue's
+# policies let the bot do with a vault.
+VAULT_RULES = json.loads((paths.ROOT / 'chains/solana/vault/rules.json').read_text())['venues']
+
+
+def vault_swaps(dex, rules=VAULT_RULES):
+    """Whether a Squads vault's rules for `dex` hold a swap on its pool: a
+    fork's are its base's, less what it leaves out ("like", "without"). A
+    vault on a venue without one does not swap at all. Pure."""
+    v = rules.get(dex)
+    if not v:
+        return False
+    base = rules[v['like']] if v.get('like') else v
+    without = set(v.get('without') or [])
+    return any(i['name'].startswith('swap') for i in base['instructions'] if i['name'] not in without)
+
+
 def housekeeper(kind):
     """Whether this process runs the wallet-wide chore `kind` ('sweep',
     'janitor', 'audit', 'scanner'): only the wallet's residual owner, and
@@ -434,6 +451,8 @@ def _chain(*args, dex=None, timeout=tuning.SIGNER_TIMEOUT_S, extra_env=None):
     target = dex or config.DEX
     if config.VAULT and target in ('jupiter', 'orca-swap'):
         return None, 'refused: a vault swaps only on a pool its owners approved (the venue signer)'
+    if config.VAULT and config.VAULT['kind'] == 'squads' and args[:1] == ('rebalance',) and not vault_swaps(target):
+        return None, f'refused: the vault rules for {target} hold no swap on its pool'
     try:
         vault = config.vault_env(config.DEX if target in ('payout', 'janitor') else target)
     except ValueError as e:

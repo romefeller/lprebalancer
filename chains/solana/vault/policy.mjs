@@ -47,8 +47,16 @@ function discriminator(d) {
   return { constraint: { offset: 0, type: d.type, value: d.value, op: 'eq' }, prefix };
 }
 
-// What a role pins, for one vault. `ctx` = {vault, payer, pools, payouts}.
-function pin(role, index, programId, ctx) {
+// The address a `pda` pin names for one pool: seeds are strings, or "pool"
+// for the pool's own key, as the venue program derives it. Pure.
+export function poolPda(seeds, pool, programId) {
+  if (!seeds?.length) throw new Error('a pda pin needs its seeds');
+  const parts = seeds.map(s => s === 'pool' ? new PublicKey(pool).toBuffer() : Buffer.from(s));
+  return PublicKey.findProgramAddressSync(parts, programId)[0];
+}
+
+// What a pin requires of its account, for one vault. `ctx` = {vault, payer, pools, payouts}.
+function pin({ role, index, seeds }, programId, ctx) {
   const keys = (list, what) => {
     if (!list?.length) throw new Error(`role ${role} needs at least one ${what}`);
     return { index, keys: list.map(k => new PublicKey(k)) };
@@ -58,6 +66,7 @@ function pin(role, index, programId, ctx) {
     case 'vault': return keys([ctx.vault], 'vault');
     case 'vaultOrPayer': return keys([ctx.vault, ctx.payer], 'vault and payer');
     case 'pool': return keys(ctx.pools, 'approved pool');
+    case 'pda': return keys(ctx.pools?.map(p => poolPda(seeds, p, programId)), 'approved pool');
     case 'payout': return keys(ctx.payouts, 'payout token account');
     case 'none': return keys([programId], 'program');
     case 'vaultToken': return { index, data: ownedByVault };
@@ -66,13 +75,32 @@ function pin(role, index, programId, ctx) {
   }
 }
 
+// A venue's instruction rules: its own, or those of the venue it is a fork
+// of ("like"; less those it names "without"), which then run against its own
+// program. A rule's
+// "rewardRecipients" become one vaultToken pin per reward the venue's pools
+// have ("rewards").
+export function instructionsOf(venue, rules = RULES) {
+  const v = rules.venues[venue];
+  const base = v.like ? rules.venues[v.like] : v;
+  if (!base?.instructions) throw new Error(`venue ${venue} is like ${v.like}, which has no rules of its own`);
+  const without = new Set(v.without ?? []);
+  for (const name of without) if (!base.instructions.some(i => i.name === name)) throw new Error(`venue ${venue}: no rule ${name} to leave out`);
+  return base.instructions.filter(i => !without.has(i.name)).map(({ rewardRecipients: r, ...rule }) => {
+    if (!r) return rule;
+    if (!Number.isInteger(v.rewards) || v.rewards < 0 || v.rewards > 3) throw new Error(`venue ${venue}: rewards must be 0 to 3`);
+    const pins = Array.from({ length: v.rewards }, (_, i) => ({ index: r.first + i * r.stride, role: 'vaultToken' }));
+    return { ...rule, pins: [...rule.pins, ...pins] };
+  });
+}
+
 // The rules a vault's policies for `venue` hold: the venue's own, the shared
 // ones, and payouts when the vault has payout accounts.
 export function rulesFor(venue, rules = RULES, withPayout = true) {
   const v = rules.venues[venue];
   if (!v) throw new Error(`no vault rules for venue ${venue} (have: ${Object.keys(rules.venues).join(', ')})`);
   return [
-    ...v.instructions.map(i => ({ ...i, program: v.program })),
+    ...instructionsOf(venue, rules).map(i => ({ ...i, program: v.program })),
     ...rules.common,
     ...(withPayout ? rules.payout : []),
   ];
@@ -85,7 +113,7 @@ function constraintOf(rule, ctx) {
   const accounts = rule.pins.map(p => {
     if (seen.has(p.index)) throw new Error(`${rule.name}: account ${p.index} pinned twice`);
     seen.add(p.index);
-    return pin(p.role, p.index, programId, ctx);
+    return pin(p, programId, ctx);
   });
   return { constraint: { programId, accounts, data: [d.constraint] },
     entry: { name: rule.name, programId, prefix: d.prefix, accounts, opens: Boolean(rule.opens) } };

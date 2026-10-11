@@ -14,6 +14,8 @@
     "  vaultOrPayer  the vault, or the bot's payer (rent the payer paid goes back to it)",
     "  payout        a token account of a payout wallet (profit wallet, fee wallet)",
     "  none          the venue program itself: the placeholder for an empty optional account",
+    "  pda           the address the venue program derives for each approved pool from",
+    "                `seeds` (strings, and \"pool\" for the pool's key)",
     "Only accounts money can flow to are pinned, plus the pool. The vault's own signature",
     "  (the wallet of an associated token account is pinned the same way: index 2 = vault)",
     "needs no pin: no other account can sign as the vault. An instruction not listed here",
@@ -21,7 +23,15 @@
     "(Anchor: sha256('global:<name>')[0..8]).",
     "A rule with \"opens\": true creates accounts that later instructions are checked",
     "against. The program checks every instruction of a call before it runs any, so such",
-    "an instruction ends its call and the next one starts after it has run."
+    "an instruction ends its call and the next one starts after it has run.",
+    "A venue with \"like\": <venue> is a fork of that venue: its rules, against its own program, but those it names in \"without\".",
+    "Byreal leaves out swap_v2: its SOL/USDC pool takes only swap_v3_dyn, which the signer does not build.",
+    "\"rewards\": how many reward slots each approved pool of the venue has initialized; the",
+    "owners approve no pool with another count (vault/venues.mjs). A rule's \"rewardRecipients\"",
+    "pins one more vaultToken account per reward: first, then every stride. Raydium's",
+    "decrease_liquidity_v2 pays each reward to the second account of a triplet (pool reward",
+    "vault, recipient, mint) after the fixed accounts; the signer names the pool's bitmap",
+    "extension first (index 16, pinned), so each recipient sits at an index the rule pins."
   ],
   "common": [
     {
@@ -205,6 +215,213 @@
             {
               "index": 9,
               "role": "none"
+            }
+          ]
+        }
+      ]
+    },
+    "raydium-clmm": {
+      "program": "CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK",
+      "rewards": 1,
+      "instructions": [
+        {
+          "name": "open_position_v2",
+          "discriminator": "4db84ad67056f1c7",
+          "pins": [
+            {
+              "index": 1,
+              "role": "vault"
+            },
+            {
+              "index": 5,
+              "role": "pool"
+            }
+          ]
+        },
+        {
+          "name": "open_position_with_token22_nft",
+          "discriminator": "4dffae527d1dc92e",
+          "pins": [
+            {
+              "index": 1,
+              "role": "vault"
+            },
+            {
+              "index": 4,
+              "role": "pool"
+            }
+          ]
+        },
+        {
+          "name": "increase_liquidity_v2",
+          "discriminator": "851d59df45eeb00a",
+          "pins": [
+            {
+              "index": 1,
+              "role": "vaultToken"
+            },
+            {
+              "index": 2,
+              "role": "pool"
+            }
+          ]
+        },
+        {
+          "name": "decrease_liquidity_v2",
+          "discriminator": "3a7fbc3e4f52c460",
+          "pins": [
+            {
+              "index": 3,
+              "role": "pool"
+            },
+            {
+              "index": 9,
+              "role": "vaultToken"
+            },
+            {
+              "index": 10,
+              "role": "vaultToken"
+            },
+            {
+              "index": 16,
+              "role": "pda",
+              "seeds": [
+                "pool_tick_array_bitmap_extension",
+                "pool"
+              ]
+            }
+          ],
+          "rewardRecipients": {
+            "first": 18,
+            "stride": 3
+          }
+        },
+        {
+          "name": "close_position",
+          "discriminator": "7b86510031446262",
+          "pins": [
+            {
+              "index": 0,
+              "role": "vault"
+            }
+          ]
+        },
+        {
+          "name": "swap_v2",
+          "discriminator": "2b04ed0b1ac91e62",
+          "pins": [
+            {
+              "index": 2,
+              "role": "pool"
+            },
+            {
+              "index": 4,
+              "role": "vaultToken"
+            }
+          ]
+        }
+      ]
+    },
+    "byreal": {
+      "program": "REALQqNEomY6cQGZJUGwywTBD2UmDT32rZcNnfxQ5N2",
+      "like": "raydium-clmm",
+      "rewards": 0,
+      "without": [
+        "swap_v2"
+      ]
+    },
+    "orca": {
+      "program": "whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc",
+      "instructions": [
+        {
+          "name": "increase_liquidity_by_token_amounts_v2",
+          "discriminator": "effb097cd2c6352b",
+          "pins": [
+            {
+              "index": 0,
+              "role": "pool"
+            },
+            {
+              "index": 6,
+              "role": "vaultToken"
+            }
+          ]
+        },
+        {
+          "name": "decrease_liquidity_v2",
+          "discriminator": "3a7fbc3e4f52c460",
+          "pins": [
+            {
+              "index": 0,
+              "role": "pool"
+            },
+            {
+              "index": 9,
+              "role": "vaultToken"
+            },
+            {
+              "index": 10,
+              "role": "vaultToken"
+            }
+          ]
+        },
+        {
+          "name": "collect_fees_v2",
+          "discriminator": "cf755fbfe5b4e20f",
+          "pins": [
+            {
+              "index": 0,
+              "role": "pool"
+            },
+            {
+              "index": 6,
+              "role": "vaultToken"
+            },
+            {
+              "index": 8,
+              "role": "vaultToken"
+            }
+          ]
+        },
+        {
+          "name": "collect_reward_v2",
+          "discriminator": "b16b25b4a01331d1",
+          "pins": [
+            {
+              "index": 0,
+              "role": "pool"
+            },
+            {
+              "index": 4,
+              "role": "vaultToken"
+            }
+          ]
+        },
+        {
+          "name": "close_position_with_token_extensions",
+          "discriminator": "01b6873b9b1963df",
+          "pins": [
+            {
+              "index": 1,
+              "role": "vaultOrPayer"
+            }
+          ]
+        },
+        {
+          "name": "swap_v2",
+          "discriminator": "2b04ed0b1ac91e62",
+          "pins": [
+            {
+              "index": 4,
+              "role": "pool"
+            },
+            {
+              "index": 7,
+              "role": "vaultToken"
+            },
+            {
+              "index": 9,
+              "role": "vaultToken"
             }
           ]
         }

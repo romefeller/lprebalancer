@@ -29,6 +29,13 @@
 // SDK as the owner, and never printed. The pool comes from --pool <address> or
 // LPBOT_POOL for every command that needs one.
 //
+// Vault mode (LPBOT_VAULT_SETTINGS set; chains/solana/vault/account.mjs): the
+// money and positions belong to a Squads vault the owners control, the key
+// above only pays fees, and every instruction that needs the vault runs
+// through the vault's policy. The instructions come from ./vault.mjs, the
+// SDK's static builders over the vault's own token accounts; the vault pays
+// a position's rent and gets it back at close. Key mode is unchanged.
+//
 // Commands:
 //   node venues/raydium_clmm/signer.mjs balance [pool]
 //   node venues/raydium_clmm/signer.mjs positions
@@ -38,6 +45,7 @@
 //   node venues/raydium_clmm/signer.mjs harvest <position> [--execute]
 //   node venues/raydium_clmm/signer.mjs close <position> [--execute]
 //   node venues/raydium_clmm/signer.mjs increase <position> <maxA> <maxB> [--execute]   (add to an open position in range)
+//   node venues/raydium_clmm/signer.mjs rebalance <mintA> <mintB> <targetUsdA> <targetUsdB> [--execute]   (a swap on this pool)
 import fs from 'node:fs';
 import { positionRent } from '../../shared/position_rent.mjs';
 import { PRICE_SLIPPAGE_BPS, SLIPPAGE_REFUSAL, openToleranceBps, safeBase } from '../../shared/slippage.mjs';
@@ -53,12 +61,17 @@ import { waitTurn } from '../jupiter/gate.mjs';
 import { NeverLanded, priorityCuPrice, sendUntilLanded } from '../../shared/tx_send.mjs';
 import SOLANA from '../../chains/solana/solana.json' with { type: 'json' };
 import { JUPITER, jupiterHeaders } from '../jupiter/api.mjs';
+import { actingAccount } from '../../chains/solana/vault/account.mjs';
+import * as vaultIx from './vault.mjs';
+import { planRebalance, TARGET_TOLERANCE } from '../../shared/rebalance_plan.mjs';
+import { planSwap, valueLossOk, checkImpact, parseHints, noopReport, Refused, MAX_VALUE_LOSS } from '../orca/swap.mjs';
+import { swapSides, sellable } from '../../shared/pool_swap.mjs';
 
 // The SDK's ESM build loads under Node 24, but the CommonJS build is used so
 // that this file, the SDK and web3.js share one copy of PublicKey and BN.
 const require = createRequire(import.meta.url);
 const {
-  Raydium, TxVersion, TickUtil, TickArrayUtil, LiquidityMathUtil, CLMM_PROGRAM_ID,
+  Raydium, TxVersion, TickUtil, TickArrayUtil, LiquidityMathUtil, CLMM_PROGRAM_ID, PoolUtils,
 } = require('@raydium-io/raydium-sdk-v2');
 const { Connection, Keypair, PublicKey } = require('@solana/web3.js');
 const BN = require('bn.js');
@@ -71,6 +84,10 @@ export const ENDPOINTS = endpoints(process.env, { indexed: true });
 const MAX_USD = Number(process.env.LPBOT_MAX_USD ?? 260);
 const SLIPPAGE_BPS = Number(process.env.LPBOT_SLIPPAGE_BPS ?? 100);
 const GAS_RESERVE_SOL = Number(process.env.LPBOT_GAS_RESERVE_SOL ?? 0.02);
+// SOL a vault keeps for itself: the rent of a position it opens (personal
+// position, NFT mint and account: about 0.009 on a lean open) and of the
+// WSOL account a deposit or swap opens. Never deposited.
+const VAULT_SOL_FLOOR = 0.02;
 
 const DEX = 'raydium-clmm';
 const PROGRAM_ID = new PublicKey(SOLANA.programs.raydium_clmm);
@@ -215,15 +232,18 @@ async function describe(pool, r, connection) {
   return info;
 }
 
+// The SDK reads positions and token accounts of its owner: the vault in
+// vault mode (a public key; nothing is signed through the SDK there).
 async function connect(url, { withKey = true } = {}) {
   guard();
   const connection = new Connection(url, 'confirmed');
   const payer = withKey ? Keypair.fromSecretKey(await secretBytes()) : null;
+  const acting = payer ? await actingAccount({ connection, payer, venue: DEX }) : null;
   const raydium = await Raydium.load({
-    connection, owner: payer ?? undefined, cluster: 'mainnet',
+    connection, owner: acting?.mode === 'vault' ? acting.owner : payer ?? undefined, cluster: 'mainnet',
     disableFeatureCheck: true, disableLoadToken: true,
   });
-  return { connection, payer, raydium };
+  return { connection, payer, raydium, acting };
 }
 
 // Run the whole operation over the endpoints (shared/rpc_policy.mjs). A rate limit,
@@ -245,23 +265,27 @@ async function splBalance(connection, owner, mint, decimals, multiplier, lamport
   return rawToUi(raw, decimals, multiplier);
 }
 
-async function balance(poolExplicit) {
+export async function balance(poolExplicit, deps) {
   const pool = poolArg(poolExplicit);
-  return withRpc(async ({ connection, payer, raydium }) => {
+  return withRpc(async ({ connection, payer, raydium, acting }) => {
     const info = await describe(pool, await loadPool(raydium, pool), connection);
-    const lamports = await connection.getBalance(payer.publicKey);
-    const out = { owner: payer.publicKey.toBase58(), sol: lamports / 1e9, pool, dex: DEX,
+    const owner = acting.owner;
+    const lamports = await connection.getBalance(owner);
+    const out = { owner: owner.toBase58(), sol: lamports / 1e9, pool, dex: DEX,
+      // a vault: its payer key pays the fees (gasSol), the vault keeps its floor
+      ...(acting.mode === 'vault' ? { custody: 'vault', gasSol: (await connection.getBalance(payer.publicKey)) / 1e9,
+        nativeReserve: VAULT_SOL_FLOOR } : {}),
       tokenA: info.symbolA, tokenB: info.symbolB, price: info.price, uiPrice: info.uiPrice,
       quoteUsd: info.quoteUsd, nativeSide: info.nativeSide, ...mintFields(...info.mints) };
-    out.balanceA = await splBalance(connection, payer.publicKey, info.mintA, info.decimalsA, info.multiplierA, lamports);
-    out.balanceB = await splBalance(connection, payer.publicKey, info.mintB, info.decimalsB, info.multiplierB, lamports);
+    out.balanceA = await splBalance(connection, owner, info.mintA, info.decimalsA, info.multiplierA, lamports);
+    out.balanceB = await splBalance(connection, owner, info.mintB, info.decimalsB, info.multiplierB, lamports);
     const inQuote = out.balanceA * info.uiPrice + out.balanceB;
     const solUsd = info.nativeSide ? null : await tokenUsd(NATIVE_MINT);
     out.walletUsd = info.quoteUsd == null ? null
       : Number((inQuote * info.quoteUsd + (info.nativeSide ? 0 : out.sol * (solUsd ?? 0))).toFixed(4));
     console.log(JSON.stringify(out, null, 1));
     return out;
-  });
+  }, undefined, deps);
 }
 
 // --- positions ------------------------------------------------------------------
@@ -356,9 +380,9 @@ export function unionView(list, r, info, tickOf) {
   return out;
 }
 
-async function status(positionArg) {
+export async function status(positionArg, deps) {
   const pool = poolArg();
-  return withRpc(async ({ connection, payer, raydium }) => {
+  return withRpc(async ({ connection, raydium, acting }) => {
     const r = await loadPool(raydium, pool);
     const info = await describe(pool, r, connection);
     const list = await positionsOnPool(raydium, pool);
@@ -369,12 +393,12 @@ async function status(positionArg) {
     const tickOf = await tickStates(connection, pool, list, info.tickSpacing);
     const out = unionView(list, r, info, tickOf);
     try {
-      out.rentSol = Number((await rentOf(connection, payer.publicKey, list.map(x => x.nftMint), PROGRAM_ID)).toFixed(9));
+      out.rentSol = Number((await rentOf(connection, acting.owner, list.map(x => x.nftMint), PROGRAM_ID)).toFixed(9));
       out.rentUsd = await rentUsdOf(info, out.rentSol);
     } catch { /* reporting only */ }
     console.log(JSON.stringify(out, null, 1));
     return out;
-  });
+  }, undefined, deps);
 }
 
 // Rent held by the position accounts and the NFT token accounts, refunded on
@@ -462,6 +486,20 @@ async function simulate(connection, built) {
   }
 }
 
+// The same for a vault's instructions (./vault.mjs): wrapped through the
+// policy and signed as acting.transaction does, then simulated.
+async function simulateActing(connection, acting, op) {
+  try {
+    const tx = acting.transaction(op.ixs, (await connection.getLatestBlockhash('confirmed')).blockhash, op.signers ?? []);
+    const res = await connection.simulateTransaction(tx);
+    const logs = res.value.logs ?? [];
+    return { ok: res.value.err == null, err: res.value.err == null ? null : JSON.stringify(res.value.err),
+      unitsConsumed: res.value.unitsConsumed ?? null, logTail: logs.slice(-4) };
+  } catch (e) {
+    return { ok: false, err: String(e?.message ?? e).slice(0, 200), unitsConsumed: null, logTail: [] };
+  }
+}
+
 // Sign and send one built transaction. The SDK prints the transaction to
 // stdout on its way out; that line is swallowed so stdout stays one JSON.
 async function sendBuilt(built) {
@@ -491,16 +529,22 @@ export async function sendAll(builts, report, send = sendBuilt) {
 
 // maxA and maxB are UI amounts (what the wallet shows); the deposit is sized
 // in pool-native units at the pool price and reported back in UI units.
-async function open(pool, lower, upper, uiMaxA, uiMaxB, execute) {
+export async function open(pool, lower, upper, uiMaxA, uiMaxB, execute, deps) {
   [lower, upper, uiMaxA, uiMaxB] = [lower, upper, uiMaxA, uiMaxB].map(Number);
   if (![lower, upper, uiMaxA, uiMaxB].every(Number.isFinite)) throw new Error('open needs numeric <lower> <upper> <maxA> <maxB>');
-  return withRpc(async ({ connection, payer, raydium }) => {
+  return withRpc(async ({ connection, payer, raydium, acting }) => {
     const r = await loadPool(raydium, pool);
     const info = await describe(pool, r, connection);
     assertWritable(info.mints);
-    const maxA = uiToNative(uiMaxA, info.multiplierA), maxB = uiToNative(uiMaxB, info.multiplierB);
+    const vault = acting.mode === 'vault';
+    let maxA = uiToNative(uiMaxA, info.multiplierA), maxB = uiToNative(uiMaxB, info.multiplierB);
     const lamports = await connection.getBalance(payer.publicKey);
     const sol = lamports / 1e9;
+    if (vault && info.nativeSide) {
+      // the vault's SOL is the deposit's; its floor stays for the rent
+      const spare = Math.max(0, (await connection.getBalance(acting.owner)) / 1e9 - VAULT_SOL_FLOOR);
+      if (info.nativeSide === 'A') maxA = Math.min(maxA, spare); else maxB = Math.min(maxB, spare);
+    }
     if (sol < GAS_RESERVE_SOL) {
       throw new Error(`SOL below the ${GAS_RESERVE_SOL} gas reserve; a wallet that cannot pay fees cannot close its own position`);
     }
@@ -517,7 +561,7 @@ async function open(pool, lower, upper, uiMaxA, uiMaxB, execute) {
     const approxUsd = (estA * info.uiPrice + estB) * (info.quoteUsd ?? 1);
     if (approxUsd > MAX_USD) throw new Error(`position about $${approxUsd.toFixed(0)} exceeds cap $${MAX_USD}`);
     if (!(estA > 0 || estB > 0)) throw new Error('nothing to deposit: both sides are zero');
-    const nativeIn = info.nativeSide === 'A' ? estA : info.nativeSide === 'B' ? estB : 0;
+    const nativeIn = vault ? 0 : info.nativeSide === 'A' ? estA : info.nativeSide === 'B' ? estB : 0;
     if (sol - nativeIn < GAS_RESERVE_SOL) {
       throw new Error(`depositing ${nativeIn.toFixed(4)} SOL would leave ${(sol - nativeIn).toFixed(4)}, below the ${GAS_RESERVE_SOL} gas reserve`);
     }
@@ -542,7 +586,10 @@ async function open(pool, lower, upper, uiMaxA, uiMaxB, execute) {
       : LiquidityMathUtil.getLiquidityFromAmountB(sqrtLo, sqrtP.lt(sqrtHi) ? sqrtP : sqrtHi, baseAmount);
     const chain = LiquidityMathUtil.getAmountsForLiquidity(sqrtP, sqrtLo, sqrtHi, liquidity, true);
 
-    const built = await raydium.clmm.openPositionFromBase({
+    const lean = process.env.LPBOT_RAYDIUM_LEAN === '1';
+    const built = vault ? await vaultIx.openIxs({ poolInfo: r.poolInfo, poolKeys: r.poolKeys, owner: acting.owner,
+      tickLower: band.tickLower, tickUpper: band.tickUpper, base, baseAmount, otherAmountMax, lean })
+      : await raydium.clmm.openPositionFromBase({
       poolInfo: r.poolInfo, poolKeys: r.poolKeys,
       ownerInfo: { useSOLBalance: true },
       tickLower: band.tickLower, tickUpper: band.tickUpper,
@@ -552,7 +599,7 @@ async function open(pool, lower, upper, uiMaxA, uiMaxB, execute) {
       // close never refunds (metadata account and fee, legacy mint), $1.80 a
       // cycle. Open simulates green both ways; close of a Token-2022 position
       // has not run live yet, so the lean path stays off until it has.
-      ...(process.env.LPBOT_RAYDIUM_LEAN === '1' ? { withMetadata: 'no-create', nft2022: true } : {}),
+      ...(lean ? { withMetadata: 'no-create', nft2022: true } : {}),
       txVersion: TX_VERSION,
     }).catch(e => {
       // The SDK creates a token account only for a side it deposits nothing
@@ -578,19 +625,19 @@ async function open(pool, lower, upper, uiMaxA, uiMaxB, execute) {
       liquidity: liquidity.toString(),
       approxUsd: Number(approxUsd.toFixed(2)),
       depositUsd: info.quoteUsd != null ? Number(approxUsd.toFixed(4)) : null,
-      positionMint: built.extInfo?.nftMint?.toBase58() ?? null,
-      instructions: built.transaction.instructions.length,
+      positionMint: (vault ? built.nftMint : built.extInfo?.nftMint)?.toBase58() ?? null,
+      instructions: vault ? built.ixs.length : built.transaction.instructions.length,
       transactions: 1,
     };
     if (!execute) {
-      const simulation = await simulate(connection, built);
+      const simulation = vault ? await simulateActing(connection, acting, built) : await simulate(connection, built);
       console.log(JSON.stringify({ ...report, simulation, sent: false }, null, 1));
       console.log('DRY RUN — instructions built. Pass --execute to sign and send.');
       return;
     }
-    const sig = await sendBuilt(built);
+    const sig = vault ? await sendActing(connection, acting, built) : await sendBuilt(built);
     console.log(JSON.stringify({ ...report, sent: true, signature: sig, signatures: [sig] }, null, 1));
-  });
+  }, undefined, deps);
 }
 
 // All of the wallet's positions on the pool, provided the one named is among
@@ -625,14 +672,16 @@ async function buildDecrease(raydium, r, p, liquidity, minA, minB, closePosition
   });
 }
 
-// The compute budget of a harvest or close on `pool`. An unreadable fee
-// history prices at the floor.
-async function exitBudget(connection, pool) {
+// The compute budget of a harvest or close on `pool`: EXIT_CU_LIMIT units,
+// more for a vault's (its policy call runs around the decrease). The price
+// keeps the whole fee under EXIT_PRIORITY_MAX_LAMPORTS either way. An
+// unreadable fee history prices at the floor.
+async function exitBudget(connection, pool, units = EXIT_CU_LIMIT) {
   let recent = [];
   try { recent = await connection.getRecentPrioritizationFees({ lockedWritableAccounts: [new PublicKey(pool)] }); } catch { recent = []; }
-  return { units: EXIT_CU_LIMIT,
-           microLamports: priorityCuPrice(recent, EXIT_CU_LIMIT, EXIT_PRIORITY_MAX_LAMPORTS, EXIT_CU_PRICE_FLOOR) };
+  return { units, microLamports: priorityCuPrice(recent, units, EXIT_PRIORITY_MAX_LAMPORTS, EXIT_CU_PRICE_FLOOR) };
 }
+const exitUnits = (acting) => (acting.mode === 'vault' ? vaultIx.VAULT_CU_LIMIT : EXIT_CU_LIMIT);
 
 // Sign and send one built legacy transaction, re-sent until it lands or its
 // blockhash expires (tx_send.sendUntilLanded). NeverLanded is thrown as
@@ -653,48 +702,74 @@ export async function sendLanded(connection, payer, built, deps = {}) {
   }
 }
 
-async function harvest(address, execute) {
+// Sign and send a vault's instructions (./vault.mjs) as sendLanded sends a
+// built transaction: re-sent until it lands or its blockhash expires, and the
+// same errors.
+export async function sendActing(connection, acting, op, deps = {}) {
+  try {
+    const bh = await connection.getLatestBlockhash('confirmed');
+    const tx = acting.transaction(op.ixs, bh.blockhash, op.signers ?? []);
+    return await sendUntilLanded(connection, tx.serialize(), bh.lastValidBlockHeight, deps);
+  } catch (error) {
+    if (error instanceof NeverLanded) throw error;
+    throw Object.assign(new Error(signerError(error)), { sent: true, cause: error });
+  }
+}
+
+// A decrease of `p` for whoever acts: the SDK's in key mode, the vault's
+// instructions (./vault.mjs) otherwise.
+async function decreaseFor(connection, acting, raydium, r, p, liquidity, minA, minB, close, budget) {
+  if (acting.mode !== 'vault') return buildDecrease(raydium, r, p, liquidity, minA, minB, close, budget);
+  return { ixs: vaultIx.decreaseIxs({ poolInfo: r.poolInfo, poolKeys: r.poolKeys, position: p, owner: acting.owner,
+    liquidity, amountMinA: minA, amountMinB: minB, nft2022: await vaultIx.isNft2022(connection, p.nftMint), close, budget }) };
+}
+
+const sendFor = (connection, payer, acting) => (b) => (acting.mode === 'vault' ? sendActing(connection, acting, b) : sendLanded(connection, payer, b));
+const simulateFor = (connection, acting) => (b) => (acting.mode === 'vault' ? simulateActing(connection, acting, b) : simulate(connection, b));
+const ixCount = (b) => (b.ixs ?? b.transaction.instructions).length;
+
+export async function harvest(address, execute, deps) {
   const pool = poolArg();
-  return withRpc(async ({ connection, payer, raydium }) => {
+  return withRpc(async ({ connection, payer, raydium, acting }) => {
     const r = await loadPool(raydium, pool);
     const info = await describe(pool, r, connection);
     assertWritable(info.mints);
     const ps = await findPositions(raydium, pool, address);
     const tickOf = await tickStates(connection, pool, ps, info.tickSpacing);
     const builts = [];
-    const budget = await exitBudget(connection, pool);
-    for (const p of ps) builts.push(await buildDecrease(raydium, r, p, new BN(0), new BN(0), new BN(0), false, budget));
+    const budget = await exitBudget(connection, pool, exitUnits(acting));
+    for (const p of ps) builts.push(await decreaseFor(connection, acting, raydium, r, p, new BN(0), new BN(0), new BN(0), false, budget));
     const fees = ps.map(p => positionAmounts(p, r, tickOf));
     const sum = (k) => fees.reduce((n, f) => n.add(f[k]), new BN(0));
     const report = {
       mint: address, pool, positions: ps.length, transactions: builts.length,
-      instructions: builts.reduce((n, b) => n + b.transaction.instructions.length, 0),
+      instructions: builts.reduce((n, b) => n + ixCount(b), 0),
       feesQuote: { feeOwedA: sum('feeA').toString(), feeOwedB: sum('feeB').toString(),
         feesAccruedA: rawToUi(sum('feeA'), info.decimalsA, info.multiplierA),
         feesAccruedB: rawToUi(sum('feeB'), info.decimalsB, info.multiplierB) },
     };
     if (!execute) {
       const simulation = [];
-      for (const b of builts) simulation.push(await simulate(connection, b));
+      for (const b of builts) simulation.push(await simulateFor(connection, acting)(b));
       console.log(JSON.stringify({ ...report, simulation, sent: false }, null, 1));
       console.log('DRY RUN — pass --execute to collect fees.');
       return;
     }
-    const sigs = await sendAll(builts, report, b => sendLanded(connection, payer, b));
+    const sigs = await sendAll(builts, report, sendFor(connection, payer, acting));
     console.log(JSON.stringify({ harvested: address, signature: sigs[sigs.length - 1], signatures: sigs }, null, 1));
-  });
+  }, undefined, deps);
 }
 
-async function close(address, execute) {
+export async function close(address, execute, deps) {
   const pool = poolArg();
-  return withRpc(async ({ connection, payer, raydium }) => {
+  return withRpc(async ({ connection, payer, raydium, acting }) => {
     const r = await loadPool(raydium, pool);
     const info = await describe(pool, r, connection);
     assertWritable(info.mints);
     const ps = await findPositions(raydium, pool, address);
     const tickOf = await tickStates(connection, pool, ps, info.tickSpacing);
     const builts = [], ests = [];
-    const budget = await exitBudget(connection, pool);
+    const budget = await exitBudget(connection, pool, exitUnits(acting));
     for (const p of ps) {
       const am = positionAmounts(p, r, tickOf);
       ests.push(am);
@@ -704,12 +779,12 @@ async function close(address, execute) {
       // that token. A 1% cut of each amount was a ~0.01% price tolerance on a
       // +/-1% band, and closes failed with PriceSlippageCheck (6017).
       const { minA, minB } = closeMinimumsRaw(r.rpcPoolInfo.sqrtPriceX64, p);
-      builts.push(await buildDecrease(raydium, r, p, p.liquidity, minA, minB, true, budget));
+      builts.push(await decreaseFor(connection, acting, raydium, r, p, p.liquidity, minA, minB, true, budget));
     }
     const sum = (k) => ests.reduce((n, e) => n.add(e[k]), new BN(0));
     const report = {
       mint: address, pool, positions: ps.length, transactions: builts.length,
-      instructions: builts.reduce((n, b) => n + b.transaction.instructions.length, 0),
+      instructions: builts.reduce((n, b) => n + ixCount(b), 0),
       quote: { liquidity: ps.reduce((n, p) => n.add(p.liquidity), new BN(0)).toString(),
         tokenEstA: sum('amountA').toString(), tokenEstB: sum('amountB').toString(),
         closeEstA: rawToUi(sum('amountA'), info.decimalsA, info.multiplierA),
@@ -718,14 +793,14 @@ async function close(address, execute) {
     };
     if (!execute) {
       const simulation = [];
-      for (const b of builts) simulation.push(await simulate(connection, b));
+      for (const b of builts) simulation.push(await simulateFor(connection, acting)(b));
       console.log(JSON.stringify({ ...report, simulation, sent: false }, null, 1));
       console.log('DRY RUN — close instructions built. Pass --execute to send.');
       return;
     }
-    const sigs = await sendAll(builts, report, b => sendLanded(connection, payer, b));
+    const sigs = await sendAll(builts, report, sendFor(connection, payer, acting));
     console.log(JSON.stringify({ closed: address, signature: sigs[sigs.length - 1], signatures: sigs }, null, 1));
-  });
+  }, undefined, deps);
 }
 
 // Add to an open position in range, instead of a close and a reopen (owner,
@@ -736,16 +811,17 @@ async function close(address, execute) {
 // before anything is signed: a position out of range, gas under the reserve,
 // a deposit that would leave gas under it, a position that would pass
 // LPBOT_MAX_USD, nothing to add.
-export async function increase(address, uiMaxA, uiMaxB, execute) {
+export async function increase(address, uiMaxA, uiMaxB, execute, deps) {
   [uiMaxA, uiMaxB] = [uiMaxA, uiMaxB].map(Number);
   if (![uiMaxA, uiMaxB].every(x => Number.isFinite(x) && x >= 0) || !(uiMaxA > 0 || uiMaxB > 0)) {
     throw new Error('increase needs <positionMint> <maxA> <maxB>, both >= 0 and one > 0');
   }
   const pool = poolArg();
-  return withRpc(async ({ connection, payer, raydium }) => {
+  return withRpc(async ({ connection, payer, raydium, acting }) => {
     const r = await loadPool(raydium, pool);
     const info = await describe(pool, r, connection);
     assertWritable(info.mints);
+    const vault = acting.mode === 'vault';
     const ps = await findPositions(raydium, pool, address);
     const p = ps.find(x => x.nftMint.toBase58() === address);
     const { decimalsA: da, decimalsB: db } = info;
@@ -759,7 +835,11 @@ export async function increase(address, uiMaxA, uiMaxB, execute) {
     if (sol < GAS_RESERVE_SOL) {
       throw new Error(`SOL below the ${GAS_RESERVE_SOL} gas reserve; a wallet that cannot pay fees cannot close its own position`);
     }
-    const maxA = uiToNative(uiMaxA, info.multiplierA), maxB = uiToNative(uiMaxB, info.multiplierB);
+    let maxA = uiToNative(uiMaxA, info.multiplierA), maxB = uiToNative(uiMaxB, info.multiplierB);
+    if (vault && info.nativeSide) {
+      const spare = Math.max(0, (await connection.getBalance(acting.owner)) / 1e9 - VAULT_SOL_FLOOR);
+      if (info.nativeSide === 'A') maxA = Math.min(maxA, spare); else maxB = Math.min(maxB, spare);
+    }
     const quote = depositQuote(price, lowerP, upperP, maxA, maxB);
     if (!quote) throw new Error('nothing to add: the caps are empty');
     const estA = quote.estA * info.multiplierA, estB = quote.estB * info.multiplierB;
@@ -774,7 +854,7 @@ export async function increase(address, uiMaxA, uiMaxB, execute) {
     }
     // The SDK wraps the whole cap of the other side, not the estimate: the
     // reserve is checked against the native side's cap (audit 2026-10-03).
-    const nativeIn = info.nativeSide === 'A' ? uiMaxA : info.nativeSide === 'B' ? uiMaxB : 0;
+    const nativeIn = vault ? 0 : info.nativeSide === 'A' ? uiMaxA : info.nativeSide === 'B' ? uiMaxB : 0;
     if (sol - nativeIn < GAS_RESERVE_SOL) {
       throw new Error(`adding up to ${nativeIn.toFixed(4)} SOL would leave ${(sol - nativeIn).toFixed(4)}, below the ${GAS_RESERVE_SOL} gas reserve`);
     }
@@ -791,10 +871,13 @@ export async function increase(address, uiMaxA, uiMaxB, execute) {
     const chainA = rawToUi(chain.amountA, da, info.multiplierA), chainB = rawToUi(chain.amountB, db, info.multiplierB);
     // what the program takes for this liquidity, not the quote before the price tolerance (audit: 4.4% high)
     const chainUsd = (chainA * info.uiPrice + chainB) * (info.quoteUsd ?? 1);
-    const built = await raydium.clmm.increasePositionFromBase({
-      poolInfo: r.poolInfo, ownerPosition: p, ownerInfo: { useSOLBalance: true },
-      base, baseAmount, otherAmountMax, txVersion: TX_VERSION,
-    });
+    const built = vault
+      ? { ixs: vaultIx.increaseIxs({ poolInfo: r.poolInfo, poolKeys: r.poolKeys, position: p, owner: acting.owner, base, baseAmount,
+        otherAmountMax, nft2022: await vaultIx.isNft2022(connection, p.nftMint) }) }
+      : await raydium.clmm.increasePositionFromBase({
+        poolInfo: r.poolInfo, ownerPosition: p, ownerInfo: { useSOLBalance: true },
+        base, baseAmount, otherAmountMax, txVersion: TX_VERSION,
+      });
     const report = {
       positionMint: address, pool, dex: DEX, pair: `${info.symbolA}/${info.symbolB}`,
       lowerPrice: Number(lowerP.toFixed(6)), upperPrice: Number(upperP.toFixed(6)),
@@ -805,17 +888,78 @@ export async function increase(address, uiMaxA, uiMaxB, execute) {
       liquidityAdded: liquidity.toString(), liquidityBefore: p.liquidity.toString(),
       heldUsd: Number(heldUsd.toFixed(2)), quoteUsdEstimate: Number(addUsd.toFixed(4)),
       depositUsd: info.quoteUsd != null ? Number(chainUsd.toFixed(4)) : null,
-      instructions: built.transaction.instructions.length, transactions: 1,
+      instructions: ixCount(built), transactions: 1,
     };
     if (!execute) {
-      const simulation = await simulate(connection, built);
+      const simulation = await simulateFor(connection, acting)(built);
       console.log(JSON.stringify({ ...report, simulation, sent: false }, null, 1));
       console.log('DRY RUN — increase built. Pass --execute to sign and send.');
       return;
     }
-    const sig = await sendBuilt(built);
+    const sig = vault ? await sendActing(connection, acting, built) : await sendBuilt(built);
     console.log(JSON.stringify({ ...report, sent: true, signature: sig, signatures: [sig] }, null, 1));
-  });
+  }, undefined, deps);
+}
+
+// The loop's `rebalance` (SWAP_HOOK.md) on the profile's own pool: a vault's
+// swaps come here, never to Jupiter (lp/signers.route). The same plan, value
+// and impact checks and report fields as venues/meteora_dlmm/signer.mjs;
+// the quote is the SDK's own swap simulation over the pool's tick arrays.
+export async function rebalance(mintA, mintB, targetA, targetB, execute, deps) {
+  const pool = poolArg();
+  const tA = Number(targetA), tB = Number(targetB);
+  if (!(tA >= 0 && tB >= 0)) throw new Refused(`targets must be non-negative dollars, got ${targetA} ${targetB}`);
+  if (mintA === mintB) throw new Refused('mintA and mintB are the same token');
+  const hints = parseHints(process.env.LPBOT_TOKEN_HINTS);
+  return withRpc(async ({ connection, raydium, acting }) => {
+    const r = await loadPool(raydium, pool);
+    const info = await describe(pool, r, connection);
+    assertWritable(info.mints);
+    const [infoA, infoB] = swapSides(info, mintA, mintB, hints);
+    const reserves = { vaultFloor: VAULT_SOL_FLOOR, gasReserve: GAS_RESERVE_SOL };
+    const [balA, balB] = await Promise.all([sellable(connection, acting, infoA, reserves), sellable(connection, acting, infoB, reserves)]);
+    const balances = { owner: acting.owner.toBase58(), custody: acting.mode,
+      A: { mint: infoA.mint, symbol: infoA.symbol, amount: balA.total, sellable: balA.avail, usd: Number(balA.usd.toFixed(4)), usdPrice: infoA.usdPrice },
+      B: { mint: infoB.mint, symbol: infoB.symbol, amount: balB.total, sellable: balB.avail, usd: Number(balB.usd.toFixed(4)), usdPrice: infoB.usdPrice },
+      targetUsdA: tA, targetUsdB: tB };
+    const plan = planRebalance(balA.usd, balB.usd, tA, tB);
+    const s = plan && planSwap(plan, infoA, infoB, balA.avail, balB.avail);
+    if (!plan || !(s.rawIn > 0n)) {
+      const out = noopReport(plan ? 'the amount to sell rounds to zero' : `both sides within ${TARGET_TOLERANCE * 100}% of target or nothing to sell`, balances);
+      console.log(JSON.stringify(out, null, 1));
+      return out;
+    }
+    const q = PoolUtils.computeAmountOut({ poolInfo: r.computePoolInfo, tickarrayBitmapExtension: r.computePoolInfo.exBitmapInfo,
+      tickArrayCache: r.tickData[pool], baseMint: new PublicKey(s.sellInfo.mint), epochInfo: await connection.getEpochInfo(),
+      amountIn: new BN(s.rawIn.toString()), slippage: SLIPPAGE_BPS / 1e4, blockTimestamp: Math.floor(Date.now() / 1000),
+      catchLiquidityInsufficient: true });
+    if (!q.allTrade || BigInt(q.realAmountIn.amount.toString()) !== s.rawIn) throw new Refused('the pool cannot take the whole amount in its loaded tick arrays; refusing');
+    const human = (raw, d) => Number(BigInt(raw.toString())) / 10 ** d;
+    const inUsd = human(s.rawIn, s.sellInfo.decimals) * s.sellInfo.usdPrice;
+    const estUsd = human(q.amountOut.amount, s.buyInfo.decimals) * s.buyInfo.usdPrice;
+    const minUsd = human(q.minAmountOut.amount, s.buyInfo.decimals) * s.buyInfo.usdPrice;
+    if (!valueLossOk(inUsd, estUsd)) throw new Refused(`the pool pays $${estUsd.toFixed(4)} for $${inUsd.toFixed(4)}; more than ${MAX_VALUE_LOSS * 100}% below fair value; refusing`);
+    if (!valueLossOk(inUsd, minUsd, MAX_VALUE_LOSS + SLIPPAGE_BPS / 1e4)) throw new Refused(`the pool pays $${minUsd.toFixed(4)} at worst for $${inUsd.toFixed(4)}; refusing`);
+    const impact = q.priceImpact.numerator.mul(new BN(1e9)).div(q.priceImpact.denominator).toNumber() / 1e9;   // a ratio, not percent
+    checkImpact(impact);
+    const built = { ixs: vaultIx.swapIxs({ poolInfo: r.poolInfo, poolKeys: r.poolKeys, owner: acting.owner, inputMint: s.sellInfo.mint,
+      amountIn: new BN(s.rawIn.toString()), amountOutMin: q.minAmountOut.amount, remainingAccounts: q.remainingAccounts }) };
+    const report = { ...balances, mode: plan.mode, sellSide: plan.sellSide, buySide: plan.buySide,
+      pool, dex: DEX, routePlan: ['Raydium CLMM'],
+      sold: { mint: s.sellInfo.mint, symbol: s.sellInfo.symbol, amount: s.amount, usd: Number(inUsd.toFixed(4)) },
+      bought: { mint: s.buyInfo.mint, symbol: s.buyInfo.symbol, amount: human(q.amountOut.amount, s.buyInfo.decimals), usd: Number(estUsd.toFixed(4)) },
+      minOutAmount: human(q.minAmountOut.amount, s.buyInfo.decimals), priceImpactPct: Number(impact.toFixed(8)),
+      slippageBps: SLIPPAGE_BPS, swapUsdValue: Number(inUsd.toFixed(4)), signature: null, sent: false };
+    if (!execute) {
+      console.log(JSON.stringify({ ...report, simulation: await simulateActing(connection, acting, built) }, null, 1));
+      console.log('DRY RUN — swap built and simulated. Pass --execute to sign and send.');
+      return report;
+    }
+    guard();
+    const out = { ...report, signature: await sendActing(connection, acting, built), sent: true };
+    console.log(JSON.stringify(out, null, 1));
+    return out;
+  }, undefined, deps);
 }
 
 // Up to REBUILD_ATTEMPTS builds on fresh pool state when the chain refuses
@@ -850,6 +994,7 @@ async function main() {
   if (cmd === 'close') return rebuildOnRefusal(() => close(rest[0], execute), execute);
   if (cmd === 'increase') return rebuildOnRefusal(() => increase(rest[0], rest[1], rest[2], execute), execute);
   if (cmd === 'open') return rebuildOnRefusal(() => open(rest[0], rest[1], rest[2], rest[3], rest[4], execute), execute);
+  if (cmd === 'rebalance') return rebalance(rest[0], rest[1], rest[2], rest[3], execute);
   if (cmd === 'pool') {
     // Read-only: no key is loaded.
     const pool = poolArg(rest[0]);
@@ -859,7 +1004,8 @@ async function main() {
   }
   console.log('commands: balance [pool] | positions | status [position] | pool [pool] | '
     + 'open <pool> <lo> <hi> <maxA> <maxB> [--execute] | harvest <position> [--execute] '
-    + '| close <position> [--execute]   (pool via --pool or LPBOT_POOL)');
+    + '| close <position> [--execute] | increase <position> <maxA> <maxB> [--execute] '
+    + '| rebalance <mintA> <mintB> <usdA> <usdB> [--execute]   (pool via --pool or LPBOT_POOL)');
 }
 
 // Braces in an error text would look like JSON to the loop; flatten them.

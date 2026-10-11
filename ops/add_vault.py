@@ -57,8 +57,9 @@ def addresses(xs, what, chain='solana'):
 
 
 def register_rows(args, connected):
-    """(wallet row, vault row, policy row) for `connected`, the JSON that
-    `cli.mjs connect --execute` printed. Pure."""
+    """(wallet row, vault row, [policy row per venue]) for `connected`, the
+    JSON that `cli.mjs connect --execute` printed: a Solana vault names each
+    venue's policies and pools under `venues`, a Safe its one venue. Pure."""
     if not WALLET_ID.match(args.wallet):
         raise Refused(f'wallet id {args.wallet!r}')
     for name, v in (('--secret-env', args.secret_env), ('--policy-key-env', args.policy_key_env)):
@@ -74,8 +75,14 @@ def register_rows(args, connected):
         raise Refused(f'a Safe vault on chain {chain!r}')
     if kind == 'safe' and args.policy_key_env != args.secret_env:
         raise Refused('a Safe vault has one key: --policy-key-env must be --secret-env')
-    if connected.get('venue') not in VENUES[kind]:
-        raise Refused(f'venue {connected.get("venue")!r} has no vault rules')
+    venues = connected.get('venues')
+    if venues is None:
+        venues = {connected.get('venue'): {'policies': connected.get('policies'), 'pools': connected.get('pools')}}
+    if not venues:
+        raise Refused('no venues')
+    for name in venues:
+        if name not in VENUES[kind]:
+            raise Refused(f'venue {name!r} has no vault rules')
     vault = addresses([connected.get('vault')], 'vault', chain)[0]
     settings = addresses([connected.get('settings')], 'settings', chain)[0]
     owners = addresses(connected.get('owners'), 'owners', chain)
@@ -90,11 +97,14 @@ def register_rows(args, connected):
     lookup = addresses([connected['lookup']], 'lookup', chain)[0] if connected.get('lookup') else None
     wallet = (args.wallet, chain, vault, args.secret_env, args.label or args.wallet)
     vault_row = (args.wallet, kind, settings, owners, threshold, args.policy_key_env, lookup)
-    policy = (args.wallet, connected['venue'], addresses(connected.get('policies'), 'policies', chain),
-              addresses(connected.get('pools'), 'pools', chain), addresses(connected.get('payouts'), 'payouts', chain))
-    if not policy[2] or not policy[3]:
-        raise Refused('no policies or no pools')
-    return wallet, vault_row, policy
+    payouts = addresses(connected.get('payouts'), 'payouts', chain)
+    policies = []
+    for name, v in venues.items():
+        row = (args.wallet, name, addresses(v.get('policies'), 'policies', chain), addresses(v.get('pools'), 'pools', chain), payouts)
+        if not row[2] or not row[3]:
+            raise Refused(f'{name}: no policies or no pools')
+        policies.append(row)
+    return wallet, vault_row, policies
 
 
 def payout_accounts(wallets, mints):
@@ -106,10 +116,11 @@ def payout_accounts(wallets, mints):
 
 def register(args):
     connected = json.loads(pathlib.Path(args.json).read_text())
-    wallet, vault_row, policy = register_rows(args, connected)
+    wallet, vault_row, policies = register_rows(args, connected)
     print('wallet:', wallet)
     print('vault:', vault_row)
-    print('policy:', policy)
+    for policy in policies:
+        print('policy:', policy)
     if not args.apply:
         print('DRY RUN: pass --apply to write.')
         return
@@ -117,7 +128,8 @@ def register(args):
         cur.execute('insert into wallets (id, chain, address, secret_env, label) values (%s, %s, %s, %s, %s)', wallet)
         cur.execute('insert into vaults (wallet_id, kind, settings, owners, threshold, policy_key_env, lookup) '
                     'values (%s, %s, %s, %s, %s, %s, %s)', vault_row)
-        cur.execute('insert into vault_policies (wallet_id, venue, policies, pools, payouts) values (%s, %s, %s, %s, %s)', policy)
+        for policy in policies:
+            cur.execute('insert into vault_policies (wallet_id, venue, policies, pools, payouts) values (%s, %s, %s, %s, %s)', policy)
     print(f'written. Set {args.secret_env} and {args.policy_key_env} in the service environment, then add the profile.')
 
 
