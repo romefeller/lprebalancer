@@ -374,8 +374,10 @@ def balance_wallet(state, bal, rec, share_a=None):
     # The swap script keeps the gas reserve out of what it sells, but not the
     # open's rent headroom: the native side's target carries it, or an open
     # after a buy of SOL comes up short by the headroom and leaves the other
-    # token idle.
-    head = res - config.GAS_RESERVE_SOL
+    # token idle. A vault pays no gas and no open rent (its payer key does):
+    # it has no headroom, and its floor under the gas reserve is no negative
+    # one (2026-10-11: test0's 0.035 SOL asked a swap to "-3.33").
+    head = 0.0 if config.VAULT else max(res - config.GAS_RESERVE_SOL, 0.0)
     head_usd = head * capital.ui_price(bal) * q if bal.get('nativeSide') == 'A' else \
         (head * q if bal.get('nativeSide') == 'B' else 0.0)
     target_a = f"{C * frac_a + (head_usd if bal.get('nativeSide') == 'A' else 0.0):.2f}"
