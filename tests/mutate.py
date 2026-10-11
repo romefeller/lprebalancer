@@ -117,7 +117,7 @@ TARGETS = {
                     NODE_TESTS('test_vault_policy.mjs', 'test_vault_fork.mjs')),
     'vault_admin': ('chains/solana/vault/admin.mjs', ['connectPlan', 'connectDone', 'connectProblems', 'staticAccounts', 'lookupPlan'],
                     NODE_TESTS('test_vault_policy.mjs', 'test_vault_cli_fork.mjs')),
-    'vault_account': ('chains/solana/vault/account.mjs', ['vaultConfig', 'actingAccount', 'needed', 'verifyPolicy', 'wrap'],
+    'vault_account': ('chains/solana/vault/account.mjs', ['vaultConfig', 'actingAccount', 'needed', 'verifyPolicy', 'wrap', 'withVaultBudget'],
                       NODE_TESTS('test_vault_policy.mjs', 'test_vault_dlmm_fork.mjs')),
     'vault_cli': ('chains/solana/vault/cli.mjs', ['payoutAccounts', 'request'], NODE_TESTS('test_vault_cli_fork.mjs', 'test_owner_page_fork.mjs')),
     'vault_payout': ('chains/solana/payout.mjs', ['sendFromVault'], NODE_TESTS('test_vault_dlmm_fork.mjs')),

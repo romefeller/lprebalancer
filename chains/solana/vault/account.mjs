@@ -29,7 +29,7 @@ import { compile, plan } from './policy.mjs';
 import SOLANA from '../solana.json' with { type: 'json' };
 
 const require = createRequire(import.meta.url);
-const { Keypair, PublicKey, Transaction, TransactionInstruction, TransactionMessage, VersionedTransaction } = require('@solana/web3.js');
+const { ComputeBudgetProgram, Keypair, PublicKey, Transaction, TransactionInstruction, TransactionMessage, VersionedTransaction } = require('@solana/web3.js');
 
 const list = (v) => (v ?? '').split(',').map(s => s.trim()).filter(Boolean);
 
@@ -145,6 +145,28 @@ export function vaultFundsItsAccounts(ixs, vault, payer) {
 // one call to its policy, everything else as built. Pure.
 export function wrap(ixs, cfg, compiled) {
   ixs = vaultFundsItsAccounts(ixs, cfg.vault, cfg.payer);
-  return plan(ixs, cfg.vault, compiled).flatMap(step => step.policy === null ? step.ixs
-    : [sq.policyExecuteIx({ policy: cfg.policies[step.policy], signer: cfg.policyKey, vault: cfg.vault, ixs: step.ixs, indices: step.indices })]);
+  const steps = plan(ixs, cfg.vault, compiled);
+  const calls = steps.filter(step => step.policy !== null).length;
+  return withVaultBudget(steps.flatMap(step => step.policy === null ? step.ixs
+    : [sq.policyExecuteIx({ policy: cfg.policies[step.policy], signer: cfg.policyKey, vault: cfg.vault, ixs: step.ixs, indices: step.indices })]), calls);
+}
+
+// What one policy call costs on top of the instructions it carries (account
+// checks, the CPI). An SDK sizes its compute limit by simulating its bare
+// instructions; wrapped, they need this much more (2026-10-11: a DLMM swap
+// sized at ~100k ran out inside the vault at 117,644).
+export const VAULT_CALL_UNITS = 150_000;
+const MAX_UNITS = 1_400_000;
+const SET_LIMIT = 2;                                  // ComputeBudget SetComputeUnitLimit
+
+// `ixs` with every compute-unit limit raised by VAULT_CALL_UNITS per policy
+// call, at most the transaction maximum. No limit set: the runtime default
+// already scales with the instruction count. Pure.
+export function withVaultBudget(ixs, calls) {
+  if (!calls) return ixs;
+  return ixs.map(ix => {
+    if (!ix.programId.equals(ComputeBudgetProgram.programId) || ix.data[0] !== SET_LIMIT) return ix;
+    const units = Math.min(Buffer.from(ix.data).readUInt32LE(1) + calls * VAULT_CALL_UNITS, MAX_UNITS);
+    return ComputeBudgetProgram.setComputeUnitLimit({ units });
+  });
 }
