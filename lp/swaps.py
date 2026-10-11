@@ -142,6 +142,10 @@ def add_idle(state, status, wbal, idle, price):
     and three of them must not move the position (audit 2026-10-03). A
     failure moves nothing and is retried at the next allowed deploy. True
     when liquidity was added."""
+    if config.VAULT:
+        # A vault's role allows no add: the position manager adds to any
+        # position id, a stranger's too. Its idle cash waits for the re-centre.
+        return False
     mint, lo, hi = status['positionMint'], status['lowerPrice'], status['upperPrice']
     try:
         share_a = calm.band_share_a(wbal['price'], lo, hi)

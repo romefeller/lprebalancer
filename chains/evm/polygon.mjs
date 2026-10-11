@@ -23,6 +23,20 @@ export const V3 = Object.freeze({
   quoter: A('0x61fFE014bA17989E743c5F6cB21bF9697530B21e'),     // QuoterV2
 });
 
+// The vault contracts (chains/evm/vault/): Safe 1.4.1 holds the money, a Zodiac Roles v2
+// module lets the bot's key make only the calls its role allows. Checked on chain on
+// 2026-10-10: SafeL2 and the factory answer VERSION() "1.4.1"; the handler and MultiSend
+// have the code hash of the canonical Ethereum deployments; the Roles mastercopy is
+// initialised to owner 0x..01 (locked), its source verified on Sourcify.
+export const VAULT = Object.freeze({
+  safeSingleton: A('0x29fcB43b46531BcA003ddC8FCB67FFE91900C762'),      // SafeL2 1.4.1
+  safeFactory: A('0x4e1DCf7AD4e460CfD30791CCC4F9c8a4f820ec67'),        // SafeProxyFactory 1.4.1
+  fallbackHandler: A('0xfd0732Dc9E303f09fCEf3a7388Ad10A83459Ec99'),    // CompatibilityFallbackHandler 1.4.1
+  multiSendCallOnly: A('0x9641d764fc13c8B624c04430C7356C1C7C8102e2'),  // MultiSendCallOnly 1.4.1
+  rolesMastercopy: A('0x9646fDAD06d3e24444381f44362a3B0eB343D337'),    // Zodiac Roles v2
+  moduleFactory: A('0x000000000000aDdB49795b0f9bA5BC298cDda236'),      // Zodiac ModuleProxyFactory
+});
+
 // No v4 route on Polygon: an empty registry, so every swap takes the v3 quote.
 export const V4 = null;
 export const V4_POOLS = Object.freeze([]);

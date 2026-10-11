@@ -165,6 +165,8 @@ MIGRATE_MIN_GAIN = _env('LPBOT_MIGRATE_MIN_GAIN', float, float(_CFG.get('migrate
 # DEXes the bot may actually open positions on: the ones with a signer.
 EXECUTE_DEXES = tuple(_env('LPBOT_EXECUTE_DEXES', _list, list(_CFG.get('execute_dexes') or ['orca'])))
 # A vault acts only where its owners approved a policy.
+if VAULT and (VAULT['kind'] == 'safe') != (CHAIN != 'solana'):
+    raise SystemExit(f'profile {PROFILE}: a {VAULT["kind"]} vault cannot serve chain {CHAIN}')
 if VAULT and not set(EXECUTE_DEXES) <= set(VAULT['venues']):
     raise SystemExit(f'profile {PROFILE}: execute_dexes {sorted(EXECUTE_DEXES)} include venues the vault has no '
                      f'approved policy for (approved: {sorted(VAULT["venues"])})')
@@ -349,15 +351,20 @@ WALLET = _env('LPBOT_WALLET', str, os.environ.get(WALLET_SECRET_ENV, ''))
 
 
 def vault_env(dex):
-    """What a Solana signer needs to act for this profile's vault on `dex`
-    (chains/solana/vault/account.mjs), or {} without a vault. Raises
-    ValueError for a venue the owners approved no policy for: nothing may be
-    signed there. Pure over VAULT and the environment."""
+    """What a signer needs to act for this profile's vault on `dex`
+    (chains/solana/vault/account.mjs, chains/evm/vault/account.mjs), or {}
+    without a vault. Raises ValueError for a venue the owners approved no
+    policy for: nothing may be signed there. Pure over VAULT and the
+    environment."""
     if not VAULT:
         return {}
     v = VAULT['venues'].get(dex)
     if not v:
         raise ValueError(f'the vault has no approved policy for {dex} (approved: {sorted(VAULT["venues"]) or "none"})')
+    if VAULT['kind'] == 'safe':
+        # One key on an EVM chain: the wallet's own sends through the Roles module.
+        return {'LPBOT_VAULT_SAFE': VAULT['settings'], 'LPBOT_VAULT_ROLES': v['policies'][0], 'LPBOT_VAULT_VENUE': dex,
+                'LPBOT_VAULT_POOLS': ','.join(v['pools']), 'LPBOT_VAULT_PAYOUTS': ','.join(v['payouts'])}
     key_path = os.environ.get(VAULT['policy_key_env'], '')
     if not key_path:
         raise ValueError(f'{VAULT["policy_key_env"]} (the path of the vault\'s policy key) is not set')

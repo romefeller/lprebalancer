@@ -15,6 +15,7 @@ import fees  # noqa: E402
 import lp.capital  # noqa: E402
 import lp.harvest  # noqa: E402
 import lp.signers  # noqa: E402
+import lp.swaps  # noqa: E402
 
 SOL = fees.NATIVE_MINT
 USDC = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'
@@ -108,6 +109,32 @@ class SignerEnvironment(unittest.TestCase):
         with mock.patch.object(config, 'VAULT', vault(lookup=DLMM_POOL)), \
                 mock.patch.dict(os.environ, {'LPBOT_VAULT_TEST_POLICY_KEY': '/keys/policy.json'}):
             self.assertEqual(config.vault_env('meteora-dlmm')['LPBOT_VAULT_LOOKUP'], DLMM_POOL)
+
+    def test_a_safe_vault_gets_its_safe_role_pools_and_payouts(self):
+        safe = vault(kind='safe', settings='0x5FbDB2315678afecb367f032d93F642f64180aa3', policy_key_env='LPBOT_V_PAYER',
+                     venues={'uniswap-v3-polygon': {'policies': ['0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512'],
+                                                    'pools': ['0x9B08288C3Be4F62bbf8d1C20Ac9C5e6f9467d8B7'],
+                                                    'payouts': ['0x2b35000000000000000000000000000000000142']}})
+        with mock.patch.object(config, 'VAULT', safe):
+            env = config.vault_env('uniswap-v3-polygon')
+            with self.assertRaisesRegex(ValueError, 'no approved policy for orca'):
+                config.vault_env('orca')
+        self.assertEqual(env, {'LPBOT_VAULT_SAFE': '0x5FbDB2315678afecb367f032d93F642f64180aa3',
+                               'LPBOT_VAULT_ROLES': '0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512',
+                               'LPBOT_VAULT_VENUE': 'uniswap-v3-polygon',
+                               'LPBOT_VAULT_POOLS': '0x9B08288C3Be4F62bbf8d1C20Ac9C5e6f9467d8B7',
+                               'LPBOT_VAULT_PAYOUTS': '0x2b35000000000000000000000000000000000142'})
+
+    def test_a_vault_never_adds_idle_cash_to_its_position(self):
+        status = {'positionMint': '1', 'lowerPrice': 0.1, 'upperPrice': 0.2}
+        with mock.patch.object(config, 'VAULT', vault()), \
+                mock.patch.object(lp.swaps.calm, 'band_share_a', side_effect=AssertionError('nothing is planned')) as plan:
+            self.assertIs(lp.swaps.add_idle({}, status, {'price': 0.15}, 10.0, 0.15), False)
+        plan.assert_not_called()
+        with mock.patch.object(config, 'VAULT', None), \
+                mock.patch.object(lp.swaps.calm, 'band_share_a', side_effect=ValueError('out of the band')) as plan:
+            self.assertFalse(lp.swaps.add_idle({}, status, {'price': 0.15}, 10.0, 0.15))
+        plan.assert_called_once()
 
     def test_an_unapproved_venue_or_a_missing_key_is_refused(self):
         with mock.patch.object(config, 'VAULT', vault()), \

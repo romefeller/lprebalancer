@@ -23,6 +23,13 @@
 // send nothing is retried: a failure part-way is printed with `sent: true, partial: true`
 // and every hash.
 //
+// A vault (LPBOT_VAULT_SAFE, chains/evm/vault/): the Safe holds the tokens and the position
+// NFTs and is every call's subject and recipient; the key sends each step through the
+// Zodiac Roles module and pays the gas. The Safe must have the module enabled (an owner's
+// revoke stops every command), the pool must be one the owners approved, a close is three
+// calls (no multicall in the role), there is no increase, no wrap, and a payout goes only
+// to an approved profit or fee wallet.
+//
 // The key is read from WALLET_SECRET_PATH inside this process (chains/evm/keyfile.mjs) and never
 // printed. Commands:
 //   node venues/uniswap_v3/signer.mjs balance [pool]          | balance <token>   (chains/solana/payout.mjs shape)
@@ -39,7 +46,7 @@
 import path from 'node:path';
 import { assertNotHalted } from '../../shared/halt_guard.mjs';
 import { BOT_ROOT } from '../../bot_root.mjs';
-import { createPublicClient, http, getAddress, isAddress, encodeFunctionData, encodeAbiParameters, decodeEventLog, keccak256 } from 'viem';
+import { createPublicClient, http, getAddress, isAddress, encodeFunctionData, encodeAbiParameters, decodeEventLog, decodeFunctionData, keccak256 } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 import { isEntry } from '../../shared/rpc_policy.mjs';
 import { planRebalance, TARGET_TOLERANCE } from '../../shared/rebalance_plan.mjs';
@@ -47,6 +54,7 @@ import { readKey } from '../../chains/evm/keyfile.mjs';
 import { overBase, evmErrorKind } from '../../chains/evm/rpc.mjs';
 import { chainModule } from '../../chains/evm/chains.mjs';
 import * as M from '../../chains/evm/clmath.mjs';
+import { acting, vaultConfig, verifyVault } from '../../chains/evm/vault/account.mjs';
 
 // The chain module: Unichain unless LPBOT_CHAIN names another (chains/evm/chains.mjs).
 let U = chainModule(process.env.LPBOT_CHAIN);
@@ -105,7 +113,18 @@ export async function connect(url) {
   const chainId = await pub.getChainId();
   if (chainId !== U.CHAIN_ID) throw new Error(`RPC ${new URL(url).host} serves chain ${chainId}, not ${U.NAME} (${U.CHAIN_ID}); refusing`);
   const account = privateKeyToAccount(readKey(process.env.WALLET_SECRET_PATH));
-  return { pub, account, me: account.address, url };
+  // A vault (LPBOT_VAULT_SAFE): the Safe is `me`, the key only sends and pays the gas.
+  const vault = vaultConfig(process.env);
+  if (vault) {
+    if (!U.VAULT) throw new Error(`refused: ${U.NAME} has no vault contracts in its chain module`);
+    await verifyVault(pub, vault);
+  }
+  return { pub, account, url, ...acting(account.address, vault) };
+}
+
+// A vault acts only on the pools its owners approved.
+function approvedPool(ctx, pool) {
+  if (ctx.vault && !ctx.vault.pools.some(p => same(p, pool))) throw new Error(`refused: pool ${pool} is not one the vault's owners approved`);
 }
 
 export async function withRpc(fn, deps = {}) {
@@ -195,9 +214,10 @@ export function marketRefusals(info, cfg) {
 }
 
 // --- wallet reads ---------------------------------------------------------------------
-async function holdings(pub, me, info) {
+// `gasFrom`: the key that pays the gas (a vault's money is not its gas).
+async function holdings(pub, me, info, gasFrom = me) {
   const [eth, [b0, b1]] = await Promise.all([
-    pub.getBalance({ address: me }),
+    pub.getBalance({ address: gasFrom }),
     pub.multicall({ allowFailure: false, contracts: [info.mintA, info.mintB].map(t => ({ address: t, abi: U.ERC20_ABI, functionName: 'balanceOf', args: [me] })) }),
   ]);
   return { eth, rawA: b0, rawB: b1 };
@@ -214,9 +234,10 @@ export function spendable(h, info, sleeve) {
 async function balance(poolExplicit) {
   const pool = poolArg(poolExplicit);
   const cfg = settings();
-  return withRpc(async ({ pub, me }) => {
+  return withRpc(async (ctx) => {
+    const { pub, me } = ctx;
     const info = await describe(pub, pool);
-    const h = await holdings(pub, me, info);
+    const h = await holdings(pub, me, info, ctx.from);
     const ua = M.toHuman(h.rawA, info.decimalsA), ub = M.toHuman(h.rawB, info.decimalsB);
     const ethHuman = M.toHuman(h.eth, 18);
     const out = {
@@ -226,6 +247,8 @@ async function balance(poolExplicit) {
       quoteUsd: info.quoteUsd, nativeSide: null, balanceA: ua, balanceB: ub,
       gasReserveNative: M.toHuman(cfg.gasReserve, 18),
     };
+    // A vault: the Safe holds the tokens, the bot's key holds the gas (lp/capital.gas_for_open).
+    if (ctx.vault) Object.assign(out, { custody: 'vault', gasSol: out.eth, sol: 0, eth: 0 });
     // ETH is gas, outside the pool: not part of walletUsd (the loop counts the native token separately)
     out.walletUsd = info.quoteUsd == null ? null : Number(((ua * info.price + ub) * info.quoteUsd).toFixed(4));
     console.log(JSON.stringify(out, null, 1));
@@ -436,11 +459,18 @@ export async function atBlock(pub, minBlock, fn, deps = {}) {
   throw new Error(`refused: no endpoint node reached block ${minBlock}: ${String(last?.shortMessage ?? last?.message ?? last).split('\n')[0]}`);
 }
 
+// The steps as sent: through the vault's role when there is one, from the key that signs.
+function simulate(ctx, steps) {
+  return simulateSequence(ctx.pub, ctx.from, steps.map(ctx.wrap));
+}
+
 // Simulate, estimate, sign one step. Nothing leaves the process.
-async function signStep(ctx, step, cfg) {
+export async function signStep(ctx, step, cfg) {
   guard();
-  const { pub, account, me } = ctx;
-  const req = { account: me, to: step.to, data: step.data, value: step.value ?? 0n };
+  const { pub, account } = ctx;
+  const me = ctx.from ?? ctx.me;              // a context built before vaults has `me` only
+  const call = ctx.wrap ? ctx.wrap(step) : step;
+  const req = { account: me, to: call.to, data: call.data, value: call.value ?? 0n };
   const gas = await atBlock(pub, ctx.minBlock, async (bn) => {
     const at = bn == null ? {} : { blockNumber: bn };
     await pub.call({ ...req, ...at });
@@ -451,7 +481,7 @@ async function signStep(ctx, step, cfg) {
   const eth = await pub.getBalance({ address: me });
   if (eth < req.value + gas * fees.maxFeePerGas) throw new Error(`refused: ${M.toHuman(eth, 18)} ${U.NATIVE_SYMBOL} cannot pay ${step.label}`);
   const serialized = await account.signTransaction({
-    chainId: U.CHAIN_ID, type: 'eip1559', nonce: ctx.nonce, to: step.to, data: step.data, value: req.value,
+    chainId: U.CHAIN_ID, type: 'eip1559', nonce: ctx.nonce, to: req.to, data: req.data, value: req.value,
     gas, maxFeePerGas: fees.maxFeePerGas, maxPriorityFeePerGas: fees.maxPriorityFeePerGas,
   });
   return { serialized, hash: keccak256(serialized) };
@@ -554,8 +584,9 @@ async function open(poolIn, lower, upper, maxA, maxB, execute) {
   const sleeve = M.parseSleeve(cfg.sleeve);
   return withRpc(async (ctx) => {
     const { pub, me } = ctx;
+    approvedPool(ctx, pool);
     const info = await describe(pub, pool);
-    const h = await holdings(pub, me, info);
+    const h = await holdings(pub, me, info, ctx.from);
     const plan = planOpen(info, h, cfg, sleeve, lower, upper, maxA, maxB);
     const dl = await deadline(pub);
     const steps = [
@@ -582,13 +613,13 @@ async function open(poolIn, lower, upper, maxA, maxB, execute) {
       slippageBps: cfg.slippageBps, referenceUsd: info.referenceUsd, referenceDeviation: info.referenceDeviation,
       positionMint: null, transactions: steps.length, plannedSteps: steps.map(s => s.label),
     };
-    const simulation = await simulateSequence(pub, me, steps);
+    const simulation = await simulate(ctx, steps);
     if (!execute || plan.refusals.length) {
       return reportUnsent(report, plan.refusals, simulation, 'DRY RUN — open built and simulated. Pass --execute to sign and send.');
     }
     const bad = blockingFailure(simulation);
     if (bad) throw new Error(`refused: simulation of ${bad.label} reverts: ${bad.revert}`);
-    ctx.nonce = await nonceFor(pub, me);
+    ctx.nonce = await nonceFor(pub, ctx.from);
     const r = await runSteps(ctx, steps, cfg);
     const minted = r.sent.find(s => s.label === 'mint' && s.receipt);
     const extra = {};
@@ -644,6 +675,9 @@ export function planIncrease(info, x, h, cfg, sleeve, maxA, maxB) {
 
 async function increase(tokenArg, maxA, maxB, execute) {
   guard();
+  // The position manager adds to ANY position id: a role that allowed it would let the key
+  // fund a stranger's position with the Safe's tokens. A vault re-centres instead.
+  if (vaultConfig(process.env)) throw new Error('refused: a vault does not add to a position (increaseLiquidity takes any position id)');
   const [a, b] = [Number(maxA), Number(maxB)];
   if (![a, b].every(v => Number.isFinite(v) && v >= 0) || !(a > 0 || b > 0)) {
     throw new Error('increase needs <tokenId> <maxA> <maxB>, both >= 0 and one > 0');
@@ -655,7 +689,7 @@ async function increase(tokenArg, maxA, maxB, execute) {
     const { pub, me } = ctx;
     const info = await describe(pub, pool);
     const x = await ownedPosition(pub, me, info, tokenArg);
-    const h = await holdings(pub, me, info);
+    const h = await holdings(pub, me, info, ctx.from);
     const plan = planIncrease(info, x, h, cfg, sleeve, maxA, maxB);
     const dl = await deadline(pub);
     const steps = [
@@ -677,13 +711,13 @@ async function increase(tokenArg, maxA, maxB, execute) {
       depositUsd: Number.isFinite(plan.addUsd) ? Number(plan.addUsd.toFixed(4)) : null,
       transactions: steps.length, plannedSteps: steps.map(st => st.label),
     };
-    const simulation = await simulateSequence(pub, me, steps);
+    const simulation = await simulate(ctx, steps);
     if (!execute || plan.refusals.length) {
       return reportUnsent(report, plan.refusals, simulation, 'DRY RUN — increase built and simulated. Pass --execute to sign and send.');
     }
     const bad = blockingFailure(simulation);
     if (bad) throw new Error(`refused: simulation of ${bad.label} reverts: ${bad.revert}`);
-    ctx.nonce = await nonceFor(pub, me);
+    ctx.nonce = await nonceFor(pub, ctx.from);
     const r = await runSteps(ctx, steps, cfg);
     // what went in, from the receipt's IncreaseLiquidity event: the program's amounts, not the plan's
     const extra = {};
@@ -726,18 +760,19 @@ async function harvest(tokenArg, execute) {
   return withRpc(async (ctx) => {
     const { pub, me } = ctx;
     const info = await describe(pub, pool);
+    approvedPool(ctx, pool);
     const x = await ownedPosition(pub, me, info, tokenArg);
     const [f0, f1] = await feesOwed(pub, me, info, x.tokenId);
     const steps = [{ label: 'collect', to: info.npm, data: collectData(x.tokenId, me) }];
     const report = { mint: x.tokenId.toString(), pool, dex: U.DEX,
       feesA: M.toHuman(f0, info.decimalsA), feesB: M.toHuman(f1, info.decimalsB), transactions: 1 };
-    if (!execute) return reportUnsent(report, [], await simulateSequence(pub, me, steps), 'DRY RUN — pass --execute to collect fees.');
+    if (!execute) return reportUnsent(report, [], await simulate(ctx, steps), 'DRY RUN — pass --execute to collect fees.');
     if (f0 === 0n && f1 === 0n) {
       const out = { harvested: x.tokenId.toString(), signature: null, note: 'nothing to claim' };
       console.log(JSON.stringify(out, null, 1));
       return out;
     }
-    ctx.nonce = await nonceFor(pub, me);
+    ctx.nonce = await nonceFor(pub, ctx.from);
     const r = await runSteps(ctx, steps, cfg);
     return reportSent({ harvested: x.tokenId.toString(), pool, dex: U.DEX }, r, collected(r.sent[0]?.receipt, info));
   });
@@ -760,6 +795,16 @@ export function closeCalls(x, info, me, cfg, dl) {
   return { calls, estA: e0, estB: e1 };
 }
 
+// The close as transactions: one NPM multicall, or for a vault (whose role allows no
+// multicall: its inner calls would go unchecked) each call alone. A vault's close stopped
+// part-way is safe: what the position owes is collected to the Safe only, and the next close
+// skips a decrease of zero liquidity. Pure.
+export function closeSteps(calls, npm, vault) {
+  if (!vault) return [{ label: 'decrease+collect+burn', to: npm, data: encodeFunctionData({ abi: U.NPM_ABI, functionName: 'multicall', args: [calls] }) }];
+  const label = (data) => decodeFunctionData({ abi: U.NPM_ABI, data }).functionName;
+  return calls.map(data => ({ label: label(data), to: npm, data }));
+}
+
 async function close(tokenArg, execute) {
   guard();
   const pool = poolArg();
@@ -767,17 +812,19 @@ async function close(tokenArg, execute) {
   return withRpc(async (ctx) => {
     const { pub, me } = ctx;
     const info = await describe(pub, pool);
+    approvedPool(ctx, pool);
     const x = await ownedPosition(pub, me, info, tokenArg);
     const [f0, f1] = await feesOwed(pub, me, info, x.tokenId);
     const { calls, estA, estB } = closeCalls(x, info, me, cfg, await deadline(pub));
-    const steps = [{ label: 'decrease+collect+burn', to: info.npm, data: encodeFunctionData({ abi: U.NPM_ABI, functionName: 'multicall', args: [calls] }) }];
-    const report = { mint: x.tokenId.toString(), pool, dex: U.DEX, transactions: 1, instructions: calls.length,
+    const steps = closeSteps(calls, info.npm, Boolean(ctx.vault));
+    const report = { mint: x.tokenId.toString(), pool, dex: U.DEX, transactions: steps.length, instructions: calls.length,
       quote: { tokenEstA: estA.toString(), tokenEstB: estB.toString() },
       feesQuote: { feeOwedA: f0.toString(), feeOwedB: f1.toString() }, slippageBps: cfg.slippageBps };
-    if (!execute) return reportUnsent(report, [], await simulateSequence(pub, me, steps), 'DRY RUN — close built and simulated. Pass --execute to send.');
-    ctx.nonce = await nonceFor(pub, me);
+    if (!execute) return reportUnsent(report, [], await simulate(ctx, steps), 'DRY RUN — close built and simulated. Pass --execute to send.');
+    ctx.nonce = await nonceFor(pub, ctx.from);
     const r = await runSteps(ctx, steps, cfg);
-    return reportSent({ closed: x.tokenId.toString(), pool, dex: U.DEX }, r, collected(r.sent[0]?.receipt, info));
+    // a vault's close is several transactions: the Collect event is in one of them
+    return reportSent({ closed: x.tokenId.toString(), pool, dex: U.DEX }, r, collected({ logs: r.sent.flatMap(st => st.receipt?.logs ?? []) }, info));
   });
 }
 
@@ -871,12 +918,13 @@ async function rebalance(mintA, mintB, targetA, targetB, execute) {
   if (!(tA >= 0 && tB >= 0)) throw new Error(`targets must be non-negative dollars, got ${targetA} ${targetB}`);
   return withRpc(async (ctx) => {
     const { pub, me } = ctx;
+    approvedPool(ctx, pool);
     const info = await describe(pub, pool);
     if (!isAddress(String(mintA), { strict: false }) || !isAddress(String(mintB), { strict: false })
         || !same(mintA, info.mintA) || !same(mintB, info.mintB)) {
       throw new Error(`refused: rebalance mints must be the pool's ${info.mintA} ${info.mintB}`);
     }
-    const h = await holdings(pub, me, info);
+    const h = await holdings(pub, me, info, ctx.from);
     const can = spendable(h, info, sleeve);
     const usdPriceA = info.price * info.quoteUsd, usdPriceB = info.quoteUsd;
     const humA = M.toHuman(can.a, info.decimalsA), humB = M.toHuman(can.b, info.decimalsB);
@@ -934,13 +982,13 @@ async function rebalance(mintA, mintB, targetA, targetB, execute) {
       transaction: { steps: steps.map(s => s.label) },
     };
     const swapRefusals = (sellA ? h.rawA : h.rawB) >= rawIn ? [] : [`wallet lacks ${amountIn} ${symIn} to sell`];
-    const simulation = await simulateSequence(pub, me, steps);
+    const simulation = await simulate(ctx, steps);
     if (!execute || swapRefusals.length) {
       return reportUnsent(report, swapRefusals, simulation, 'DRY RUN — quote taken and swap built and simulated. Pass --execute to sign and send.');
     }
     const bad = blockingFailure(simulation);
     if (bad) throw new Error(`refused: simulation of ${bad.label} reverts: ${bad.revert}`);
-    ctx.nonce = await nonceFor(pub, me);
+    ctx.nonce = await nonceFor(pub, ctx.from);
     const r = await runSteps(ctx, steps, cfg);
     const swapped = r.sent.find(s => s.label === 'swap' && s.receipt);
     if (swapped) {
@@ -984,17 +1032,29 @@ async function rawOf(pub, me, t) {
     : pub.readContract({ address: t.mint, abi: U.ERC20_ABI, functionName: 'balanceOf', args: [me] });
 }
 
+// A vault pays out to the profit wallet or the fee wallet only, and only when its owners
+// approved that wallet (the role allows a transfer to the approved wallets alone). Pure.
+export function checkVaultRecipient(to, vault, env = process.env) {
+  if (!isAddress(String(to), { strict: false })) throw new Error(`refused: destination ${to} is not an address`);
+  const wallets = [env.LPBOT_PROFIT_WALLET, env.LPBOT_FEE_WALLET].filter(Boolean);
+  if (!wallets.some(w => same(w, to))) throw new Error('refused: destination is neither the profit wallet nor the fee wallet; refusing to send');
+  if (!vault.payouts.some(w => same(w, to))) throw new Error(`refused: ${to} is not a payout wallet the vault's owners approved`);
+  return getAddress(to);
+}
+
 async function send(token, amountArg, toArg, execute) {
   guard();
   const cfg = settings();
   const sleeve = M.parseSleeve(cfg.sleeve);
   // The destination is checked before any key or network: a bad argument goes nowhere.
-  const to = checkRecipient(toArg, cfg);
+  const vault = vaultConfig(process.env);
+  if (vault && isNative(token)) throw new Error(`refused: a vault pays out tokens only; ${U.NATIVE_SYMBOL} leaves it only to its owners`);
+  const to = vault ? checkVaultRecipient(toArg, vault) : checkRecipient(toArg, cfg);
   const amount = Number(amountArg);
   if (!Number.isFinite(amount) || amount <= 0) throw new Error(`amount must be a positive number, got ${amountArg}`);
   return withRpc(async (ctx) => {
     const { pub, me } = ctx;
-    checkRecipient(to, cfg, me);
+    if (!vault) checkRecipient(to, cfg, me);
     const t = await tokenFacts(pub, token);
     const have = await rawOf(pub, me, t);
     // an ERC-20 amount rounded up at the 9th decimal is the holding (capToHeld); native coin
@@ -1013,13 +1073,13 @@ async function send(token, amountArg, toArg, execute) {
       : { label: `send ${t.symbol}`, to: t.mint, data: erc20(t.mint, 'transfer', [to, raw]) };
     const report = { mint: t.mint, symbol: t.symbol, amount: M.toHuman(raw, t.decimals), raw: raw.toString(), decimals: t.decimals, from: me, to };
     if (!execute) {
-      const [sim] = await simulateSequence(pub, me, [step]);
+      const [sim] = await simulate(ctx, [step]);
       const out = { ...report, simulation: { ok: sim.ok, err: sim.revert }, signature: null, sent: false };
       console.log(JSON.stringify(out, null, 1));
       console.log('DRY RUN — transfer built and simulated. Pass --execute to sign and send.');
       return out;
     }
-    ctx.nonce = await nonceFor(pub, me);
+    ctx.nonce = await nonceFor(pub, ctx.from);
     const r = await runSteps(ctx, [step], cfg);
     const out = { ...report, signature: r.sent[0]?.hash ?? null, sent: true };
     if (r.error) { out.partial = true; out.error = r.error; process.exitCode = 1; }
@@ -1047,6 +1107,7 @@ export function planWrap(native, amountArg, cfg) {
 
 async function wrap(amountArg, execute) {
   guard();
+  if (vaultConfig(process.env)) throw new Error(`refused: a vault holds no ${U.NATIVE_SYMBOL} to wrap; its key holds only gas`);
   const cfg = settings();
   if (!U.WRAPPED_NATIVE) throw new Error(`${U.NAME} has no wrapped native token`);
   return withRpc(async (ctx) => {
@@ -1057,13 +1118,13 @@ async function wrap(amountArg, execute) {
       data: encodeFunctionData({ abi: U.WRAPPED_ABI, functionName: 'deposit' }), value: plan.raw };
     const report = { wrapped: M.toHuman(plan.raw, 18), symbol: U.NATIVE_SYMBOL, to: U.WRAPPED_NATIVE, chain: U.CHAIN,
       nativeBefore: M.toHuman(native, 18), nativeAfter: M.toHuman(native - plan.raw, 18), transactions: 1 };
-    const simulation = await simulateSequence(pub, me, [step]);
+    const simulation = await simulate(ctx, [step]);
     if (!execute || plan.refusals.length) {
       return reportUnsent(report, plan.refusals, simulation, 'DRY RUN — wrap built and simulated. Pass --execute to sign and send.');
     }
     const bad = blockingFailure(simulation);
     if (bad) throw new Error(`refused: simulation of ${bad.label} reverts: ${bad.revert}`);
-    ctx.nonce = await nonceFor(pub, me);
+    ctx.nonce = await nonceFor(pub, ctx.from);
     return reportSent(report, await runSteps(ctx, [step], cfg));
   });
 }
