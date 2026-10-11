@@ -129,7 +129,8 @@ export async function connectVault(connection, keys, c, f, log) {
   if (!venue) throw new Error(`no venue of ${c.venues.join(', ')} has vault support yet`);
   const wallets = [f.profitWallet, ...(f.feeWallet ? [f.feeWallet] : [])];
   const out = await connect({ owners: f.owner, venue, pools: c.pools[venue], payout: wallets.join(','),
-    'payout-mint': c.payoutMint, execute: true }, { connection, payer: keys.payer, policyKey: keys.policyKey, log });
+    'payout-mint': c.payoutMint, execute: true, seed: f.planned?.seed },
+  { connection, payer: keys.payer, policyKey: keys.policyKey, log, onPlan: f.onPlan });
   return out;
 }
 

@@ -26,13 +26,14 @@ import fs from 'node:fs';
 import path from 'node:path';
 import * as sq from './squads.mjs';
 import { compile } from './policy.mjs';
-import { connectPlan, connectProblems, lookupPlan, staticAccounts } from './admin.mjs';
+import { connectDone, connectPlan, connectProblems, lookupPlan, staticAccounts } from './admin.mjs';
 import { readKeypair, vaultConfig, verifyPolicy } from './account.mjs';
 import { venue as venueOf } from './venues.mjs';
 import SOLANA from '../solana.json' with { type: 'json' };
 import { assertNotHalted } from '../../../shared/halt_guard.mjs';
 import { BOT_ROOT } from '../../../bot_root.mjs';
 import { isEntry } from '../../../shared/rpc_policy.mjs';
+import { sendUntilLanded } from '../../../shared/tx_send.mjs';
 
 const require = createRequire(import.meta.url);
 const { Connection, Keypair, PublicKey, SystemProgram, TransactionMessage, VersionedTransaction } = require('@solana/web3.js');
@@ -75,10 +76,13 @@ async function sendAll(connection, payer, groups) {
     const msg = new TransactionMessage({ payerKey: payer.publicKey, recentBlockhash: blockhash, instructions: ixs }).compileToV0Message();
     const tx = new VersionedTransaction(msg);
     tx.sign([payer]);
-    const signature = await connection.sendRawTransaction(tx.serialize());
-    const r = await connection.confirmTransaction({ signature, blockhash, lastValidBlockHeight }, 'confirmed');
-    if (r.value.err) throw new Error(`${signature} failed: ${JSON.stringify(r.value.err)} (sent so far: ${sigs.join(', ') || 'none'})`);
-    sigs.push(signature);
+    // re-sent until it lands, and read from the chain at expiry: never confirmed
+    // over a websocket, which some RPCs do not serve (2026-10-11)
+    try {
+      sigs.push(await sendUntilLanded(connection, tx.serialize(), lastValidBlockHeight));
+    } catch (e) {
+      throw new Error(`${e.signature ?? 'a transaction'}: ${e.message} (landed before it: ${sigs.join(', ') || 'none'})`);
+    }
   }
   return sigs;
 }
@@ -101,7 +105,10 @@ function keys(dir) {
 
 // `payer` and `policyKey` default to the keys the environment names; `log`
 // gets the report (onboard/server.mjs passes its own).
-export async function connect(f, { connection = new Connection(RPC, 'confirmed'), payer = null, policyKey = null, log = console.log } = {}) {
+// `f.seed` resumes the vault an earlier try planned (`onPlan` hears each plan
+// before anything is sent): only the steps the chain lacks are sent.
+export async function connect(f, { connection = new Connection(RPC, 'confirmed'), payer = null, policyKey = null, log = console.log,
+  onPlan = null } = {}) {
   const owners = keysOf(f.owners, '--owners');
   const threshold = Number(f.threshold ?? 1);
   const venue = f.venue;
@@ -113,7 +120,7 @@ export async function connect(f, { connection = new Connection(RPC, 'confirmed')
   policyKey ??= await readKeypair(process.env.LPBOT_VAULT_POLICY_KEY ?? '');
   const config = sq.decodeProgramConfig((await connection.getAccountInfo(sq.programConfigPda())).data);
   if (config.creationFee > 0n) log(`note: the program charges ${Number(config.creationFee) / 1e9} SOL per account`);
-  const seed = config.smartAccountIndex + 1n;
+  const seed = f.seed != null ? BigInt(f.seed) : config.smartAccountIndex + 1n;
   const vault = sq.vaultPda(sq.settingsPda(seed));
   const payouts = payoutAccounts(payoutWallets, payoutMints);
   const compiled = compile(venue, { vault, payer: payer.publicKey, pools, payouts });
@@ -133,7 +140,11 @@ export async function connect(f, { connection = new Connection(RPC, 'confirmed')
     log('DRY RUN — pass --execute to create the vault. Nothing is deposited by this.');
     return report;
   }
-  const sigs = await sendAll(connection, payer, plan.txs);
+  await onPlan?.({ seed: seed.toString(), settings: report.settings, vault: report.vault });
+  const [settingsInfo, ...policyInfos] = await connection.getMultipleAccountsInfo([plan.settings, ...plan.policies], 'confirmed');
+  const landed = connectDone(settingsInfo?.data ?? null, policyInfos.map(Boolean), { owners, creator: payer.publicKey });
+  if (landed.size) log(`resuming: ${landed.size} of ${plan.txs.length} setup transactions already landed`);
+  const sigs = await sendAll(connection, payer, plan.txs.filter((_, i) => !landed.has(i)));
   const problems = connectProblems((await connection.getAccountInfo(plan.settings, 'confirmed')).data,
     { owners, threshold, botKeys: [payer.publicKey, policyKey.publicKey] });
   if (problems.length) throw new Error(`the vault is not as planned; do not deposit: ${problems.join('; ')}`);

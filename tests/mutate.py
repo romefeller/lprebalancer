@@ -115,7 +115,7 @@ TARGETS = {
                                                      'putSettingsAction', 'compileInner', 'policyExecuteIx', 'ownerExecuteIx',
                                                      'decodeSettings', 'policyStateIs'],
                     NODE_TESTS('test_vault_policy.mjs', 'test_vault_fork.mjs')),
-    'vault_admin': ('chains/solana/vault/admin.mjs', ['connectPlan', 'connectProblems', 'staticAccounts', 'lookupPlan'],
+    'vault_admin': ('chains/solana/vault/admin.mjs', ['connectPlan', 'connectDone', 'connectProblems', 'staticAccounts', 'lookupPlan'],
                     NODE_TESTS('test_vault_policy.mjs', 'test_vault_cli_fork.mjs')),
     'vault_account': ('chains/solana/vault/account.mjs', ['vaultConfig', 'actingAccount', 'needed', 'verifyPolicy', 'wrap'],
                       NODE_TESTS('test_vault_policy.mjs', 'test_vault_dlmm_fork.mjs')),
@@ -376,6 +376,8 @@ EQUIVALENT = {
     # or absent, never 0, false or '' that would read differently.
     ('onboard_server', 'makeServer', '\\?\\? -> ||', 'profile: { name: r.name, template: cfg.chains[r.chain].template, settings: cfg.chains[r.chain].settings ?? {}, dex: venue, pool, execute_dexes: [venue],', 0):
         'a chain\'s settings are an object or absent: ?? and || agree',
+    ('onboard_server', 'makeServer', '\\?\\? -> ||', 'planned: r.connected?.planned ?? null,', 0):
+        'a saved plan is an object or absent: ?? and || agree',
     ('onboard_server', 'makeServer', '\\?\\? -> ||', 'const now = deps.now ?? (() => Date.now());', 0):
         'deps.now is a function or absent: ?? and || pick the same',
     ('onboard_server', 'makeServer', '\\?\\? -> ||', 'const log = deps.log ?? ((o) => console.log(JSON.stringify({ t: new Date(now()).toISOString(), ...o })));', 0):

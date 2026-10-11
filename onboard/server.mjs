@@ -289,7 +289,10 @@ export function makeServer(cfg, deps) {
           const g = await adapter.gas();
           if (!g.ok) throw new Error(`the bot's key holds ${g.have} ${g.symbol}, less than one setup (${g.need})`);
           log({ event: 'connect', chain: r.chain, name: r.name, owner: r.owner });
-          connected = await adapter.connect({ owner: r.owner, profitWallet: r.profit_wallet, feeWallet: r.fee_wallet });
+          // the plan is saved before anything is sent, so a resume finishes this vault, never a second one
+          connected = await adapter.connect({ owner: r.owner, profitWallet: r.profit_wallet, feeWallet: r.fee_wallet,
+            planned: r.connected?.planned ?? null,
+            onPlan: (planned) => deps.store('connected', { id: r.id, connected: { planned } }) });
           await deps.store('connected', { id: r.id, connected });
         }
         const venue = connected.venue, pool = connected.pools[0];

@@ -376,7 +376,7 @@ function memoryStore(over = {}) {
 function fakes(over = {}, cfg = CFG) {
   let t = 1_000_000_000;
   const db = memoryStore({ ...over, now: () => t });
-  const calls = { connect: 0, start: [], checks: [] };
+  const calls = { connect: 0, start: [], checks: [], planned: [] };
   const payments = new Map();             // signature -> verdict
   const adapter = {
     keys: { public: [BOT.publicKey.toBase58()], payee: PAYER, secretEnv: 'P', policyKeyEnv: 'Q' },
@@ -390,6 +390,8 @@ function fakes(over = {}, cfg = CFG) {
     checkPayment: async (sig, ex) => { calls.checks.push([sig, ex]); return payments.get(sig) ?? { state: 'pending', reason: 'the payment is not on chain (yet)' }; },
     connect: async (f) => {
       calls.connect++;
+      calls.planned.push(f.planned);
+      await f.onPlan?.({ seed: f.planned?.seed ?? `SEED${calls.connect}`, settings: 'S', vault: 'VAULT' });
       if (over.connectFails?.()) throw new Error('rpc down');
       return { vault: 'VAULT', sent: true, owners: [f.owner], venue: 'meteora-dlmm', pools: ['POOL'], f };
     },
@@ -454,7 +456,9 @@ test('server: sign, pay the gas, set up, deposit, start — and only signed valu
     const reg = f.db.calls.find(c => c[0] === 'register')[1];
     assert.equal(reg.profile.template, 'sol-usdc');
     assert.deepEqual([reg.secret_env, reg.policy_key_env, reg.profile.dex, reg.profile.pool], ['P', 'Q', 'meteora-dlmm', 'POOL']);
-    assert.deepEqual(reg.connected.f, { owner: OWNER.publicKey.toBase58(), profitWallet: PROFIT.publicKey.toBase58(), feeWallet: OPERATOR_SOL });
+    const { onPlan, ...signed } = reg.connected.f;
+    assert.deepEqual(signed, { owner: OWNER.publicKey.toBase58(), profitWallet: PROFIT.publicKey.toBase58(), feeWallet: OPERATOR_SOL, planned: null });
+    assert.equal(typeof onPlan, 'function', 'the plan is saved before the connect sends anything');
     const dep = await post('tx', { invite: INVITE, name: 'my-pool', action: 'deposit', amount: '50', token: 'USDC' });
     assert.deepEqual(JSON.parse(dep.json.transactions[0]), { owner: OWNER.publicKey.toBase58(), vault: 'VAULT', token: 'SOL', amount: '1.355' },
       'the deposit is the signed amount less the gas, whatever the body says');
@@ -507,6 +511,8 @@ test('server: a setup that fails keeps the payment and resumes without paying or
     assert.equal(two.status, 502, 'connected, then the registration failed');
     assert.match(two.json.error, /The vault VAULT exists; do not deposit/);
     assert.equal(f.calls.connect, 2, 'the first try failed before any vault, so the resume connected');
+    assert.deepEqual(f.calls.planned, [null, { seed: 'SEED1', settings: 'S', vault: 'VAULT' }],
+      'the resume finishes the vault the first try planned (its seed), never a new one');
     failRegister = false;
     const three = await post('pay', { invite: INVITE, name: 'my-pool', payment: 'SOMETHING-ELSE' });
     assert.deepEqual([three.status, three.json.state], [200, 'registered']);

@@ -40,6 +40,29 @@ export function connectPlan({ creator, treasury, seed, owners, threshold, policy
   return { settings, vault: sq.vaultPda(settings), policies, txs };
 }
 
+// Which steps of a connectPlan already landed (their indexes in plan.txs),
+// read from the chain: the vault's settings data (null when not created) and
+// whether each policy account exists. A resumed connect sends only the rest
+// (2026-10-11: the first connect's create landed but its confirmation failed,
+// and a second try would have made another vault). Pure.
+export function connectDone(settingsData, policyExists, { owners, creator }) {
+  if (!settingsData) {
+    if (policyExists.some(Boolean)) throw new Error('policies exist for a vault that does not');
+    return new Set();
+  }
+  const s = sq.decodeSettings(settingsData);
+  const have = new Set(s.signers.map(x => x.key.toBase58()));
+  const missing = owners.map(k => new PublicKey(k).toBase58()).filter(k => !have.has(k));
+  if (missing.length) throw new Error(`the vault at this seed is not this request's: ${missing.join(', ')} is not an owner`);
+  const done = new Set([0]);
+  policyExists.forEach((e, i) => { if (e) done.add(i + 1); });
+  if (!have.has(new PublicKey(creator).toBase58())) {
+    if (policyExists.some(e => !e)) throw new Error('the bot left the vault before every policy was created; only the owners can add them');
+    done.add(policyExists.length + 1);
+  }
+  return done;
+}
+
 // What a connected vault must look like before anyone deposits: these owners
 // at this threshold, the bot's keys not among them. Returns the problems.
 export function connectProblems(settingsData, { owners, threshold, botKeys }) {
