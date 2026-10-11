@@ -79,6 +79,8 @@ test('a request takes the whole balance or less, never nothing or more, and says
   for (const amount of ['0', '0.6', 'x']) await assert.rejects(ask('withdraw', { to: me, mint: 'SOL', amount }), /the vault holds 0.5 SOL/, amount);
   assert.match((await ask('withdraw', { to: me, mint: 'SOL', amount: '0.5' })).summary, /withdraw 0.5 SOL/);
   assert.match((await ask('withdraw', { to: me, amount: '0.25' })).summary, /withdraw 0.25 SOL/);
+  // an empty --mint is not read as SOL
+  await assert.rejects(ask('withdraw', { to: me, mint: '', amount: '0.25' }), /public key/i);
 
   await fork.clone([new PublicKey(USDC)]);
   const src = spl.getAssociatedTokenAddressSync(new PublicKey(USDC), new PublicKey(out.vault), true);

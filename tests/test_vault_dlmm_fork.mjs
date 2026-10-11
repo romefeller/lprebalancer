@@ -367,6 +367,17 @@ test('payout: the vault pays the profit and fee wallets, and nothing else', { ti
   // a send that fails before it went out is an error, never a partial
   const down = Object.create(connection, { sendRawTransaction: { value: async () => { throw new Error('rpc down'); } } });
   await assert.rejects(send('1', down), /rpc down/);
+  // a dry run reports the simulation and sends nothing (the fork declines simulations, so stub them)
+  const dryRun = async (err) => {
+    const sim = Object.create(connection, { simulateTransaction: { value: async () => ({ value: { err, logs: [] } }) } });
+    said.length = 0; console.log = (x) => said.push(x);
+    try { await payout.sendFromVault(USDC.toBase58(), '1', profit.toBase58(), false, { env: penv, connection: sim }); } finally { console.log = log; }
+    const r = said.filter(x => typeof x === 'string' && x.startsWith('{')).map(JSON.parse).at(-1);
+    return [r.sent, r.signature, r.simulation];
+  };
+  assert.deepEqual(await dryRun(null), [false, null, { ok: true, err: null }]);
+  assert.deepEqual(await dryRun({ InstructionError: [1, 'Custom'] }), [false, null, { ok: false, err: { InstructionError: [1, 'Custom'] } }]);
+  assert.equal(fork.tokenAmount(getAssociatedTokenAddressSync(USDC, vault, true)), 194_500_000n);
   said.length = 0; console.log = (x) => said.push(x);
   try { await send('194.5'); } finally { console.log = log; }
   const last = said.filter(x => typeof x === 'string' && x.startsWith('{')).map(JSON.parse).at(-1);

@@ -705,6 +705,14 @@ EQUIVALENT = {
         'parseHints keeps only prices above 0: ?? and || agree',
     ('vault_swap', 'rebalance', '\\?\\? -> ||', 'const out = { ...report, signature: r.sigs[0] ?? null, sent: true };', 0):
         'a signature is a non-empty string or missing: ?? and || agree',
+    ('vault_swap', 'swapSides', '\\?\\? -> ||', "if (h && h.decimals !== decimals) throw new Refused(`${h.symbol ?? mint} decimals ${h.decimals} disagree with the chain's ${decimals}; refusing`);", 0):
+        'parseHints always sets a non-empty symbol: ?? and || agree',
+    ('vault_cli', 'request', '\\?\\? -> ||', 'groups ??= [[sq.ownerExecuteIx({ settings: cfg.settings, signers: [owner], vault: cfg.vault, ixs })]];', 0):
+        'groups is unset or a non-empty list: ??= and ||= agree',
+    ('vault_routing', 'housekeeper', 'return None', 'return False', 0):
+        'every caller reads housekeeper() as a truth value: None and False agree',
+    ('vault_capital', 'profit_wallet_pinned', 'drop operand 0', 'return bool(pin) and wallets.norm(pin) == wallets.norm(config.PROFIT_WALLET) and chains.is_address(config.CHAIN, pin)', 0):
+        'an empty or missing pin fails chains.is_address anyway: bool(pin) only returns earlier',
     ('fee_share', 'fee_share', 'swap Lt->LtE', 'if not 0 < bps <= 5000:', 0):
         'a share of 0 bps returns before this check',
     ('read_status', 'read_status', 'drop operand 1', "if not (out and out.get('positionMint')):", 0):

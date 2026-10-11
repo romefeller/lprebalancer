@@ -243,6 +243,8 @@ class Gas(unittest.TestCase):
         with mock.patch.object(lp.capital, 'native_reserve', lambda bal: 0.2):
             self.assertFalse(self.gas({'sol': 0.1, 'balanceA': 1.0, 'nativeSide': None})[0])
             self.assertTrue(self.gas({'sol': 0.2, 'nativeSide': None})[0])
+            # no 'sol' read and no native side: a pool token is never taken for gas
+            self.assertFalse(self.gas({'balanceA': 1.0, 'balanceB': 1.0, 'nativeSide': None})[0])
 
     def test_a_shortage_is_told_once_and_forgotten_when_topped_up(self):
         state = {}
