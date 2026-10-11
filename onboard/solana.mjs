@@ -3,7 +3,7 @@
 // revoke) built unsigned for the owner's wallet to sign and send.
 import { createRequire } from 'module';
 import * as sq from '../chains/solana/vault/squads.mjs';
-import { RULES } from '../chains/solana/vault/policy.mjs';
+import { RULES, compile } from '../chains/solana/vault/policy.mjs';
 import { VENUES } from '../chains/solana/vault/venues.mjs';
 import { readKeypair } from '../chains/solana/vault/account.mjs';
 import { connect, request } from '../chains/solana/vault/cli.mjs';
@@ -193,10 +193,13 @@ export async function ownerTxs(connection, c, row, keys, { action, owner, token,
     if (amount !== 'all' && !(toRaw(amount, t.decimals) > 0n)) throw new Invalid('amount: a number or all');
     parts = [await request('withdraw', { owner, to: owner, mint: t.native ? 'SOL' : t.mint, amount },
       { connection, env: requestEnv(row, venues[0], keys) })];
-  } else if (action === 'revoke') {
+  } else if (action === 'revoke' || action === 'approve') {
+    // approve: the bot's policy key back on every policy, with the rules as the
+    // bot now compiles them (after a revoke, or after rules.json grew)
     parts = [];
     for (const v of venues) {
-      parts.push(await request('revoke', { owner, payer: keys.payer.publicKey.toBase58() }, { connection, env: requestEnv(row, v, keys) }));
+      parts.push(await request(action, { owner, payer: keys.payer.publicKey.toBase58(), 'policy-key': keys.policyKey.publicKey.toBase58() },
+        { connection, env: requestEnv(row, v, keys) }));
     }
   } else throw new Invalid(`action ${action}`);
   const { blockhash } = await connection.getLatestBlockhash('confirmed');
@@ -220,7 +223,24 @@ export async function status(connection, c, row, keys) {
   const policies = Object.values(row.venues).flatMap(v => v.policies).map(p => new PublicKey(p));
   const infos = await connection.getMultipleAccountsInfo(policies, 'confirmed');
   const botActive = infos.length > 0 && infos.every(i => i && sq.decodePolicyHead(i.data).signers.some(s => s.key.equals(keys.policyKey.publicKey)));
-  return { vault: vault.toBase58(), balances, botActive };
+  return { vault: vault.toBase58(), balances, botActive, rulesCurrent: rulesCurrent(row, vault, keys, infos) };
+}
+
+// Whether every policy on chain holds the rules the bot now compiles for this
+// vault. False after rules.json grew (2026-10-11: increase_position_length2):
+// the bot then refuses to act until the owner approves the new rules.
+export function rulesCurrent(row, vault, keys, infos) {
+  let i = 0;
+  for (const [venue, v] of Object.entries(row.venues)) {
+    const compiled = compile(venue, { vault, payer: keys.payer.publicKey, pools: v.pools.map(k => new PublicKey(k)),
+      payouts: v.payouts.map(k => new PublicKey(k)) });
+    if (compiled.policies.length !== v.policies.length) return false;
+    for (const p of compiled.policies) {
+      const info = infos[i++];
+      if (!info || !sq.policyStateIs(info.data, p.policy)) return false;
+    }
+  }
+  return true;
 }
 
 export const hasDeposit = (st) => Object.values(st.balances).some(v => Number(v) > 0);

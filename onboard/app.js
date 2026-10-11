@@ -287,6 +287,12 @@
     box.append(el('div', { class: 'row' }, amount, token));
     box.append(el('button', { text: 'Withdraw', onclick: () => act('Withdraw', async () =>
       signAndSend({ name: v.name, action: 'withdraw', token: token.value, amount: amount.value.trim() })) }));
+    if (v.rulesCurrent === false || (v.botActive === false && v.chain === 'solana')) {
+      box.append(el('p', { class: 'warn', text: v.botActive
+        ? 'The bot\'s rules were updated: approve them, or the bot stays paused on this vault.'
+        : 'The bot is revoked on this vault: approve to let it run again.' }));
+      box.append(el('button', { text: 'Approve bot rules', onclick: () => act('Approve', () => signAndSend({ name: v.name, action: 'approve' })) }));
+    }
     if (v.botActive) {
       box.append(el('button', { text: 'Revoke bot', onclick: () => {
         if (!confirm(`Revoke the bot on ${v.name}? It stops acting on this vault; your money stays in it.`)) return;

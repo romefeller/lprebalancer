@@ -761,6 +761,8 @@ test('server: a chain whose transactions expire answers one at a time', async ()
     for (const index of [2, -1, 0.5, 'x', '1', null]) assert.equal((await post('tx', { invite: INVITE, name: 'my-pool', action: 'revoke', index })).status, 400);
     assert.equal((await post('tx', { invite: INVITE, name: 'my-pool', action: 'withdraw', amount: '1e9' })).status, 400);
     assert.equal((await post('tx', { invite: INVITE, name: 'my-pool', action: 'steal' })).status, 400);
+    const ap = await post('tx', { invite: INVITE, name: 'my-pool', action: 'approve' });
+    assert.deepEqual([ap.status, ap.json.count], [200, 2], 'the owner approves the bot\'s current rules');
     f.adapter.expires = false;
   });
   const g = fakes();
