@@ -110,6 +110,29 @@ export function minimum(c, token) {
   return fromRaw(toRaw(t.min, t.decimals) + (t.native ? gasTotal(c) : 0n), t.decimals);
 }
 
+// The most a wallet can put in with `token` (the page's Max), from what it
+// holds: `held` maps the token's and the native coin's symbols to raw units.
+// The native coin keeps back the owner's fees (tokens.fees); a token goes in
+// whole, and the native coin must hold the bot's gas and the fees beside it.
+// Never above the token's max. {amount} (a decimal with a point) or {short}
+// (why there is none). Pure.
+export function maxAmount(c, token, held) {
+  const t = c.tokens[token], [native, n] = nativeOf(c);
+  const fees = toRaw(t.fees, n.decimals), have = held[token];
+  const min = toRaw(minimum(c, token), t.decimals);
+  const room = t.native ? have - fees : have;
+  if (room < min) {
+    const need = t.native ? `${fromRaw(min + fees, t.decimals)} ${token} with your fees` : `${fromRaw(min, t.decimals)} ${token}`;
+    return { short: `not enough: you have ${fromRaw(have, t.decimals)} ${token}, the minimum is ${need}` };
+  }
+  if (!t.native && held[native] < gasTotal(c) + fees) {
+    return { short: `not enough ${native} for the bot's gas and your fees: you have ${fromRaw(held[native], n.decimals)} ${native}, `
+      + `you need ${fromRaw(gasTotal(c) + fees, n.decimals)} ${native}` };
+  }
+  const max = toRaw(t.max, t.decimals);
+  return { amount: fromRaw(room < max ? room : max, t.decimals) };
+}
+
 // Who pays a fee share, from the config: none when the profit wallet is the
 // operator's own; else `fee.bps` of the payout-token fees to the operator.
 export function feeTerms(chain, profit, operator, bps) {

@@ -9,7 +9,9 @@
 // profile starts. Then the owner withdraws and revokes the bot. A second
 // owner's bad payments are refused without a lamport spent, a payment is
 // never used twice, and a setup that stops resumes from the page with the
-// payment already made.
+// payment already made. A third owner presses Max and signs with what it
+// filled: the most the wallet holds, less the fees kept back for its own two
+// transactions, and the wallet stays rent-exempt.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
@@ -30,7 +32,7 @@ const spl = require('@solana/spl-token');
 const bs58 = require('bs58').default;
 
 const INVITE = 'fork-invite-code';
-const NAME = 'ob-fork', NAME2 = 'ob-fork-two';
+const NAME = 'ob-fork', NAME2 = 'ob-fork-two', NAME3 = 'ob-fork-max';
 const TEMPLATE = 'ob-fork-tpl';
 const SYSTEM = SystemProgram.programId.toBase58();
 
@@ -104,10 +106,16 @@ async function transfer(fork, ledger, from, to, lamports) {
 }
 
 // The fork's mainnet snapshot may be older than mainnet: the next smart
-// account seeds can exist there already. Keep them out of the fork.
+// account seeds, their policies and vaults can exist there already (mainnet
+// makes new ones while the test runs). Keep them out of the fork.
 function freeSeeds(fork, n = 8) {
   const next = sq.decodeProgramConfig(fork.get(sq.programConfigPda()).data).smartAccountIndex;
-  for (let i = 1n; i <= BigInt(n); i++) fork.absent.add(sq.settingsPda(next + i).toBase58());
+  for (let i = 1n; i <= BigInt(n); i++) {
+    const settings = sq.settingsPda(next + i);
+    fork.absent.add(settings.toBase58());
+    fork.absent.add(sq.vaultPda(settings).toBase58());
+    for (let p = 1; p <= 8; p++) fork.absent.add(sq.policyPda(settings, p).toBase58());
+  }
 }
 
 test('fork (Solana): pay the gas, sign once, vault and profile, deposit, start; bad payments, resume, withdraw, revoke', { timeout: 900_000 }, async () => {
@@ -128,8 +136,9 @@ test('fork (Solana): pay the gas, sign once, vault and profile, deposit, start; 
   const cfg = loadConfig();
   const C = cfg.chains.solana;
   C.template = TEMPLATE;
+  cfg.limits.creates = { ...cfg.limits.creates, max: 4 };       // four new vaults from this one address
   const env = { [C.payerKeyEnv]: path.join(dir, 'payer.json'), [C.policyKeyEnv]: path.join(dir, 'policy.json') };
-  clean(NAME, TEMPLATE); clean(NAME2, TEMPLATE); clean('ob-fork-three', TEMPLATE);
+  clean(NAME, TEMPLATE); clean(NAME2, TEMPLATE); clean('ob-fork-three', TEMPLATE); clean(NAME3, TEMPLATE);
   template(TEMPLATE, { chain: 'solana', address: payer.publicKey.toBase58(), payoutMint: SOLANA.usdc_mint, profit: SOLANA.operator_profit_wallet });
 
   const started = [], logs = [];
@@ -285,10 +294,47 @@ test('fork (Solana): pay the gas, sign once, vault and profile, deposit, start; 
     const again = await post('intent', { chain: 'solana', owner: owner.publicKey.toBase58(), token: 'SOL', amount: '1',
       profitWallet: owner.publicKey.toBase58(), name: NAME });
     assert.equal(again.status, 409, 'the name is taken');
+
+    // --- 5. Max fills the box with what the wallet can put in; a Sign with it goes through ---
+    const owner3 = fork.wallet(0.5);
+    const p3 = await openPage(base, INVITE);
+    doms.push(p3.dom);
+    const w3 = standardWallet(fork, ledger, owner3);
+    p3.w.dispatchEvent(new p3.w.CustomEvent('wallet-standard:register-wallet', { detail: ({ register }) => register(w3.wallet) }));
+    p3.$('connect').click();
+    await wait(() => p3.$('wallet').textContent.includes(owner3.publicKey.toBase58()));
+    const max = p3.$('max');
+    assert.deepEqual([max.tagName, max.type, max.parentElement, max.previousElementSibling], ['BUTTON', 'button', p3.$('amount').parentElement, p3.$('amount')],
+      'a real button, beside the amount box');
+    const pressMax = async () => {
+      p3.$('error').textContent = '';
+      max.click();
+      await wait(() => !max.disabled);
+    };
+    p3.$('token').value = 'USDC';
+    p3.$('amount').value = '12';
+    await pressMax();
+    assert.equal(p3.$('error').textContent, 'not enough: you have 0 USDC, the minimum is 10 USDC');
+    assert.equal(p3.$('amount').value, '12', 'the box is left as it was');
+    fork.tokenAccount(spl.getAssociatedTokenAddressSync(usdc, owner3.publicKey), usdc, owner3.publicKey, 25_250_001n);
+    await pressMax();
+    assert.deepEqual([p3.$('amount').value, p3.$('error').textContent], ['25.250001', ''], 'the whole USDC account, read on chain');
+    p3.$('token').value = 'SOL';
+    await pressMax();
+    assert.deepEqual([p3.$('amount').value, p3.$('error').textContent], ['0.499', ''], '0.5 SOL less 0.001 kept back for the fees');
+    p3.$('name').value = NAME3;
+    p3.$('sign').click();
+    await wait(() => /The bot runs/.test(p3.$('progress').textContent) || p3.$('error').textContent);
+    assert.equal(p3.$('error').textContent, '', JSON.stringify(logs.filter(l => l.event !== 'connect_report').slice(-5)));
+    assert.match(w3.signed[0], /Amount: 0.499 SOL\nGas to the bot: 0.145 SOL/);
+    const o3 = json(`select row_to_json(o) from rebalancer.onboard o where name = '${NAME3}'`);
+    assert.deepEqual([o3.state, o3.amount, o3.deposit], ['started', 0.499, 0.354]);
+    assert.equal(fork.balance(o3.vault), 354_000_000);
+    assert.equal(fork.balance(owner3.publicKey), 1_000_000 - 2 * 5000, 'the fees kept back, less the two it paid: still above the rent floor');
   } finally {
     for (const d of doms) d.window.close();
     server.close();
-    clean(NAME, TEMPLATE); clean(NAME2, TEMPLATE); clean('ob-fork-three', TEMPLATE);
+    clean(NAME, TEMPLATE); clean(NAME2, TEMPLATE); clean('ob-fork-three', TEMPLATE); clean(NAME3, TEMPLATE);
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });

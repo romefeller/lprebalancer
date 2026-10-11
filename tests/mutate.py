@@ -140,10 +140,10 @@ TARGETS = {
     # Self-serve onboarding (onboard/, 2026-10-11): what an owner signs, the gas payment it
     # must make before the bot spends anything, the server's gates, the rows it writes.
     'onboard_intent': ('onboard/intent.mjs', ['decimal', 'address', 'amount', 'toRaw', 'fromRaw', 'name', 'nativeOf', 'gasTotal', 'minimum',
-                                              'feeTerms', 'fields', 'verify', 'decodeSignature', 'inviteOk'], NODE_TESTS('test_onboard.mjs')),
-    'onboard_sol_payment': ('onboard/solana.mjs', ['vaultVenues', 'paymentVerdict', 'checkPayment', 'gas', 'paymentTxs'],
+                                              'maxAmount', 'feeTerms', 'fields', 'verify', 'decodeSignature', 'inviteOk'], NODE_TESTS('test_onboard.mjs')),
+    'onboard_sol_payment': ('onboard/solana.mjs', ['vaultVenues', 'paymentVerdict', 'checkPayment', 'gas', 'paymentTxs', 'holdings'],
                             NODE_TESTS('test_onboard.mjs', 'test_onboard_fork.mjs')),
-    'onboard_evm_payment': ('onboard/polygon.mjs', ['paymentVerdict', 'checkPayment', 'gas', 'paymentTxs'],
+    'onboard_evm_payment': ('onboard/polygon.mjs', ['paymentVerdict', 'checkPayment', 'gas', 'paymentTxs', 'holdings'],
                             NODE_TESTS('test_onboard.mjs', 'test_onboard_polygon_fork.mjs')),
     'onboard_server': ('onboard/server.mjs', ['makeServer', 'clientOf', 'serviceCommand'], NODE_TESTS('test_onboard.mjs')),
     'onboard_store': ('onboard/store.py', ['same_owner', 'taken', 'owned', 'sign', 'paid', 'resume', 'connected', 'stuck', 'with_settings', 'register',
@@ -390,6 +390,8 @@ EQUIVALENT = {
         'a log line only; a vault address is a non-empty string or absent',
     ('onboard_server', 'makeServer', '\\?\\? -> ||', "log({ event: 'error', path: sub, error: String(e?.message ?? e).slice(0, 500) });", 0):
         'a log line only',
+    ('onboard_intent', 'maxAmount', '(?<![<>=!])<(?![<=]) -> <=', 'return { amount: fromRaw(room < max ? room : max, t.decimals) };', 0):
+        'the lesser of room and max: when they are equal both branches give the same value',
     ('onboard_server', 'clientOf', '\\?\\? -> ||', "const peer = req.socket.remoteAddress ?? '';", 0):
         "remoteAddress is a non-empty string or absent: ?? and || give the same ''",
     ('onboard_server', 'clientOf', '\\?\\? -> ||', "const fwd = String(req.headers['x-forwarded-for'] ?? '').split(',')[0].trim();", 0):
