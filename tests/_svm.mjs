@@ -4,7 +4,9 @@
 // program binaries that run on mainnet.
 //
 // Program binaries are read from mainnet once per test run into TMPDIR
-// (tests/run.sh removes it at the end). Accounts are cloned on demand.
+// (tests/run.sh removes it at the end), or into LPBOT_SVM_CACHE when set:
+// tests/mutate.py shares one copy over all its runs. Accounts are cloned on
+// demand.
 import { createRequire } from 'module';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -27,10 +29,14 @@ export const RPC = process.env.LPBOT_RPC
   || (/^[A-Za-z0-9-]{16,128}$/.test(KEY) ? `https://mainnet.helius-rpc.com/?api-key=${KEY}` : null)
   || process.env.SOLANA_RPC_URL || 'https://api.mainnet-beta.solana.com';
 
-async function retry(fn, tries = 6) {
+// A read that stalls is cut off and tried again, never waited on for ever.
+const READ_TIMEOUT_MS = 30_000;
+const timedFetch = (url, opts) => fetch(url, { ...opts, signal: AbortSignal.timeout(READ_TIMEOUT_MS) });
+
+async function retry(fn, tries = 8) {
   for (let i = 0; ; i++) {
     try { return await fn(); } catch (e) {
-      if (i + 1 >= tries || !/429|Too Many|fetch failed|ECONNRESET|ETIMEDOUT|socket hang up|50[234]/.test(String(e?.message ?? e))) throw e;
+      if (i + 1 >= tries || !/429|Too Many|fetch failed|ECONNRESET|ETIMEDOUT|socket hang up|50[234]|TimeoutError|aborted/.test(String(e?.message ?? e))) throw e;
       await new Promise(r => setTimeout(r, 500 * 2 ** i));
     }
   }
@@ -38,7 +44,7 @@ async function retry(fn, tries = 6) {
 
 // The executable bytes of a deployed upgradeable program, cached for this run.
 async function programBytes(connection, programId) {
-  const file = path.join(os.tmpdir(), `svm-${programId.toBase58()}.so`);
+  const file = path.join(process.env.LPBOT_SVM_CACHE || os.tmpdir(), `svm-${programId.toBase58()}.so`);
   if (fs.existsSync(file)) return fs.readFileSync(file);
   const program = await retry(() => connection.getAccountInfo(programId));
   if (!program?.owner.equals(UPGRADEABLE_LOADER)) throw new Error(`${programId.toBase58()} is not an upgradeable program`);
@@ -52,7 +58,7 @@ async function programBytes(connection, programId) {
 }
 
 export class Fork {
-  constructor(mainnet = new Connection(RPC, 'confirmed')) {
+  constructor(mainnet = new Connection(RPC, { commitment: 'confirmed', fetch: timedFetch })) {
     this.mainnet = mainnet;
     this.svm = new LiteSvm();
     this.svm.setDefaultPrograms();                           // system, SPL Token, Token-2022, ATA, memo

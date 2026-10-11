@@ -35,6 +35,7 @@ from typing import NamedTuple
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 SCRATCH = pathlib.Path(os.environ.get('MUT_DIR') or tempfile.gettempdir()) / 'lp_bot_mutants'
+SVM_CACHE = SCRATCH / 'svm-programs'      # mainnet program binaries for the fork tests, read once per run
 WORKERS = int(os.environ.get('MUT_WORKERS', 6))
 TIMEOUT = int(os.environ.get('MUT_TIMEOUT', 180))
 PY = sys.executable
@@ -1421,7 +1422,7 @@ def run_tests(copy_root, dbname, cmd, timeout=None):
     shutil.rmtree(tmp, ignore_errors=True)
     tmp.mkdir()
     env = dict(os.environ, LPBOT_DSN=f'dbname={dbname}', HYP_EXAMPLES=os.environ.get('HYP_EXAMPLES', '60'),
-               PYTHONDONTWRITEBYTECODE='1', TMPDIR=str(tmp))
+               PYTHONDONTWRITEBYTECODE='1', TMPDIR=str(tmp), LPBOT_SVM_CACHE=str(SVM_CACHE))
     proc = subprocess.Popen(cmd, cwd=copy_root / 'tests', env=env, stdout=subprocess.PIPE,
                             stderr=subprocess.PIPE, start_new_session=True, preexec_fn=cap_file_size)
     RUNNING.add(proc)
@@ -1452,6 +1453,7 @@ def main(names):
     atexit.register(kill_running)                       # a killed run leaves no test behind
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
     SCRATCH.mkdir(parents=True, exist_ok=True)
+    SVM_CACHE.mkdir(exist_ok=True)
     if disk_low(SCRATCH):
         raise SystemExit(f'under {MIN_FREE_GB:g} GB free on the disk of {SCRATCH}: not starting')
     setups = [worker_setup(i) for i in range(WORKERS)]

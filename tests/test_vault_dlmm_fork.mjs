@@ -191,7 +191,7 @@ test('the bot stops when the policy on chain is not the one it was built for', {
 test('the DLMM signer runs a vault with its usual commands', { timeout: 300_000 }, async () => {
   const { fork, connection, acting, vault, payer } = await vaultOnFork();
   const signer = await import('../venues/meteora_dlmm/signer.mjs');
-  const deps = { urls: ['fork'], connectFn: async () => ({ connection, payer, acting }), sleep: async () => {} };
+  const deps = { urls: ['http://fork.test'], connectFn: async () => ({ connection, payer, acting }), sleep: async () => {} };
   const said = [];
   const log = console.log;
   const out = async (fn) => { said.length = 0; console.log = (x) => said.push(x); try { await fn(); } finally { console.log = log; }
@@ -245,7 +245,7 @@ test('the DLMM signer runs a vault with its usual commands', { timeout: 300_000 
 test('rebalance: the DLMM signer swaps a vault to its targets on the approved pool', { timeout: 300_000 }, async () => {
   const { fork, connection, acting, vault, payer } = await vaultOnFork({ usdc: 0n });
   const signer = await import('../venues/meteora_dlmm/signer.mjs');
-  const deps = { urls: ['fork'], connectFn: async () => ({ connection, payer, acting }), sleep: async () => {} };
+  const deps = { urls: ['http://fork.test'], connectFn: async () => ({ connection, payer, acting }), sleep: async () => {} };
   process.env.LPBOT_POOL = POOL.toBase58();
   delete process.env.LPBOT_TOKEN_HINTS;
   const dlmm = await DLMM.create(connection, POOL);
@@ -267,7 +267,7 @@ test('rebalance: the DLMM signer swaps a vault to its targets on the approved po
 test('rebalance: a price the pool does not pay is refused before anything is signed', { timeout: 300_000 }, async () => {
   const { connection, acting, payer } = await vaultOnFork({ usdc: 0n });
   const signer = await import('../venues/meteora_dlmm/signer.mjs');
-  const deps = { urls: ['fork'], connectFn: async () => ({ connection, payer, acting }), sleep: async () => {} };
+  const deps = { urls: ['http://fork.test'], connectFn: async () => ({ connection, payer, acting }), sleep: async () => {} };
   process.env.LPBOT_POOL = POOL.toBase58();
   const dlmm = await DLMM.create(connection, POOL);
   const px = Number((await dlmm.getActiveBin()).pricePerToken);
@@ -305,7 +305,7 @@ test('rebalance: nothing to do is a report, never a swap; a vault keeps its floo
   delete process.env.LPBOT_SLEEVE;
   const quiet = async (f) => { const log = console.log; console.log = () => {}; try { return await f(); } finally { console.log = log; } };
   const ask = (a, b, as = acting) => quiet(() => signer.rebalance(NATIVE_MINT.toBase58(), USDC.toBase58(), a, b, true,
-    { urls: ['fork'], connectFn: async () => ({ connection, payer, acting: as }), sleep: async () => {} }));
+    { urls: ['http://fork.test'], connectFn: async () => ({ connection, payer, acting: as }), sleep: async () => {} }));
   await assert.rejects(ask('-1', '1'), /non-negative/);
   await assert.rejects(ask('1', '-1'), /non-negative/);
   const none = await ask('0', '0');
