@@ -39,6 +39,7 @@
 //   node venues/meteora_dlmm/signer.mjs rebalance <mintA> <mintB> <targetUsdA> <targetUsdB> [--execute]
 import fs from 'node:fs';
 import path from 'node:path';
+import { sendUntilLanded } from '../../shared/tx_send.mjs';
 import { assertNotHalted } from '../../shared/halt_guard.mjs';
 import { BOT_ROOT } from '../../bot_root.mjs';
 import { createRequire } from 'node:module';
@@ -326,15 +327,15 @@ async function positions() {
   });
 }
 
-// Sign `ixs` for `acting` on a fresh blockhash, send, and wait for
-// `confirmed`. Returns the signature; throws if it failed on chain.
+// Sign `ixs` for `acting` on a fresh blockhash, send until it lands, and
+// return the signature; throws if it failed on chain or provably never
+// landed. Confirmed by polling, never over a websocket: the RPC may not
+// serve signatureSubscribe (2026-10-11: a vault swap landed and was reported
+// unsent).
 export async function sendIxs(connection, acting, ixs, extra = []) {
   const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('confirmed');
   const tx = acting.transaction(ixs, blockhash, extra);
-  const signature = await connection.sendRawTransaction(tx.serialize());
-  const r = await connection.confirmTransaction({ signature, blockhash, lastValidBlockHeight }, 'confirmed');
-  if (r?.value?.err) throw new Error(`transaction ${signature} failed: ${JSON.stringify(r.value.err)}`);
-  return signature;
+  return sendUntilLanded(connection, tx.serialize(), lastValidBlockHeight);
 }
 
 // Sends in order. Throws only if NOTHING was sent; after the first send a
