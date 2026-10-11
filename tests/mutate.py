@@ -270,6 +270,8 @@ TARGETS = {
                                     'parseSleeve', 'sleeveCap', 'capped'], NODE_TESTS('test_aerodrome.mjs')),
     # 2026-10-08: a 9-decimal request rounded up past an 18-decimal holding is the holding
     'evm_cap_held': ('chains/evm/clmath.mjs', ['capToHeld'], NODE_TESTS('test_uniswap_polygon.mjs')),
+    # 2026-10-11: opens and closes take their minimums over a price range, not per token
+    'evm_price_range': ('chains/evm/clmath.mjs', ['shiftedSqrt', 'openMinimums', 'closeMinimums'], NODE_TESTS('test_uniswap.mjs')),
     # the hot pause's fee side on Uniswap v3 venues (2026-10-08)
     'v3_fee_pool': ('venues/uniswap_v3/pools.py', ['v3_fee_state', 'uniswap_v3_fee_state'], PY_TESTS('test_polygon_hot_pause', 'test_hot_pause')),
     # an open's leftover into the position where the venue can add (2026-10-08)
@@ -353,6 +355,14 @@ EQUIVALENT = {
         'raw == held returns held either way',
     ('uniswap_signer', 'atBlock', '\\?\\? -> ||', "if (!MISSING_BLOCK.test(String(e?.details ?? '') + ' ' + String(e?.shortMessage ?? e?.message ?? e))) throw e;", 0):
         'details is a string or absent: || only also replaces the empty string with the empty string',
+    ('evm_price_range', 'shiftedSqrt', '(?<![<>=!])<(?![<=]) -> <=', 'return q < sa ? sa : q > sb ? sb : q;', 0):
+        'at q == sa both branches return the same value',
+    ('evm_price_range', 'shiftedSqrt', '(?<![<>=!-])>(?![>=]) -> >=', 'return q < sa ? sa : q > sb ? sb : q;', 0):
+        'at q == sb both branches return the same value',
+    ('evm_price_range', 'openMinimums', '(?<![<>=!])<(?![<=]) -> <=', 'return { minA: a < now.amountA ? a : now.amountA, minB: b < now.amountB ? b : now.amountB };', 0):
+        'the lesser of two equal amounts is either one',
+    ('evm_price_range', 'openMinimums', '(?<![<>=!])<(?![<=]) -> <=', 'return { minA: a < now.amountA ? a : now.amountA, minB: b < now.amountB ? b : now.amountB };', 1):
+        'the lesser of two equal amounts is either one',
     ('uniswap_signer', 'settings', '\\?\\? -> ||', "pin: env.LPBOT_EVM_PROFIT_WALLET_PIN ?? '',", 0):
         "the only falsy string || would replace is '' itself",
     ('uniswap_signer', 'settings', '\\?\\? -> ||', "profit: env.LPBOT_PROFIT_WALLET ?? '',", 0):
