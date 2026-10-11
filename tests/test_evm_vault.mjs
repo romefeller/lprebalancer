@@ -228,9 +228,9 @@ test('account: no vault, a whole vault, or a refusal; a step becomes the role ca
 test('signer: a vault closes call by call; a key wallet in one multicall', () => {
   const calls = [
     S.closeCalls({ tokenId: 5n, tickLower: -10, tickUpper: 10, liquidity: 1000n },
-      { sqrtPriceX96: (2n ** 96n).toString() }, A(1), { slippageBps: 100 }, 99n),
+      { sqrtPriceX96: (2n ** 96n).toString() }, A(1), { slippageBps: 100, priceSlippageBps: 50 }, 99n),
     S.closeCalls({ tokenId: 5n, tickLower: -10, tickUpper: 10, liquidity: 0n },
-      { sqrtPriceX96: (2n ** 96n).toString() }, A(1), { slippageBps: 100 }, 99n),
+      { sqrtPriceX96: (2n ** 96n).toString() }, A(1), { slippageBps: 100, priceSlippageBps: 50 }, 99n),
   ].map(x => x.calls);
   assert.deepEqual(S.closeSteps(calls[0], U.V3.npm, true).map(s => [s.label, s.to]),
     [['decreaseLiquidity', U.V3.npm], ['collect', U.V3.npm], ['burn', U.V3.npm]]);
