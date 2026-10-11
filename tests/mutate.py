@@ -35,7 +35,7 @@ from typing import NamedTuple
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 SCRATCH = pathlib.Path(os.environ.get('MUT_DIR') or tempfile.gettempdir()) / 'lp_bot_mutants'
-SVM_CACHE = SCRATCH / 'svm-programs'      # mainnet program binaries for the fork tests, read once per run
+SVM_CACHE = SCRATCH / 'svm-mainnet'       # the fork tests' mainnet programs and accounts, read once per run
 WORKERS = int(os.environ.get('MUT_WORKERS', 6))
 TIMEOUT = int(os.environ.get('MUT_TIMEOUT', 180))
 PY = sys.executable

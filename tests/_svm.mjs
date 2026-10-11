@@ -5,8 +5,8 @@
 //
 // Program binaries are read from mainnet once per test run into TMPDIR
 // (tests/run.sh removes it at the end), or into LPBOT_SVM_CACHE when set:
-// tests/mutate.py shares one copy over all its runs. Accounts are cloned on
-// demand.
+// tests/mutate.py shares one copy over all its runs, and one snapshot of the
+// accounts too. Accounts are cloned on demand.
 import { createRequire } from 'module';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -57,6 +57,62 @@ async function programBytes(connection, programId) {
   return bytes;
 }
 
+// Mainnet accounts as AccountInfo (null for a key mainnet does not have). With
+// LPBOT_SVM_CACHE set, each answer is kept there, so every run of a mutation
+// sweep forks the same snapshot and asks the RPC once per key.
+async function mainnetAccounts(connection, keys) {
+  const dir = process.env.LPBOT_SVM_CACHE;
+  const file = (k) => path.join(dir, `acct-${k.toBase58()}.json`);
+  const out = new Map();
+  if (dir) {
+    for (const k of keys) {
+      if (!fs.existsSync(file(k))) continue;
+      const a = JSON.parse(fs.readFileSync(file(k), 'utf8'));
+      out.set(k.toBase58(), a && { lamports: a.lamports, data: Buffer.from(a.data, 'base64'), owner: new PublicKey(a.owner), executable: a.executable });
+    }
+  }
+  const missing = keys.filter(k => !out.has(k.toBase58()));
+  for (let i = 0; i < missing.length; i += 100) {
+    const got = await retry(() => connection.getMultipleAccountsInfo(missing.slice(i, i + 100)));
+    got.forEach((a, j) => {
+      const k = missing[i + j];
+      out.set(k.toBase58(), a);
+      if (!dir) return;
+      const part = `${file(k)}.${process.pid}`;          // written whole or not at all
+      fs.writeFileSync(part, JSON.stringify(a && { lamports: a.lamports, data: Buffer.from(a.data).toString('base64'), owner: a.owner.toBase58(), executable: a.executable }));
+      fs.renameSync(part, file(k));
+    });
+  }
+  return keys.map(k => out.get(k.toBase58()));
+}
+
+// One mainnet answer, kept under `name` in LPBOT_SVM_CACHE when set.
+async function cached(name, fetchFn) {
+  const dir = process.env.LPBOT_SVM_CACHE;
+  const file = dir && path.join(dir, `${name}.json`);
+  if (file && fs.existsSync(file)) return JSON.parse(fs.readFileSync(file, 'utf8'));
+  const value = await retry(fetchFn);
+  if (file) {
+    const part = `${file}.${process.pid}`;
+    fs.writeFileSync(part, JSON.stringify(value));
+    fs.renameSync(part, file);
+  }
+  return value;
+}
+
+// Parsed accounts (mints), one cache entry per key; only JSON-parsed data is kept.
+async function mainnetParsed(connection, keys) {
+  const revive = (a) => a && { ...a, owner: new PublicKey(a.owner) };
+  const out = [];
+  for (const k of keys.map(x => new PublicKey(x))) {
+    out.push(revive(await cached(`parsed-${k.toBase58()}`, async () => {
+      const [a] = (await connection.getMultipleParsedAccounts([k])).value;
+      return a && { ...a, owner: a.owner.toBase58() };
+    })));
+  }
+  return out;
+}
+
 export class Fork {
   constructor(mainnet = new Connection(RPC, { commitment: 'confirmed', fetch: timedFetch })) {
     this.mainnet = mainnet;
@@ -71,7 +127,7 @@ export class Fork {
   // Mainnet's clock, so programs that read time (fees, activation, oracles)
   // see the present rather than slot 0.
   async syncClock() {
-    const slot = await retry(() => this.mainnet.getSlot('confirmed'));
+    const slot = await cached('slot', () => this.mainnet.getSlot('confirmed'));
     const now = BigInt(Math.floor(Date.now() / 1000));
     const c = this.svm.getClock();
     c.slot = BigInt(slot); c.unixTimestamp = now; c.epochStartTimestamp = now;
@@ -86,10 +142,8 @@ export class Fork {
   // transaction that needs them fails here as it would there.
   async clone(keys) {
     const list = keys.map(k => new PublicKey(k));
-    for (let i = 0; i < list.length; i += 100) {
-      const infos = await retry(() => this.mainnet.getMultipleAccountsInfo(list.slice(i, i + 100)));
-      infos.forEach((a, j) => { if (a && !a.executable) this.set(list[i + j], a); });
-    }
+    const infos = await mainnetAccounts(this.mainnet, list);
+    infos.forEach((a, j) => { if (a && !a.executable) this.set(list[j], a); });
   }
 
   set(key, { lamports, data, owner, executable = false }) {
@@ -111,12 +165,8 @@ export class Fork {
     const info = (a) => a && { lamports: Number(a.lamports), data: a.data, owner: a.owner, executable: false, rentEpoch: 0 };
     const read = async (keys) => {
       const missing = keys.filter(k => !fork.get(k) && !fork.absent.has(k.toBase58()));
-      if (missing.length) {
-        for (let i = 0; i < missing.length; i += 100) {
-          const got = await retry(() => main.getMultipleAccountsInfo(missing.slice(i, i + 100)));
-          got.forEach((a, j) => { const k = missing[i + j]; if (a) fork.set(k, a); else fork.absent.add(k.toBase58()); });
-        }
-      }
+      const got = await mainnetAccounts(main, missing);
+      got.forEach((a, j) => { const k = missing[j]; if (a) fork.set(k, a); else fork.absent.add(k.toBase58()); });
       return keys.map(k => info(fork.get(k)));
     };
     const matches = (data, f) => f.dataSize != null ? data.length === f.dataSize
@@ -145,7 +195,7 @@ export class Fork {
       getSignatureStatuses: async (sigs) => ({ value: sigs.map(() => ({ err: null, confirmationStatus: 'confirmed' })) }),
       getBlockHeight: async () => 0,
       getRecentPrioritizationFees: async () => [],
-      getMultipleParsedAccounts: async (ks) => main.getMultipleParsedAccounts(ks),
+      getMultipleParsedAccounts: async (ks) => ({ context: { slot: Number(fork.svm.getClock().slot) }, value: await mainnetParsed(main, ks) }),
       getParsedTokenAccountsByOwner: async (owner, { mint }) => ({ value: [...fork.seen].flatMap(k => {
         const a = fork.get(k);
         if (!a || !(a.owner.equals(TOKEN_PROGRAM_ID) || a.owner.equals(TOKEN_2022_PROGRAM_ID)) || a.data.length < AccountLayout.span) return [];
