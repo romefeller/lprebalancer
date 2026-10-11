@@ -15,6 +15,10 @@ writes nothing.
     LPBOT_DSN=dbname=rebalancer python3 ops/add_vault.py payouts --wallet tangem-vault \\
         --venue meteora-dlmm --payout <wallet>[,<wallet>] [--mints <mint>[,<mint>]] [--apply]
 
+A Safe vault (chains/evm/vault/cli.mjs connect --execute > vault.json) registers the
+same way. It has one key: its --policy-key-env is its --secret-env. Its payout wallets
+are in the bot's role, so a new payout wallet is a new connect.
+
 Then the profile: ops/add_profile.py --wallet <id> ..., and for an instance
 that is not the operator's own: db.py set <profile> special=false
 fee_wallet=<w> fee_bps=1000 (in that order).
@@ -27,23 +31,26 @@ import subprocess
 import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
+import chains  # noqa: E402
 import db  # noqa: E402
-import guards  # noqa: E402
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 CLI = ROOT / 'chains/solana/vault/cli.mjs'
 WALLET_ID = re.compile(r'^[a-z0-9][a-z0-9-]{1,40}$')
 ENV_NAME = re.compile(r'^[A-Z][A-Z0-9_]{2,63}$')
-VENUES = set(json.loads((ROOT / 'chains/solana/vault/rules.json').read_text())['venues'])
+# kind: the venues with vault rules. A 'squads' vault is on Solana; a 'safe' one names its
+# EVM chain in the connect JSON (chains/evm/vault/cli.mjs).
+VENUES = {'squads': set(json.loads((ROOT / 'chains/solana/vault/rules.json').read_text())['venues']),
+          'safe': set(json.loads((ROOT / 'chains/evm/vault/rules.json').read_text())['venues'])}
 
 
 class Refused(ValueError):
     """An argument the tool will not write."""
 
 
-def addresses(xs, what):
+def addresses(xs, what, chain='solana'):
     xs = list(xs or [])
-    bad = [x for x in xs if not guards.is_address(x)]
+    bad = [x for x in xs if not chains.is_address(chain, x)]
     if bad:
         raise Refused(f'{what}: not addresses: {bad}')
     return xs
@@ -59,21 +66,32 @@ def register_rows(args, connected):
             raise Refused(f'{name} {v!r} is not an environment variable name')
     if connected.get('sent') is not True:
         raise Refused('the JSON is a dry run: connect with --execute first')
-    if connected.get('venue') not in VENUES:
+    kind = connected.get('kind') or 'squads'
+    if kind not in VENUES:
+        raise Refused(f'vault kind {kind!r}')
+    chain = 'solana' if kind == 'squads' else connected.get('chain')
+    if kind == 'safe' and (chain == 'solana' or chain not in chains.ADDRESS):
+        raise Refused(f'a Safe vault on chain {chain!r}')
+    if kind == 'safe' and args.policy_key_env != args.secret_env:
+        raise Refused('a Safe vault has one key: --policy-key-env must be --secret-env')
+    if connected.get('venue') not in VENUES[kind]:
         raise Refused(f'venue {connected.get("venue")!r} has no vault rules')
-    vault = addresses([connected.get('vault')], 'vault')[0]
-    settings = addresses([connected.get('settings')], 'settings')[0]
-    owners = addresses(connected.get('owners'), 'owners')
+    vault = addresses([connected.get('vault')], 'vault', chain)[0]
+    settings = addresses([connected.get('settings')], 'settings', chain)[0]
+    owners = addresses(connected.get('owners'), 'owners', chain)
     threshold = int(connected.get('threshold') or 0)
     if not 1 <= threshold <= len(owners):
         raise Refused(f'{len(owners)} owners at threshold {threshold}')
-    if set(owners) & {connected.get('payer'), connected.get('policyKey')}:
+    bot = {str(connected.get(k)).lower() for k in ('payer', 'policyKey')}
+    if {o.lower() for o in owners} & bot:
         raise Refused('a bot key is among the owners')
-    lookup = addresses([connected['lookup']], 'lookup')[0] if connected.get('lookup') else None
-    wallet = (args.wallet, 'solana', vault, args.secret_env, args.label or args.wallet)
-    vault_row = (args.wallet, 'squads', settings, owners, threshold, args.policy_key_env, lookup)
-    policy = (args.wallet, connected['venue'], addresses(connected.get('policies'), 'policies'),
-              addresses(connected.get('pools'), 'pools'), addresses(connected.get('payouts'), 'payouts'))
+    if kind == 'safe' and connected.get('lookup'):
+        raise Refused('a Safe vault has no lookup table')
+    lookup = addresses([connected['lookup']], 'lookup', chain)[0] if connected.get('lookup') else None
+    wallet = (args.wallet, chain, vault, args.secret_env, args.label or args.wallet)
+    vault_row = (args.wallet, kind, settings, owners, threshold, args.policy_key_env, lookup)
+    policy = (args.wallet, connected['venue'], addresses(connected.get('policies'), 'policies', chain),
+              addresses(connected.get('pools'), 'pools', chain), addresses(connected.get('payouts'), 'payouts', chain))
     if not policy[2] or not policy[3]:
         raise Refused('no policies or no pools')
     return wallet, vault_row, policy
@@ -107,6 +125,10 @@ def payouts(args):
     v = db.vault_row(args.wallet)
     if not v or args.venue not in v['venues']:
         raise Refused(f'wallet {args.wallet} has no vault policy for {args.venue}')
+    if v['kind'] == 'safe':
+        # The payout wallets are in the role's transfer scope: the owners change them on the
+        # Safe, so a new list is a new connect, not a row edit.
+        raise Refused('a Safe vault changes its payout wallets by a new connect (chains/evm/vault/cli.mjs)')
     wallets = addresses([w for w in args.payout.split(',') if w], '--payout')
     mints = addresses([m for m in (args.mints or '').split(',') if m], '--mints')
     accounts = payout_accounts(wallets, mints)

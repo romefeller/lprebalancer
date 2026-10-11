@@ -125,6 +125,16 @@ TARGETS = {
     'vault_config': ('config.py', ['vault_env'], PY_TESTS('test_vault_config')),
     'vault_routing': ('lp/signers.py', ['route', 'housekeeper'], PY_TESTS('test_vault_config')),
     'vault_capital': ('lp/capital.py', ['gas_for_open', 'profit_wallet_pinned'], PY_TESTS('test_vault_config', 'test_payout')),
+    'evm_roles': ('chains/evm/vault/roles.mjs', ['shape', 'oneOf', 'equal', 'condition', 'flatten', 'integrity', 'targetsOf',
+                                                 'rulesFor', 'compile', 'roleCalls', 'allows'], NODE_TESTS('test_evm_vault.mjs')),
+    'evm_safe': ('chains/evm/vault/safe.mjs', ['preValidated', 'multiSend', 'setupCalls', 'execAsOwner', 'checkOwners', 'readState',
+                                               'connectProblems'], NODE_TESTS('test_evm_vault.mjs', 'test_vault_polygon_fork.mjs')),
+    'evm_account': ('chains/evm/vault/account.mjs', ['vaultConfig', 'wrapStep', 'verifyVault', 'acting'],
+                    NODE_TESTS('test_evm_vault.mjs', 'test_vault_polygon_fork.mjs')),
+    'evm_vault_signer': ('venues/uniswap_v3/signer.mjs', ['connect', 'approvedPool', 'holdings', 'simulate', 'signStep', 'closeSteps',
+                                                          'checkVaultRecipient'],
+                         NODE_TESTS('test_evm_vault.mjs', 'test_uniswap.mjs', 'test_uniswap_polygon.mjs', 'test_vault_polygon_fork.mjs')),
+    'evm_vault_cli': ('chains/evm/vault/cli.mjs', ['poolOf', 'plan', 'connect'], NODE_TESTS('test_evm_vault.mjs', 'test_vault_polygon_fork.mjs')),
     'add_vault': ('ops/add_vault.py', ['addresses', 'register_rows', 'register', 'payouts'], PY_TESTS('test_add_vault')),
     'rpc_policy': ('shared/rpc_policy.mjs', ['endpoints', 'errorKind', 'overEndpoints', 'isEntry'], NODE_TESTS('test_rpc_policy.mjs', 'test_signer_rpc.mjs')),
     'rpc_raydium': ('venues/raydium_clmm/signer.mjs', ['withRpc', 'sendAll'], NODE_TESTS('test_signer_rpc.mjs')),
@@ -154,7 +164,7 @@ TARGETS = {
     'edge_sleep_tape': ('lp/tape.py', ['pool_price_now'], PY_TESTS('test_edge_watch')),
     'reopen_shape': ('calm.py', ['offset_band', 'band_share_a', 'p_touch_width', 'touch_state'], PY_TESTS('test_reopen_shape', 'test_regime', 'test_calm')),
     'reopen_shape_loop': ('lp/regime.py', ['reopen_width'], PY_TESTS('test_reopen_shape')),
-    'add_idle': ('lp/swaps.py', ['add_idle', 'added_usd'], PY_TESTS('test_increase_idle')),
+    'add_idle': ('lp/swaps.py', ['add_idle', 'added_usd'], PY_TESTS('test_increase_idle', 'test_vault_config')),
     'add_deposit': ('db.py', ['add_deposit'], PY_TESTS('test_increase_idle.AddDeposit')),
     'unsettled_guard': ('lp/capital.py', ['unsettled_guard', 'settle_mark', 'wallet'], PY_TESTS('test_unsettled_guard')),
     'priority_fee': ('venues/jupiter/swap.mjs', ['swapRequestBody', 'priorityFeeLamports', 'verifyPriorityFee'],
@@ -347,6 +357,12 @@ SQL_TARGETS = {'deposit_db', 'unichain_book', 'unichain_quote', 'band_profile', 
 # The report prints each survivor's key: copy it here with a reason. The line
 # number is not in the key, so an edit above a mutant keeps its entry valid.
 EQUIVALENT = {
+    ('evm_vault_signer', 'signStep', '\\?(?=\\s) -> && false ?', 'const at = bn == null ? {} : { blockNumber: bn };', 0):
+        'a call at blockNumber undefined is a call at the latest block, as with no blockNumber',
+    ('evm_vault_signer', 'signStep', '\\?\\? -> ||', 'const me = ctx.from ?? ctx.me;              // a context built before vaults has `me` only', 0):
+        'ctx.from is an address or missing: ?? and || agree',
+    ('evm_vault_signer', 'signStep', '\\?\\? -> ||', 'const req = { account: me, to: call.to, data: call.data, value: call.value ?? 0n };', 0):
+        'a value of 0n or none is 0n either way: ?? and || agree',
     ('edge_fixes', 'probe_rpc', 'const 10->11', 'def probe_rpc(url=None, fallback=None, timeout=10):', 0):
         'the probe timeout: a dead endpoint fails at once in the tests, a slow one is not modelled',
     ('edge_fixes', 'probe_rpc', 'const 10->20', 'def probe_rpc(url=None, fallback=None, timeout=10):', 0):
