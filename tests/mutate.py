@@ -139,7 +139,7 @@ TARGETS = {
     'add_vault': ('ops/add_vault.py', ['addresses', 'register_rows', 'register', 'payouts'], PY_TESTS('test_add_vault')),
     # Self-serve onboarding (onboard/, 2026-10-11): what an owner signs, the gas payment it
     # must make before the bot spends anything, the server's gates, the rows it writes.
-    'onboard_intent': ('onboard/intent.mjs', ['address', 'amount', 'toRaw', 'fromRaw', 'name', 'nativeOf', 'gasTotal', 'minimum',
+    'onboard_intent': ('onboard/intent.mjs', ['decimal', 'address', 'amount', 'toRaw', 'fromRaw', 'name', 'nativeOf', 'gasTotal', 'minimum',
                                               'feeTerms', 'fields', 'verify', 'decodeSignature', 'inviteOk'], NODE_TESTS('test_onboard.mjs')),
     'onboard_sol_payment': ('onboard/solana.mjs', ['vaultVenues', 'paymentVerdict', 'checkPayment', 'gas', 'paymentTxs'],
                             NODE_TESTS('test_onboard.mjs', 'test_onboard_fork.mjs')),

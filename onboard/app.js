@@ -5,6 +5,13 @@
   const api = (p) => new URL(`api/${p}`, location.href.replace(/[?#].*$/, '').replace(/\/?$/, '/')).toString();
   const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
+  // An amount box shows a point for the decimal comma a phone keyboard types (iPhone,
+  // pt-BR): "0,18" reads 0.18. The server takes either.
+  document.addEventListener('input', (e) => {
+    const box = e.target;
+    if (box.matches?.('input[inputmode="decimal"]') && box.value.includes(',')) box.value = box.value.replace(/,/g, '.');
+  });
+
   // --- small helpers ----------------------------------------------------------
   function el(tag, attrs = {}, ...kids) {
     const e = document.createElement(tag);

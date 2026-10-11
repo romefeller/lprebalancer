@@ -326,7 +326,7 @@ export function makeServer(cfg, deps) {
     let answer;
     if (action === 'deposit') answer = await adapter.deposit({ owner: r.owner, vault: r.vault, token: r.token, amount: r.deposit });
     else if (action === 'withdraw' || action === 'revoke') {
-      const amount = I.text(body.amount);
+      const amount = I.decimal(body.amount);
       if (action === 'withdraw' && amount !== 'all' && !/^\d{1,12}(\.\d{1,18})?$/.test(amount)) throw new HttpError(400, 'amount: a number or all');
       answer = await adapter.owner(r.vault_row, { action, owner: r.owner, token: I.text(body.token), amount });
     } else throw new HttpError(400, 'action: deposit, withdraw or revoke');

@@ -46,11 +46,18 @@ export function address(chain, s, what) {
 
 export const sameAddress = (chain, a, b) => chain === 'solana' ? a === b : String(a).toLowerCase() === String(b).toLowerCase();
 
+// A decimal as typed: a phone keyboard in many regions (iPhone, pt-BR) has a
+// comma, not a point, so one comma and no point is a decimal comma ("0,18").
+export function decimal(s) {
+  const v = text(s);
+  return /^\d+,\d+$/.test(v) ? v.replace(',', '.') : v;
+}
+
 // A positive decimal amount of `token` within its bounds, as a canonical
 // string ("1.5", never "01.50"). Bounds are decimal strings in the config;
 // `extra` (raw units) raises the minimum (the gas a native deposit pays).
 export function amount(s, token, extra = 0n) {
-  const v = text(s);
+  const v = decimal(s);
   if (!/^\d{1,12}(\.\d+)?$/.test(v)) throw new Invalid('amount: a number like 1.5');
   if (v.includes('.') && v.split('.')[1].length > token.decimals) throw new Invalid(`amount: at most ${token.decimals} decimals`);
   const raw = toRaw(v, token.decimals);

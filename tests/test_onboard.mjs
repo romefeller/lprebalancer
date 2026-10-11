@@ -61,7 +61,8 @@ test('fields: every refusal', () => {
     [{ amount: '0' }, /more than zero/], [{ amount: '-1' }, /a number/], [{ amount: '1e3' }, /a number/],
     [{ amount: '0.0000000001' }, /at most 9 decimals/], [{ amount: '0.164999999' }, /at least 0.165/], [{ amount: '0.165' }, null],
     [{ amount: '51' }, /at most 50/], [{ token: 'USDC', amount: '9.99' }, /at least 10$/],
-    [{ amount: '' }, /a number/], [{ amount: ' 1 ' }, null], [{ name: 'My-Pool' }, /name/], [{ name: 'ab' }, /name/],
+    [{ amount: '' }, /a number/], [{ amount: ' 1 ' }, null],
+    [{ amount: '0,18' }, null], [{ amount: '1,000.5' }, /a number/], [{ amount: '1.000,5' }, /a number/], [{ amount: '0,1,8' }, /a number/], [{ amount: ',5' }, /a number/], [{ name: 'My-Pool' }, /name/], [{ name: 'ab' }, /name/],
     [{ name: 'a--b' }, /name/], [{ name: 'pool-' }, /name/], [{ name: '1pool' }, /name/], [{ name: 'a'.repeat(33) }, /name/],
     [{ name: 'sol-usdc' }, /reserved/], [{ name: 'poly-wpol-usdt' }, /reserved/], [{ name: 'sol-lp' }, /reserved/],
     [{ name: 'my pool' }, /name/], [{ name: 'pool;rm' }, /name/],
@@ -712,4 +713,11 @@ test('server: new requests per address and in all, per day', async () => {
     assert.equal((await make('pool-over')).status, 429);
     assert.equal(f.db.rows.length, CFG.limits.creates.max);
   });
+});
+
+test('decimal: a phone\'s decimal comma is a point; anything else is left for the checks', () => {
+  assert.equal(I.decimal('0,18'), '0.18');
+  assert.equal(I.decimal(' 12,5 '), '12.5');
+  for (const v of ['0.18', '1,000.5', '1.000,5', '0,1,8', ',5', '5,', 'all', '']) assert.equal(I.decimal(v), v.trim(), v);
+  assert.equal(I.fields(body({ amount: '0,18' }), CFG).amount, '0.18', 'the signed amount has a point');
 });
