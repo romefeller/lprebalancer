@@ -462,6 +462,7 @@ async function oldBridge() {
 
 const OLD_SRC = { bridge: gitShow('telegram_bridge.mjs'), book: gitShow('book_format.mjs'), emoji: gitShow('event_emoji.json') };
 const hasOld = Object.values(OLD_SRC).every(Boolean) && OLD_SRC.bridge.includes('async function tail() {');
+const OLD_EMOJI = hasOld ? JSON.parse(OLD_SRC.emoji) : {};
 
 test('every row of the real feed renders as before, behind its pool label', { skip: !hasOld }, async () => {
   const oldMessage = await oldBridge();
@@ -495,6 +496,14 @@ test('every row of the real feed renders as before, behind its pool label', { sk
       let got = message(r);
       // DAILY lines gained "capital moved" (665c039) and the reference-period line (9aaf63c) after the old bridge
       if (r.event === 'DAILY') got = got.replace(/ · capital moved [^\n·]*/, '').replace(/\nvs [^\n]*?\(avg [^\n]*?(?= · SOL| ·? *$|$)/, '');
+      // an event the old emoji map lacked (increase_recovered, 2026-10-11) got its own emoji since:
+      // the old bridge drew the default one, so compare the text after it
+      if (!(r.event in OLD_EMOJI)) {
+        const after = (m) => m.slice(m.indexOf(' ') + 1);
+        assert.equal(after(got.slice(label ? label.length + 1 : 0)), after(want), `${f}: ${line.slice(0, 200)}`);
+        n += 1;
+        continue;
+      }
       assert.equal(got, (label ? label + ' ' : '') + want, `${f}: ${line.slice(0, 200)}`);
       n += 1;
     }
