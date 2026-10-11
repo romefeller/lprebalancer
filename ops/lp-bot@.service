@@ -33,6 +33,11 @@ Environment=WALLET_SECRET_PATH=/home/ubuntu/.kamino-keys/bot-wallet.secret
 Environment=LPBOT_EVM_KEY_PATH=/home/ubuntu/.kamino-keys/evm-wallet.secret
 Environment=LPBOT_UNICHAIN_KEY_PATH=/home/ubuntu/.kamino-keys/unichain-wallet.secret
 Environment=LPBOT_POLYGON_KEY_PATH=/home/ubuntu/.kamino-keys/polygon-wallet.secret
+# Every vault instance (onboard/, romefeller.app/bot) signs with these shared keys,
+# named by its wallet row (secret_env, policy_key_env). They hold no owner's money.
+Environment=LPBOT_VAULT_SOL_PAYER_PATH=/home/ubuntu/.kamino-keys/vault-test/payer.json
+Environment=LPBOT_VAULT_SOL_POLICY_PATH=/home/ubuntu/.kamino-keys/vault-test/policy.json
+Environment=LPBOT_VAULT_EVM_KEY_PATH=/home/ubuntu/.kamino-keys/vault-test/evm.secret
 Environment=SOLANA_RPC_URL=https://api.mainnet-beta.solana.com
 Environment=LPBOT_DSN=dbname=rebalancer
 ExecStart=/usr/bin/python3 -u /home/ubuntu/agent-fin/lp_bot/rebalancer.py

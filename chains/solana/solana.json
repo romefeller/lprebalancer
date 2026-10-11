@@ -9,6 +9,13 @@
     "PYUSD": "2b1kV6DkPAnxd5ixfnxCpjxmKwqjjaYmCZfHsFu24GXo",
     "USDS": "USDSwr9ApdHk5bvJKMjzff41FfuX8bSxdKcR81vTwcA"
   },
+  "operator_profit_wallet": "8funmDkPNBtjqfNkBEoBF16eBfyQ4vMAFrs4Nyys5D1h",
+  "sol_usdc_pools": {
+    "meteora-dlmm": "5rCf1DM8LjKTw4YqhnoLcngyZYeNnQqztScTogYHAS6",
+    "raydium-clmm": "8sLbNZoA1cfnvMJLPfp98ZLAnFSYCFApfJKMbiXNLwxj",
+    "orca": "Czfq3xZZDmsdGdUyrNLtRhGc47cXcZtLG4crryfu44zE",
+    "byreal": "9GTj99g9tbz9U6UYDsX6YeRTgUnkYG6GTnHv3qLa5aXq"
+  },
   "programs": {
     "system": "11111111111111111111111111111111",
     "token": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",

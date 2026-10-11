@@ -99,7 +99,9 @@ function keys(dir) {
   console.log(JSON.stringify({ ...out, next: `send gas (SOL) to the payer ${out.payer.publicKey}; never to the policy key` }, null, 1));
 }
 
-export async function connect(f, { connection = new Connection(RPC, 'confirmed') } = {}) {
+// `payer` and `policyKey` default to the keys the environment names; `log`
+// gets the report (onboard/server.mjs passes its own).
+export async function connect(f, { connection = new Connection(RPC, 'confirmed'), payer = null, policyKey = null, log = console.log } = {}) {
   const owners = keysOf(f.owners, '--owners');
   const threshold = Number(f.threshold ?? 1);
   const venue = f.venue;
@@ -107,10 +109,10 @@ export async function connect(f, { connection = new Connection(RPC, 'confirmed')
   const payoutWallets = keysOf(f.payout, '--payout');
   const payoutMints = keysOf(f['payout-mint'] ?? SOLANA.usdc_mint, '--payout-mint');
   if (!venue || !pools.length) throw new Error('connect needs --venue and --pools');
-  const payer = await readKeypair(process.env.WALLET_SECRET_PATH ?? '');
-  const policyKey = await readKeypair(process.env.LPBOT_VAULT_POLICY_KEY ?? '');
+  payer ??= await readKeypair(process.env.WALLET_SECRET_PATH ?? '');
+  policyKey ??= await readKeypair(process.env.LPBOT_VAULT_POLICY_KEY ?? '');
   const config = sq.decodeProgramConfig((await connection.getAccountInfo(sq.programConfigPda())).data);
-  if (config.creationFee > 0n) console.error(`note: the program charges ${Number(config.creationFee) / 1e9} SOL per account`);
+  if (config.creationFee > 0n) log(`note: the program charges ${Number(config.creationFee) / 1e9} SOL per account`);
   const seed = config.smartAccountIndex + 1n;
   const vault = sq.vaultPda(sq.settingsPda(seed));
   const payouts = payoutAccounts(payoutWallets, payoutMints);
@@ -127,8 +129,8 @@ export async function connect(f, { connection = new Connection(RPC, 'confirmed')
     transactions: plan.txs.length, lookupAddresses: lookupAddresses.length,
   };
   if (!f.execute) {
-    console.log(JSON.stringify({ ...report, sent: false }, null, 1));
-    console.log('DRY RUN — pass --execute to create the vault. Nothing is deposited by this.');
+    log(JSON.stringify({ ...report, sent: false }, null, 1));
+    log('DRY RUN — pass --execute to create the vault. Nothing is deposited by this.');
     return report;
   }
   const sigs = await sendAll(connection, payer, plan.txs);
@@ -139,7 +141,7 @@ export async function connect(f, { connection = new Connection(RPC, 'confirmed')
   sigs.push(...await sendAll(connection, payer, lookup.txs));
   const done = { ...report, lookup: lookup.table.toBase58(), signatures: sigs, sent: true,
     deposit: `owners deposit to ${report.vault} (the vault), never to ${report.settings}` };
-  console.log(JSON.stringify(done, null, 1));
+  log(JSON.stringify(done, null, 1));
   return done;
 }
 

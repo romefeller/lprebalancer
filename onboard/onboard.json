@@ -1,0 +1,85 @@
+{
+  "_doc": [
+    "The self-serve page at romefeller.app/bot (onboard/server.mjs). No secret here: the invite's",
+    "SHA-256 and the bot's key PATHS come from the environment variables named below.",
+    "",
+    "chains.<chain>",
+    "  template        the profile whose tuning every new instance copies (ops/add_profile.py)",
+    "  venues          venues in order of preference; the first with vault rules and a pool is used",
+    "  poolsKey        Solana: the key in chains/solana/solana.json that maps venue -> pool",
+    "  pool            EVM: the one pool",
+    "  operatorWallet  the operator's profit wallet (Solana: a solana.json key). A request whose",
+    "                  profit wallet is this one is the operator's own (special, no fee share);",
+    "                  any other pays fee.bps of its payout-token fees to it",
+    "  tokens          what an owner can deposit. Solana: mintKey names a solana.json key. EVM:",
+    "                  the chain module's export of that name; native: the chain's coin, which",
+    "                  the page wraps first (wrapsTo) because a vault never wraps",
+    "  gas             what the owner pays the bot's key, in the native coin, before the bot spends",
+    "                  anything: setup (one connect, measured on a fork: Solana 2026-10-11 0.03282 SOL",
+    "                  for create, 3 policies, leave, lookup table with 2 payout wallets; Polygon",
+    "                  1,872,109 gas = 0.347 POL at 185 gwei), a margin over it (fees and gas prices",
+    "                  move), and the instance's running gas (Solana: gas_reserve_sol 0.05 + the DLMM",
+    "                  open headroom 0.05). confirmations (EVM): blocks a payment needs on top",
+    "  tokens.min      the least pool capital; a native deposit must also cover the gas",
+    "",
+    "intentTtlS: how long a message to sign is good for; paymentSlackS: how much older than the",
+    "signed request its gas payment's block time may be (block clocks drift).",
+    "limits: {max, windowS} per client address unless said; vaultsPerOwner counts every vault",
+    "the owner's wallet owns. service.start runs with {name} replaced by a checked profile name."
+  ],
+  "listen": { "host": "127.0.0.1", "port": 8090 },
+  "base": "/bot",
+  "site": "romefeller.app/bot",
+  "inviteEnv": "LPBOT_ONBOARD_INVITE_SHA256",
+  "intentTtlS": 600,
+  "paymentSlackS": 120,
+  "limits": {
+    "bodyBytes": 8192,
+    "requests": { "max": 120, "windowS": 600 },
+    "badInvites": { "max": 5, "windowS": 3600 },
+    "creates": { "max": 3, "windowS": 86400 },
+    "createsTotal": { "max": 10, "windowS": 86400 },
+    "vaultsPerOwner": 3,
+    "openIntents": 500
+  },
+  "fee": { "bps": 1000 },
+  "reservedNames": ["sol-usdc", "sol-swing", "poly-wpol-usdt", "sol-lp", "sol-lp2", "poly-lp"],
+  "service": {
+    "start": ["sudo", "-n", "/usr/bin/systemctl", "enable", "--now", "lp-bot@{name}.service"],
+    "status": ["/usr/bin/systemctl", "is-active", "lp-bot@{name}.service"]
+  },
+  "chains": {
+    "solana": {
+      "label": "Solana",
+      "pair": "SOL/USDC",
+      "template": "sol-usdc",
+      "venues": ["meteora-dlmm", "raydium-clmm", "orca", "byreal"],
+      "poolsKey": "sol_usdc_pools",
+      "operatorWallet": "operator_profit_wallet",
+      "payoutToken": "USDC",
+      "payerKeyEnv": "LPBOT_VAULT_SOL_PAYER_PATH",
+      "policyKeyEnv": "LPBOT_VAULT_SOL_POLICY_PATH",
+      "gas": { "setup": "0.0329", "margin": "0.0121", "reserve": "0.1" },
+      "tokens": {
+        "SOL": { "mintKey": "native_mint", "native": true, "decimals": 9, "min": "0.05", "max": "50" },
+        "USDC": { "mintKey": "usdc_mint", "decimals": 6, "min": "10", "max": "10000" }
+      }
+    },
+    "polygon": {
+      "label": "Polygon",
+      "pair": "WPOL/USDT0",
+      "template": "poly-wpol-usdt",
+      "venues": ["uniswap-v3-polygon"],
+      "pool": "0x9B08288C3Be4F62bbf8d1C20Ac9C5e6f9467d8B7",
+      "operatorWallet": "0x2b35948898e1b4897E7FC5a70e39b213dcfd0142",
+      "payoutToken": "USDT0",
+      "keyEnv": "LPBOT_VAULT_EVM_KEY_PATH",
+      "gas": { "setup": "0.35", "margin": "0.65", "reserve": "3", "confirmations": 5 },
+      "tokens": {
+        "POL": { "native": true, "wrapsTo": "WPOL", "decimals": 18, "min": "20", "max": "100000" },
+        "WPOL": { "decimals": 18, "min": "20", "max": "100000" },
+        "USDT0": { "decimals": 6, "min": "10", "max": "10000" }
+      }
+    }
+  }
+}

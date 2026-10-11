@@ -137,6 +137,18 @@ TARGETS = {
                          NODE_TESTS('test_evm_vault.mjs', 'test_uniswap.mjs', 'test_uniswap_polygon.mjs', 'test_vault_polygon_fork.mjs')),
     'evm_vault_cli': ('chains/evm/vault/cli.mjs', ['poolOf', 'plan', 'connect'], NODE_TESTS('test_evm_vault.mjs', 'test_vault_polygon_fork.mjs')),
     'add_vault': ('ops/add_vault.py', ['addresses', 'register_rows', 'register', 'payouts'], PY_TESTS('test_add_vault')),
+    # Self-serve onboarding (onboard/, 2026-10-11): what an owner signs, the gas payment it
+    # must make before the bot spends anything, the server's gates, the rows it writes.
+    'onboard_intent': ('onboard/intent.mjs', ['address', 'amount', 'toRaw', 'fromRaw', 'name', 'nativeOf', 'gasTotal', 'minimum',
+                                              'feeTerms', 'fields', 'verify', 'decodeSignature', 'inviteOk'], NODE_TESTS('test_onboard.mjs')),
+    'onboard_sol_payment': ('onboard/solana.mjs', ['vaultVenues', 'paymentVerdict', 'checkPayment', 'gas', 'paymentTxs'],
+                            NODE_TESTS('test_onboard.mjs', 'test_onboard_fork.mjs')),
+    'onboard_evm_payment': ('onboard/polygon.mjs', ['paymentVerdict', 'checkPayment', 'gas', 'paymentTxs'],
+                            NODE_TESTS('test_onboard.mjs', 'test_onboard_polygon_fork.mjs')),
+    'onboard_server': ('onboard/server.mjs', ['makeServer', 'clientOf', 'serviceCommand'], NODE_TESTS('test_onboard.mjs')),
+    'onboard_store': ('onboard/store.py', ['same_owner', 'taken', 'owned', 'sign', 'paid', 'resume', 'connected', 'stuck', 'register',
+                                           'started'], PY_TESTS('test_onboard_store')),
+    'onboard_fee_terms': ('ops/add_profile.py', ['fee_terms'], PY_TESTS('test_add_profile', 'test_onboard_store')),
     'rpc_policy': ('shared/rpc_policy.mjs', ['endpoints', 'errorKind', 'overEndpoints', 'isEntry'], NODE_TESTS('test_rpc_policy.mjs', 'test_signer_rpc.mjs')),
     'rpc_raydium': ('venues/raydium_clmm/signer.mjs', ['withRpc', 'sendAll'], NODE_TESTS('test_signer_rpc.mjs')),
     'rpc_dlmm': ('venues/meteora_dlmm/signer.mjs', ['withRpc', 'sendAll'], NODE_TESTS('test_signer_rpc.mjs')),
@@ -358,6 +370,26 @@ SQL_TARGETS = {'deposit_db', 'unichain_book', 'unichain_quote', 'band_profile', 
 # The report prints each survivor's key: copy it here with a reason. The line
 # number is not in the key, so an edit above a mutant keeps its entry valid.
 EQUIVALENT = {
+    # onboard/server.mjs: `??` -> `||` where the left side is a function, an object, a string
+    # or absent, never 0, false or '' that would read differently.
+    ('onboard_server', 'makeServer', '\\?\\? -> ||', 'const now = deps.now ?? (() => Date.now());', 0):
+        'deps.now is a function or absent: ?? and || pick the same',
+    ('onboard_server', 'makeServer', '\\?\\? -> ||', 'const log = deps.log ?? ((o) => console.log(JSON.stringify({ t: new Date(now()).toISOString(), ...o })));', 0):
+        'deps.log is a function or absent: ?? and || pick the same',
+    ('onboard_server', 'makeServer', '\\?\\? -> ||', "const hashes = String(deps.inviteHashes ?? '').split(',').map(s => s.trim().toLowerCase()).filter(Boolean);", 0):
+        "inviteHashes is a string or absent; '' and absent both give no hash",
+    ('onboard_server', 'makeServer', '\\?\\? -> ||', 'connected ??= e.connected ?? null;', 0):
+        'e.connected is a connect report (an object) or absent: ?? and || pick the same',
+    ('onboard_server', 'makeServer', '\\?\\? -> ||', 'connected ??= e.connected ?? null;', 1):
+        'e.connected is a connect report (an object) or absent: ?? and || pick the same',
+    ('onboard_server', 'makeServer', '\\?\\? -> ||', "log({ event: 'setup_stuck', chain: r.chain, name: r.name, error: e.message, vault: connected?.vault ?? null });", 0):
+        'a log line only; a vault address is a non-empty string or absent',
+    ('onboard_server', 'makeServer', '\\?\\? -> ||', "log({ event: 'error', path: sub, error: String(e?.message ?? e).slice(0, 500) });", 0):
+        'a log line only',
+    ('onboard_server', 'clientOf', '\\?\\? -> ||', "const peer = req.socket.remoteAddress ?? '';", 0):
+        "remoteAddress is a non-empty string or absent: ?? and || give the same ''",
+    ('onboard_server', 'clientOf', '\\?\\? -> ||', "const fwd = String(req.headers['x-forwarded-for'] ?? '').split(',')[0].trim();", 0):
+        "the header is a string or absent; '' and absent both give no forwarded address",
     ('evm_vault_signer', 'signStep', '\\?(?=\\s) -> && false ?', 'const at = bn == null ? {} : { blockNumber: bn };', 0):
         'a call at blockNumber undefined is a call at the latest block, as with no blockNumber',
     ('evm_vault_signer', 'signStep', '\\?\\? -> ||', 'const me = ctx.from ?? ctx.me;              // a context built before vaults has `me` only', 0):

@@ -1,0 +1,10 @@
+# /etc/sudoers.d/lp-onboard (mode 0440; check with `sudo visudo -c`).
+# The onboarding server (ops/lp-onboard.service, user ubuntu) may start and enable
+# ONE lp-bot instance by a profile name, and run nothing else as root. The name is
+# checked twice before: onboard/intent.mjs NAME, and the profile must exist with a
+# deposit in its vault. The pattern is a sudo regular expression (sudo >= 1.9.10).
+# Starting a profile is all it can do: no stop, no other unit, no other verb.
+# Check after install, as ubuntu:
+#   sudo -n -l /usr/bin/systemctl enable --now lp-bot@some-name.service   # allowed
+#   sudo -n -l /usr/bin/systemctl stop lp-bot@sol-usdc.service           # refused
+ubuntu ALL=(root) NOPASSWD: /usr/bin/systemctl ^enable --now lp-bot@[a-z][a-z0-9-]{1,30}[a-z0-9][.]service$

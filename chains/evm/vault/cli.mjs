@@ -7,13 +7,16 @@
 //       bot's role, adds the owners and removes the bot, in three transactions the bot pays.
 //       No owner signs anything. Prints one JSON object (ops/add_vault.py register reads it).
 //   node chains/evm/vault/cli.mjs status --safe <safe> --roles <roles>
+//   node chains/evm/vault/cli.mjs keys <file>
+//       a new bot key (0600, in a directory only its user can read). Prints its address;
+//       the owner sends gas (POL) to it. One key can serve every vault (onboard/).
 //
 // The owners run the Safe with the Safe app (app.safe.global): withdraw is a transfer from
 // the Safe; revoke is Settings > Modules > remove the Roles module.
 import crypto from 'node:crypto';
 import { createPublicClient, createWalletClient, encodeFunctionData, getAddress, http, isAddress } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
-import { readKey } from '../keyfile.mjs';
+import { readKey, writeNewKey } from '../keyfile.mjs';
 import { chainModule } from '../chains.mjs';
 import { isEntry } from '../../../shared/rpc_policy.mjs';
 import { assertNotHalted } from '../../../shared/halt_guard.mjs';
@@ -78,12 +81,13 @@ async function sent(pub, hash, what) {
 
 export async function connect(f, deps = {}) {
   const { U, account, pub, wallet } = deps.pub ? deps : clients(deps.env);
+  const log = deps.log ?? console.log;
   const p = await plan(f, { pub, U, account });
   const bot = account.address;
   const report = { kind: 'safe', chain: U.CHAIN, venue: p.venue, owners: p.owners, threshold: p.threshold, payer: bot, policyKey: bot,
     pools: p.pools.map(x => x.pool), payouts: p.payouts, role: p.compiled.role, scopes: p.compiled.functions.length, lookup: null };
   if (!f.execute) {
-    console.log(JSON.stringify({ ...report, sent: false, functions: p.compiled.functions.map(x => `${x.name} @ ${x.target}`) }, null, 1));
+    log(JSON.stringify({ ...report, sent: false, functions: p.compiled.functions.map(x => `${x.name} @ ${x.target}`) }, null, 1));
     return report;
   }
   assertNotHalted(BOT_ROOT, process.env);
@@ -115,7 +119,7 @@ export async function connect(f, deps = {}) {
   const wei = receipts.reduce((a, r) => a + r.gasUsed * r.effectiveGasPrice, 0n);
   const out = { ...report, sent: true, vault: safe, settings: safe, roles, policies: [roles], gas, cost: Number(wei) / 1e18,
     signatures: receipts.map(r => r.transactionHash), problems };
-  console.log(JSON.stringify(out, null, 1));
+  log(JSON.stringify(out, null, 1));
   if (problems.length) process.exitCode = 1;
   return out;
 }
@@ -136,7 +140,15 @@ async function main() {
   const f = flags(rest);
   if (cmd === 'connect') return connect(f);
   if (cmd === 'status') return status(f);
-  console.log('commands: connect --owners <a,..> [--threshold n] --pools <p,..> [--payout <w,..>] [--venue v] [--execute] | status --safe <s> --roles <r>');
+  if (cmd === 'keys') {
+    const file = rest[0];
+    if (!file || file.startsWith('--')) throw new Error('keys <file>: where to write the new key');
+    writeNewKey(file, `0x${crypto.randomBytes(32).toString('hex')}`);
+    return console.log(JSON.stringify({ file, address: privateKeyToAccount(readKey(file)).address,
+      next: 'send gas (POL) to this address; it pays for every vault it connects and runs' }));
+  }
+  console.log('commands: connect --owners <a,..> [--threshold n] --pools <p,..> [--payout <w,..>] [--venue v] [--execute] '
+    + '| status --safe <s> --roles <r> | keys <file>');
 }
 
 if (isEntry(import.meta.url)) {

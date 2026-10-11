@@ -1,0 +1,56 @@
+<!doctype html>
+<!--
+  romefeller.app/bot: an owner creates a vault for the LP bot, deposits, and
+  manages the vaults it owns (onboard/server.mjs serves this page and app.js).
+  The page holds no key and sends nothing itself: the owner's wallet signs and
+  sends every transaction it shows.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Aperture bot</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main>
+  <h1>Aperture</h1>
+  <p class="lead">Your own vault for the LP bot. You own it; the bot can only run its pool and pay your profit wallet.</p>
+
+  <section id="invite-box" hidden>
+    <label for="invite">Invite code</label>
+    <input id="invite" autocomplete="off" spellcheck="false">
+  </section>
+
+  <section>
+    <label for="chain">Chain</label>
+    <select id="chain"></select>
+    <button id="connect" class="primary">Connect wallet</button>
+    <p id="wallet" class="mono muted"></p>
+  </section>
+
+  <section id="form" hidden>
+    <h2>New vault</h2>
+    <label for="amount">Amount to put in the bot</label>
+    <div class="row"><input id="amount" inputmode="decimal" autocomplete="off"><select id="token"></select></div>
+    <p id="bounds" class="muted small"></p>
+    <label for="profit">Profit wallet (payouts go here)</label>
+    <input id="profit" autocomplete="off" spellcheck="false">
+    <label for="name">Pool name (shown in Telegram: a-z, 0-9, -)</label>
+    <input id="name" autocomplete="off" spellcheck="false" maxlength="32">
+    <p></p>
+    <button id="sign" class="primary">Sign</button>
+    <pre id="message" hidden></pre>
+    <div id="progress"></div>
+  </section>
+
+  <section id="mine" hidden>
+    <h2>Your vaults</h2>
+    <div id="vaults"></div>
+  </section>
+
+  <p id="error" class="warn" role="alert"></p>
+</main>
+<script src="app.js"></script>
+</body>
+</html>

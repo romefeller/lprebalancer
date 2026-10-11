@@ -1,0 +1,39 @@
+# /etc/caddy/Caddyfile: romefeller.app serves the onboarding page under /bot and
+# nothing else (the x402 service on :8080 is retired). Caddy keeps the TLS
+# certificate. Install after review:
+#   sudo cp /etc/caddy/Caddyfile /etc/caddy/Caddyfile.bak-x402
+#   sudo install -m 644 ops/onboard/Caddyfile /etc/caddy/Caddyfile
+#   sudo install -D -m 644 ops/onboard/caddy-memory.conf /etc/systemd/system/caddy.service.d/memory.conf
+#   caddy validate --config /etc/caddy/Caddyfile
+#   sudo systemctl daemon-reload && sudo systemctl restart caddy
+romefeller.app {
+	# /bot and /bot/... go to the onboarding server; anything else is 404
+	@bot path /bot /bot/*
+	handle @bot {
+		request_body {
+			max_size 16KB
+		}
+		# Caddy sets X-Forwarded-For to the client's address (no trusted proxies before
+		# it); the server's rate limits read it from 127.0.0.1 only
+		reverse_proxy 127.0.0.1:8090
+	}
+	handle {
+		respond 404
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "no-referrer"
+		-Server
+	}
+
+	log {
+		output file /var/log/caddy/bot.log {
+			roll_size 10MiB
+			roll_keep 5
+		}
+		format json
+	}
+}
