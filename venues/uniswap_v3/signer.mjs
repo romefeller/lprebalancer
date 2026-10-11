@@ -80,6 +80,7 @@ export function settings(env = process.env) {
   return {
     maxUsd: num('LPBOT_MAX_USD', 260),
     slippageBps: num('LPBOT_SLIPPAGE_BPS', 100),
+    priceSlippageBps: num('LPBOT_PRICE_SLIPPAGE_BPS', 50),   // opens and closes: a price range (clmath.openMinimums)
     gasReserve: M.toRaw(num('LPBOT_GAS_RESERVE_NATIVE', 0.0005), 18),
     maxImpact: num('LPBOT_MAX_IMPACT', 0.01),
     maxOracleDev: num('LPBOT_MAX_ORACLE_DEV', 0.02),
@@ -573,7 +574,7 @@ export function planOpen(info, h, cfg, sleeve, lower, upper, maxA, maxB) {
   if (!(approxUsd <= cfg.maxUsd)) refusals.push(`position about $${Number.isFinite(approxUsd) ? approxUsd.toFixed(2) : '?'} exceeds cap $${cfg.maxUsd}`);
   if (h.rawA < dep.amountA) refusals.push(`wallet lacks ${amtA} ${info.symbolA}`);
   if (h.rawB < dep.amountB) refusals.push(`wallet lacks ${amtB} ${info.symbolB}`);
-  const minA = M.minWithSlippage(dep.amountA, cfg.slippageBps), minB = M.minWithSlippage(dep.amountB, cfg.slippageBps);
+  const { minA, minB } = M.openMinimums(BigInt(info.sqrtPriceX96), sa, sb, dep.amountA, dep.amountB, cfg.priceSlippageBps);
   return { refusals, tickLower, tickUpper, capA, capB, dep, amtA, amtB, approxUsd, minA, minB };
 }
 
@@ -669,7 +670,7 @@ export function planIncrease(info, x, h, cfg, sleeve, maxA, maxB) {
   }
   if (h.rawA < dep.amountA) refusals.push(`wallet lacks ${amtA} ${info.symbolA}`);
   if (h.rawB < dep.amountB) refusals.push(`wallet lacks ${amtB} ${info.symbolB}`);
-  const minA = M.minWithSlippage(dep.amountA, cfg.slippageBps), minB = M.minWithSlippage(dep.amountB, cfg.slippageBps);
+  const { minA, minB } = M.openMinimums(sp, sa, sb, dep.amountA, dep.amountB, cfg.priceSlippageBps);
   return { refusals, capA, capB, dep, amtA, amtB, addUsd, heldUsd, minA, minB };
 }
 
@@ -778,16 +779,18 @@ async function harvest(tokenArg, execute) {
   });
 }
 
-// decreaseLiquidity (all of it, amountMin at slippage) + collect + burn, in ONE NPM
+// decreaseLiquidity (all of it, amountMin over a price range) + collect + burn, in ONE NPM
 // multicall: one transaction, so a close is never left half done.
 export function closeCalls(x, info, me, cfg, dl) {
   const sa = M.sqrtRatioAtTick(x.tickLower), sb = M.sqrtRatioAtTick(x.tickUpper);
-  const [e0, e1] = M.amountsForLiquidity(BigInt(info.sqrtPriceX96), sa, sb, x.liquidity, false);
+  const sp = BigInt(info.sqrtPriceX96);
+  const [e0, e1] = M.amountsForLiquidity(sp, sa, sb, x.liquidity, false);
   const calls = [];
   if (x.liquidity > 0n) {
+    const { minA, minB } = M.closeMinimums(sp, sa, sb, x.liquidity, cfg.priceSlippageBps);
     calls.push(encodeFunctionData({ abi: U.NPM_ABI, functionName: 'decreaseLiquidity', args: [{
       tokenId: x.tokenId, liquidity: x.liquidity,
-      amount0Min: M.minWithSlippage(e0, cfg.slippageBps), amount1Min: M.minWithSlippage(e1, cfg.slippageBps), deadline: dl,
+      amount0Min: minA, amount1Min: minB, deadline: dl,
     }] }));
   }
   calls.push(collectData(x.tokenId, me));

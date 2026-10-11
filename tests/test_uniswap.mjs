@@ -48,7 +48,7 @@ function poolInfo(usdPerHype = 90, extra = {}) {
     nativeSide: null, feePips: 3000, volatile: U.HYPE, poolUsd: 1 / p, referenceUsd: 1 / p, referenceDeviation: 0, ...extra,
   };
 }
-const CFG = { maxUsd: 260, slippageBps: 100, gasReserve: M.toRaw('0.0005', 18), maxImpact: 0.01, maxOracleDev: 0.02,
+const CFG = { maxUsd: 260, slippageBps: 100, priceSlippageBps: 50, gasReserve: M.toRaw('0.0005', 18), maxImpact: 0.01, maxOracleDev: 0.02,
   maxFeeWei: M.toRaw('0.5', 9), pin: PIN, profit: '', sleeve: '' };
 const rich = { eth: E18 / 100n, rawA: 200n * E6, rawB: 2n * E18 };
 
@@ -195,7 +195,7 @@ test('positionView: principal and fees in dollars with stable A; rent is zero; i
   assert.strictEqual(S.positionView({ ...x, tickLower: info.tick + 60, tickUpper: info.tick + 600 }, info, [0n, 0n]).inRange, false);
 });
 
-test('closeCalls: decrease all liquidity at slippage, collect, burn; no decrease without liquidity', () => {
+test('closeCalls: decrease all liquidity with price-range minimums, collect, burn; no decrease without liquidity', () => {
   const info = poolInfo(90);
   const x = { tokenId: 7n, tickLower: info.tick - 600, tickUpper: info.tick + 600, liquidity: 10n ** 15n };
   const { calls, estA, estB } = S.closeCalls(x, info, OTHER, CFG, 123n);
@@ -203,8 +203,10 @@ test('closeCalls: decrease all liquidity at slippage, collect, burn; no decrease
   const dec = decodeFunctionData({ abi: U.NPM_ABI, data: calls[0] });
   assert.strictEqual(dec.functionName, 'decreaseLiquidity');
   assert.strictEqual(dec.args[0].liquidity, x.liquidity);
-  assert.strictEqual(dec.args[0].amount0Min, M.minWithSlippage(estA, 100));
-  assert.strictEqual(dec.args[0].amount1Min, M.minWithSlippage(estB, 100));
+  const sa = M.sqrtRatioAtTick(x.tickLower), sb = M.sqrtRatioAtTick(x.tickUpper);
+  const mins = M.closeMinimums(BigInt(info.sqrtPriceX96), sa, sb, x.liquidity, CFG.priceSlippageBps);
+  assert.deepStrictEqual([dec.args[0].amount0Min, dec.args[0].amount1Min], [mins.minA, mins.minB]);
+  assert.ok(mins.minA > 0n && mins.minA < estA && mins.minB > 0n && mins.minB < estB);
   assert.deepStrictEqual(calls.slice(1).map(c => decodeFunctionData({ abi: U.NPM_ABI, data: c }).functionName), ['collect', 'burn']);
   assert.strictEqual(S.closeCalls({ ...x, liquidity: 0n }, info, OTHER, CFG, 1n).calls.length, 2);
 });
@@ -401,4 +403,79 @@ test('boundaries: planOpen at the exact edges', () => {
   assert.ok(!S.planOpen(base, rich, { ...CFG, maxUsd: p.approxUsd }, new Map(), lo, hi, '100', '1').refusals.join().includes('exceeds cap'));
   const over = S.planOpen(base, rich, { ...CFG, maxUsd: p.approxUsd - 0.01 }, new Map(), lo, hi, '100', '1');
   assert.match(over.refusals.join(), new RegExp(`position about \\$${p.approxUsd.toFixed(2).replace('.', '\\.')} exceeds cap`));
+});
+
+// --- price-range minimums (2026-10-11: WPOL opens refused on "Price slippage check") ----------
+test('openMinimums: the 2026-10-11 WPOL case: a 0.05% move breaks a 1% per-token floor, not the price range', () => {
+  const sp = M.sqrtRatioAtTick(0), sa = M.sqrtRatioAtTick(-126), sb = M.sqrtRatioAtTick(126);   // about +/-1.26%
+  const capA = 10n ** 21n, capB = 10n ** 21n;
+  const now = M.depositFor(sp, sa, sb, capA, capB);
+  const moved = M.depositFor(M.shiftedSqrt(sp, sa, sb, 5, true), sa, sb, now.amountA, now.amountB);   // +0.05%
+  assert.ok(moved.amountA < M.minWithSlippage(now.amountA, 100), 'the old floor refuses this move');
+  const { minA, minB } = M.openMinimums(sp, sa, sb, now.amountA, now.amountB, 50);
+  assert.ok(moved.amountA >= minA && moved.amountB >= minB, 'the price range accepts it');
+});
+
+test('openMinimums / closeMinimums property: every price inside the range meets both minimums', () => {
+  let seed = 7;
+  const rnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+  for (let i = 0; i < 300; i++) {
+    const half = 10 + Math.floor(rnd() * 2000), at = Math.floor((rnd() * 2 - 1) * half * 0.9);
+    const sa = M.sqrtRatioAtTick(-half), sb = M.sqrtRatioAtTick(half), sp = M.sqrtRatioAtTick(at);
+    const bps = Math.floor(rnd() * 200);
+    const capA = BigInt(1 + Math.floor(rnd() * 1e9)) * 10n ** 9n, capB = BigInt(1 + Math.floor(rnd() * 1e9)) * 10n ** 9n;
+    const now = M.depositFor(sp, sa, sb, capA, capB);
+    const open = M.openMinimums(sp, sa, sb, now.amountA, now.amountB, bps);
+    assert.ok(open.minA <= now.amountA && open.minB <= now.amountB);
+    const L = now.liquidity, close = M.closeMinimums(sp, sa, sb, L, bps);
+    const [c0, c1] = M.amountsForLiquidity(sp, sa, sb, L, false);
+    assert.ok(close.minA <= c0 && close.minB <= c1);
+    for (const k of [0, 0.25, 0.5, 0.75, 1]) {
+      // a price between the two edges, as a sqrt price
+      const lo = M.shiftedSqrt(sp, sa, sb, bps, false), hi = M.shiftedSqrt(sp, sa, sb, bps, true);
+      const q = lo + ((hi - lo) * BigInt(Math.round(k * 1000))) / 1000n;
+      const d = M.depositFor(q, sa, sb, now.amountA, now.amountB);
+      assert.ok(d.amountA >= open.minA && d.amountB >= open.minB, `open at ${k}`);
+      const [r0, r1] = M.amountsForLiquidity(q, sa, sb, L, false);
+      assert.ok(r0 >= close.minA && r1 >= close.minB, `close at ${k}`);
+    }
+  }
+});
+
+test('shiftedSqrt: 0 bps is the price itself, the band edges bound it, bad bps refused', () => {
+  const sa = M.sqrtRatioAtTick(-100), sb = M.sqrtRatioAtTick(100), sp = M.sqrtRatioAtTick(0);
+  assert.strictEqual(M.shiftedSqrt(sp, sa, sb, 0, true), sp);
+  assert.strictEqual(M.shiftedSqrt(sp, sa, sb, 0, false), sp);
+  assert.ok(M.shiftedSqrt(sp, sa, sb, 50, true) > sp && M.shiftedSqrt(sp, sa, sb, 50, false) < sp);
+  assert.strictEqual(M.shiftedSqrt(sp, sa, sb, 9999, true), sb);
+  assert.strictEqual(M.shiftedSqrt(sp, sa, sb, 9999, false), sa);
+  assert.strictEqual(M.shiftedSqrt(sp, sb, sa, 9999, true), sb, 'edges in either order');
+  // +1% of price is +0.4988% of sqrt price
+  const up = Number(M.shiftedSqrt(sp, M.sqrtRatioAtTick(-1000), M.sqrtRatioAtTick(1000), 100, true)) / Number(sp);
+  assert.ok(Math.abs(up - Math.sqrt(1.01)) < 1e-9, String(up));
+  for (const bad of [-1, 10000, 1.5, undefined]) assert.throws(() => M.shiftedSqrt(sp, sa, sb, bad, true), /out of range/);
+  const at0 = M.openMinimums(sp, sa, sb, 10n ** 18n, 10n ** 18n, 0), now = M.depositFor(sp, sa, sb, 10n ** 18n, 10n ** 18n);
+  assert.deepStrictEqual([at0.minA, at0.minB], [now.amountA, now.amountB]);
+});
+
+test('settings: LPBOT_PRICE_SLIPPAGE_BPS sets the open and close range, 50 by default', () => {
+  assert.strictEqual(S.settings({}).priceSlippageBps, 50);
+  assert.strictEqual(S.settings({ LPBOT_PRICE_SLIPPAGE_BPS: '20' }).priceSlippageBps, 20);
+  assert.throws(() => S.settings({ LPBOT_PRICE_SLIPPAGE_BPS: '-1' }), /LPBOT_PRICE_SLIPPAGE_BPS/);
+});
+
+test('planOpen / planIncrease: the minimums are those of the amounts the mint asks for, not of the caps', () => {
+  const info = poolInfo(90);
+  const h = { eth: 10n ** 18n, rawA: 10n ** 24n, rawB: 10n ** 24n };
+  const lower = info.price / 1.012, upper = info.price * 1.012;
+  // caps far apart: one side limits the deposit, so the other cap is much more than the mint asks for
+  const plan = S.planOpen(info, h, { ...CFG, maxUsd: 1e9 }, new Map(), lower, upper, '1000', '5');
+  const sa = M.sqrtRatioAtTick(plan.tickLower), sb = M.sqrtRatioAtTick(plan.tickUpper), sp = BigInt(info.sqrtPriceX96);
+  const want = M.openMinimums(sp, sa, sb, plan.dep.amountA, plan.dep.amountB, CFG.priceSlippageBps);
+  assert.deepStrictEqual([plan.minA, plan.minB], [want.minA, want.minB]);
+  assert.ok(plan.minA <= plan.dep.amountA && plan.minB <= plan.dep.amountB);
+  const x = { tokenId: 1n, tickLower: plan.tickLower, tickUpper: plan.tickUpper, liquidity: 10n ** 12n };
+  const inc = S.planIncrease(info, x, h, { ...CFG, maxUsd: 1e9 }, new Map(), '1000', '5');
+  const wantInc = M.openMinimums(sp, sa, sb, inc.dep.amountA, inc.dep.amountB, CFG.priceSlippageBps);
+  assert.deepStrictEqual([inc.minA, inc.minB], [wantInc.minA, wantInc.minB]);
 });

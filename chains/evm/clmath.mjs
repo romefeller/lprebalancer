@@ -98,6 +98,37 @@ export function depositFor(sp, sa, sb, capA, capB) {
   return { liquidity: L, amountA: a < capA ? a : capA, amountB: b < capB ? b : capB };
 }
 
+// sp moved by `bps` basis points of PRICE (sqrt price by the square root of that),
+// up or down, and kept inside [sa, sb].
+export function shiftedSqrt(sp, sa, sb, bps, up) {
+  if (!Number.isInteger(bps) || bps < 0 || bps >= 10000) throw new Error(`slippage ${bps} bps out of range [0, 10000)`);
+  [sa, sb] = order(sa, sb);
+  const den = 10n ** 12n, num = BigInt(Math.round(Math.sqrt(1 + bps / 1e4) * 1e12));
+  const q = up ? mulDiv(sp, num, den) : mulDiv(sp, den, num);
+  return q < sa ? sa : q > sb ? sb : q;
+}
+
+// Minimums as a PRICE range (shared/slippage.mjs says why): a per-token cut is the
+// wrong model for a narrow band, where a 0.05% move shifts several percent of the
+// position from one token to the other (2026-10-11: three WPOL opens refused on
+// "Price slippage check" with 1% per token in a +/-1.26% band). Token A is least
+// when the price is highest, token B when it is lowest; each minimum holds anywhere
+// in [p / (1 + bps), p * (1 + bps)].
+
+// A mint of amountDesired (capA, capB): the least of each token it takes.
+export function openMinimums(sp, sa, sb, capA, capB, bps) {
+  const hi = shiftedSqrt(sp, sa, sb, bps, true), lo = shiftedSqrt(sp, sa, sb, bps, false);
+  const now = depositFor(sp, sa, sb, capA, capB);
+  const a = depositFor(hi, sa, sb, capA, capB).amountA, b = depositFor(lo, sa, sb, capA, capB).amountB;
+  return { minA: a < now.amountA ? a : now.amountA, minB: b < now.amountB ? b : now.amountB };
+}
+
+// A decrease of liquidity L: the least of each token it returns.
+export function closeMinimums(sp, sa, sb, L, bps) {
+  const hi = shiftedSqrt(sp, sa, sb, bps, true), lo = shiftedSqrt(sp, sa, sb, bps, false);
+  return { minA: amountsForLiquidity(hi, sa, sb, L, false)[0], minB: amountsForLiquidity(lo, sa, sb, L, false)[1] };
+}
+
 // amount less `bps` basis points, rounded down: the amountMin for a mint, a decrease or a
 // swap. bps outside [0, 10000) is a configuration error, not a number to clamp.
 export function minWithSlippage(amount, bps) {
