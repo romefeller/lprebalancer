@@ -249,3 +249,51 @@ test('Orca: payouts leave the vault for the approved payout wallet only', { time
   await assert.rejects(payout.sendFromVault(USDC.toBase58(), '1', stranger.toBase58(), true,
     { env: { ...penv, LPBOT_PROFIT_WALLET: stranger.toBase58() }, connection }), /not an approved payout account/);
 });
+
+const simulating = (connection, value) => Object.create(connection, { simulateTransaction: { value: async () => ({ value }) } });
+const brokenBlockhash = (connection) => Object.create(connection, { getLatestBlockhash: { value: async () => { throw new Error('rpc down'); } } });
+
+test('Orca: a dry run reports the simulation of the vault\'s transaction and sends nothing', { timeout: 600_000 }, async () => {
+  const { fork, connection, vault, payer, acting, rpc, owner, deps, signer } = await setup();
+  const via = (conn) => ({ urls: ['http://fork.test'], connectFn: async () => ({ rpc, connection: conn, payer, acting, owner }), sleep: async () => {} });
+  const price = (await said(() => signer.balance(POOL, deps))).price;
+  const before = fork.balance(vault);
+  const dry = async (conn) => (await said(() => signer.open(POOL, String(price * 0.99), String(price * 1.01), '0.5', '100', false, via(conn)))).simulation;
+  assert.deepEqual(await dry(simulating(connection, { err: null, logs: ['a', 'Program log: Error: x', 'c', 'd', 'e'], unitsConsumed: 0 })),
+    { ok: true, err: null, logError: 'Program log: Error: x', unitsConsumed: 0, logTail: ['Program log: Error: x', 'c', 'd', 'e'] });
+  assert.deepEqual(await dry(simulating(connection, { err: { InstructionError: [3, 'Custom'] }, logs: null })),
+    { ok: false, err: '{"InstructionError":[3,"Custom"]}', logError: null, unitsConsumed: null, logTail: [] });
+  assert.deepEqual(await dry(brokenBlockhash(connection)), { ok: false, err: 'rpc down', unitsConsumed: null, logTail: [] });
+  assert.equal(fork.balance(vault), before, 'a dry run moved nothing');
+  const opened = await said(() => signer.open(POOL, String(price * 0.99), String(price * 1.01), '0.5', '100', true, deps));
+  for (const run of [() => signer.harvest(opened.positionMint, false, via(simulating(connection, { err: null, logs: [], unitsConsumed: 7 }))),
+    () => signer.close(opened.positionMint, false, via(simulating(connection, { err: null, logs: [], unitsConsumed: 7 })))]) {
+    const out = await said(run);
+    assert.equal(out.sent, false);
+    assert.deepEqual(out.simulation, { ok: true, err: null, logError: null, unitsConsumed: 7, logTail: [] });
+  }
+  assert.equal((await said(() => signer.status(opened.positionMint, deps))).positionMint, opened.positionMint, 'still open');
+  const s = await said(() => signer.rebalance(SOL.toBase58(), USDC.toBase58(), '1', '400', false, via(simulating(connection, { err: null, logs: [], unitsConsumed: 9 }))));
+  assert.equal(s.sent, false);
+  assert.equal(s.simulation.unitsConsumed, 9);
+});
+
+test('Orca rebalance: bad targets are refused; nothing to do is a report; a key wallet is sent elsewhere', { timeout: 600_000 }, async () => {
+  const { fork, connection, vault, payer, rpc, deps, signer } = await setup({ usdc: 0n });
+  const ask = (a, b) => said(() => signer.rebalance(SOL.toBase58(), USDC.toBase58(), a, b, true, deps));
+  await assert.rejects(signer.rebalance(SOL.toBase58(), USDC.toBase58(), '-1', '1', true, deps), /non-negative/);
+  await assert.rejects(signer.rebalance(SOL.toBase58(), USDC.toBase58(), '1', '-1', true, deps), /non-negative/);
+  await assert.rejects(signer.rebalance(SOL.toBase58(), SOL.toBase58(), '1', '1', true, deps), /same token/);
+  const none = await ask('0', '0');
+  assert.equal(none.noop, true);
+  assert.match(none.reason, /within .* or nothing to sell/);
+  assert.ok(Math.abs(none.A.sellable - (2 - 0.005)) < 1e-9, `a vault keeps only its floor: ${none.A.sellable}`);
+  const dust = await ask('1', '0.0000001');
+  assert.equal(dust.noop, true);
+  assert.match(dust.reason, /rounds to zero/);
+  assert.equal(fork.balance(vault), 2e9, 'nothing moved');
+  const key = await actingAccount({ connection, payer, venue: 'orca', env: {} });
+  await assert.rejects(signer.rebalance(SOL.toBase58(), USDC.toBase58(), '1', '1', true,
+    { urls: ['http://fork.test'], connectFn: async () => ({ rpc, connection, payer, acting: key, owner: keyOf(payer) }), sleep: async () => {} }),
+  /a key wallet swaps through venues\/orca\/swap.mjs/);
+});

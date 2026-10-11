@@ -939,6 +939,47 @@ EQUIVALENT = {
         "a comment: ' desc' is in 'describes'",
     ('daily', 'daily_line', 'swap GtE->Gt', "return {'day': day.isoformat(), 'complete': now() >= end,", 0):
         'only the exact instant of midnight differs; now() is never that instant in a test or a poll',
+    # Squads vault mode of Raydium, Orca, Byreal (2026-10-11)
+    ('vault_policy', 'instructionsOf', '\\?\\? -> ||', 'const without = new Set(v.without ?? []);', 0):
+        '"without" is a list or missing in rules.json: ?? and || agree',
+    ('vault_connect', 'connect', '(?<![<>=!-])>(?![>=]) -> >=', 'if (config.creationFee > 0n) console.error(`note: the program charges ${Number(config.creationFee) / 1e9} SOL per account`);', 0):
+        'report-only: a note on stderr when the program charges a fee',
+    ('vault_connect', 'connect', '> 0n -> >= 0n', 'if (config.creationFee > 0n) console.error(`note: the program charges ${Number(config.creationFee) / 1e9} SOL per account`);', 0):
+        'report-only: a note on stderr when the program charges a fee',
+    ('vault_connect', 'connect', '\\?\\? -> ||', "const venues = (f.venue ?? '').split(',').map(v => v.trim()).filter(Boolean);", 0):
+        "--venue missing or '' gives '' either way",
+    ('vault_connect', 'connect', '\\?\\? -> ||', "const payer = await readKeypair(process.env.WALLET_SECRET_PATH ?? '');", 0):
+        "unset or '' reads the same empty path, and readKeypair fails on it either way",
+    ('vault_connect', 'connect', '\\?\\? -> ||', "const policyKey = await readKeypair(process.env.LPBOT_VAULT_POLICY_KEY ?? '');", 0):
+        "unset or '' reads the same empty path, and readKeypair fails on it either way",
+    ('raydium_vault', 'around', '\\?\\? -> ||', 'return [ComputeBudgetProgram.setComputeUnitLimit({ units: budget?.units ?? VAULT_CU_LIMIT }),', 0):
+        'a budget names EXIT_CU_LIMIT or VAULT_CU_LIMIT units, never 0: ?? and || agree',
+    ('raydium_vault', 'decreaseIxs', '\\?\\? -> ||', 'const rewards = (poolKeys.rewardInfos ?? []).map(r => ({ mint: r.mint.address, program: r.mint.programId }));', 0):
+        "the SDK's rewardInfos is a list or missing: ?? and || agree",
+    ('raydium_vault_signer', 'simulateActing', '\\?\\? -> ||', "const tx = acting.transaction(op.ixs, (await connection.getLatestBlockhash('confirmed')).blockhash, op.signers ?? []);", 0):
+        'signers is a list or missing: ?? and || agree',
+    ('raydium_vault_signer', 'simulateActing', '\\?\\? -> ||', 'const logs = res.value.logs ?? [];', 0):
+        'logs is a list, null or missing: ?? and || agree',
+    ('raydium_vault_signer', 'simulateActing', '\\?\\? -> ||', 'return { ok: false, err: String(e?.message ?? e).slice(0, 200), unitsConsumed: null, logTail: [] };', 0):
+        "an error's message is a non-empty string or missing: ?? and || agree",
+    ('raydium_vault_signer', 'sendActing', '\\?\\? -> ||', 'const tx = acting.transaction(op.ixs, bh.blockhash, op.signers ?? []);', 0):
+        'signers is a list or missing: ?? and || agree',
+    ('raydium_vault_signer', 'rebalance', '\\|\\| -> &&', "if (!q.allTrade || BigInt(q.realAmountIn.amount.toString()) !== s.rawIn) throw new Refused('the pool cannot take the whole amount in its loaded tick arrays; refusing');", 0):
+        'the SDK sets allTrade false exactly when the amount it takes falls short of the amount asked (no transfer fee on a plain mint): the two tests agree',
+    ('orca_vault', 'madeSigners', '\\?\\? -> ||', 'for (const a of ix.accounts ?? []) {', 0):
+        "a kit instruction's accounts are a list or missing: ?? and || agree",
+    ('orca_vault_signer', 'sendVault', '\\?\\? -> ||', 'throw new AfterSignError(`send failed after signing (not retried): ${e?.message ?? e}`);', 0):
+        "an error's message is a non-empty string or missing: ?? and || agree",
+    ('orca_vault_signer', 'simulateVault', '\\?\\? -> ||', 'const logs = res.value.logs ?? [];', 0):
+        'logs is a list, null or missing: ?? and || agree',
+    ('orca_vault_signer', 'simulateVault', '\\?\\? -> ||', 'logError: logs.find(l => /Program log: (Error|AnchorError)/.test(l)) ?? null,', 0):
+        'find gives a non-empty log line or undefined: ?? and || agree',
+    ('orca_vault_signer', 'simulateVault', '\\?\\? -> ||', 'return { ok: false, err: String(e?.message ?? e).slice(0, 200), unitsConsumed: null, logTail: [] };', 0):
+        "an error's message is a non-empty string or missing: ?? and || agree",
+    ('byreal_vault_signer', 'vaultDecrease', '\\bnew BN\\(0\\) -> new BN(1)', 'let amountMinA = new BN(0), amountMinB = new BN(0);', 0):
+        'the minimums of a harvest (liquidity 0): the program checks them only when liquidity > 0 (decrease_liquidity.rs)',
+    ('byreal_vault_signer', 'vaultDecrease', '\\bnew BN\\(0\\) -> new BN(1)', 'let amountMinA = new BN(0), amountMinB = new BN(0);', 1):
+        'the minimums of a harvest (liquidity 0): the program checks them only when liquidity > 0 (decrease_liquidity.rs)',
 }
 
 
@@ -1454,16 +1495,18 @@ def survived(rc):
     return rc == 0
 
 
-def run_tests(copy_root, dbname, cmd, timeout=None):
+def run_tests(copy_root, dbname, cmd, timeout=None, offline=True):
     """The return code of `cmd` in the copy's tests directory, or 'timeout'
     (counted as KILLED). The command runs in its own session; on a timeout
     the whole process group is killed, and after a normal exit any straggler
-    of the group is too."""
+    of the group is too. `offline`: the fork tests read mainnet only through
+    the snapshot the baseline (offline=False) filled (tests/_svm.mjs)."""
     tmp = copy_root / 'lpbot-tests.tmp'           # this run's temp files, emptied after it
     shutil.rmtree(tmp, ignore_errors=True)
     tmp.mkdir()
     env = dict(os.environ, LPBOT_DSN=f'dbname={dbname}', HYP_EXAMPLES=os.environ.get('HYP_EXAMPLES', '60'),
-               PYTHONDONTWRITEBYTECODE='1', TMPDIR=str(tmp), LPBOT_SVM_CACHE=str(SVM_CACHE))
+               PYTHONDONTWRITEBYTECODE='1', TMPDIR=str(tmp), LPBOT_SVM_CACHE=str(SVM_CACHE),
+               LPBOT_SVM_OFFLINE='1' if offline else '0')
     proc = subprocess.Popen(cmd, cwd=copy_root / 'tests', env=env, stdout=subprocess.PIPE,
                             stderr=subprocess.PIPE, start_new_session=True, preexec_fn=cap_file_size)
     RUNNING.add(proc)
@@ -1500,7 +1543,7 @@ def main(names):
     setups = [worker_setup(i) for i in range(WORKERS)]
     # baseline: the unmutated copy must pass every command
     for name in names:
-        rc = run_tests(*setups[0], TARGETS[name][2])
+        rc = run_tests(*setups[0], TARGETS[name][2], offline=False)
         if rc != 0:
             raise SystemExit(f'baseline fails for {name} ({rc}): fix the tests first')
     queue = list(enumerate(todo))

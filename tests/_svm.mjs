@@ -6,7 +6,8 @@
 // Program binaries are read from mainnet once per test run into TMPDIR
 // (tests/run.sh removes it at the end), or into LPBOT_SVM_CACHE when set:
 // tests/mutate.py shares one copy over all its runs, and one snapshot of the
-// accounts too. Accounts are cloned on demand.
+// accounts too, read in its baseline (LPBOT_SVM_OFFLINE below). Accounts are
+// cloned on demand.
 import { createRequire } from 'module';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -72,6 +73,11 @@ async function mainnetAccounts(connection, keys) {
     }
   }
   const missing = keys.filter(k => !out.has(k.toBase58()));
+  // LPBOT_SVM_OFFLINE=1 (a mutation run, after its baseline filled the
+  // snapshot): what the snapshot lacks is not on mainnet. The keys a test
+  // makes up (positions, wallets) never are, and the public RPC is spared
+  // one read each of them per mutant.
+  if (dir && process.env.LPBOT_SVM_OFFLINE === '1') return keys.map(k => out.get(k.toBase58()) ?? null);
   for (let i = 0; i < missing.length; i += 100) {
     const got = await retry(() => connection.getMultipleAccountsInfo(missing.slice(i, i + 100)));
     got.forEach((a, j) => {

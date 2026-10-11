@@ -9,12 +9,14 @@ import { Fork } from './_svm.mjs';
 import { connectedVault, POOL as DLMM_POOL } from './_vault.mjs';
 import { actingAccount } from '../chains/solana/vault/account.mjs';
 import { compile } from '../chains/solana/vault/policy.mjs';
-import { poolsByVenue } from '../chains/solana/vault/cli.mjs';
+import { poolsByVenue, connect } from '../chains/solana/vault/cli.mjs';
 import { venue } from '../chains/solana/vault/venues.mjs';
+import SOLANA from '../chains/solana/solana.json' with { type: 'json' };
 
 const require = createRequire(import.meta.url);
 const { PublicKey, AddressLookupTableAccount } = require('@solana/web3.js');
 const { PoolInfoLayout } = require('@raydium-io/raydium-sdk-v2');
+const { getAssociatedTokenAddressSync } = require('@solana/spl-token');
 
 const POOLS = {
   'meteora-dlmm': DLMM_POOL,
@@ -42,6 +44,21 @@ test('one connect approves all four venues; each signs only through its own poli
   const table = AddressLookupTableAccount.deserialize(fork.get(out.lookup).data);
   assert.equal(table.addresses.length, out.lookupAddresses);
   for (const v of venues) assert.ok(table.addresses.some(a => a.toBase58() === POOLS[v]), `${v}'s pool in the lookup table`);
+});
+
+test('connect: no venue or no pool, or an empty threshold, is refused before anything is sent', { timeout: 300_000 }, async () => {
+  const { connection, owner } = await connectedVault();
+  const owners = owner.publicKey.toBase58();
+  await assert.rejects(connect({ owners, venue: 'orca' }, { connection }), /connect needs --venue and --pools/);
+  await assert.rejects(connect({ owners, pools: POOLS.orca }, { connection }), /connect needs --venue and --pools/);
+  await assert.rejects(connect({ owners, venue: ' , ', pools: POOLS.orca }, { connection }), /connect needs --venue and --pools/);
+  await assert.rejects(connect({ owners, venue: 'orca', pools: POOLS.orca, threshold: '' }, { connection }), /threshold 0 with 1 owners/);
+  // a dry run, with an empty --payout-mint: USDC, as with none
+  const log = console.log; console.log = () => {};
+  let dry;
+  try { dry = await connect({ owners, venue: 'orca', pools: POOLS.orca, payout: owners, 'payout-mint': '' }, { connection }); } finally { console.log = log; }
+  assert.equal(dry.sent, undefined);
+  assert.deepEqual(dry.payouts, [String(getAssociatedTokenAddressSync(new PublicKey(SOLANA.usdc_mint), owner.publicKey, true))]);
 });
 
 test('a pool no listed venue owns, or a venue without a pool, is refused', { timeout: 300_000 }, async () => {

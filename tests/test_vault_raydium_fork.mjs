@@ -148,6 +148,11 @@ test('Raydium: a pool the owners did not approve is refused, by the bot and by t
     base: 'MintB', baseAmount: new BN(10_000_000), otherAmountMax: new BN(1e9), lean: true });
   assert.throws(() => acting.wrap(built.ixs), NotAllowed);
   const [open] = vaultCalls(built.ixs, acting);
+  // lean: open_position_with_token22_nft without metadata; else open_position_v2 with it (byte 56: with_metadata)
+  const legacy = vaultCalls((await vaultIx.openIxs({ poolInfo: r.poolInfo, poolKeys: r.poolKeys, owner: vault, tickLower: tick - 50,
+    tickUpper: tick + 50, base: 'MintB', baseAmount: new BN(10_000_000), otherAmountMax: new BN(1e9), lean: false })).ixs, acting)[0];
+  assert.deepEqual([open.data.subarray(0, 8).toString('hex'), open.data[56]], ['4dffae527d1dc92e', 0]);
+  assert.deepEqual([legacy.data.subarray(0, 8).toString('hex'), legacy.data[56]], ['4db84ad67056f1c7', 1]);
   const res = await force(fork, acting, policyKey, [open], 'open_position_with_token22_nft', built.signers);
   assert.ok(!res.ok);
   assert.match(res.logs.join('\n'), /ProgramInteractionAccountConstraintViolated/);
@@ -259,4 +264,50 @@ test('Raydium: payouts leave the vault for the approved payout wallet only', { t
   const stranger = Keypair.generate().publicKey;
   await assert.rejects(payout.sendFromVault(USDC.toBase58(), '1', stranger.toBase58(), true,
     { env: { ...penv, LPBOT_PROFIT_WALLET: stranger.toBase58() }, connection }), /not an approved payout account/);
+});
+
+// A connection whose simulations answer `value` (the fork declines them), or
+// whose blockhash read fails.
+const simulating = (connection, value) => Object.create(connection, { simulateTransaction: { value: async () => ({ value }) } });
+const brokenBlockhash = (connection) => Object.create(connection, { getLatestBlockhash: { value: async () => { throw new Error('rpc down'); } } });
+
+test('Raydium: a dry run reports the simulation of the vault\'s transaction and sends nothing', { timeout: 600_000 }, async () => {
+  const { fork, connection, vault, payer, acting, signer } = await setup();
+  const load = () => Raydium.load({ connection, owner: vault, cluster: 'mainnet', disableFeatureCheck: true, disableLoadToken: true });
+  const via = (conn) => ({ urls: ['http://fork.test'], connectFn: async () => ({ connection: conn, payer, raydium: await load(), acting }), sleep: async () => {} });
+  const live = via(connection);
+  const price = (await said(() => signer.balance(undefined, live))).price;
+  const before = fork.balance(vault);
+  const dry = async (conn) => (await said(() => signer.open(POOL, String(price * 0.99), String(price * 1.01), '0.5', '100', false, via(conn)))).simulation;
+  assert.deepEqual(await dry(simulating(connection, { err: null, logs: ['a', 'b', 'c', 'd', 'e'], unitsConsumed: 0 })),
+    { ok: true, err: null, unitsConsumed: 0, logTail: ['b', 'c', 'd', 'e'] });
+  assert.deepEqual(await dry(simulating(connection, { err: { InstructionError: [3, 'Custom'] }, logs: null })),
+    { ok: false, err: '{"InstructionError":[3,"Custom"]}', unitsConsumed: null, logTail: [] });
+  assert.deepEqual(await dry(brokenBlockhash(connection)), { ok: false, err: 'rpc down', unitsConsumed: null, logTail: [] });
+  assert.equal(fork.balance(vault), before, 'a dry run moved nothing');
+  // the harvest and the swap dry-run the same way
+  const opened = await said(() => signer.open(POOL, String(price * 0.99), String(price * 1.01), '0.5', '100', true, live));
+  const h = await said(() => signer.harvest(opened.positionMint, false, via(simulating(connection, { err: null, logs: [], unitsConsumed: 7 }))));
+  assert.deepEqual(h.simulation, [{ ok: true, err: null, unitsConsumed: 7, logTail: [] }]);
+  const s = await said(() => signer.rebalance(SOL.toBase58(), USDC.toBase58(), '1', '400', false, via(simulating(connection, { err: null, logs: [], unitsConsumed: 9 }))));
+  assert.equal(s.sent, false);
+  assert.deepEqual(s.simulation, { ok: true, err: null, unitsConsumed: 9, logTail: [] });
+});
+
+test('Raydium rebalance: bad targets are refused; nothing to do is a report, never a swap', { timeout: 600_000 }, async () => {
+  const { fork, vault, deps, signer } = await setup({ usdc: 0n });
+  const ask = (a, b) => said(() => signer.rebalance(SOL.toBase58(), USDC.toBase58(), a, b, true, deps));
+  await assert.rejects(signer.rebalance(SOL.toBase58(), USDC.toBase58(), '-1', '1', true, deps), /non-negative/);
+  await assert.rejects(signer.rebalance(SOL.toBase58(), USDC.toBase58(), '1', '-1', true, deps), /non-negative/);
+  await assert.rejects(signer.rebalance(SOL.toBase58(), SOL.toBase58(), '1', '1', true, deps), /same token/);
+  const none = await ask('0', '0');
+  assert.equal(none.noop, true);
+  assert.match(none.reason, /within .* or nothing to sell/);
+  assert.equal(none.custody, 'vault');
+  assert.ok(Math.abs(none.A.sellable - (2 - 0.02)) < 1e-9, `a vault keeps only its floor: ${none.A.sellable}`);
+  // a USDC target worth less than one lamport of SOL
+  const dust = await ask('1', '0.0000001');
+  assert.equal(dust.noop, true);
+  assert.match(dust.reason, /rounds to zero/);
+  assert.equal(fork.balance(vault), 2e9, 'nothing moved');
 });

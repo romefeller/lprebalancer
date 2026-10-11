@@ -120,7 +120,7 @@ export async function connect(f, { connection = new Connection(RPC, 'confirmed')
   const venues = (f.venue ?? '').split(',').map(v => v.trim()).filter(Boolean);
   const pools = keysOf(f.pools, '--pools');
   const payoutWallets = keysOf(f.payout, '--payout');
-  const payoutMints = keysOf(f['payout-mint'] ?? SOLANA.usdc_mint, '--payout-mint');
+  const payoutMints = keysOf(f['payout-mint'] || SOLANA.usdc_mint, '--payout-mint');
   if (!venues.length || !pools.length) throw new Error('connect needs --venue and --pools');
   const payer = await readKeypair(process.env.WALLET_SECRET_PATH ?? '');
   const policyKey = await readKeypair(process.env.LPBOT_VAULT_POLICY_KEY ?? '');
