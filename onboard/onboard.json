@@ -53,6 +53,7 @@
       "label": "Solana",
       "pair": "SOL/USDC",
       "template": "sol-usdc",
+      "settings": { "min_deploy_usd": 2 },
       "venues": ["meteora-dlmm", "raydium-clmm", "orca", "byreal"],
       "poolsKey": "sol_usdc_pools",
       "operatorWallet": "operator_profit_wallet",
@@ -61,7 +62,7 @@
       "policyKeyEnv": "LPBOT_VAULT_SOL_POLICY_PATH",
       "gas": { "setup": "0.0329", "margin": "0.0121", "reserve": "0.1" },
       "tokens": {
-        "SOL": { "mintKey": "native_mint", "native": true, "decimals": 9, "min": "0.05", "max": "50" },
+        "SOL": { "mintKey": "native_mint", "native": true, "decimals": 9, "min": "0.02", "max": "50" },
         "USDC": { "mintKey": "usdc_mint", "decimals": 6, "min": "10", "max": "10000" }
       }
     },

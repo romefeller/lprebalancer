@@ -126,6 +126,17 @@ def profile_args(p, wallet_id, chain):
         special=p['special'], fee_bps=p['fee_bps'] or None, fee_wallet=p['fee_wallet'])
 
 
+def with_settings(row, settings, skip):
+    """The profile row with the chain's onboarding settings (onboard.json
+    chains.<chain>.settings) over the template's tuning. Only tuning columns the
+    row already has: never its identity, pool, wallet or the signed terms. Pure."""
+    signed = {'profit_wallet', 'special', 'fee_bps', 'fee_wallet'}
+    bad = sorted(k for k in settings if k not in row or k in skip or k in signed)
+    if bad:
+        raise Refused(f'onboarding settings name no tuning column: {", ".join(bad)}')
+    return {**row, **settings}
+
+
 def register(cur, r):
     """The vault's three rows (add_vault) and the profile (add_profile, from
     its template), or nothing: one transaction."""
@@ -165,6 +176,7 @@ def register(cur, r):
                                        dict(cur.fetchone()), 0, vault=True)
     except add_profile.Refused as e:
         raise Refused(str(e)) from None
+    prow = with_settings(prow, p.get('settings') or {}, add_profile.SKIP)
     add_profile.insert_rows(cur, None, prow, None)
     cur.execute("update onboard set state = 'registered', vault = %s, connected = %s, updated_at = now() where id = %s",
                 (c['vault'], json.dumps(c), r['id']))

@@ -59,7 +59,7 @@ test('fields: every refusal', () => {
     [{ profitWallet: pda }, /profit wallet: not a wallet/], [{ profitWallet: `${PROFIT.publicKey.toBase58()}\n` }, null],
     [{ profitWallet: '0x2b35948898e1b4897E7FC5a70e39b213dcfd0142' }, /profit wallet/],
     [{ amount: '0' }, /more than zero/], [{ amount: '-1' }, /a number/], [{ amount: '1e3' }, /a number/],
-    [{ amount: '0.0000000001' }, /at most 9 decimals/], [{ amount: '0.194999999' }, /at least 0.195/], [{ amount: '0.195' }, null],
+    [{ amount: '0.0000000001' }, /at most 9 decimals/], [{ amount: '0.164999999' }, /at least 0.165/], [{ amount: '0.165' }, null],
     [{ amount: '51' }, /at most 50/], [{ token: 'USDC', amount: '9.99' }, /at least 10$/],
     [{ amount: '' }, /a number/], [{ amount: ' 1 ' }, null], [{ name: 'My-Pool' }, /name/], [{ name: 'ab' }, /name/],
     [{ name: 'a--b' }, /name/], [{ name: 'pool-' }, /name/], [{ name: '1pool' }, /name/], [{ name: 'a'.repeat(33) }, /name/],
@@ -114,7 +114,7 @@ test('fee terms: the operator\'s own wallet is special, any other pays the confi
 test('gas: the configured setup, margin and reserve; the minimum covers it', () => {
   assert.equal(I.fromRaw(I.gasTotal(SOL), 9), '0.145');
   assert.equal(I.fromRaw(I.gasTotal(POLY), 18), '4');
-  assert.equal(I.minimum(SOL, 'SOL'), '0.195');
+  assert.equal(I.minimum(SOL, 'SOL'), '0.165');
   assert.equal(I.minimum(SOL, 'USDC'), '10');
   assert.equal(I.minimum(POLY, 'POL'), '24');
   assert.equal(I.minimum(POLY, 'WPOL'), '20', 'wrapped: the gas is paid in POL beside it');
@@ -601,7 +601,7 @@ test('server: names and vaults per owner', async () => {
     assert.equal((await post('intent', { invite: INVITE, ...body({ name: 'taken-name' }) })).status, 409);
     assert.equal((await post('intent', { invite: INVITE, ...body({ name: 'sol-usdc' }) })).status, 400, 'a reserved name');
     assert.equal((await post('intent', { invite: INVITE, ...body({ amount: '1000' }) })).status, 400);
-    assert.equal((await post('intent', { invite: INVITE, ...body({ amount: '0.19' }) })).status, 400, 'under the gas and the minimum capital');
+    assert.equal((await post('intent', { invite: INVITE, ...body({ amount: '0.16' }) })).status, 400, 'under the gas and the minimum capital');
     // two intents for one name: the second signature finds it taken
     const a = await signed(post), b = await signed(post);
     assert.equal((await post('sign', { invite: INVITE, nonce: a.it.nonce, message: a.it.message, signature: a.sig })).status, 200);
@@ -671,7 +671,7 @@ test('server: rate limits, sizes, methods and paths', async () => {
     assert.equal((await fetch(`${base}/app.js`)).status, 200);
     const pub = await (await fetch(`${base}/api/config`)).json();
     assert.deepEqual(Object.keys(pub.chains), ['solana']);
-    assert.deepEqual([pub.chains.solana.gas, pub.chains.solana.tokens.SOL.min, pub.chains.solana.tokens.USDC.min], ['0.145', '0.195', '10']);
+    assert.deepEqual([pub.chains.solana.gas, pub.chains.solana.tokens.SOL.min, pub.chains.solana.tokens.USDC.min], ['0.145', '0.165', '10']);
     assert.equal(JSON.stringify(pub).includes('Env'), false, 'no environment names leak');
     assert.equal((await fetch(`${base}/api/intent`)).status, 404, 'GET of an action');
     const plain = await fetch(`${base}/api/intent`, { method: 'POST', body: '{}' });

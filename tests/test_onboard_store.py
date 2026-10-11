@@ -141,6 +141,7 @@ class Store(unittest.TestCase):
         self.assertEqual((c['pair_label'], c['mints'], c['deposit_mint']), ('SOL/USDC', [SOL, USDC], SOL))
         for k in ('bands', 'payout_mint', 'payout_enabled', 'max_usd', 'poll_seconds', 'regime_widths', 'harvest_interval_hours'):
             self.assertEqual(c[k], t[k], f'{k} is the template\'s')
+        self.assertEqual(c['min_deploy_usd'], t['min_deploy_usd'], 'no settings: the template\'s')
         o = row('select * from onboard where id = %s', i)
         self.assertEqual((o['state'], o['vault'], o['connected']['settings']), ('registered', VAULT, SETTINGS))
         self.assertEqual(store.run('started', {'id': i}), {'started': True})
@@ -293,3 +294,36 @@ import unittest.mock  # noqa: E402
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class Settings(unittest.TestCase):
+    """onboard.json chains.<chain>.settings: tuning over the template, nothing else."""
+
+    def setUp(self):
+        clean()
+
+    def tearDown(self):
+        clean()
+
+    def test_the_profile_takes_the_settings_and_a_bad_one_writes_nothing(self):
+        templates()
+        i = begin()
+        register(i, profile={'settings': {'min_deploy_usd': 2}})
+        self.assertEqual(float(row("select min_deploy_usd from config where name = 'ob-one'")['min_deploy_usd']), 2.0)
+        clean()
+        templates()
+        i = begin()
+        with self.assertRaisesRegex(store.Refused, 'pool'):
+            register(i, profile={'settings': {'pool': 'X'}})
+        self.assertIsNone(row("select 1 from config where name = 'ob-one'"))
+        self.assertIsNone(row("select 1 from wallets where id = 'ob-one-vault'"))
+
+    def test_tuning_columns_are_set_and_nothing_else_is(self):
+        row = {'name': 'ob', 'pool': 'P', 'min_deploy_usd': 5, 'bands': [1], 'profit_wallet': 'W', 'special': True,
+               'fee_bps': 0, 'fee_wallet': None}
+        self.assertEqual(store.with_settings(row, {}, set()), row)
+        got = store.with_settings(row, {'min_deploy_usd': 2}, {'name', 'pool'})
+        self.assertEqual((got['min_deploy_usd'], got['bands'], row['min_deploy_usd']), (2, [1], 5))
+        for bad in ('name', 'pool', 'profit_wallet', 'special', 'fee_bps', 'fee_wallet', 'no_such_column'):
+            with self.assertRaisesRegex(store.Refused, bad):
+                store.with_settings(row, {bad: 1}, {'name', 'pool'})

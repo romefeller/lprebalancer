@@ -146,7 +146,7 @@ TARGETS = {
     'onboard_evm_payment': ('onboard/polygon.mjs', ['paymentVerdict', 'checkPayment', 'gas', 'paymentTxs'],
                             NODE_TESTS('test_onboard.mjs', 'test_onboard_polygon_fork.mjs')),
     'onboard_server': ('onboard/server.mjs', ['makeServer', 'clientOf', 'serviceCommand'], NODE_TESTS('test_onboard.mjs')),
-    'onboard_store': ('onboard/store.py', ['same_owner', 'taken', 'owned', 'sign', 'paid', 'resume', 'connected', 'stuck', 'register',
+    'onboard_store': ('onboard/store.py', ['same_owner', 'taken', 'owned', 'sign', 'paid', 'resume', 'connected', 'stuck', 'with_settings', 'register',
                                            'started'], PY_TESTS('test_onboard_store')),
     'onboard_fee_terms': ('ops/add_profile.py', ['fee_terms'], PY_TESTS('test_add_profile', 'test_onboard_store')),
     'rpc_policy': ('shared/rpc_policy.mjs', ['endpoints', 'errorKind', 'overEndpoints', 'isEntry'], NODE_TESTS('test_rpc_policy.mjs', 'test_signer_rpc.mjs')),

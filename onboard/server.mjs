@@ -295,7 +295,7 @@ export function makeServer(cfg, deps) {
         const venue = connected.venue, pool = connected.pools[0];
         const reg = await deps.store('register', { id: r.id, wallet_id: r.wallet_id, label: r.name, secret_env: adapter.keys.secretEnv,
           policy_key_env: adapter.keys.policyKeyEnv, connected,
-          profile: { name: r.name, template: cfg.chains[r.chain].template, dex: venue, pool, execute_dexes: [venue],
+          profile: { name: r.name, template: cfg.chains[r.chain].template, settings: cfg.chains[r.chain].settings ?? {}, dex: venue, pool, execute_dexes: [venue],
             rec: await adapter.record(venue, pool) } });
         log({ event: 'registered', chain: r.chain, name: r.name, vault: reg.vault });
         return { name: r.name, chain: r.chain, state: 'registered', vault: reg.vault, token: r.token, deposit: r.deposit };
