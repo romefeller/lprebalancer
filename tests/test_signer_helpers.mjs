@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { PublicKey } from '@solana/web3.js';
 import { positionRent } from '../shared/position_rent.mjs';
-import { executeBuilt, isProgramFailure, signerError } from '../shared/signer_errors.mjs';
+import { isProgramFailure, signerError } from '../shared/signer_errors.mjs';
 
 const key = n => new PublicKey(Buffer.alloc(32, n));
 const TOKEN_2022 = new PublicKey('TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb');
@@ -41,11 +41,3 @@ test('program rejection takes precedence over retry noise', () => {
   assert.ok(!isProgramFailure(new Error('429 Too Many Requests')));
 });
 
-test('an uncertain submission must not be executed again on another endpoint', async () => {
-  let calls = 0;
-  await assert.rejects(executeBuilt({ execute: async () => {
-    calls++;
-    throw new Error('429 while confirming transaction');
-  }}), err => err.sent === true);
-  assert.equal(calls, 1);
-});

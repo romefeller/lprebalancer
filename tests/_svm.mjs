@@ -197,7 +197,9 @@ export class Fork {
         if (!r.ok) throw new SendTransactionError({ action: 'simulate', signature: '', transactionMessage: 'fork: transaction failed', logs: r.logs });
         return bs58.encode(tx.signatures[0]);
       },
-      confirmTransaction: async () => ({ value: { err: null } }),
+      // as the Alchemy RPC: no signature subscription; every send must poll (test_no_websocket.mjs)
+      confirmTransaction: async () => { throw new Error('fork: confirmTransaction (a websocket subscription) is not served; poll instead'); },
+      onSignature: () => { throw new Error('fork: signatureSubscribe is not served; poll instead'); },
       // a send that returned ran in full: it is confirmed at once
       getSignatureStatuses: async (sigs) => ({ value: sigs.map(() => ({ err: null, confirmationStatus: 'confirmed' })) }),
       getBlockHeight: async () => 0,

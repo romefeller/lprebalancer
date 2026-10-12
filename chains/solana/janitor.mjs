@@ -15,6 +15,7 @@
 // 2026-09-28: four empty accounts (mSOL, RAY, ZEC, JitoSOL) held 0.00705 SOL.
 // A close costs 5,000 lamports and returns 1.5-2.0 million.
 import { signerError } from '../../shared/signer_errors.mjs';
+import { sendUntilLanded } from '../../shared/tx_send.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
 import { assertNotHalted } from '../../shared/halt_guard.mjs';
@@ -22,7 +23,7 @@ import { BOT_ROOT } from '../../bot_root.mjs';
 import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
-const { Connection, Keypair, PublicKey, Transaction, sendAndConfirmTransaction } = require('@solana/web3.js');
+const { Connection, Keypair, PublicKey, Transaction } = require('@solana/web3.js');
 const spl = require('@solana/spl-token');
 
 const RPC = process.env.SOLANA_RPC_URL ?? process.env.LPBOT_RPC ?? 'https://api.mainnet-beta.solana.com';
@@ -111,8 +112,13 @@ async function closeEmpty(keepMints, execute) {
     const batch = plan.slice(i, i + MAX_PER_TX);
     const tx = new Transaction().add(...closeInstructions(batch, owner));
     tx.feePayer = payer.publicKey;
+    // polled until it lands (shared/tx_send.mjs), never confirmed over a websocket:
+    // the Alchemy RPC serves no signatureSubscribe
+    const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('confirmed');
+    tx.recentBlockhash = blockhash;
     verifyCloseTx(tx, owner, batch);
-    signatures.push(await sendAndConfirmTransaction(connection, tx, [payer], { commitment: 'confirmed' }));
+    tx.sign(payer);
+    signatures.push(await sendUntilLanded(connection, tx.serialize(), lastValidBlockHeight));
   }
   console.log(JSON.stringify({ ...report, sent: true, signature: signatures[signatures.length - 1], signatures }, null, 1));
 }

@@ -198,16 +198,22 @@ test('byreal: sendAll never throws, so the loop never sees a send', async () => 
   assert.deepEqual(out3, { sigs: ['SIG'], error: null });
 });
 
-test('raydium: a failed execute is marked sent and never rotated', async () => {
+test('raydium: a failed send is marked sent and never rotated', async () => {
   const log = console.log; console.log = () => {};
   try {
-    const built = { execute: async () => { throw new Error('fetch failed'); } };
-    const r = await oneAttempt(SIGNERS['venues/raydium_clmm/signer.mjs'], () => raydium.sendAll([built], {}));
+    const payer = { publicKey: 'P' };
+    const built = () => ({ transaction: { sign() {}, serialize: () => Buffer.alloc(1) } });
+    const bh = async () => ({ blockhash: 'x', lastValidBlockHeight: 1 });
+    const conn = { getLatestBlockhash: bh, sendRawTransaction: async () => { throw new Error('fetch failed'); } };
+    const send = (c) => (b) => raydium.sendLanded(c, payer, b, { sleep: async () => {} });
+    const r = await oneAttempt(SIGNERS['venues/raydium_clmm/signer.mjs'], () => raydium.sendAll([built()], {}, send(conn)));
     await assert.rejects(r.p, e => e.sent === true && /fetch failed/.test(e.message));
     assert.equal(r.n(), 1);
     let k = 0;
-    const two = { execute: async () => { if (k++) throw new Error('429 Too Many Requests'); return { txId: 'SIG1' }; } };
-    const r2 = await oneAttempt(SIGNERS['venues/raydium_clmm/signer.mjs'], () => raydium.sendAll([two, two], {}));
+    const conn2 = { getLatestBlockhash: bh, getBlockHeight: async () => 0,
+      sendRawTransaction: async () => { if (k++) throw new Error('429 Too Many Requests'); return 'SIG1'; },
+      getSignatureStatuses: async () => ({ value: [{ err: null, confirmationStatus: 'confirmed' }] }) };
+    const r2 = await oneAttempt(SIGNERS['venues/raydium_clmm/signer.mjs'], () => raydium.sendAll([built(), built()], {}, send(conn2)));
     await assert.rejects(r2.p, e => e.sent === true && /partial send: 1\/2/.test(e.message));
     assert.equal(r2.n(), 1);
   } finally { console.log = log; }

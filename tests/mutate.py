@@ -184,7 +184,7 @@ TARGETS = {
                                            'started'], PY_TESTS('test_onboard_store')),
     'onboard_fee_terms': ('ops/add_profile.py', ['fee_terms'], PY_TESTS('test_add_profile', 'test_onboard_store')),
     'rpc_policy': ('shared/rpc_policy.mjs', ['endpoints', 'errorKind', 'overEndpoints', 'isEntry'], NODE_TESTS('test_rpc_policy.mjs', 'test_signer_rpc.mjs')),
-    'rpc_raydium': ('venues/raydium_clmm/signer.mjs', ['withRpc', 'sendAll'], NODE_TESTS('test_signer_rpc.mjs')),
+    'rpc_raydium': ('venues/raydium_clmm/signer.mjs', ['withRpc', 'sendAll'], NODE_TESTS('test_signer_rpc.mjs', 'test_program_errors.mjs', 'test_no_websocket.mjs')),
     'rpc_dlmm': ('venues/meteora_dlmm/signer.mjs', ['withRpc', 'sendAll'], NODE_TESTS('test_signer_rpc.mjs', 'test_program_errors.mjs')),
     'rpc_pancake': ('venues/pancakeswap_v3/signer.mjs', ['withRpc', 'sendOne'], NODE_TESTS('test_signer_rpc.mjs')),
     'rpc_byreal': ('venues/byreal/signer.mjs', ['withRpc', 'sendAll', 'confirm'], NODE_TESTS('test_signer_rpc.mjs', 'test_program_errors.mjs')),
@@ -942,7 +942,7 @@ EQUIVALENT = {
         'recent is an array, null or undefined; ?? and || differ only for a falsy non-array',
     ('tx_send_price', 'priorityCuPrice', '\\?\\? -> ||', 'const fees = (recent ?? []).map(r => Number(r?.prioritizationFee ?? r)).filter(f => f > 0).sort((a, b) => a - b);', 1):
         'a fee of 0 falls back to the record itself: Number of an object is NaN, filtered out as 0 is',
-    ('rpc_raydium', 'sendAll', '\\?\\? -> ||', 'signatures: sigs, error: String(e?.message ?? e).slice(0, 300) }, null, 1));', 0):
+    ('rpc_raydium', 'sendAll', '\\?\\? -> ||', 'signatures: sigs, error: String(e?.message ?? e).slice(0, 1800) }, null, 1));', 0):
         'error-message text only: ?? and || differ only for an error with an empty message',
     ('rpc_raydium', 'sendAll', '\\?\\? -> ||', 'throw Object.assign(new Error(`partial send: ${sigs.length}/${builts.length} sent; ${e?.message ?? e}`), { sent: true });', 0):
         'error-message text only: ?? and || differ only for an error with an empty message',

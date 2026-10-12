@@ -49,7 +49,7 @@
 import fs from 'node:fs';
 import { positionRent } from '../../shared/position_rent.mjs';
 import { PRICE_SLIPPAGE_BPS, SLIPPAGE_REFUSAL, openToleranceBps, safeBase } from '../../shared/slippage.mjs';
-import { executeBuilt, isProgramFailure, signerError } from '../../shared/signer_errors.mjs';
+import { isProgramFailure, signerError } from '../../shared/signer_errors.mjs';
 import { consistentFees } from '../../shared/fee_snapshot.mjs';
 import { endpoints, overEndpoints, isEntry } from '../../shared/rpc_policy.mjs';
 import { readMints, rawToUi, uiToNative, uiPrice, assertWritable, mintFields } from '../../shared/token2022.mjs';
@@ -500,19 +500,14 @@ async function simulateActing(connection, acting, op) {
   }
 }
 
-// Sign and send one built transaction. The SDK prints the transaction to
-// stdout on its way out; that line is swallowed so stdout stays one JSON.
-async function sendBuilt(built) {
-  const log = console.log;
-  console.log = () => {};
-  try {
-    return await executeBuilt(built);
-  } finally { console.log = log; }
-}
+// No transaction goes through the SDK's own execute(): it confirms over a
+// websocket (signatureSubscribe), which the Alchemy RPC does not serve
+// (2026-10-12 20:09Z: an open that landed counted as a failure and the
+// breaker backed off 20 min). Every send is sendLanded / sendActing (polled).
 
 // Send several built transactions in order, each through `send`. After the
 // first one lands, a failure is reported as a partial send and never retried.
-export async function sendAll(builts, report, send = sendBuilt) {
+export async function sendAll(builts, report, send) {
   const sigs = [];
   for (const b of builts) {
     try {
@@ -635,7 +630,7 @@ export async function open(pool, lower, upper, uiMaxA, uiMaxB, execute, deps) {
       console.log('DRY RUN — instructions built. Pass --execute to sign and send.');
       return;
     }
-    const sig = vault ? await sendActing(connection, acting, built) : await sendBuilt(built);
+    const sig = await sendFor(connection, payer, acting)(built);          // polled, never a websocket
     console.log(JSON.stringify({ ...report, sent: true, signature: sig, signatures: [sig] }, null, 1));
   }, undefined, deps);
 }
@@ -896,7 +891,7 @@ export async function increase(address, uiMaxA, uiMaxB, execute, deps) {
       console.log('DRY RUN — increase built. Pass --execute to sign and send.');
       return;
     }
-    const sig = vault ? await sendActing(connection, acting, built) : await sendBuilt(built);
+    const sig = await sendFor(connection, payer, acting)(built);          // polled, never a websocket
     console.log(JSON.stringify({ ...report, sent: true, signature: sig, signatures: [sig] }, null, 1));
   }, undefined, deps);
 }

@@ -18,13 +18,3 @@ export function isProgramFailure(error) {
   return /PriceSlippageCheck|InstructionError|custom program error|failed on chain|simulation failed|transaction .* failed/i.test(signerError(error));
 }
 
-export async function executeBuilt(built) {
-  try {
-    const { txId } = await built.execute({ sendAndConfirm: true, skipPreflight: false });
-    return txId;
-  } catch (error) {
-    // Execution may already have submitted a transaction. Let the controller
-    // read its outcome; never execute the whole operation on another endpoint.
-    throw Object.assign(new Error(signerError(error)), { sent: true, cause: error });
-  }
-}
