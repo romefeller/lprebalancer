@@ -107,12 +107,18 @@ const ROW = { settings: SETTINGS, venues: { 'raydium-clmm': { policies: [Keypair
 const message = (payer) => Buffer.from(new TransactionMessage({ payerKey: new PublicKey(payer), recentBlockhash: PublicKey.default.toBase58(),
   instructions: [SystemProgram.transfer({ fromPubkey: new PublicKey(payer), toPubkey: new PublicKey(VAULT), lamports: 1 })] }).compileToLegacyMessage().serialize()).toString('base64');
 const BLOCKHASH = Keypair.generate().publicKey.toBase58();
-const conn = { getLatestBlockhash: async () => ({ blockhash: BLOCKHASH }) };
+const conn = { getLatestBlockhash: async () => ({ blockhash: BLOCKHASH }), getMinimumBalanceForRentExemption: async (n) => 890_880 + 6960 * n,
+  getBalance: async () => 10e9 };
 
 function stubs(positionsByVenue = {}) {
   const calls = [];
   return { calls, deps: {
     request: async (action, f, { env }) => { calls.push([action, f, env.LPBOT_VAULT_VENUE]); return { summary: `${action} ${env.LPBOT_VAULT_VENUE}`, messages: [message(f.owner)] }; },
+    rulesRequest: async (action, a) => {
+      calls.push([action, a]);
+      const ix = SystemProgram.transfer({ fromPubkey: a.owner, toPubkey: new PublicKey(VAULT), lamports: 1 });
+      return { summary: `${action} ${a.venues.map(v => v.venue).join(' and ')}`, groups: a.venues.map(() => [ix]), steps: a.venues.map(() => ({ kind: 'update' })) };
+    },
     positions: async (_c, { venue }) => positionsByVenue[venue] ?? [],
   } };
 }
@@ -140,13 +146,20 @@ test('owner transactions: each action builds what it should, for every venue it 
   r = await run({ action: 'close' }, stubs({}));
   assert.deepEqual([r.calls, r.out.transactions], [[], []]);
   assert.match(r.out.summary, /nothing to close/);
-  // revoke and approve: every venue's policies, the bot's keys named
+  // revoke and approve: every venue's policies in one request, the bot's keys named
   for (const action of ['revoke', 'approve']) {
     r = await run({ action });
-    assert.deepEqual(r.calls.map(c => [c[0], c[2], c[1].payer, c[1]['policy-key']]),
-      ['raydium-clmm', 'orca'].map(v => [action, v, KEYS.payer.publicKey.toBase58(), KEYS.policyKey.publicKey.toBase58()]));
-    assert.equal(r.out.summary, `${action} raydium-clmm; ${action} orca`);
+    assert.equal(r.calls.length, 1);
+    const [a, req] = r.calls[0];
+    assert.deepEqual([a, req.settings, req.owner.toBase58(), req.payer.toBase58(), req.policyKey.toBase58(), req.venues.map(v => v.venue)],
+      [action, SETTINGS, OWNER, KEYS.payer.publicKey.toBase58(), KEYS.policyKey.publicKey.toBase58(), ['raydium-clmm', 'orca']]);
+    assert.equal(r.out.summary, `${action} raydium-clmm and orca`);
+    assert.equal(r.out.transactions.length, 2);
   }
+  // an approval the wallet cannot pay for is refused before it is built for signing
+  const poor = { ...conn, getBalance: async () => 1000 };
+  await assert.rejects(ownerTxs(poor, C, ROW, KEYS, { owner: OWNER, action: 'approve' }, stubs().deps), /approving needs/);
+  await ownerTxs(poor, C, ROW, KEYS, { owner: OWNER, action: 'revoke' }, stubs().deps);
   await assert.rejects(run({ action: 'teleport' }), /action teleport/);
   // each transaction: the message as built, its blockhash the newest
   const tx = Transaction.from(Buffer.from((await run({ action: 'revoke' })).out.transactions[0], 'base64'));
@@ -169,6 +182,7 @@ test('the vault\'s state: balances, whether every policy still names the bot, it
   assert.equal(s.vault, sq.vaultPda(new PublicKey(SETTINGS)).toBase58());
   s = await at([{ data: head([bot]) }, { data: head([owner]) }]);
   assert.deepEqual([s.botActive, s.positions], [false, 0], 'one policy without the bot: revoked');
-  assert.equal((await at([{ data: head([bot]) }, null])).botActive, false, 'a policy gone: revoked');
+  assert.equal((await at([{ data: head([bot]) }, null])).botActive, true, 'a policy not created yet (a venue staged) says nothing');
+  assert.equal((await at([null, null])).botActive, false, 'none at all: no bot');
   assert.equal((await at([])).botActive, false, 'no policy at all: no bot');
 });

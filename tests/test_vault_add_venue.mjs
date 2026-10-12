@@ -268,6 +268,9 @@ test('approval cost: the rent of each new policy, the growth of each update, the
   }), { numRuns: 40 });
 });
 
+// the vault's positions are read by the venues' SDKs: none here (test_onboard_sol.mjs counts them)
+const NO_POSITIONS = { positionsOf: async () => [] };
+
 test('status: a policy staged for a venue the owners have not approved yet is no revoke, but the rules are not current', async () => {
   const v = vaultWith(['meteora-dlmm'], ['raydium-clmm']);
   const policyKey = { publicKey: v.signer };
@@ -276,10 +279,10 @@ test('status: a policy staged for a venue the owners have not approved yet is no
   const keys = { payer: { publicKey: key() }, policyKey };
   const rowOf = () => ({ settings: v.settings.toBase58(), venues: Object.fromEntries(v.venues.map(x => [x.venue,
     { policies: x.addresses.map(String), pools: [key().toBase58()], payouts: [key().toBase58()] }])) });
-  const st = await solStatus(conn(infos), { tokens: {} }, rowOf(), keys);
+  const st = await solStatus(conn(infos), { tokens: {} }, rowOf(), keys, NO_POSITIONS);
   assert.equal(st.botActive, true);
   assert.equal(st.rulesCurrent, false);
-  assert.equal((await solStatus(conn(infos.map(() => null)), { tokens: {} }, rowOf(), keys)).botActive, false, 'no policy at all: nothing active');
+  assert.equal((await solStatus(conn(infos.map(() => null)), { tokens: {} }, rowOf(), keys, NO_POSITIONS)).botActive, false, 'no policy at all: nothing active');
   const revoked = infos.map(i => i && policyAccount(v.settings, 1n, [key()], v.venues[0].compiled.policies[0].policy));
-  assert.equal((await solStatus(conn(revoked), { tokens: {} }, rowOf(), keys)).botActive, false);
+  assert.equal((await solStatus(conn(revoked), { tokens: {} }, rowOf(), keys, NO_POSITIONS)).botActive, false);
 });

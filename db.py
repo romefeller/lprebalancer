@@ -121,7 +121,7 @@ def vault_row(wallet_id):
 
 def feed_latest_put(profile, kind, line):
     """Keep `line` (a feed row, as JSON text, redacted) as the newest of its
-    kind for `profile` (sql/039 feed_latest): what the owner's page shows."""
+    kind for `profile` (sql/040 feed_latest): what the owner's page shows."""
     with cursor(commit=True) as cur:
         cur.execute('insert into feed_latest (profile, kind, row, updated_at) values (%s, %s, %s, now()) '
                     'on conflict (profile, kind) do update set row = excluded.row, updated_at = now()',
@@ -130,7 +130,7 @@ def feed_latest_put(profile, kind, line):
 
 def owner_exit_pending(profile):
     """The id of the exit the owner asked for and the loop has not done, or
-    None (sql/039 owner_requests)."""
+    None (sql/040 owner_requests)."""
     with cursor() as cur:
         cur.execute("select id from owner_requests where profile = %s and kind = 'exit' and done_at is null "
                     'order by id limit 1', (profile,))

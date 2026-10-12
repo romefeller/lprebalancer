@@ -53,7 +53,7 @@ def stop_revoked(err):
 
 
 def owner_exit():
-    """The pending exit the owner asked for (sql/039), or None. A read that
+    """The pending exit the owner asked for (sql/040), or None. A read that
     fails is no request: the next poll reads again."""
     if not config.VAULT:
         return None

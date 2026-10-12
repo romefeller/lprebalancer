@@ -86,25 +86,45 @@ export function readPolicy(r) {
   return { accountIndex, constraints, hooks: Boolean(pre || post), spendingLimits: limits };
 }
 
-// The settings actions of execute_settings_transaction_sync. Only policy
-// updates are read; any other action is reported by kind.
-function readSettingsActions(data) {
+// A ProgramInteraction policy where `r` stands: its constraints and its bytes.
+function policyAt(r) {
+  const payload = r.u8();
+  if (payload !== 3) throw new Error(`a change other than a program-interaction policy (payload ${payload})`);
+  const start = r.o;
+  const policy = readPolicy(r);
+  return { policy, bytes: Buffer.from(r.b.subarray(start, r.o)) };
+}
+
+// The settings actions of execute_settings_transaction_sync: policy updates
+// (squads.mjs putSettingsAction 8) and policy creations (7, a venue staged
+// on the vault, admin.mjs approvePlan). Any other action (a signer, a
+// threshold, a removal) is refused, not read. A creation's address is its
+// seed's (squads.mjs policyPda).
+function readSettingsActions(data, settings) {
   const r = new Reader(data);
   r.bytes(8);
   const signers = r.u8();
+  const readSigners = (r) => r.vec(r => ({ key: r.key(), permissions: r.u8() }));
   const actions = r.vec(r => {
     const kind = r.u8();
-    // any other action (a signer, a threshold, another policy kind) is refused, not read
-    if (kind !== 8) throw new Error(`a change other than a policy update (settings action ${kind})`);
-    const address = r.key();
-    const policySigners = r.vec(r => ({ key: r.key(), permissions: r.u8() }));
-    const threshold = r.u16(), timeLock = r.u32(), payload = r.u8();
-    if (payload !== 3) throw new Error(`a change other than a program-interaction policy (payload ${payload})`);
-    const start = r.o;
-    const policy = readPolicy(r);
-    const bytes = r.b.subarray(start, r.o);
-    const expiration = r.option(r => r.u8());
-    return { kind: 'policyUpdate', address, signers: policySigners, threshold, timeLock, policy, bytes: Buffer.from(bytes), expiration };
+    if (kind === 8) {
+      const address = r.key();
+      const policySigners = readSigners(r);
+      const threshold = r.u16(), timeLock = r.u32();
+      const { policy, bytes } = policyAt(r);
+      const expiration = r.option(r => r.u8());
+      return { kind: 'policyUpdate', address, signers: policySigners, threshold, timeLock, policy, bytes, expiration };
+    }
+    if (kind === 7) {
+      const seed = r.u64();
+      const { policy, bytes } = policyAt(r);
+      const policySigners = readSigners(r);
+      const threshold = r.u16(), timeLock = r.u32();
+      const start = r.option(r => r.u8()), expiration = r.option(r => r.u8());
+      return { kind: 'policyCreate', address: sq.policyPda(new PublicKey(settings), seed).toBase58(), signers: policySigners, threshold, timeLock,
+        policy, bytes, expiration: start ?? expiration };
+    }
+    throw new Error(`a change other than a policy update (settings action ${kind})`);
   }, 16);
   const memo = r.option(r => r.bytes(r.u32()).toString('utf8'));
   if (!r.done()) throw new Error('bytes after the settings actions');
@@ -462,24 +482,23 @@ function policyUpdates(outer, expect, pins, ctx, lines, no, signer) {
     if (!Buffer.from(ix.data).subarray(0, 8).equals(sqDisc('settings'))) { no('a vault instruction other than a policy update'); continue; }
     if (ix.keys[0]?.pubkey !== expect.settings) no('it changes another vault');
     if (ix.keys[1]?.pubkey !== expect.owner) no('the rent is paid by someone else than you');
-    const s = readSettingsActions(ix.data);
+    const s = readSettingsActions(ix.data, expect.settings);
     if (s.signers !== 1 || ix.keys[4]?.pubkey !== expect.owner) no('it is not signed by your wallet alone');
     for (const a of s.actions) {
       const w = want[a.address];
       if (!w) { no(`policy ${short(a.address)} is not one of your vault's`); continue; }
+      // a new policy (a venue staged on the vault) only names the bot: a revoke creates none
+      if (a.kind === 'policyCreate' && signer !== pins.policyKey) no(`a revoke creates no policy (${short(a.address)})`);
       if (a.signers.length !== 1 || a.signers[0].key !== signer || a.signers[0].permissions !== sq.PERMISSION.all) {
         no(`policy ${short(a.address)} would name ${a.signers.map(s => short(s.key)).join(', ')}, not ${who}`);
       }
       if (a.threshold !== 1 || a.timeLock !== 0 || a.expiration !== null) no('a threshold, time lock or expiry other than the rules\'');
       if (a.policy.hooks || a.policy.spendingLimits || a.policy.accountIndex !== 0) no('hooks, spending limits or another vault account');
       const same = w.policy && Buffer.from(a.bytes).equals(sq.encodeProgramInteraction(w.policy));
-      lines.push(`Policy ${short(a.address)} (${w.venue}): signer ${who}; ${a.policy.constraints.length} allowed instructions${same ? ', exactly the rules in git' : ''}:`);
+      lines.push(`${a.kind === 'policyCreate' ? 'New policy' : 'Policy'} ${short(a.address)} (${w.venue}): signer ${who}; ${a.policy.constraints.length} allowed instructions${same ? ', exactly the rules in git' : ''}:`);
       for (const c of a.policy.constraints) lines.push(`  · ${describeConstraint(c, ctx)}`);
       if (!same) no(`policy ${short(a.address)} differs from the rules in git (rules.json) for your vault`);
-      delete want[a.address];
     }
   }
-  const left = Object.keys(want);
-  if (left.length && expect.complete) no(`${left.length} of your vault's policies are not in it`);
 }
 

@@ -1,4 +1,4 @@
-"""The loop and the owner's page (sql/039): a vault the owners revoked stops
+"""The loop and the owner's page (sql/040): a vault the owners revoked stops
 the bot once and cleanly (one REVOKED line, exit 0, no failure, no HALT); an
 exit the owner signed closes the position into the vault and stops; a vault
 profile keeps its newest book and DAILY rows where the page reads them."""

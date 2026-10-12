@@ -200,7 +200,7 @@ export async function ownerTxs(connection, c, row, keys, { action, owner, token,
   } else if (action === 'withdraw') {
     const t = own(c.tokens, token);
     if (!t) throw new Invalid(`token ${token}`);
-    if (amount !== 'all' && (amount.split('.')[1]?.length ?? 0) > t.decimals) throw new Invalid(`amount: at most ${t.decimals} decimals`);
+    if (amount !== 'all' && (amount.split('.')[1]?.length ?? 0) > t.decimals) throw new Invalid(`amount: a number or all, at most ${t.decimals} decimals`);
     if (amount !== 'all' && !(toRaw(amount, t.decimals) > 0n)) throw new Invalid('amount: a number or all');
     parts = [await request('withdraw', { owner, to: owner, mint: t.native ? 'SOL' : t.mint, amount },
       { connection, env: requestEnv(row, venues[0], keys) })];

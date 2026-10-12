@@ -356,3 +356,25 @@ test('edges: a policy update with hooks, limits, another account, threshold, tim
   assert.match(lines, /Token: pay out \(TransferChecked to a payout wallet only\)/);
   assert.match(lines, /Token: open a token account for the vault/, 'a shared rule by its name');
 });
+
+test('approve: a venue staged on the vault: its new policies at the vault\'s next seeds, exactly the rules; never in a revoke', () => {
+  const compiled = compile(VENUE, { vault: VAULT, payer: PAYER, pools: POOLS[VENUE].map(p => new PublicKey(p)),
+    payouts: payoutWallets.map(w => new PublicKey(ata(w, USDC))) }).policies;
+  const seeds = compiled.map((_, i) => 5n + BigInt(i));
+  const staged = seeds.map(s => sq.policyPda(SETTINGS, s).toBase58());
+  const e = (kind) => ({ ...base, kind, policies: { [VENUE]: staged }, pools: { [VENUE]: POOLS[VENUE] }, payoutWallets });
+  const create = (i, signer = POLICY_KEY, policy = compiled[i].policy, seed = seeds[i]) => [sq.settingsSyncIx({ settings: SETTINGS, signers: [OWNER], rentPayer: OWNER,
+    extra: [sq.policyPda(SETTINGS, seed)], actions: [{ kind: 'policyCreate', seed, policy, signers: [{ key: signer }] }] })];
+  for (let i = 0; i < compiled.length; i++) {
+    const r = decodeSol(wire(create(i)), e('approve'), PINS);
+    ok(r);
+    assert.match(r.lines[0], /^New policy .*exactly the rules in git/);
+  }
+  refused(decodeSol(wire(create(0, OWNER)), e('revoke'), PINS), /a revoke creates no policy/);
+  refused(decodeSol(wire(create(0, STRANGER)), e('approve'), PINS), /not the bot's rules key/);
+  refused(decodeSol(wire(create(0, POLICY_KEY, compiled[0].policy, 99n)), e('approve'), PINS), /not one of your vault's/, 'another seed');
+  const last = compiled.length - 1;
+  const p = compiled[last].policy;
+  const wider = { ...p, constraints: [...p.constraints, p.constraints[0]] };
+  refused(decodeSol(wire(create(last, POLICY_KEY, wider)), e('approve'), PINS), /differs from the rules in git/);
+});

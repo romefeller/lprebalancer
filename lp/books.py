@@ -147,7 +147,7 @@ def notify(event, **payload):
           flush=True)
 
 
-# The rows the owner's page shows (onboard/, sql/039 feed_latest): the
+# The rows the owner's page shows (onboard/, sql/040 feed_latest): the
 # newest book, DAILY, and the owner's stops.
 PAGE_EVENTS = ('DAILY', 'REVOKED', 'OWNER_EXIT')
 

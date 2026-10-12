@@ -349,7 +349,7 @@ class Settings(unittest.TestCase):
 
 
 class OwnerPage(unittest.TestCase):
-    """The owner's page (sql/039): deposits verified on chain set the cap,
+    """The owner's page (sql/040): deposits verified on chain set the cap,
     exit requests, the bot's latest rows."""
 
     def setUp(self):
