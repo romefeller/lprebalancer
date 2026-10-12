@@ -50,6 +50,7 @@ import { assertNotHalted } from '../../shared/halt_guard.mjs';
 import { BOT_ROOT } from '../../bot_root.mjs';
 import { createRequire } from 'node:module';
 import { waitTurn } from '../jupiter/gate.mjs';
+import { awaitLanded, BLOCKHASH_LIFETIME } from '../../shared/tx_send.mjs';
 import SOLANA from '../../chains/solana/solana.json' with { type: 'json' };
 import { JUPITER, jupiterHeaders } from '../jupiter/api.mjs';
 import { actingAccount } from '../../chains/solana/vault/account.mjs';
@@ -474,18 +475,11 @@ export async function sendAll(connection, txs, payer) {
   return { sigs, error: null };
 }
 
+// Polls, never a websocket (the Alchemy RPC serves no signatureSubscribe).
+// The SDK built the transaction on a blockhash it fetched before this send,
+// so it expires by the block height read here plus a blockhash's lifetime.
 async function confirm(connection, sig) {
-  let res;
-  try {
-    res = await connection.confirmTransaction(sig, 'confirmed');
-  } catch (e) {
-    // timed out waiting: ask once more before declaring the outcome unknown
-    const st = await connection.getSignatureStatuses([sig]);
-    const s = st.value[0];
-    if (!s || !s.confirmationStatus) throw new Error(`${sig} not confirmed: ${String(e?.message ?? e).slice(0, 120)}`);
-    res = { value: s };
-  }
-  if (res.value.err) throw new Error(`${sig} failed on chain: ${JSON.stringify(res.value.err)}`);
+  await awaitLanded(connection, sig, (await connection.getBlockHeight('confirmed')) + BLOCKHASH_LIFETIME);
 }
 
 // sent: whether anything reached the chain; partial: something did and then

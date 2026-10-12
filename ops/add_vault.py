@@ -7,7 +7,7 @@ owners and the policy key; the policy row names, per venue, the policies and
 what the owners approved. A dry run by default: it prints every row and
 writes nothing.
 
-    # after `cli.mjs connect ... --execute > vault.json`
+    # after `cli.mjs connect ... --execute > vault.json` (--json - reads it from stdin)
     LPBOT_DSN=dbname=rebalancer python3 ops/add_vault.py register --wallet tangem-vault \\
         --json vault.json --secret-env LPBOT_TANGEM_PAYER_KEY --policy-key-env LPBOT_TANGEM_POLICY_KEY [--apply]
 
@@ -19,9 +19,9 @@ A Safe vault (chains/evm/vault/cli.mjs connect --execute > vault.json) registers
 same way. It has one key: its --policy-key-env is its --secret-env. Its payout wallets
 are in the bot's role, so a new payout wallet is a new connect.
 
-Then the profile: ops/add_profile.py --wallet <id> ..., and for an instance
-that is not the operator's own: db.py set <profile> special=false
-fee_wallet=<w> fee_bps=1000 (in that order).
+Then the profile: ops/add_profile.py --wallet <id> --profit-wallet <w> ..., and for
+an instance that is not the operator's own: --no-special --fee-wallet <w> --fee-bps 1000.
+onboard/ does all of it for a vault an owner signs up for at /bot.
 """
 import argparse
 import json
@@ -114,9 +114,19 @@ def payout_accounts(wallets, mints):
     return addresses(json.loads(out.strip().splitlines()[-1]), 'payout accounts')
 
 
+def insert_rows(cur, wallet, vault_row, policies):
+    """Write the rows of register_rows() with `cur`: the wallet, the vault and
+    one policy row per venue. The caller commits."""
+    cur.execute('insert into wallets (id, chain, address, secret_env, label) values (%s, %s, %s, %s, %s)', wallet)
+    cur.execute('insert into vaults (wallet_id, kind, settings, owners, threshold, policy_key_env, lookup) '
+                'values (%s, %s, %s, %s, %s, %s, %s)', vault_row)
+    for policy in policies:
+        cur.execute('insert into vault_policies (wallet_id, venue, policies, pools, payouts) values (%s, %s, %s, %s, %s)', policy)
+
+
 def register(args):
-    connected = json.loads(pathlib.Path(args.json).read_text())
-    wallet, vault_row, policies = register_rows(args, connected)
+    text = sys.stdin.read() if args.json == '-' else pathlib.Path(args.json).read_text()
+    wallet, vault_row, policies = register_rows(args, json.loads(text))
     print('wallet:', wallet)
     print('vault:', vault_row)
     for policy in policies:
@@ -125,11 +135,7 @@ def register(args):
         print('DRY RUN: pass --apply to write.')
         return
     with db.cursor(commit=True) as cur:
-        cur.execute('insert into wallets (id, chain, address, secret_env, label) values (%s, %s, %s, %s, %s)', wallet)
-        cur.execute('insert into vaults (wallet_id, kind, settings, owners, threshold, policy_key_env, lookup) '
-                    'values (%s, %s, %s, %s, %s, %s, %s)', vault_row)
-        for policy in policies:
-            cur.execute('insert into vault_policies (wallet_id, venue, policies, pools, payouts) values (%s, %s, %s, %s, %s)', policy)
+        insert_rows(cur, wallet, vault_row, policies)
     print(f'written. Set {args.secret_env} and {args.policy_key_env} in the service environment, then add the profile.')
 
 

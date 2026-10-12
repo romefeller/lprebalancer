@@ -153,7 +153,8 @@ test('dlmm: a first send that fails is never rotated; a later one is a partial r
   const conn2 = {
     getLatestBlockhash: blockhash,
     sendRawTransaction: async () => { if (k++) throw new Error('fetch failed'); return 'SIG1'; },
-    confirmTransaction: async () => ({ value: { err: null } }),
+    getSignatureStatuses: async () => ({ value: [{ err: null, confirmationStatus: 'confirmed' }] }),
+    getBlockHeight: async () => 0,
   };
   const out = await dlmm.sendAll(conn2, [{ instructions: [] }, { instructions: [] }], acting);
   assert.deepEqual(out.sigs, ['SIG1']); assert.match(out.error, /fetch failed/);
@@ -162,8 +163,9 @@ test('dlmm: a first send that fails is never rotated; a later one is a partial r
 test('dlmm: a transaction that fails on chain is a failed send, not a signature', async () => {
   const acting = { transaction: () => ({ serialize: () => Buffer.alloc(1) }) };
   const conn = { getLatestBlockhash: async () => ({ blockhash: 'x', lastValidBlockHeight: 1 }),
-    sendRawTransaction: async () => 'SIG', confirmTransaction: async () => ({ value: { err: { InstructionError: [0, 'Custom'] } } }) };
-  await assert.rejects(dlmm.sendIxs(conn, acting, []), /SIG failed/);
+    sendRawTransaction: async () => 'SIG', getBlockHeight: async () => 0,
+    getSignatureStatuses: async () => ({ value: [{ err: { InstructionError: [0, 'Custom'] }, confirmationStatus: 'confirmed' }] }) };
+  await assert.rejects(dlmm.sendIxs(conn, acting, []), e => e.afterSend && e.signature === 'SIG' && /failed on chain: .*Custom/.test(e.message));
 });
 
 function fakeTx() { return { message: {}, sign() {}, serialize: () => Buffer.alloc(1) }; }
@@ -174,7 +176,9 @@ test('pancake: a send or confirm failure is never rotated', async () => {
   let r = await oneAttempt(SIGNERS['venues/pancakeswap_v3/signer.mjs'], () => pancake.sendOne(noSend, fakeTx(), [], []));
   await assert.rejects(r.p, e => e instanceof AfterSignError && !e.sent && /\(not retried\): fetch failed/.test(e.message));
   assert.equal(r.n(), 1);
-  const noConfirm = { ...base, sendRawTransaction: async () => 'SIG', confirmTransaction: async () => { throw new Error('429 Too Many Requests'); } };
+  // the wait polls (no websocket): a status read that fails after the send is a sent result
+  const noConfirm = { ...base, sendRawTransaction: async () => 'SIG', getBlockHeight: async () => 0,
+    getSignatureStatuses: async () => { throw new Error('429 Too Many Requests'); } };
   r = await oneAttempt(SIGNERS['venues/pancakeswap_v3/signer.mjs'], () => pancake.sendOne(noConfirm, fakeTx(), [], []));
   await assert.rejects(r.p, e => e instanceof pancake.SentError && e.sent && e.signatures[0] === 'SIG');
   assert.equal(r.n(), 1);
@@ -184,9 +188,11 @@ test('byreal: sendAll never throws, so the loop never sees a send', async () => 
   const conn = { sendRawTransaction: async () => { throw new Error('fetch failed'); } };
   const out = await byreal.sendAll(conn, [fakeTx()], {});
   assert.deepEqual(out.sigs, []); assert.match(out.error, /fetch failed/);
-  const conn2 = { sendRawTransaction: async () => 'SIG', confirmTransaction: async () => { throw new Error('timed out'); }, getSignatureStatuses: async () => ({ value: [null] }) };
+  // the wait polls (no websocket); the blockhash passes with no record of the send: expired
+  let height = 0;
+  const conn2 = { sendRawTransaction: async () => 'SIG', getBlockHeight: async () => (height += 200), getSignatureStatuses: async () => ({ value: [null] }) };
   const out2 = await byreal.sendAll(conn2, [fakeTx()], {});
-  assert.deepEqual(out2.sigs, ['SIG']); assert.match(out2.error, /not confirmed/);
+  assert.deepEqual(out2.sigs, ['SIG']); assert.match(out2.error, /expired: .*no record of SIG/);
   const conn3 = { ...conn2, getSignatureStatuses: async () => ({ value: [{ err: null, confirmationStatus: 'confirmed' }] }) };
   const out3 = await byreal.sendAll(conn3, [fakeTx()], {});                 // a late confirmation counts
   assert.deepEqual(out3, { sigs: ['SIG'], error: null });

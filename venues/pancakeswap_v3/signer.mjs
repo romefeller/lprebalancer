@@ -59,6 +59,7 @@ import { assertNotHalted } from '../../shared/halt_guard.mjs';
 import { BOT_ROOT } from '../../bot_root.mjs';
 import { createRequire } from 'node:module';
 import { waitTurn } from '../jupiter/gate.mjs';
+import { sendUntilLanded } from '../../shared/tx_send.mjs';
 import SOLANA from '../../chains/solana/solana.json' with { type: 'json' };
 import { JUPITER, jupiterHeaders } from '../jupiter/api.mjs';
 
@@ -512,20 +513,17 @@ export async function sendOne(connection, tx, signers, sigsSoFar) {
   tx.message.recentBlockhash = blockhash;
   tx.sign(signers);
   // A send that fails without a signature may still reach a node: never
-  // rotated, never retried (AfterSignError).
+  // rotated, never retried (AfterSignError). The wait polls, never over a
+  // websocket (the Alchemy RPC serves no signatureSubscribe).
   let sig;
   try {
-    sig = await connection.sendRawTransaction(tx.serialize(), { skipPreflight: false, maxRetries: 3 });
+    sig = await sendUntilLanded(connection, tx.serialize(), lastValidBlockHeight);
   } catch (e) {
-    throw new AfterSignError(`send failed after signing (not retried): ${e?.message ?? e}`);
-  }
-  sigsSoFar.push(sig);
-  try {
-    const c = await connection.confirmTransaction({ signature: sig, blockhash, lastValidBlockHeight }, 'confirmed');
-    if (c.value.err) throw new Error(`transaction ${sig} failed: ${JSON.stringify(c.value.err)}`);
-  } catch (e) {
+    if (!e.afterSend) throw new AfterSignError(`send failed after signing (not retried): ${e?.message ?? e}`);
+    sigsSoFar.push(e.signature);
     throw new SentError(e.message, sigsSoFar.slice());
   }
+  sigsSoFar.push(sig);
   return sig;
 }
 

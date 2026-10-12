@@ -41,6 +41,40 @@ def args(**kw):
     return argparse.Namespace(**a)
 
 
+class FeeTerms(unittest.TestCase):
+    """--special, --fee-bps, --fee-wallet (sql/036): the operator's own instance pays no
+    share; only a vault instance pays one, to a valid wallet, at most 50%."""
+    W = '8funmDkPNBtjqfNkBEoBF16eBfyQ4vMAFrs4Nyys5D1h'
+
+    def terms(self, vault=True, chain='solana', **kw):
+        return ap.fee_terms(argparse.Namespace(**kw), chain, vault)
+
+    def test_what_it_allows(self):
+        self.assertEqual(self.terms(), (True, 0, None), 'no flags: the operator\'s own')
+        self.assertEqual(self.terms(vault=False), (True, 0, None))
+        self.assertEqual(self.terms(special=True), (True, 0, None))
+        self.assertEqual(self.terms(special=False, fee_bps=1000, fee_wallet=self.W), (False, 1000, self.W))
+        self.assertEqual(self.terms(special=False, fee_bps=5000, fee_wallet=self.W), (False, 5000, self.W))
+        self.assertEqual(self.terms(special=False, fee_bps=0, fee_wallet=self.W), (False, 0, None), 'no share: no wallet kept')
+        self.assertEqual(self.terms(special=False), (False, 0, None))
+        self.assertEqual(self.terms(chain='polygon', special=False, fee_bps=1, fee_wallet='0x2b35948898e1b4897E7FC5a70e39b213dcfd0142'),
+                         (False, 1, '0x2b35948898e1b4897E7FC5a70e39b213dcfd0142'))
+
+    def test_what_it_refuses(self):
+        for kw, vault, msg in ((dict(fee_bps=1000, fee_wallet=self.W), True, 'special instance pays no fee'),
+                               (dict(special=True, fee_bps=1000), True, 'special instance pays no fee'),
+                               (dict(special=True, fee_wallet=self.W), True, 'special instance pays no fee'),
+                               (dict(special=False), False, 'only a vault instance'),
+                               (dict(special=False, fee_bps=1000, fee_wallet=self.W), False, 'only a vault instance'),
+                               (dict(special=False, fee_bps=5001, fee_wallet=self.W), True, 'not between 0 and 5000'),
+                               (dict(special=False, fee_bps=-1, fee_wallet=self.W), True, 'not between 0 and 5000'),
+                               (dict(special=False, fee_bps=1000), True, 'is not a solana address'),
+                               (dict(special=False, fee_bps=1000, fee_wallet='0x2b35948898e1b4897E7FC5a70e39b213dcfd0142'), True,
+                                'is not a solana address')):
+            with self.subTest(kw=kw), self.assertRaisesRegex(ap.Refused, msg):
+                self.terms(vault=vault, **kw)
+
+
 class Build(unittest.TestCase):
     def test_the_swing_on_a_new_wallet(self):
         w, row, sw = ap.build(args(), TEMPLATE, REC, None, 0)

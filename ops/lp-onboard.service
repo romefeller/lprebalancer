@@ -1,0 +1,45 @@
+# The self-serve page romefeller.app/bot (onboard/server.mjs): an owner creates a
+# vault and one profile for the LP bot. Caddy proxies /bot* to 127.0.0.1:8090.
+#
+# Install (once, after review):
+#   sudo install -m 644 ops/lp-onboard.service /etc/systemd/system/
+#   sudo install -m 440 ops/onboard/lp-onboard.sudoers /etc/sudoers.d/lp-onboard && sudo visudo -c
+#   sudo systemctl daemon-reload && sudo systemctl enable --now lp-onboard
+#
+# No key and no secret in this file: the variables hold PATHS of the bot's keys
+# (the same ones every vault instance signs with, ops/lp-bot@.service), and
+# ~/.kamino-keys/onboard.env holds LPBOT_ONBOARD_INVITE_SHA256 (the SHA-256 of
+# each invite code, comma-separated). ~/.kamino-keys/env gives the RPC endpoints.
+# The server starts a new profile with `sudo -n systemctl enable --now
+# lp-bot@<name>.service` and nothing else (the sudoers snippet): sudo needs
+# NoNewPrivileges off.
+[Unit]
+Description=Aperture onboarding page (romefeller.app/bot)
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/agent-fin/lp_bot
+EnvironmentFile=-/home/ubuntu/.kamino-keys/env
+EnvironmentFile=-/home/ubuntu/.kamino-keys/onboard.env
+Environment=PATH=/usr/bin:/bin
+Environment=LPBOT_DSN=dbname=rebalancer
+Environment=SOLANA_RPC_URL=https://api.mainnet-beta.solana.com
+Environment=LPBOT_VAULT_SOL_PAYER_PATH=/home/ubuntu/.kamino-keys/vault-test/payer.json
+Environment=LPBOT_VAULT_SOL_POLICY_PATH=/home/ubuntu/.kamino-keys/vault-test/policy.json
+Environment=LPBOT_VAULT_EVM_KEY_PATH=/home/ubuntu/.kamino-keys/vault-test/evm.secret
+ExecStart=/usr/bin/node /home/ubuntu/agent-fin/lp_bot/onboard/server.mjs
+Restart=on-failure
+RestartSec=10
+MemoryHigh=200M
+MemoryMax=300M
+PrivateTmp=true
+ProtectSystem=full
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target

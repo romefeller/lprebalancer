@@ -116,9 +116,9 @@ TARGETS = {
                                                      'putSettingsAction', 'compileInner', 'policyExecuteIx', 'ownerExecuteIx',
                                                      'decodeSettings', 'policyStateIs'],
                     NODE_TESTS('test_vault_policy.mjs', 'test_vault_fork.mjs')),
-    'vault_admin': ('chains/solana/vault/admin.mjs', ['connectPlan', 'connectProblems', 'staticAccounts', 'lookupPlan'],
+    'vault_admin': ('chains/solana/vault/admin.mjs', ['connectPlan', 'connectDone', 'connectProblems', 'staticAccounts', 'lookupPlan'],
                     NODE_TESTS('test_vault_policy.mjs', 'test_vault_cli_fork.mjs', 'test_vault_venues_fork.mjs')),
-    'vault_account': ('chains/solana/vault/account.mjs', ['vaultConfig', 'actingAccount', 'needed', 'verifyPolicy', 'wrap'],
+    'vault_account': ('chains/solana/vault/account.mjs', ['vaultConfig', 'actingAccount', 'needed', 'verifyPolicy', 'wrap', 'withVaultBudget'],
                       NODE_TESTS('test_vault_policy.mjs', 'test_vault_dlmm_fork.mjs')),
     'vault_cli': ('chains/solana/vault/cli.mjs', ['payoutAccounts', 'request'], NODE_TESTS('test_vault_cli_fork.mjs', 'test_owner_page_fork.mjs')),
     'vault_connect': ('chains/solana/vault/cli.mjs', ['poolsByVenue', 'connect'], NODE_TESTS('test_vault_venues_fork.mjs', 'test_vault_cli_fork.mjs')),
@@ -153,7 +153,19 @@ TARGETS = {
                                                           'checkVaultRecipient'],
                          NODE_TESTS('test_evm_vault.mjs', 'test_uniswap.mjs', 'test_uniswap_polygon.mjs', 'test_vault_polygon_fork.mjs')),
     'evm_vault_cli': ('chains/evm/vault/cli.mjs', ['poolOf', 'plan', 'connect'], NODE_TESTS('test_evm_vault.mjs', 'test_vault_polygon_fork.mjs')),
-    'add_vault': ('ops/add_vault.py', ['addresses', 'register_rows', 'register', 'payouts'], PY_TESTS('test_add_vault')),
+    'add_vault': ('ops/add_vault.py', ['addresses', 'register_rows', 'register', 'payouts', 'insert_rows'], PY_TESTS('test_add_vault', 'test_onboard_store')),
+    # Self-serve onboarding (onboard/, 2026-10-11): what an owner signs, the gas payment it
+    # must make before the bot spends anything, the server's gates, the rows it writes.
+    'onboard_intent': ('onboard/intent.mjs', ['decimal', 'address', 'amount', 'toRaw', 'fromRaw', 'name', 'nativeOf', 'gasTotal', 'minimum',
+                                              'maxAmount', 'addAmount', 'feeTerms', 'fields', 'verify', 'decodeSignature', 'inviteOk'], NODE_TESTS('test_onboard.mjs')),
+    'onboard_sol_payment': ('onboard/solana.mjs', ['vaultVenues', 'paymentVerdict', 'checkPayment', 'gas', 'paymentTxs', 'holdings'],
+                            NODE_TESTS('test_onboard.mjs', 'test_onboard_fork.mjs')),
+    'onboard_evm_payment': ('onboard/polygon.mjs', ['paymentVerdict', 'checkPayment', 'gas', 'paymentTxs', 'holdings'],
+                            NODE_TESTS('test_onboard.mjs', 'test_onboard_polygon_fork.mjs')),
+    'onboard_server': ('onboard/server.mjs', ['makeServer', 'clientOf', 'serviceCommand', 'profileVenues'], NODE_TESTS('test_onboard.mjs')),
+    'onboard_store': ('onboard/store.py', ['same_owner', 'taken', 'owned', 'sign', 'paid', 'resume', 'connected', 'stuck', 'with_settings', 'register',
+                                           'started'], PY_TESTS('test_onboard_store')),
+    'onboard_fee_terms': ('ops/add_profile.py', ['fee_terms'], PY_TESTS('test_add_profile', 'test_onboard_store')),
     'rpc_policy': ('shared/rpc_policy.mjs', ['endpoints', 'errorKind', 'overEndpoints', 'isEntry'], NODE_TESTS('test_rpc_policy.mjs', 'test_signer_rpc.mjs')),
     'rpc_raydium': ('venues/raydium_clmm/signer.mjs', ['withRpc', 'sendAll'], NODE_TESTS('test_signer_rpc.mjs')),
     'rpc_dlmm': ('venues/meteora_dlmm/signer.mjs', ['withRpc', 'sendAll'], NODE_TESTS('test_signer_rpc.mjs')),
@@ -273,7 +285,7 @@ TARGETS = {
     'quiet_db': ('db.py', ['tape_ref_pool'], PY_TESTS('test_quiet_pool')),
     # 2026-10-02: a payout's priority fee, and the send loop that proves an expired one never landed
     'payout_send': ('chains/solana/payout.mjs', ['payoutCuPrice'], NODE_TESTS('test_payout_send.mjs')),
-    'tx_send': ('shared/tx_send.mjs', ['sendUntilLanded'], NODE_TESTS('test_payout_send.mjs')),
+    'tx_send': ('shared/tx_send.mjs', ['sendUntilLanded', 'awaitLanded'], NODE_TESTS('test_payout_send.mjs', 'test_signer_rpc.mjs')),
     'deposit_mark': ('lp/moves.py', ['opened_mark', 'settle_deposit'], PY_TESTS('test_deposit_mark')),
     'deposit_db': ('db.py', ['set_deposit'], PY_TESTS('test_deposit_mark')),
     'tx_send_price': ('shared/tx_send.mjs', ['priorityCuPrice'], NODE_TESTS('test_payout_send.mjs', 'test_raydium_landing.mjs')),
@@ -318,10 +330,12 @@ TARGETS = {
                                     'parseSleeve', 'sleeveCap', 'capped'], NODE_TESTS('test_aerodrome.mjs')),
     # 2026-10-08: a 9-decimal request rounded up past an 18-decimal holding is the holding
     'evm_cap_held': ('chains/evm/clmath.mjs', ['capToHeld'], NODE_TESTS('test_uniswap_polygon.mjs')),
+    # 2026-10-11: opens and closes take their minimums over a price range, not per token
+    'evm_price_range': ('chains/evm/clmath.mjs', ['shiftedSqrt', 'openMinimums', 'closeMinimums'], NODE_TESTS('test_uniswap.mjs')),
     # the hot pause's fee side on Uniswap v3 venues (2026-10-08)
     'v3_fee_pool': ('venues/uniswap_v3/pools.py', ['v3_fee_state', 'uniswap_v3_fee_state'], PY_TESTS('test_polygon_hot_pause', 'test_hot_pause')),
     # an open's leftover into the position where the venue can add (2026-10-08)
-    'open_leftover': ('lp/swaps.py', ['adds_open_leftover', 'deploy_idle', 'idle_deploys_left'], PY_TESTS('test_deploy_leftover', 'test_deploy_idle', 'test_increase_idle')),
+    'open_leftover': ('lp/swaps.py', ['can_add', 'adds_open_leftover', 'deploy_idle', 'idle_deploys_left'], PY_TESTS('test_deploy_leftover', 'test_deploy_idle', 'test_increase_idle')),
     'v3_fee_loop': ('lp/board.py', ['sample_fee_growth', 'sample_v3_fee_growth'], PY_TESTS('test_polygon_hot_pause', 'test_hot_pause', 'test_venues')),
     'evm_signer': ('venues/aerodrome/signer.mjs', ['guard', 'marketRefusals', 'spendable', 'positionView', 'simulateSequence',
                                             'runSteps', 'planOpen', 'closeCalls', 'checkRecipient', 'isNative',
@@ -375,6 +389,32 @@ SQL_TARGETS = {'deposit_db', 'unichain_book', 'unichain_quote', 'band_profile', 
 # The report prints each survivor's key: copy it here with a reason. The line
 # number is not in the key, so an edit above a mutant keeps its entry valid.
 EQUIVALENT = {
+    # onboard/server.mjs: `??` -> `||` where the left side is a function, an object, a string
+    # or absent, never 0, false or '' that would read differently.
+    ('onboard_server', 'makeServer', '\\?\\? -> ||', 'profile: { name: r.name, template: cfg.chains[r.chain].template, settings: cfg.chains[r.chain].settings ?? {}, dex, pool, execute_dexes: execute,', 0):
+        'a chain\'s settings are an object or absent: ?? and || agree',
+    ('onboard_server', 'makeServer', '\\?\\? -> ||', 'planned: r.connected?.planned ?? null,', 0):
+        'a saved plan is an object or absent: ?? and || agree',
+    ('onboard_server', 'makeServer', '\\?\\? -> ||', 'const now = deps.now ?? (() => Date.now());', 0):
+        'deps.now is a function or absent: ?? and || pick the same',
+    ('onboard_server', 'makeServer', '\\?\\? -> ||', 'const log = deps.log ?? ((o) => console.log(JSON.stringify({ t: new Date(now()).toISOString(), ...o })));', 0):
+        'deps.log is a function or absent: ?? and || pick the same',
+    ('onboard_server', 'makeServer', '\\?\\? -> ||', "const hashes = String(deps.inviteHashes ?? '').split(',').map(s => s.trim().toLowerCase()).filter(Boolean);", 0):
+        "inviteHashes is a string or absent; '' and absent both give no hash",
+    ('onboard_server', 'makeServer', '\\?\\? -> ||', 'connected ??= e.connected ?? null;', 0):
+        'e.connected is a connect report (an object) or absent: ?? and || pick the same',
+    ('onboard_server', 'makeServer', '\\?\\? -> ||', 'connected ??= e.connected ?? null;', 1):
+        'e.connected is a connect report (an object) or absent: ?? and || pick the same',
+    ('onboard_server', 'makeServer', '\\?\\? -> ||', "log({ event: 'setup_stuck', chain: r.chain, name: r.name, error: e.message, vault: connected?.vault ?? null });", 0):
+        'a log line only; a vault address is a non-empty string or absent',
+    ('onboard_server', 'makeServer', '\\?\\? -> ||', "log({ event: 'error', path: sub, error: String(e?.message ?? e).slice(0, 500) });", 0):
+        'a log line only',
+    ('onboard_intent', 'maxAmount', '(?<![<>=!])<(?![<=]) -> <=', 'return { amount: fromRaw(room < max ? room : max, t.decimals) };', 0):
+        'the lesser of room and max: when they are equal both branches give the same value',
+    ('onboard_server', 'clientOf', '\\?\\? -> ||', "const peer = req.socket.remoteAddress ?? '';", 0):
+        "remoteAddress is a non-empty string or absent: ?? and || give the same ''",
+    ('onboard_server', 'clientOf', '\\?\\? -> ||', "const fwd = String(req.headers['x-forwarded-for'] ?? '').split(',')[0].trim();", 0):
+        "the header is a string or absent; '' and absent both give no forwarded address",
     ('evm_vault_signer', 'signStep', '\\?(?=\\s) -> && false ?', 'const at = bn == null ? {} : { blockNumber: bn };', 0):
         'a call at blockNumber undefined is a call at the latest block, as with no blockNumber',
     ('evm_vault_signer', 'signStep', '\\?\\? -> ||', 'const me = ctx.from ?? ctx.me;              // a context built before vaults has `me` only', 0):
@@ -407,6 +447,14 @@ EQUIVALENT = {
         'raw == held returns held either way',
     ('uniswap_signer', 'atBlock', '\\?\\? -> ||', "if (!MISSING_BLOCK.test(String(e?.details ?? '') + ' ' + String(e?.shortMessage ?? e?.message ?? e))) throw e;", 0):
         'details is a string or absent: || only also replaces the empty string with the empty string',
+    ('evm_price_range', 'shiftedSqrt', '(?<![<>=!])<(?![<=]) -> <=', 'return q < sa ? sa : q > sb ? sb : q;', 0):
+        'at q == sa both branches return the same value',
+    ('evm_price_range', 'shiftedSqrt', '(?<![<>=!-])>(?![>=]) -> >=', 'return q < sa ? sa : q > sb ? sb : q;', 0):
+        'at q == sb both branches return the same value',
+    ('evm_price_range', 'openMinimums', '(?<![<>=!])<(?![<=]) -> <=', 'return { minA: a < now.amountA ? a : now.amountA, minB: b < now.amountB ? b : now.amountB };', 0):
+        'the lesser of two equal amounts is either one',
+    ('evm_price_range', 'openMinimums', '(?<![<>=!])<(?![<=]) -> <=', 'return { minA: a < now.amountA ? a : now.amountA, minB: b < now.amountB ? b : now.amountB };', 1):
+        'the lesser of two equal amounts is either one',
     ('uniswap_signer', 'settings', '\\?\\? -> ||', "pin: env.LPBOT_EVM_PROFIT_WALLET_PIN ?? '',", 0):
         "the only falsy string || would replace is '' itself",
     ('uniswap_signer', 'settings', '\\?\\? -> ||', "profit: env.LPBOT_PROFIT_WALLET ?? '',", 0):
@@ -827,12 +875,12 @@ EQUIVALENT = {
         'error-message text only: ?? and || differ only for an error with an empty message',
     ('rpc_dlmm', 'sendAll', '\\?\\? -> ||', 'return { sigs, error: String(e?.message ?? e).slice(0, 300) };', 0):
         'error-message text only: ?? and || differ only for an error with an empty message',
-    ('rpc_pancake', 'sendOne', '\\?\\? -> ||', 'throw new AfterSignError(`send failed after signing (not retried): ${e?.message ?? e}`);', 0):
+    ('rpc_pancake', 'sendOne', '\\?\\? -> ||', 'if (!e.afterSend) throw new AfterSignError(`send failed after signing (not retried): ${e?.message ?? e}`);', 0):
         'error-message text only: ?? and || differ only for an error with an empty message',
     ('rpc_byreal', 'sendAll', '\\?\\? -> ||', 'return { sigs, error: String(e?.message ?? e).slice(0, 300) };', 0):
         'error-message text only: ?? and || differ only for an error with an empty message',
-    ('rpc_byreal', 'confirm', '\\?\\? -> ||', 'if (!s || !s.confirmationStatus) throw new Error(`${sig} not confirmed: ${String(e?.message ?? e).slice(0, 120)}`);', 0):
-        'error-message text only: ?? and || differ only for an error with an empty message',
+    ('onboard_server', 'profileVenues', '\\?\\? -> ||', 'const v = connected.venues ?? { [connected.venue]: { pools: connected.pools } };', 0):
+        'a connect report\'s venues is an object (truthy) or absent: ?? and || pick the same',
     ('rpc_orca', 'sendOnce', '\\?\\? -> ||', 'throw new AfterSignError(`send failed after signing (not retried): ${e?.message ?? e}`);', 0):
         'error-message text only: ?? and || differ only for an error with an empty message',
     # venues/orca/swap.mjs
@@ -942,16 +990,22 @@ EQUIVALENT = {
     # Squads vault mode of Raydium, Orca, Byreal (2026-10-11)
     ('vault_policy', 'instructionsOf', '\\?\\? -> ||', 'const without = new Set(v.without ?? []);', 0):
         '"without" is a list or missing in rules.json: ?? and || agree',
-    ('vault_connect', 'connect', '(?<![<>=!-])>(?![>=]) -> >=', 'if (config.creationFee > 0n) console.error(`note: the program charges ${Number(config.creationFee) / 1e9} SOL per account`);', 0):
+    ('vault_connect', 'connect', '(?<![<>=!-])>(?![>=]) -> >=', 'if (config.creationFee > 0n) log(`note: the program charges ${Number(config.creationFee) / 1e9} SOL per account`);', 0):
         'report-only: a note on stderr when the program charges a fee',
-    ('vault_connect', 'connect', '> 0n -> >= 0n', 'if (config.creationFee > 0n) console.error(`note: the program charges ${Number(config.creationFee) / 1e9} SOL per account`);', 0):
+    ('vault_connect', 'connect', '> 0n -> >= 0n', 'if (config.creationFee > 0n) log(`note: the program charges ${Number(config.creationFee) / 1e9} SOL per account`);', 0):
         'report-only: a note on stderr when the program charges a fee',
     ('vault_connect', 'connect', '\\?\\? -> ||', "const venues = (f.venue ?? '').split(',').map(v => v.trim()).filter(Boolean);", 0):
         "--venue missing or '' gives '' either way",
-    ('vault_connect', 'connect', '\\?\\? -> ||', "const payer = await readKeypair(process.env.WALLET_SECRET_PATH ?? '');", 0):
-        "unset or '' reads the same empty path, and readKeypair fails on it either way",
-    ('vault_connect', 'connect', '\\?\\? -> ||', "const policyKey = await readKeypair(process.env.LPBOT_VAULT_POLICY_KEY ?? '');", 0):
-        "unset or '' reads the same empty path, and readKeypair fails on it either way",
+    ('vault_connect', 'connect', '\\?\\? -> ||', "payer ??= await readKeypair(process.env.WALLET_SECRET_PATH ?? '');", 0):
+        'payer is a Keypair or null: ??= and ||= assign the same',
+    ('vault_connect', 'connect', '\\?\\? -> ||', "payer ??= await readKeypair(process.env.WALLET_SECRET_PATH ?? '');", 1):
+        'an environment value is a string or absent; an empty one and none both read no key',
+    ('vault_connect', 'connect', '\\?\\? -> ||', "policyKey ??= await readKeypair(process.env.LPBOT_VAULT_POLICY_KEY ?? '');", 0):
+        'policyKey is a Keypair or null: ??= and ||= assign the same',
+    ('vault_connect', 'connect', '\\?\\? -> ||', "policyKey ??= await readKeypair(process.env.LPBOT_VAULT_POLICY_KEY ?? '');", 1):
+        'an environment value is a string or absent; an empty one and none both read no key',
+    ('vault_connect', 'connect', '\\?\\? -> ||', 'const landed = connectDone(settingsInfo?.data ?? null, policyInfos.map(Boolean), { owners, creator: payer.publicKey });', 0):
+        'account data is a Buffer (an object, truthy) or absent: ?? and || pick the same',
     ('raydium_vault', 'around', '\\?\\? -> ||', 'return [ComputeBudgetProgram.setComputeUnitLimit({ units: budget?.units ?? VAULT_CU_LIMIT }),', 0):
         'a budget names EXIT_CU_LIMIT or VAULT_CU_LIMIT units, never 0: ?? and || agree',
     ('raydium_vault', 'decreaseIxs', '\\?\\? -> ||', 'const rewards = (poolKeys.rewardInfos ?? []).map(r => ({ mint: r.mint.address, program: r.mint.programId }));', 0):

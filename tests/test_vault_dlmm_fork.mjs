@@ -249,6 +249,25 @@ test('the DLMM signer runs a vault with its usual commands', { timeout: 300_000 
 
 // The loop's swap, on the vault's own pool: a vault holding only SOL ends
 // near half SOL, half USDC, worth what it was.
+test('a wide band opens through the vault: the position grows past its default length (2026-10-11, test0)', { timeout: 300_000 }, async () => {
+  const { connection, acting, payer } = await vaultOnFork();
+  const signer = await import('../venues/meteora_dlmm/signer.mjs');
+  const deps = { urls: ['http://fork.test'], connectFn: async () => ({ connection, payer, acting }), sleep: async () => {} };
+  process.env.LPBOT_POOL = POOL.toBase58();
+  const out = async (fn) => { const said = [], log = console.log; console.log = (x) => said.push(x);
+    try { await fn(); } finally { console.log = log; }
+    return said.filter(x => typeof x === 'string' && x.startsWith('{')).map(JSON.parse).at(-1); };
+  const dlmm = await DLMM.create(connection, POOL);
+  const price = Number((await dlmm.getActiveBin()).pricePerToken);
+  const binStep = dlmm.lbPair.binStep;
+  const bins = Math.ceil(Math.log(1.05 / 0.95) / Math.log(1 + binStep / 1e4)) + 1;
+  assert.ok(bins > 70, `the band spans ${bins} bins: more than one default position (70)`);
+  const opened = await out(() => signer.open(POOL.toBase58(), String(price * 0.95), String(price * 1.05), '1', '100', true, deps));
+  assert.equal(opened.sent, true, JSON.stringify(opened));
+  const c = await out(() => signer.close(opened.positionMint, true, deps));
+  assert.ok(c.closed === opened.positionMint && !c.partial, JSON.stringify(c));
+});
+
 test('rebalance: the DLMM signer swaps a vault to its targets on the approved pool', { timeout: 300_000 }, async () => {
   const { fork, connection, acting, vault, payer } = await vaultOnFork({ usdc: 0n });
   const signer = await import('../venues/meteora_dlmm/signer.mjs');

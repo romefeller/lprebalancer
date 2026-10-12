@@ -23,7 +23,9 @@
     "(Anchor: sha256('global:<name>')[0..8]).",
     "A rule with \"opens\": true creates accounts that later instructions are checked",
     "against. The program checks every instruction of a call before it runs any, so such",
-    "an instruction ends its call and the next one starts after it has run.",
+    "an instruction ends its call and the next one starts after it has run. An instruction",
+    "that grows an account is one too: Solana lets the inner instructions of one call grow",
+    "accounts by 10240 bytes in all (a DLMM position created and widened in one call failed).",
     "A venue with \"like\": <venue> is a fork of that venue: its rules, against its own program, but those it names in \"without\".",
     "Byreal leaves out swap_v2: its SOL/USDC pool takes only swap_v3_dyn, which the signer does not build.",
     "\"rewards\": how many reward slots each approved pool of the venue has initialized; the",
@@ -101,9 +103,21 @@
         {
           "name": "initialize_position2",
           "discriminator": "8f13f291d50f6873",
+          "opens": true,
           "pins": [
             {
               "index": 2,
+              "role": "pool"
+            }
+          ]
+        },
+        {
+          "name": "increase_position_length2",
+          "discriminator": "ffd2cc477389e171",
+          "opens": true,
+          "pins": [
+            {
+              "index": 1,
               "role": "pool"
             }
           ]

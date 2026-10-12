@@ -139,6 +139,20 @@ class Swap(Patched):
         _, _, _, ta, tb, *_ = self.run_it(b)[0]
         self.assertEqual(ta, tb)
 
+    def test_a_vault_has_no_headroom_and_never_a_negative_target(self):
+        # 2026-10-11, test0: 0.035 SOL in a vault (floor 0.005), no USDC; the swap was asked "-3.33"
+        b = dict(bal(0.035, 0.0, price=111.0), nativeReserve=0.005)
+        with mock.patch.object(config, 'VAULT', {'kind': 'squads', 'venues': {}}):
+            calls = self.run_it(b)
+        C = lp.capital.deployable_usd(b)
+        self.assertAlmostEqual(C, 0.03 * 111.0, places=6)
+        _, _, _, ta, tb, *_ = calls[0]
+        self.assertEqual((ta, tb), (f'{C / 2:.2f}', f'{C / 2:.2f}'))
+        # a key wallet whose reserve is under the gas reserve gets no negative headroom either
+        _, _, _, ta, tb, *_ = self.run_it(dict(b, nativeReserve=0.001))[0]
+        self.assertTrue(float(ta) >= 0 and float(tb) >= 0, (ta, tb))
+        self.assertEqual(ta, tb)
+
     def test_a_wallet_near_half_each_does_not_swap(self):
         C_half = 110.0
         self.assertEqual(self.run_it(bal(C_half / 120.0 + RES(), C_half)), [])

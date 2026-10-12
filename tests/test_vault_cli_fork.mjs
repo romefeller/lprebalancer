@@ -102,3 +102,54 @@ test('a request takes the whole balance or less, never nothing or more, and says
   assert.match(approve.summary, new RegExp(`^approve for the bot \\(${policyKey.publicKey.toBase58()}\\)`));
   assert.ok(approve.summary.endsWith(`payouts ${out.payouts.join(', ')}`), approve.summary);
 });
+
+test('connect resumes its own vault: a try cut off after its create finishes that vault, never a second one', { timeout: 300_000 }, async () => {
+  const { Fork } = await import('./_svm.mjs');
+  const { connect } = await import('../chains/solana/vault/cli.mjs');
+  const { connectDone, connectProblems } = await import('../chains/solana/vault/admin.mjs');
+  const { DLMM_PROGRAM, POOL } = await import('./_vault.mjs');
+  const fork = new Fork();
+  await Promise.all([fork.program(sq.PROGRAM_ID), fork.program(DLMM_PROGRAM)]);
+  await fork.syncClock();
+  await fork.clone([sq.programConfigPda()]);
+  const index0 = sq.decodeProgramConfig(fork.get(sq.programConfigPda()).data).smartAccountIndex;
+  await fork.clone([sq.decodeProgramConfig(fork.get(sq.programConfigPda()).data).treasury]);
+  const payer = Keypair.generate(), policyKey = Keypair.generate(), owner = fork.wallet(1), profit = Keypair.generate();
+  fork.fund(payer.publicKey, 1);
+  const connection = fork.connection();
+  const f = { owners: owner.publicKey.toBase58(), venue: 'meteora-dlmm', pools: POOL, payout: profit.publicKey.toBase58(), execute: true };
+  const quiet = { payer, policyKey, log: () => {} };
+  // the first try: the create lands, then the network drops
+  let sends = 0, planned = null;
+  const flaky = Object.create(connection, { sendRawTransaction: { value: async (raw, o) => {
+    if (++sends > 1) throw new Error('fetch failed');
+    return connection.sendRawTransaction(raw, o);
+  } } });
+  await assert.rejects(connect(f, { ...quiet, connection: flaky, onPlan: (p) => { planned = p; } }), /fetch failed/);
+  assert.ok(planned && fork.get(planned.settings), 'the plan was heard before the send, and its create landed');
+  const settings = new PublicKey(planned.settings);
+  const policies = [1, 2, 3].map(i => sq.policyPda(settings, i));
+  const exists = () => policies.map(p => Boolean(fork.get(p)));
+  const half = fork.get(settings).data;
+  assert.deepEqual([...connectDone(half, exists(), { owners: [owner.publicKey], creator: payer.publicKey })], [0]);
+  assert.throws(() => connectDone(half, exists(), { owners: [Keypair.generate().publicKey], creator: payer.publicKey }), /not this request's/);
+  assert.throws(() => connectDone(null, [true], { owners: [owner.publicKey], creator: payer.publicKey }), /policies exist/);
+  assert.deepEqual([...connectDone(null, [false], { owners: [owner.publicKey], creator: payer.publicKey })], []);
+
+  // the resume: the same seed, only the missing steps
+  const said = [];
+  const out = await connect({ ...f, seed: planned.seed }, { ...quiet, connection, log: (l) => said.push(String(l)) });
+  assert.equal(out.settings, planned.settings);
+  assert.ok(said.some(l => /resuming: 1 of \d+ setup transactions already landed/.test(l)), said.join('\n'));
+  assert.deepEqual(connectProblems(fork.get(settings).data, { owners: [owner.publicKey], threshold: 1,
+    botKeys: [payer.publicKey, policyKey.publicKey] }), []);
+  assert.equal(sq.decodeProgramConfig(fork.get(sq.programConfigPda()).data).smartAccountIndex, index0 + 1n, 'one vault, not two');
+  const full = fork.get(settings).data;
+  const all = [...connectDone(full, exists(), { owners: [owner.publicKey], creator: payer.publicKey })].sort();
+  assert.deepEqual(all, [0, 1, 2, 3, 4].slice(0, policies.length + 2));
+  assert.throws(() => connectDone(full, [true, false, true], { owners: [owner.publicKey], creator: payer.publicKey }), /before every policy/);
+  // a third call finds nothing to do and sends no setup transaction
+  sends = 0;
+  const again = await connect({ ...f, seed: planned.seed }, { ...quiet, connection: flaky });
+  assert.equal(again.settings, planned.settings);
+});

@@ -8,7 +8,7 @@ import { createRequire } from 'module';
 import fc from 'fast-check';
 import * as sq from '../chains/solana/vault/squads.mjs';
 import { RULES, compile, match, plan, needsVault, NotAllowed, POLICY_BYTES, instructionsOf, poolPda } from '../chains/solana/vault/policy.mjs';
-import { vaultConfig, wrap, vaultFundsItsAccounts } from '../chains/solana/vault/account.mjs';
+import { vaultConfig, wrap, vaultFundsItsAccounts, withVaultBudget, VAULT_CALL_UNITS } from '../chains/solana/vault/account.mjs';
 import { connectPlan, connectProblems, lookupPlan, staticAccounts } from '../chains/solana/vault/admin.mjs';
 import { actingAccount } from '../chains/solana/vault/account.mjs';
 
@@ -308,6 +308,24 @@ test('wrap: one policy call per step, every vault instruction inside one', () =>
     assert.ok(c.keys.some(k => k.isSigner && k.pubkey.equals(cfg.policyKey)));
     assert.ok(!c.keys.some(k => k.isSigner && k.pubkey.equals(f.vault)));
   }
+});
+
+test('withVaultBudget: an SDK compute limit gains the vault cost of each policy call (2026-10-11 swap ran out)', () => {
+  const limit = (u) => ComputeBudgetProgram.setComputeUnitLimit({ units: u });
+  const price = ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 5000 });
+  const unitsOf = (ix) => Buffer.from(ix.data).readUInt32LE(1);
+  const other = new TransactionInstruction({ programId: DLMM, data: Buffer.from([2, 0, 0, 0, 0]), keys: [] });
+  const [l, p, o] = withVaultBudget([limit(100_000), price, other], 2);
+  assert.equal(unitsOf(l), 100_000 + 2 * VAULT_CALL_UNITS);
+  assert.deepEqual([p, o], [price, other], 'a price and a non-budget instruction stay as built');
+  assert.equal(unitsOf(withVaultBudget([limit(1_390_000)], 1)[0]), 1_400_000, 'never above the transaction maximum');
+  const none = [limit(100_000)];
+  assert.equal(withVaultBudget(none, 0), none, 'no policy call: nothing changes');
+  // through wrap: a swap the SDK sized at 100k leaves with room for its call
+  const f = fixture();
+  const cfg = { vault: f.vault, payer: f.payer, policies: f.compiled.policies.map(() => key()), policyKey: key() };
+  const out = wrap([limit(100_000), f.dlmm('swap2')], cfg, f.compiled);
+  assert.equal(unitsOf(out[0]), 100_000 + VAULT_CALL_UNITS);
 });
 
 test('codec: inner accounts are listed once, writable if any use writes, the vault never a signer', () => {

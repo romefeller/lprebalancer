@@ -8,6 +8,8 @@
 // and after lastValidBlockHeight asks the chain once more: no record means
 // the transaction never landed and never can (NeverLanded).
 export const REBROADCAST_MS = 2_000;
+// Block heights a blockhash stays valid for (Solana: 150 blocks after its own).
+export const BLOCKHASH_LIFETIME = 150;
 
 // Thrown when a sent transaction's blockhash expired and the chain does not
 // know its signature: it never landed and never can.
@@ -33,21 +35,32 @@ export function priorityCuPrice(recent, units, cap, floor) {
 export async function sendUntilLanded(connection, raw, lastValidBlockHeight, { sleep = ms => new Promise(r => setTimeout(r, ms)) } = {}) {
   const signature = await connection.sendRawTransaction(raw, { skipPreflight: false, maxRetries: 0 });
   try {
-    for (;;) {
-      const st = (await connection.getSignatureStatuses([signature])).value?.[0];
-      if (st?.err) throw new Error(`transaction failed on chain: ${JSON.stringify(st.err)}`);
-      if (st && (st.confirmationStatus === 'confirmed' || st.confirmationStatus === 'finalized')) return signature;
-      if ((await connection.getBlockHeight('confirmed')) > lastValidBlockHeight) {
-        const last = (await connection.getSignatureStatuses([signature], { searchTransactionHistory: true })).value?.[0];
-        if (last?.err) throw new Error(`transaction failed on chain: ${JSON.stringify(last.err)}`);
-        if (last) return signature;                         // it landed after all
-        throw new NeverLanded(`expired: block height passed and the chain has no record of ${signature}; nothing was sent`);
-      }
-      await sleep(REBROADCAST_MS);
-      try { await connection.sendRawTransaction(raw, { skipPreflight: true, maxRetries: 0 }); } catch { /* the next status read decides */ }
-    }
+    return await awaitLanded(connection, signature, lastValidBlockHeight, { sleep,
+      resend: () => connection.sendRawTransaction(raw, { skipPreflight: true, maxRetries: 0 }) });
   } catch (e) {
     throw Object.assign(e, { afterSend: true, signature });
+  }
+}
+
+// Wait for `signature` by polling its status, never over a websocket (the
+// Alchemy RPC serves no signatureSubscribe). Returns it once confirmed;
+// throws when it failed on chain, or NeverLanded when the block height passed
+// lastValidBlockHeight and a history search does not find it. `resend` (if
+// given) runs between reads; its errors are ignored.
+export async function awaitLanded(connection, signature, lastValidBlockHeight,
+  { sleep = ms => new Promise(r => setTimeout(r, ms)), resend = null } = {}) {
+  for (;;) {
+    const st = (await connection.getSignatureStatuses([signature])).value?.[0];
+    if (st?.err) throw new Error(`transaction failed on chain: ${JSON.stringify(st.err)}`);
+    if (st && (st.confirmationStatus === 'confirmed' || st.confirmationStatus === 'finalized')) return signature;
+    if ((await connection.getBlockHeight('confirmed')) > lastValidBlockHeight) {
+      const last = (await connection.getSignatureStatuses([signature], { searchTransactionHistory: true })).value?.[0];
+      if (last?.err) throw new Error(`transaction failed on chain: ${JSON.stringify(last.err)}`);
+      if (last) return signature;                         // it landed after all
+      throw new NeverLanded(`expired: block height passed and the chain has no record of ${signature}; nothing was sent`);
+    }
+    await sleep(REBROADCAST_MS);
+    if (resend) { try { await resend(); } catch { /* the next status read decides */ } }
   }
 }
 

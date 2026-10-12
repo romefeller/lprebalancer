@@ -29,14 +29,24 @@ def idle_deploys_left(times, now, per_day=IDLE_DEPLOYS_PER_DAY):
     return max(0, per_day - sum(1 for t in (times or []) if now - t < tuning.DAY_S))
 
 
+def can_add():
+    """Whether idle cash goes into the open position by the signer's
+    `increase`. Not from a Safe vault: its role allows no add (the position
+    manager adds to any position id, a stranger's too), so its idle cash, an
+    owner's Add capital too, goes in by a re-centre. A Squads vault's rule
+    pins the position's NFT account to one the vault owns
+    (chains/solana/vault/rules.json), so it adds as a key wallet does."""
+    return config.DEX in INCREASE_DEXES and not (config.VAULT and config.VAULT['kind'] == 'safe')
+
+
 def adds_open_leftover():
     """Whether this profile adds an open's leftover to the position (owner,
     2026-10-08: "almost 99% in LP, idle money is bad"; the same strategy on
-    every pool but the DJT swing test). Only where the venue's signer has
-    `increase`: there the leftover goes in as a swap of the leftover alone
+    every pool but the DJT swing test). Only where the profile can add
+    (can_add): there the leftover goes in as a swap of the leftover alone
     and one add, not a re-centre. The swing (LPBOT_SWING_POOLS) keeps the
     leftover excused, as before."""
-    return config.DEX in INCREASE_DEXES and not config.SWING_POOLS
+    return can_add() and not config.SWING_POOLS
 
 
 def idle_to_deploy(deployable_usd, equity_usd, seconds_since_open):
@@ -101,7 +111,7 @@ def deploy_idle(state, status, wbal, rv, price):
             db.event('deploy_idle_deferred', f'${idle:.2f} idle: {why}')
         return False
     state['idle_deploys'] = [t for t in (state.get('idle_deploys') or []) if now - t < tuning.DAY_S] + [now]; paths.save(state)
-    if config.DEX in INCREASE_DEXES:
+    if can_add():
         return add_idle(state, status, wbal, idle, price)
     k = rv['choice'] if rv else math.sqrt(status['upperPrice'] / status['lowerPrice'])
     books.notify_book('DEPLOY_IDLE', idle_usd=round(idle, 2), price=price, lower=status['lowerPrice'],
@@ -376,8 +386,10 @@ def balance_wallet(state, bal, rec, share_a=None):
     # The swap script keeps the gas reserve out of what it sells, but not the
     # open's rent headroom: the native side's target carries it, or an open
     # after a buy of SOL comes up short by the headroom and leaves the other
-    # token idle.
-    head = res - config.GAS_RESERVE_SOL
+    # token idle. A vault pays no gas and no open rent (its payer key does):
+    # it has no headroom, and its floor under the gas reserve is no negative
+    # one (2026-10-11: test0's 0.035 SOL asked a swap to "-3.33").
+    head = 0.0 if config.VAULT else max(res - config.GAS_RESERVE_SOL, 0.0)
     head_usd = head * capital.ui_price(bal) * q if bal.get('nativeSide') == 'A' else \
         (head * q if bal.get('nativeSide') == 'B' else 0.0)
     target_a = f"{C * frac_a + (head_usd if bal.get('nativeSide') == 'A' else 0.0):.2f}"

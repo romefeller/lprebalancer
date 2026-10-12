@@ -40,7 +40,7 @@ import wallets  # noqa: E402
 # and the switches set here (deploy.sh's SKIP, plus allow_swap).
 SKIP = {'id', 'name', 'active', 'pool', 'pair_label', 'token_a', 'token_b', 'dex', 'dexes', 'updated_at',
         'wallet_id', 'enabled', 'deposit_mint', 'residual_owner', 'mints', 'pool_pinned', 'regime_enabled',
-        'rebalance_swap', 'execute_dexes', 'signer_env', 'allow_swap'}
+        'rebalance_swap', 'execute_dexes', 'signer_env', 'allow_swap', 'special', 'fee_bps', 'fee_wallet'}
 # Venues a position can be held on: every signer but the routes.
 VENUES = tuple(d for d in lp.signers.SIGNERS if d not in ('jupiter', 'orca-swap', 'payout', 'janitor'))
 WALLET_ID = re.compile(r'^[a-z0-9][a-z0-9-]{1,40}$')
@@ -73,12 +73,30 @@ def signer_env(items):
         raise Refused(str(e)) from None
 
 
-def build(args, template, rec, wallet, others):
+def fee_terms(args, chain, vault):
+    """(special, fee_bps, fee_wallet) for `args` (sql/036). An instance is
+    the operator's own (special, no fee share) unless --no-special; only a
+    vault instance may be anything else. Pure; raises Refused."""
+    special = True if getattr(args, 'special', None) is None else bool(args.special)
+    bps = getattr(args, 'fee_bps', None) or 0
+    to = getattr(args, 'fee_wallet', None)
+    if special and (bps or to):
+        raise Refused('a special instance pays no fee share: no --fee-bps or --fee-wallet')
+    if not special and not vault:
+        raise Refused('only a vault instance can be --no-special (a key wallet pays no fee share)')
+    if not 0 <= bps <= 5000:
+        raise Refused(f'--fee-bps {bps} is not between 0 and 5000')
+    if bps and not ADDRESS[chain](to):
+        raise Refused(f'--fee-wallet {to!r} is not a {chain} address')
+    return special, bps, to if bps else None
+
+
+def build(args, template, rec, wallet, others, vault=False):
     """(wallet row or None, config row, swing row or None) for `args`.
     `template` is the template's config row (with its wallet's chain as
     'chain'), `rec` the pool record (dexes.pool), `wallet` the existing
     wallets row or None, `others` how many profiles the wallet holds
-    already. Pure; raises Refused."""
+    already, `vault` whether that wallet is a vault. Pure; raises Refused."""
     chain = (wallet or {}).get('chain') or args.chain
     if chain not in ADDRESS:
         raise Refused(f'unknown chain {chain!r}')
@@ -125,7 +143,12 @@ def build(args, template, rec, wallet, others):
             raise Refused(f'unknown calendar {args.calendar!r}; known: {sorted(swing.CALENDARS)}')
         swing_row = {'profile': args.profile, 'open_dex': op[0], 'open_pool': op[1], 'closed_dex': cl[0],
                      'closed_pool': cl[1], 'calendar': args.calendar, 'lead_s': args.lead_s}
+    special, fee_bps, fee_wallet = fee_terms(args, chain, vault)
     row = {c: v for c, v in template.items() if c not in SKIP | {'chain'}}
+    if getattr(args, 'profit_wallet', None):
+        if not ADDRESS[chain](args.profit_wallet):
+            raise Refused(f'--profit-wallet {args.profit_wallet!r} is not a {chain} address')
+        row['profit_wallet'] = args.profit_wallet
     if cross:
         # the template's payout token is another chain's: pay in this pool's stablecoin
         row['payout_mint'] = next(m for m in mints if m in stables)
@@ -141,8 +164,23 @@ def build(args, template, rec, wallet, others):
                pair_label=f'{a["symbol"]}/{b["symbol"]}', token_a=a['symbol'], token_b=b['symbol'],
                wallet_id=args.wallet, enabled=True, deposit_mint=deposit, residual_owner=others == 0,
                mints=mints, pool_pinned=True, regime_enabled=True, rebalance_swap=True,
-               allow_swap=swing_row is not None, signer_env=signer_env(args.signer_env) or None)
+               allow_swap=swing_row is not None, signer_env=signer_env(args.signer_env) or None,
+               special=special, fee_bps=fee_bps, fee_wallet=fee_wallet)
     return new_wallet, row, swing_row
+
+
+def insert_rows(cur, new_wallet, row, swing_row):
+    """Write what build() returned with `cur`; the caller commits."""
+    keys = list(row)
+    # jsonb columns (signer_env and any later one) go in as JSON; a dict is not a SQL value
+    vals = [psycopg2.extras.Json(row[k]) if isinstance(row[k], dict) else row[k] for k in keys]
+    if new_wallet:
+        cur.execute('insert into wallets (id, chain, address, secret_env, label) values (%s,%s,%s,%s,%s)', new_wallet)
+    cur.execute(f'insert into config ({", ".join(keys)}) values ({", ".join(["%s"] * len(keys))})', vals)
+    if swing_row:
+        cols = list(swing_row)
+        cur.execute(f'insert into swing ({", ".join(cols)}) values ({", ".join(["%s"] * len(cols))})',
+                    [swing_row[c] for c in cols])
 
 
 def drop_in(swing_row):
@@ -163,6 +201,11 @@ def parse(argv):
     p.add_argument('--cross-chain', action='store_true', help='take the tuning of a template on another chain')
     p.add_argument('--payout-mint', help='mint or symbol; default: the template\'s (another chain: the stablecoin)')
     p.add_argument('--max-usd', type=float, help='the signer\'s per-open ceiling; default: the template\'s')
+    p.add_argument('--profit-wallet', help='where payouts go; default: the template\'s')
+    p.add_argument('--special', action=argparse.BooleanOptionalAction, default=None,
+                   help='the operator\'s own instance (default); --no-special for a vault that pays a fee share')
+    p.add_argument('--fee-bps', type=int, help='share of the payout-token fees for --fee-wallet (with --no-special)')
+    p.add_argument('--fee-wallet')
     p.add_argument('--address'), p.add_argument('--secret-env'), p.add_argument('--label')
     p.add_argument('--dex', required=True), p.add_argument('--pool', required=True)
     p.add_argument('--execute-dexes', help='comma list; default: --dex')
@@ -191,7 +234,8 @@ def main(argv):
     if exists:
         raise SystemExit(f'ERROR: profile {args.profile} exists; nothing written')
     try:
-        new_wallet, row, swing_row = build(args, dict(template), dexes.pool(args.dex, args.pool), wallet, others)
+        new_wallet, row, swing_row = build(args, dict(template), dexes.pool(args.dex, args.pool), wallet, others,
+                                           vault=db.vault_row(args.wallet) is not None)
     except Refused as e:
         raise SystemExit(f'ERROR: {e}')
     print('wallet:', new_wallet or f'{args.wallet} (exists)')
@@ -202,18 +246,8 @@ def main(argv):
     if not args.apply:
         print('DRY RUN: pass --apply to write')
         return 0
-    keys = list(row)
-    # jsonb columns (signer_env and any later one) go in as JSON; a dict is not a SQL value
-    vals = [psycopg2.extras.Json(row[k]) if isinstance(row[k], dict) else row[k] for k in keys]
     with db.cursor(commit=True) as cur:
-        if new_wallet:
-            cur.execute('insert into wallets (id, chain, address, secret_env, label) values (%s,%s,%s,%s,%s)',
-                        new_wallet)
-        cur.execute(f'insert into config ({", ".join(keys)}) values ({", ".join(["%s"] * len(keys))})', vals)
-        if swing_row:
-            cols = list(swing_row)
-            cur.execute(f'insert into swing ({", ".join(cols)}) values ({", ".join(["%s"] * len(cols))})',
-                        [swing_row[c] for c in cols])
+        insert_rows(cur, new_wallet, row, swing_row)
     print(f'written. Next: install the drop-in above (swing), then '
           f'sudo systemctl enable --now lp-bot@{args.profile}' + (' lp-swing' if swing_row else ''))
     return 0

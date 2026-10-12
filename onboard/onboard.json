@@ -1,0 +1,103 @@
+{
+  "_doc": [
+    "The self-serve page at romefeller.app/bot (onboard/server.mjs). No secret here: the invite's",
+    "SHA-256 and the bot's key PATHS come from the environment variables named below.",
+    "",
+    "chains.<chain>",
+    "  template        the profile whose tuning every new instance copies (ops/add_profile.py)",
+    "  venues          venues in order of preference; only those with vault rules and a pool count",
+    "  approveVenues   Solana: how many of them (the first) a new vault approves; its profile opens on",
+    "                  the first. Each venue adds policies to the setup (measured on a fork 2026-10-12,",
+    "                  two payout wallets: Raydium 0.02745 SOL, Meteora 0.03377, Raydium+Orca 0.05119,",
+    "                  all four 0.09748). A new profile is pinned to its pool (add_profile), and the",
+    "                  board does not yet keep a vault to its approved pools, so more than one venue",
+    "                  costs gas the vault cannot use yet; all four would raise the SOL minimum to ~0.25",
+    "  poolsKey        Solana: the key in chains/solana/solana.json that maps venue -> pool",
+    "  pool            EVM: the one pool",
+    "  operatorWallet  the operator's profit wallet (Solana: a solana.json key). A request whose",
+    "                  profit wallet is this one is the operator's own (special, no fee share);",
+    "                  any other pays fee.bps of its payout-token fees to it",
+    "  tokens          what an owner can deposit. Solana: mintKey names a solana.json key. EVM:",
+    "                  the chain module's export of that name; native: the chain's coin, which",
+    "                  the page wraps first (wrapsTo) because a vault never wraps",
+    "  gas             what the owner pays the bot's key, in the native coin, before the bot spends",
+    "                  anything: setup (one connect, measured on a fork: Solana 2026-10-11 0.03282 SOL",
+    "                  for create, 3 policies (Meteora), leave, lookup table with 2 payout wallets;",
+    "                  2026-10-12 Raydium 0.02745, see approveVenues; Polygon",
+    "                  1,872,109 gas = 0.347 POL at 185 gwei), a margin over it (fees and gas prices",
+    "                  move), and the instance's running gas (Solana: gas_reserve_sol 0.05 + the DLMM",
+    "                  open headroom 0.05). confirmations (EVM): blocks a payment needs on top",
+    "  tokens.min      the least pool capital; a native deposit must also cover the gas",
+    "  tokens.fees     the native coin the page's Max keeps back for the owner's own transactions",
+    "                  with this token: the gas payment and the deposit. Solana: two signatures",
+    "                  (0.00001), the wallet's rent-exempt floor (0.00089088: a System account may",
+    "                  not drop below it unless it is empty) and, for a token, the vault's token",
+    "                  account the deposit creates (0.00203928), with room for a priority fee.",
+    "                  Polygon: the gas of the payment, the wrap and the transfer (a token: the",
+    "                  payment and the transfer) at 500 gwei. Max of a token takes the whole",
+    "                  balance; the native coin must then hold the bot's gas and these fees",
+    "",
+    "intentTtlS: how long a message to sign is good for; paymentSlackS: how much older than the",
+    "signed request its gas payment's block time may be (block clocks drift).",
+    "limits: {max, windowS} per client address unless said; vaultsPerOwner counts every vault",
+    "the owner's wallet owns or is creating: 1, one pool per wallet; more capital goes into that",
+    "vault (Add capital). service.start runs with {name} replaced by a checked profile name."
+  ],
+  "listen": { "host": "127.0.0.1", "port": 8090 },
+  "base": "/bot",
+  "site": "romefeller.app/bot",
+  "inviteEnv": "LPBOT_ONBOARD_INVITE_SHA256",
+  "intentTtlS": 600,
+  "paymentSlackS": 120,
+  "limits": {
+    "bodyBytes": 8192,
+    "requests": { "max": 120, "windowS": 600 },
+    "badInvites": { "max": 5, "windowS": 3600 },
+    "creates": { "max": 3, "windowS": 86400 },
+    "createsTotal": { "max": 10, "windowS": 86400 },
+    "vaultsPerOwner": 1,
+    "openIntents": 500
+  },
+  "fee": { "bps": 1000 },
+  "reservedNames": ["sol-usdc", "sol-swing", "poly-wpol-usdt", "sol-lp", "sol-lp2", "poly-lp"],
+  "service": {
+    "start": ["sudo", "-n", "/usr/bin/systemctl", "enable", "--now", "lp-bot@{name}.service"],
+    "status": ["/usr/bin/systemctl", "is-active", "lp-bot@{name}.service"]
+  },
+  "chains": {
+    "solana": {
+      "label": "Solana",
+      "pair": "SOL/USDC",
+      "template": "sol-usdc",
+      "settings": { "min_deploy_usd": 2 },
+      "venues": ["raydium-clmm", "orca", "meteora-dlmm", "byreal"],
+      "approveVenues": 1,
+      "poolsKey": "sol_usdc_pools",
+      "operatorWallet": "operator_profit_wallet",
+      "payoutToken": "USDC",
+      "payerKeyEnv": "LPBOT_VAULT_SOL_PAYER_PATH",
+      "policyKeyEnv": "LPBOT_VAULT_SOL_POLICY_PATH",
+      "gas": { "setup": "0.0329", "margin": "0.0121", "reserve": "0.1" },
+      "tokens": {
+        "SOL": { "mintKey": "native_mint", "native": true, "decimals": 9, "min": "0.02", "max": "50", "fees": "0.001" },
+        "USDC": { "mintKey": "usdc_mint", "decimals": 6, "min": "10", "max": "10000", "fees": "0.003" }
+      }
+    },
+    "polygon": {
+      "label": "Polygon",
+      "pair": "WPOL/USDT0",
+      "template": "poly-wpol-usdt",
+      "venues": ["uniswap-v3-polygon"],
+      "pool": "0x9B08288C3Be4F62bbf8d1C20Ac9C5e6f9467d8B7",
+      "operatorWallet": "0x2b35948898e1b4897E7FC5a70e39b213dcfd0142",
+      "payoutToken": "USDT0",
+      "keyEnv": "LPBOT_VAULT_EVM_KEY_PATH",
+      "gas": { "setup": "0.35", "margin": "0.65", "reserve": "3", "confirmations": 5 },
+      "tokens": {
+        "POL": { "native": true, "wrapsTo": "WPOL", "decimals": 18, "min": "20", "max": "100000", "fees": "0.1" },
+        "WPOL": { "decimals": 18, "min": "20", "max": "100000", "fees": "0.05" },
+        "USDT0": { "decimals": 6, "min": "10", "max": "10000", "fees": "0.05" }
+      }
+    }
+  }
+}

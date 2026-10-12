@@ -37,12 +37,22 @@ async function setup() {
   // simulations (tests/_svm.mjs), so here every one passes and the send,
   // run in full by the programs, is the verdict.
   const passing = Object.create(connection, { simulateTransaction: { value: async () => ({ value: { err: null, logs: [], unitsConsumed: 0 } }) } });
+  // `first`: each account's lamports when a send first named it, so a test
+  // can tell rent the pool keeps (a tick array created or grown for the band)
+  // from rent that should come back.
+  const first = new Map(), send = fork.sendSigned.bind(fork);
+  fork.sendSigned = async (tx) => {
+    const keys = fork.keysOf(tx);
+    await fork.connection().getMultipleAccountsInfo(keys);         // mainnet's accounts first
+    for (const k of keys) if (!first.has(String(k))) first.set(String(k), fork.get(k)?.lamports ?? 0n);
+    return send(tx);
+  };
   const deps = { urls: ['http://fork.test'], connectFn: async () => ({ connection: passing, payer, chain, acting }), sleep: async () => {} };
   const signer = await import('../venues/byreal/signer.mjs');
   process.env.LPBOT_POOL = POOL;
   process.env.LPBOT_MAX_USD = '100000';
   delete process.env.LPBOT_TOKEN_HINTS;
-  return { ...v, vault, acting, chain, deps, signer };
+  return { ...v, vault, acting, chain, deps, signer, first };
 }
 
 async function said(fn) {
@@ -73,7 +83,7 @@ async function swapIxs(chain, pool, who, mint, amount) {
 const FEES_OWED_AT = 129;
 
 test('the Byreal signer runs a vault: open, harvest, close', { timeout: 600_000 }, async () => {
-  const { fork, vault, payer, deps, signer } = await setup();
+  const { fork, vault, payer, deps, signer, first } = await setup();
   const b = await said(() => signer.balance(undefined, deps));
   assert.equal(b.owner, vault.toBase58());
   assert.equal(b.custody, 'vault');
@@ -103,7 +113,13 @@ test('the Byreal signer runs a vault: open, harvest, close', { timeout: 600_000 
   // the vault paid the position's rent and got it back; the payer paid fees only
   assert.ok(payerBefore - fork.balance(payer.publicKey) < 0.0005e9, `payer spent ${(payerBefore - fork.balance(payer.publicKey)) / 1e9} SOL`);
   assert.equal(fork.get(ata(SOL, vault)), null, 'no WSOL left wrapped');
-  assert.ok(fork.balance(vault) > vaultSolBefore - 0.01e9, 'the SOL came back to the vault');
+  // what stays behind is rent the pool's own accounts gained (tick arrays
+  // created or grown for this band), never more
+  const gains = [...first].map(([k, was]) => [k, fork.get(new PublicKey(k)), was])
+    .filter(([, a, was]) => a && new PublicKey(a.owner).equals(PROGRAM) && a.lamports > was);
+  const kept = gains.reduce((n, [, a, was]) => n + Number(a.lamports - was), 0);
+  assert.ok(kept < 0.05e9, `the pool kept ${kept / 1e9} SOL of rent`);
+  assert.ok(fork.balance(vault) > vaultSolBefore - 0.01e9 - kept, `the SOL came back to the vault (less ${kept / 1e9} SOL the pool keeps)`);
 });
 
 test('Byreal: another pool, a swap, or tokens to anyone but the vault, are refused', { timeout: 600_000 }, async () => {
