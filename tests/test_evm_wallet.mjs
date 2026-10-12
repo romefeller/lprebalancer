@@ -116,3 +116,27 @@ test('unknown command prints usage and nothing else', () => {
   assert.strictEqual(r.status, 0);
   assert.match(r.stdout, /^commands: create/);
 });
+
+// 2026-10-12: the sandboxed onboarding page reads its EVM key as a systemd credential,
+// mode 0440 in $CREDENTIALS_DIRECTORY. Group read is taken there and only there.
+test('a systemd credential (0440 in CREDENTIALS_DIRECTORY) is read; the same mode elsewhere is not', () => {
+  const creds = scratch(), other = scratch();
+  const f = path.join(creds, 'evm.secret'), g = path.join(other, 'evm.secret');
+  for (const p of [f, g]) { fs.writeFileSync(p, `0x${'11'.repeat(32)}\n`); fs.chmodSync(p, 0o440); }
+  const env = { CREDENTIALS_DIRECTORY: creds };
+  assert.match(readKey(f, env), /^0x(11){32}$/);
+  assert.match(readKey(path.join(creds, '.', 'evm.secret'), { CREDENTIALS_DIRECTORY: `${creds}/` }), /^0x(11){32}$/);
+  assert.throws(() => readKey(g, env), /must be 0600/);
+  assert.throws(() => readKey(f, {}), /must be 0600/);
+  for (const mode of [0o444, 0o460, 0o404]) {
+    fs.chmodSync(f, mode);
+    assert.throws(() => readKey(f, env), /must be 0600/, mode.toString(8));
+  }
+  fs.chmodSync(f, 0o400);
+  assert.match(readKey(f, env), /^0x(11){32}$/);
+  // a file in a subdirectory of the credentials directory is not a credential
+  fs.mkdirSync(path.join(creds, 'sub'));
+  const h = path.join(creds, 'sub', 'evm.secret');
+  fs.writeFileSync(h, `0x${'11'.repeat(32)}\n`); fs.chmodSync(h, 0o440);
+  assert.throws(() => readKey(h, env), /must be 0600/);
+});

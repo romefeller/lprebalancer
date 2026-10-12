@@ -58,11 +58,16 @@ export function writeNewKey(file, hex) {
 
 // Read the key at `file`. Refuses a file that group or others can read (as ssh does), a
 // file that is not a regular file, and content that is not exactly one valid key.
-export function readKey(file) {
+// One exception: a systemd credential (LoadCredential=, the sandboxed onboarding page,
+// ops/lp-onboard.service) is mode 0440 in $CREDENTIALS_DIRECTORY, a directory only that
+// unit can open. There, and only there, the group may read it; others never.
+export function readKey(file, env = process.env) {
   if (!file) throw new Error('WALLET_SECRET_PATH is not set; refusing to guess a key location');
   const st = fs.statSync(file);
   if (!st.isFile()) throw new Error(`key path ${file} is not a regular file`);
-  if ((st.mode & 0o077) !== 0) {
+  const credential = Boolean(env.CREDENTIALS_DIRECTORY)
+    && path.dirname(path.resolve(file)) === path.resolve(env.CREDENTIALS_DIRECTORY);
+  if ((st.mode & (credential ? 0o037 : 0o077)) !== 0) {
     throw new Error(`key file ${file} has mode ${(st.mode & 0o777).toString(8)}; it must be 0600`);
   }
   const hex = fs.readFileSync(file, 'utf8').trim().toLowerCase();
