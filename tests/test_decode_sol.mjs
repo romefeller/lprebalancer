@@ -1,0 +1,192 @@
+// onboard/decode_sol.mjs: the page reads every Solana transaction before the
+// wallet signs it. Each kind built as the server builds it passes and reads
+// in words; every tampered copy (another amount, recipient, signer, vault,
+// rule, pool, program) is refused. The real builders on a fork:
+// test_onboard_fork.mjs runs every transaction of the page through it too.
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { createRequire } from 'module';
+import fc from 'fast-check';
+import * as sq from '../chains/solana/vault/squads.mjs';
+import { RULES, compile, instructionsOf } from '../chains/solana/vault/policy.mjs';
+import { ata, decodeSol, expectedPolicies, MAX_PRIORITY_LAMPORTS } from '../onboard/decode_sol.mjs';
+import SOLANA from '../chains/solana/solana.json' with { type: 'json' };
+
+const require = createRequire(import.meta.url);
+const { ComputeBudgetProgram, Keypair, PublicKey, SystemProgram, Transaction, TransactionInstruction, TransactionMessage, VersionedTransaction } = require('@solana/web3.js');
+const spl = require('@solana/spl-token');
+
+const key = () => Keypair.generate().publicKey;
+const OWNER = key(), PAYER = key(), POLICY_KEY = key(), PROFIT = key(), STRANGER = key();
+const SETTINGS = key(), VAULT = sq.vaultPda(SETTINGS);
+const OPERATOR = SOLANA.operator_profit_wallet, USDC = new PublicKey(SOLANA.usdc_mint), WSOL = new PublicKey(SOLANA.native_mint);
+const POOLS = Object.fromEntries(Object.entries(SOLANA.sol_usdc_pools).map(([v, p]) => [v, [p]]));
+const PINS = { payer: PAYER.toBase58(), policyKey: POLICY_KEY.toBase58(), operator: OPERATOR, pools: POOLS, rules: RULES, solana: SOLANA };
+const VENUE = 'raydium-clmm';
+const payoutWallets = [PROFIT.toBase58(), OPERATOR];
+const POLICIES = compile(VENUE, { vault: VAULT, payer: PAYER, pools: POOLS[VENUE].map(p => new PublicKey(p)),
+  payouts: payoutWallets.map(w => new PublicKey(ata(w, USDC))) }).policies.map(() => key().toBase58());
+const base = { owner: OWNER.toBase58(), vault: VAULT.toBase58(), settings: SETTINGS.toBase58() };
+const vaultExpect = (kind, over = {}) => ({ ...base, kind, policies: { [VENUE]: POLICIES }, pools: { [VENUE]: POOLS[VENUE] }, payoutWallets, ...over });
+
+const wire = (ixs, payer = OWNER) => {
+  const tx = new Transaction().add(...ixs);
+  tx.feePayer = payer; tx.recentBlockhash = PublicKey.default.toBase58();
+  return tx.serialize({ requireAllSignatures: false, verifySignatures: false }).toString('base64');
+};
+const ok = (r) => assert.deepEqual(r.problems, [], r.lines.join('\n'));
+const refused = (r, re, what) => { assert.equal(r.ok, false, what); if (re) assert.match(r.problems.join(' | '), re, what); };
+
+const transfer = (from, to, lamports) => SystemProgram.transfer({ fromPubkey: from, toPubkey: to, lamports });
+const tokenSend = (src, dst, auth, raw, mint = USDC) => spl.createTransferCheckedInstruction(src, mint, dst, auth, raw, 6);
+const ownerExec = (ixs, over = {}) => sq.ownerExecuteIx({ settings: SETTINGS, signers: [OWNER], vault: VAULT, ixs, ...over });
+const policyTx = (signer, i = 0, over = {}) => {
+  const policies = compile(VENUE, { vault: VAULT, payer: PAYER, pools: POOLS[VENUE].map(p => new PublicKey(p)),
+    payouts: payoutWallets.map(w => new PublicKey(ata(w, USDC))) }).policies;
+  const address = new PublicKey(over.address ?? POLICIES[i]);
+  return [sq.settingsSyncIx({ settings: over.settings ?? SETTINGS, signers: [OWNER], rentPayer: OWNER, extra: [address],
+    actions: [{ kind: 'policyUpdate', address, policy: over.policy ?? policies[i].policy, signers: [{ key: signer, permissions: over.permissions }] }] })];
+};
+
+test('payment: the signed amount to the bot\'s gas key, from the wallet only', () => {
+  const e = { ...base, kind: 'payment', raw: '145000000' };
+  const r = decodeSol(wire([transfer(OWNER, PAYER, 145_000_000)]), e, PINS);
+  ok(r);
+  assert.match(r.lines[0], /Send 0\.145 SOL from your wallet .* to the bot's gas key/);
+  refused(decodeSol(wire([transfer(OWNER, STRANGER, 145_000_000)]), e, PINS), /not the bot's gas key/, 'another recipient');
+  refused(decodeSol(wire([transfer(OWNER, PAYER, 145_000_001)]), e, PINS), /you signed for/, 'another amount');
+  refused(decodeSol(wire([transfer(OWNER, PAYER, 145_000_000), transfer(OWNER, STRANGER, 1)]), e, PINS), /one transfer/, 'a second transfer');
+  refused(decodeSol(wire([transfer(STRANGER, PAYER, 145_000_000)]), e, PINS), /signatures of/, 'another signer');
+  refused(decodeSol(wire([transfer(OWNER, PAYER, 145_000_000)], STRANGER), e, PINS), /fee payer/, 'another fee payer');
+  fc.assert(fc.property(fc.bigInt({ min: 1n, max: 10n ** 12n }), (lamports) => {
+    const r2 = decodeSol(wire([transfer(OWNER, PAYER, lamports)]), e, PINS);
+    assert.equal(r2.ok, lamports === 145_000_000n);
+  }), { numRuns: 200 });
+});
+
+test('deposit: SOL to the vault, or USDC from the wallet\'s account to the vault\'s', () => {
+  ok(decodeSol(wire([transfer(OWNER, VAULT, 2_000_000_000)]), { ...base, kind: 'deposit', mint: WSOL.toBase58(), raw: '2000000000' }, PINS));
+  refused(decodeSol(wire([transfer(OWNER, STRANGER, 2_000_000_000)]), { ...base, kind: 'deposit', mint: WSOL.toBase58(), raw: '2000000000' }, PINS), /your vault/);
+  const e = { ...base, kind: 'deposit', mint: USDC.toBase58(), raw: '10000000' };
+  const src = spl.getAssociatedTokenAddressSync(USDC, OWNER), dst = spl.getAssociatedTokenAddressSync(USDC, VAULT, true);
+  const open = spl.createAssociatedTokenAccountIdempotentInstruction(OWNER, dst, VAULT, USDC);
+  const r = decodeSol(wire([open, tokenSend(src, dst, OWNER, 10_000_000)]), e, PINS);
+  ok(r);
+  assert.match(r.lines.join('\n'), /Send 10 USDC from your wallet's USDC account .* to your vault's USDC account/);
+  const strangerAta = spl.getAssociatedTokenAddressSync(USDC, STRANGER);
+  refused(decodeSol(wire([open, tokenSend(src, strangerAta, OWNER, 10_000_000)]), e, PINS), /not your vault's account/);
+  refused(decodeSol(wire([open, tokenSend(src, dst, OWNER, 9_999_999)]), e, PINS), /deposits 9\.999999/);
+  refused(decodeSol(wire([spl.createAssociatedTokenAccountIdempotentInstruction(OWNER, strangerAta, STRANGER, USDC), tokenSend(src, dst, OWNER, 10_000_000)]), e, PINS),
+    /not your vault's/);
+});
+
+test('withdraw: from the vault into the owner\'s wallet only, the asked amount', () => {
+  const e = (raw, mint = WSOL) => ({ ...base, kind: 'withdraw', mint: mint.toBase58(), raw });
+  ok(decodeSol(wire([ownerExec([transfer(VAULT, OWNER, 500_000_000)])]), e('500000000'), PINS));
+  refused(decodeSol(wire([ownerExec([transfer(VAULT, STRANGER, 500_000_000)])]), e('500000000'), PINS), /from your vault to your wallet/);
+  refused(decodeSol(wire([ownerExec([transfer(VAULT, OWNER, 500_000_001)])]), e('500000000'), PINS), /not what you asked/);
+  refused(decodeSol(wire([ownerExec([transfer(VAULT, OWNER, 1)], { settings: key() })]), e('1'), PINS), /settings/);
+  const src = spl.getAssociatedTokenAddressSync(USDC, VAULT, true), dst = spl.getAssociatedTokenAddressSync(USDC, OWNER);
+  const usdc = [spl.createAssociatedTokenAccountIdempotentInstruction(OWNER, dst, OWNER, USDC), ownerExec([tokenSend(src, dst, VAULT, 1_500_000)])];
+  ok(decodeSol(wire(usdc), e('1500000', USDC), PINS));
+  refused(decodeSol(wire(usdc), e('1500001', USDC), PINS), /amount/);
+  const away = [ownerExec([tokenSend(src, spl.getAssociatedTokenAddressSync(USDC, STRANGER), VAULT, 1_500_000)])];
+  refused(decodeSol(wire(away), e('1500000', USDC), PINS), /not your wallet's account/);
+  // all: every balance, the vault's accounts closed to the owner
+  const all = [spl.createAssociatedTokenAccountIdempotentInstruction(OWNER, dst, OWNER, USDC),
+    ownerExec([tokenSend(src, dst, VAULT, 7), spl.createCloseAccountInstruction(src, OWNER, VAULT), transfer(VAULT, OWNER, 9)])];
+  ok(decodeSol(wire(all), e('all'), PINS));
+  const closeAway = [ownerExec([spl.createCloseAccountInstruction(src, STRANGER, VAULT), transfer(VAULT, OWNER, 9)])];
+  refused(decodeSol(wire(closeAway), e('all'), PINS), /closes to somewhere/);
+  refused(decodeSol(wire([ownerExec([spl.createCloseAccountInstruction(src, OWNER, VAULT), transfer(VAULT, OWNER, 9)])]), e('9'), PINS), /does not need/, 'a close only with all');
+  // through a bot policy, never
+  const viaPolicy = sq.policyExecuteIx({ policy: new PublicKey(POLICIES[0]), signer: OWNER, vault: VAULT, ixs: [transfer(VAULT, OWNER, 1)], indices: [0] });
+  refused(decodeSol(wire([viaPolicy]), e('1'), PINS), /does not need|policy/);
+});
+
+test('approve: exactly the rules in git, the bot\'s rules key the only signer; revoke names the owner alone', () => {
+  for (let i = 0; i < POLICIES.length; i++) {
+    const r = decodeSol(wire(policyTx(POLICY_KEY, i)), vaultExpect('approve'), PINS);
+    ok(r);
+    assert.match(r.lines.join('\n'), /exactly the rules in git/);
+    assert.match(r.lines.join('\n'), /Raydium: (open_position_v2|decrease_liquidity_v2|close_position)/);
+    ok(decodeSol(wire(policyTx(OWNER, i)), vaultExpect('revoke'), PINS));
+  }
+  refused(decodeSol(wire(policyTx(STRANGER)), vaultExpect('approve'), PINS), /not the bot's rules key/, 'another key');
+  refused(decodeSol(wire(policyTx(POLICY_KEY)), vaultExpect('revoke'), PINS), /not only you/, 'a revoke that leaves the bot');
+  refused(decodeSol(wire(policyTx(POLICY_KEY, 0, { permissions: 1 })), vaultExpect('approve'), PINS), /not the bot's rules key/, 'other permissions');
+  refused(decodeSol(wire(policyTx(POLICY_KEY, 0, { address: key().toBase58() })), vaultExpect('approve'), PINS), /not one of your vault's/);
+  refused(decodeSol(wire(policyTx(POLICY_KEY, 0, { settings: key() })), vaultExpect('approve'), PINS), /another vault/);
+  // a policy with another pool, payout or one more rule differs from git
+  // each policy that a changed pool, payout or payer touches differs from the pinned rules
+  const compiled = (ctx = {}) => compile(VENUE, { vault: VAULT, payer: PAYER, pools: POOLS[VENUE].map(p => new PublicKey(p)),
+    payouts: payoutWallets.map(w => new PublicKey(ata(w, USDC))), ...ctx }).policies.map(p => p.policy);
+  const right = compiled();
+  for (const [what, ctx] of [['another pool', { pools: [key()] }], ['another payout', { payouts: [key()] }]]) {
+    const wrong = compiled(ctx);
+    let changed = 0;
+    wrong.forEach((policy, i) => {
+      if (sq.encodeProgramInteraction(policy).equals(sq.encodeProgramInteraction(right[i]))) return;
+      changed++;
+      refused(decodeSol(wire(policyTx(POLICY_KEY, i, { policy })), vaultExpect('approve'), PINS), /differs from the rules in git/, `${what}, policy ${i}`);
+    });
+    assert.ok(changed > 0, what);
+  }
+  // one more allowed instruction in the last policy
+  const last = right.length - 1;
+  const wider = { ...right[last], constraints: [...right[last].constraints, right[last].constraints[0]] };
+  refused(decodeSol(wire(policyTx(POLICY_KEY, last, { policy: wider })), vaultExpect('approve'), PINS), /differs/, 'one more rule');
+  // a pool the server names that the bundled config does not approve
+  refused(decodeSol(wire(policyTx(POLICY_KEY)), vaultExpect('approve', { pools: { [VENUE]: [key().toBase58()] } }), PINS), /not the raydium-clmm pool/);
+  // the payouts the page shows are the owner's profit wallet and the operator: another wallet changes the rules
+  refused(decodeSol(wire(policyTx(POLICY_KEY, last)), vaultExpect('approve', { payoutWallets: [STRANGER.toBase58(), OPERATOR] }), PINS), /differs/);
+  assert.equal(expectedPolicies(VENUE, vaultExpect('approve'), PINS).length, POLICIES.length);
+});
+
+test('transactions the page cannot read, or that cost the owner, are refused', () => {
+  const e = { ...base, kind: 'payment', raw: '1' };
+  refused(decodeSol('not base64 at all', e, PINS), /cannot be read/);
+  const v0 = new VersionedTransaction(new TransactionMessage({ payerKey: OWNER, recentBlockhash: PublicKey.default.toBase58(),
+    instructions: [transfer(OWNER, PAYER, 1)] }).compileToV0Message()).serialize();
+  refused(decodeSol(Buffer.from(v0).toString('base64'), e, PINS), /cannot be read|version 0/);
+  const pricey = [ComputeBudgetProgram.setComputeUnitLimit({ units: 1_400_000 }), ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 10_000_000 }), transfer(OWNER, PAYER, 1)];
+  refused(decodeSol(wire(pricey), e, PINS), /priority fee/);
+  const cheap = [ComputeBudgetProgram.setComputeUnitLimit({ units: 200_000 }), ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 1000 }), transfer(OWNER, PAYER, 1)];
+  ok(decodeSol(wire(cheap), e, PINS));
+  assert.ok(MAX_PRIORITY_LAMPORTS <= 1_000_000n);
+  const unknown = new TransactionInstruction({ programId: STRANGER, keys: [], data: Buffer.from([1, 2, 3]) });
+  refused(decodeSol(wire([unknown]), e, PINS), /transfer/);
+  refused(decodeSol(wire([transfer(OWNER, PAYER, 1)]), { ...base, kind: 'teleport' }, PINS), /nothing to check/);
+});
+
+test('close: the venue\'s exit instructions only, pinned to the vault and the approved pool', () => {
+  const rule = (name) => instructionsOf(VENUE).find(r => r.name === name);
+  const pool = new PublicKey(POOLS[VENUE][0]), program = new PublicKey(RULES.venues[VENUE].program);
+  const ix = (name, keys) => new TransactionInstruction({ programId: program, data: Buffer.concat([Buffer.from(rule(name).discriminator, 'hex'), Buffer.alloc(24)]),
+    keys: keys.map(k => ({ pubkey: k, isSigner: false, isWritable: true })) });
+  // decrease_liquidity_v2 as the rules pin it: pool, the vault's token accounts, the bitmap
+  const dec = rule('decrease_liquidity_v2');
+  const keys = Array.from({ length: 20 }, () => key());
+  const solAta = ata(VAULT, WSOL), usdcAta = ata(VAULT, USDC);
+  const reward = key();
+  keys[14] = WSOL; keys[15] = USDC; keys[19] = reward;     // mints named in the instruction: the vault's accounts derive from them
+  for (const p of dec.pins) {
+    keys[p.index] = p.role === 'pool' ? pool : p.role === 'vault' ? VAULT : p.role === 'pda'
+      ? PublicKey.findProgramAddressSync(p.seeds.map(s => s === 'pool' ? pool.toBuffer() : Buffer.from(s)), program)[0]
+      : new PublicKey(p.index >= 16 ? ata(VAULT, reward) : p.index % 2 ? solAta : usdcAta);
+  }
+  const good = ix('decrease_liquidity_v2', keys);
+  const e = { ...base, kind: 'close' };
+  const r = decodeSol(wire([ownerExec([good])]), e, PINS);
+  ok(r);
+  assert.match(r.lines.join('\n'), /Raydium: decrease_liquidity_v2/);
+  for (const p of dec.pins.filter(x => x.role !== 'none')) {
+    const bad = [...keys]; bad[p.index] = STRANGER;
+    refused(decodeSol(wire([ownerExec([ix('decrease_liquidity_v2', bad)])]), e, PINS), /not your vault's/, `pin ${p.index} (${p.role})`);
+  }
+  refused(decodeSol(wire([ownerExec([ix('swap_v2', keys)])]), e, PINS), /not a way out/, 'a swap is no close');
+  refused(decodeSol(wire([ownerExec([ix('open_position_v2', keys)])]), e, PINS), /not a way out/, 'an open is no close');
+  refused(decodeSol(wire([ownerExec([transfer(VAULT, STRANGER, 5)])]), e, PINS), /does not need|closes no position/, 'a transfer out');
+  refused(decodeSol(wire([ownerExec([good, spl.createCloseAccountInstruction(new PublicKey(solAta), STRANGER, VAULT)])]), e, PINS), /closes to somewhere/);
+  ok(decodeSol(wire([ownerExec([good, spl.createCloseAccountInstruction(new PublicKey(solAta), VAULT, VAULT)])]), e, PINS));
+});

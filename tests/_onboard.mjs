@@ -1,11 +1,7 @@
-// Shared by the onboarding fork tests: rows in the test database, and the
-// page (onboard/) opened in jsdom from the server under test.
+// Shared by the onboarding fork tests: rows in the test database. The page
+// itself opens in Chromium (tests/_browser.mjs).
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { createRequire } from 'module';
-
-const require = createRequire(import.meta.url);
-const { JSDOM } = require('jsdom');
 
 export const DSN = process.env.LPBOT_DSN ?? '';
 
@@ -46,28 +42,3 @@ export const wait = async (fn, ms = 240_000) => {
   while (Date.now() < end) { const v = fn(); if (v) return v; await new Promise(r => setTimeout(r, 100)); }
   throw new Error('timed out waiting');
 };
-
-// The page as a browser loads it from the server: index.html, then style.css
-// and app.js. `setup(window)` runs before any script (an injected wallet).
-export async function openPage(base, invite, setup = () => {}) {
-  const dom = await JSDOM.fromURL(`${base}#invite=${invite}`, { runScripts: 'dangerously', resources: 'usable', pretendToBeVisual: true,
-    beforeParse(w) {
-      w.fetch = (u, o) => globalThis.fetch(new URL(u, w.location.href), o);
-      w.TextEncoder = TextEncoder;
-      w.confirm = () => true;
-      setup(w);
-    } });
-  const w = dom.window, doc = w.document, $ = (id) => doc.getElementById(id);
-  await wait(() => $('chain').options.length > 0);
-  return { dom, w, doc, $ };
-}
-
-// Click a vault card's button by its text, and wait for the page to say done.
-export async function cardAction($, text, fill = () => {}) {
-  const card = $('vaults').querySelector('.vault');
-  fill(card);
-  [...card.querySelectorAll('button')].find(b => b.textContent === text).click();
-  const what = text.split(' ')[0];
-  await wait(() => new RegExp(`${what}: done`).test($('progress').textContent) || $('error').textContent);
-  assert.equal($('error').textContent, '');
-}

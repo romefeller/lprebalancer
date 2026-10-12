@@ -8,6 +8,7 @@
 import crypto from 'node:crypto';
 import { createRequire } from 'module';
 import { getAddress, isAddress, recoverMessageAddress } from 'viem';
+import { toRaw, fromRaw } from './units.mjs';
 
 const require = createRequire(import.meta.url);
 const { PublicKey } = require('@solana/web3.js');
@@ -74,17 +75,8 @@ export function addAmount(s, token) {
   return amount(s, { ...token, min: '0' });
 }
 
-// A decimal string to integer units, and back. Pure, exact.
-export function toRaw(s, decimals) {
-  const [i, f = ''] = String(s).split('.');
-  return BigInt(i) * 10n ** BigInt(decimals) + BigInt((f + '0'.repeat(decimals)).slice(0, decimals) || '0');
-}
-
-export function fromRaw(raw, decimals) {
-  const d = 10n ** BigInt(decimals);
-  const f = (raw % d).toString().padStart(decimals, '0').replace(/0+$/, '');
-  return f ? `${raw / d}.${f}` : `${raw / d}`;
-}
+// Integer units: onboard/units.mjs (the page's bundle uses them too).
+export { toRaw, fromRaw };
 
 export function name(s, reserved = []) {
   const v = text(s);
@@ -194,16 +186,89 @@ export function message(f, c, { site, nonce, expires, payer }) {
 
 export const newNonce = () => crypto.randomBytes(16).toString('hex');
 
-// Whether `signature` is `owner`'s over `text`. Solana: a base58 or base64
-// ed25519 signature by the owner's key. EVM: an EIP-191 signature whose
-// recovered signer is the owner.
-export async function verify(chain, owner, text, signature) {
+// --- Solana off-chain messages ------------------------------------------------
+//
+// A hardware wallet (Ledger, and wallets that sign like it) does not sign the
+// raw text: it signs the Solana off-chain message that carries it, so that no
+// signed message can ever be a transaction. Two layouts are in use:
+//   short  (solana-sdk OffchainMessage v0, the Ledger app):
+//          "\xffsolana offchain" | version 0 | format | length u16 LE | text
+//   full   (the later v0 spec, with an application domain and the signers):
+//          "\xffsolana offchain" | version 0 | domain (32) | format | signer count | signers | length u16 LE | text
+// format: 0 printable ASCII (0x20-0x7e), 1 UTF-8 of at most 1212 bytes, 2 UTF-8.
+// The first byte 0xff is no transaction's: a message starts with its
+// signature count (at most 127 for a legacy one) or 0x80 + a version.
+export const OFFCHAIN_DOMAIN = Buffer.concat([Buffer.from([0xff]), Buffer.from('solana offchain', 'ascii')]);
+const LIMITED_UTF8 = 1212;
+
+// The formats `bytes` may be declared as. Pure.
+export function offchainFormats(bytes) {
+  const out = [];
+  if (bytes.length && bytes.every(b => b >= 0x20 && b <= 0x7e)) out.push(0);
+  if (bytes.length <= LIMITED_UTF8) out.push(1);
+  out.push(2);
+  return out;
+}
+
+// The short layout of `text` declared as `format`. Pure.
+export function offchainShort(text, format) {
   const msg = Buffer.from(text, 'utf8');
+  const len = Buffer.alloc(2); len.writeUInt16LE(msg.length);
+  return Buffer.concat([OFFCHAIN_DOMAIN, Buffer.from([0, format]), len, msg]);
+}
+
+// What a signed off-chain message says: {layout, format, signers, text}, or
+// null when the bytes are not one (a wrong length, an unknown version or
+// format, bytes after the text). Pure.
+export function parseOffchain(bytes) {
+  const b = Buffer.from(bytes);
+  if (b.length < 20 || !b.subarray(0, 16).equals(OFFCHAIN_DOMAIN) || b[16] !== 0) return null;
+  const text = (at, format, signers, layout) => {
+    if (b.length < at + 2) return null;
+    const len = b.readUInt16LE(at), msg = b.subarray(at + 2);
+    if (msg.length !== len || !offchainFormats(msg).includes(format)) return null;
+    let s;
+    try { s = new TextDecoder('utf-8', { fatal: true }).decode(msg); } catch { return null; }
+    return { layout, format, signers, text: s };
+  };
+  const short = text(18, b[17], [], 'short');
+  if (short) return short;
+  // full: domain 17..49, format 49, count 50, signers, length
+  if (b.length < 53) return null;
+  const count = b[50], at = 51 + 32 * count;
+  if (count < 1 || b.length < at + 2) return null;
+  const signers = Array.from({ length: count }, (_, i) => new PublicKey(b.subarray(51 + 32 * i, 83 + 32 * i)).toBase58());
+  return text(at, b[49], signers, 'full');
+}
+
+// The byte strings an owner's wallet may have signed for `text`: the text
+// itself, or an off-chain message of exactly this text whose only signer (in
+// the full layout) is the owner. `signed` (the bytes the wallet says it
+// signed, base64) narrows it to that one; anything else is refused. Pure.
+export function signedForms(text, owner, signed = null) {
+  const raw = Buffer.from(text, 'utf8');
+  if (signed) {
+    const b = Buffer.from(String(signed), 'base64');
+    if (b.equals(raw)) return [b];
+    const m = parseOffchain(b);
+    if (!m || m.text !== text) return [];
+    if (m.layout === 'full' && !(m.signers.length === 1 && m.signers[0] === owner)) return [];
+    return [b];
+  }
+  return [raw, ...offchainFormats(raw).map(f => offchainShort(text, f))];
+}
+
+// Whether `signature` is `owner`'s over `text`. Solana: a base58 or base64
+// ed25519 signature by the owner's key over the text or over an off-chain
+// message of it (signedForms; `signed` is what the wallet reports it signed).
+// EVM: an EIP-191 signature whose recovered signer is the owner.
+export async function verify(chain, owner, text, signature, signed = null) {
   if (chain === 'solana') {
     const sig = decodeSignature(signature);
     if (sig.length !== 64) return false;
     const key = crypto.createPublicKey({ format: 'jwk', key: { kty: 'OKP', crv: 'Ed25519', x: Buffer.from(new PublicKey(owner).toBytes()).toString('base64url') } });
-    return crypto.verify(null, msg, key, sig);
+    if (signed !== null && !/^[A-Za-z0-9+/]+={0,2}$/.test(String(signed))) return false;
+    return signedForms(text, owner, signed).some(m => crypto.verify(null, m, key, sig));
   }
   if (!/^0x[0-9a-fA-F]{130}$/.test(String(signature))) return false;
   try {

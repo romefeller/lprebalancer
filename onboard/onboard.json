@@ -41,7 +41,20 @@
     "signed request its gas payment's block time may be (block clocks drift).",
     "limits: {max, windowS} per client address unless said; vaultsPerOwner counts every vault",
     "the owner's wallet owns or is creating: 1, one pool per wallet; more capital goes into that",
-    "vault (Add capital). service.start runs with {name} replaced by a checked profile name."
+    "vault (Add capital). service.start runs with {name} replaced by a checked profile name.",
+    "",
+    "walletConnect: WalletConnect v2 (Reown) for wallets that do not live in the browser (Tangem,",
+    "  Ledger Live, any mobile wallet). projectId: a free Reown Cloud project id (cloud.reown.com),",
+    "  not a secret; the environment variable projectIdEnv wins over it. Empty: the page offers",
+    "  the browser's own wallets only. relayUrl: the relay the page talks to; verify: the origins of",
+    "  WalletConnect's verify service (a hidden frame that lets a wallet show this site as verified).",
+    "  The page's CSP allows exactly these, and only when a project id is set.",
+    "capHeadroom: a vault profile's max_usd is 2 x side_cap_fraction x capHeadroom x the dollars of",
+    "  every deposit (onboard/store.py cap): all of the capital deploys, with room for the price and",
+    "  the fees to grow into.",
+    "chains.<chain>.botKeys: the bot's public keys (Solana: the payer, then the policy key; EVM: the",
+    "  key), pinned: the server does not open a chain whose key files are other keys, and the page",
+    "  (built from this file) refuses a payment or a rule that names any other key."
   ],
   "listen": { "host": "127.0.0.1", "port": 8090 },
   "base": "/bot",
@@ -59,6 +72,13 @@
     "openIntents": 500
   },
   "fee": { "bps": 1000 },
+  "capHeadroom": 3,
+  "walletConnect": {
+    "projectIdEnv": "LPBOT_ONBOARD_WC_PROJECT_ID",
+    "projectId": "",
+    "relayUrl": "wss://relay.walletconnect.org",
+    "verify": ["https://verify.walletconnect.org", "https://verify.walletconnect.com"]
+  },
   "reservedNames": ["sol-usdc", "sol-swing", "poly-wpol-usdt", "sol-lp", "sol-lp2", "poly-lp"],
   "service": {
     "start": ["sudo", "-n", "/usr/bin/systemctl", "enable", "--now", "lp-bot@{name}.service"],
@@ -75,6 +95,7 @@
       "poolsKey": "sol_usdc_pools",
       "operatorWallet": "operator_profit_wallet",
       "payoutToken": "USDC",
+      "botKeys": ["5qJSPE7LuK1L47wUSo2356gaViZsTcbqQQkywmgDaiFw", "5qz5VvXh6qN2T4kshPMHwHGyuZKLGdrQdMofvq3qxRC8"],
       "payerKeyEnv": "LPBOT_VAULT_SOL_PAYER_PATH",
       "policyKeyEnv": "LPBOT_VAULT_SOL_POLICY_PATH",
       "gas": { "setup": "0.0329", "margin": "0.0121", "reserve": "0.1" },
@@ -91,6 +112,7 @@
       "pool": "0x9B08288C3Be4F62bbf8d1C20Ac9C5e6f9467d8B7",
       "operatorWallet": "0x2b35948898e1b4897E7FC5a70e39b213dcfd0142",
       "payoutToken": "USDT0",
+      "botKeys": ["0xd444E30ceD354dBB87d5fF9Df1CdAeFc55DeEBc3"],
       "keyEnv": "LPBOT_VAULT_EVM_KEY_PATH",
       "gas": { "setup": "0.35", "margin": "0.65", "reserve": "3", "confirmations": 5 },
       "tokens": {

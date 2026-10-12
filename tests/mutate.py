@@ -121,7 +121,17 @@ TARGETS = {
                     NODE_TESTS('test_vault_policy.mjs', 'test_vault_cli_fork.mjs', 'test_vault_venues_fork.mjs')),
     'vault_account': ('chains/solana/vault/account.mjs', ['vaultConfig', 'actingAccount', 'needed', 'verifyPolicy', 'wrap', 'withVaultBudget'],
                       NODE_TESTS('test_vault_policy.mjs', 'test_vault_dlmm_fork.mjs')),
-    'vault_cli': ('chains/solana/vault/cli.mjs', ['payoutAccounts', 'request'], NODE_TESTS('test_vault_cli_fork.mjs', 'test_owner_page_fork.mjs')),
+    'vault_cli': ('chains/solana/vault/cli.mjs', ['payoutAccounts', 'request'],
+                  NODE_TESTS('test_vault_cli_fork.mjs', 'test_owner_page_fork.mjs', 'test_vault_exit_fork.mjs')),
+    # The owners' own way out (2026-10-12): exact withdraw amounts, withdraw ALL, and every
+    # position closed into the vault with no bot key (vault/exit.mjs).
+    'vault_withdraw': ('chains/solana/vault/cli.mjs', ['parseAmount', 'formatAmount', 'amountOf', 'withdrawAll'],
+                       NODE_TESTS('test_vault_exit.mjs', 'test_vault_cli_fork.mjs', 'test_vault_exit_fork.mjs', 'test_owner_page_fork.mjs')),
+    'vault_exit': ('chains/solana/vault/exit.mjs', ['ata', 'hex8', 'exitRules', 'checkExitIxs', 'rentToVault', 'sortOut', 'message',
+                                                    'packMessages', 'positionView', 'venueExit', 'ownerCloseMessages'],
+                   NODE_TESTS('test_vault_exit.mjs', 'test_vault_exit_fork.mjs')),
+    'vault_exit_venues': ('chains/solana/vault/exit.mjs', ['clmmMinimums', 'mintPrograms', 'dlmmExit', 'raydiumExit', 'byrealExit', 'orcaExit',
+                                                           'vaultPositions'], NODE_TESTS('test_vault_exit_fork.mjs')),
     'vault_connect': ('chains/solana/vault/cli.mjs', ['poolsByVenue', 'connect'], NODE_TESTS('test_vault_venues_fork.mjs', 'test_vault_cli_fork.mjs')),
     'vault_venues': ('chains/solana/vault/venues.mjs', ['raydiumLayout', 'whirlpoolLayout', 'venue'],
                      NODE_TESTS('test_vault_venues_fork.mjs', 'test_vault_raydium_fork.mjs', 'test_vault_orca_fork.mjs')),
@@ -173,15 +183,49 @@ TARGETS = {
     'add_vault': ('ops/add_vault.py', ['addresses', 'register_rows', 'register', 'payouts', 'insert_rows'], PY_TESTS('test_add_vault', 'test_onboard_store')),
     # Self-serve onboarding (onboard/, 2026-10-11): what an owner signs, the gas payment it
     # must make before the bot spends anything, the server's gates, the rows it writes.
-    'onboard_intent': ('onboard/intent.mjs', ['decimal', 'address', 'amount', 'toRaw', 'fromRaw', 'name', 'nativeOf', 'gasTotal', 'minimum',
+    'onboard_intent': ('onboard/intent.mjs', ['decimal', 'address', 'amount', 'name', 'nativeOf', 'gasTotal', 'minimum',
                                               'maxAmount', 'addAmount', 'feeTerms', 'fields', 'verify', 'decodeSignature', 'inviteOk'], NODE_TESTS('test_onboard.mjs')),
     'onboard_sol_payment': ('onboard/solana.mjs', ['vaultVenues', 'paymentVerdict', 'checkPayment', 'gas', 'paymentTxs', 'holdings'],
                             NODE_TESTS('test_onboard.mjs', 'test_onboard_fork.mjs')),
     'onboard_evm_payment': ('onboard/polygon.mjs', ['paymentVerdict', 'checkPayment', 'gas', 'paymentTxs', 'holdings'],
                             NODE_TESTS('test_onboard.mjs', 'test_onboard_polygon_fork.mjs')),
+    # The owner's way out of a Polygon vault (2026-10-12): close from the Safe, withdraw all,
+    # re-grant, the deposit check, and the page's decoder of every owner transaction.
+    'evm_exit': ('chains/evm/vault/exit.mjs', ['ownerExec', 'vaultPositions', 'closeData', 'ownerCloseCalls', 'regrantCall'],
+                 NODE_TESTS('test_evm_exit.mjs', 'test_vault_exit_polygon_fork.mjs')),
+    'onboard_evm_owner': ('onboard/polygon.mjs', ['vaultOf', 'positions', 'revertData', 'botHasRole', 'withdrawAll', 'isAll', 'ownerTxs',
+                                                  'depositVerdict', 'checkDeposit', 'confirm', 'status'],
+                          NODE_TESTS('test_evm_exit.mjs', 'test_vault_exit_polygon_fork.mjs')),
+    'onboard_decode_evm': ('onboard/decode_evm.mjs', ['same', 'shown', 'formatRaw', 'preValidated', 'valueOf', 'hexData', 'decodeExact',
+                                                      'nativeSymbol', 'wrappedOf', 'tokenAt', 'safeCall', 'payment', 'deposit', 'withdraw',
+                                                      'revoke', 'approve', 'close', 'moduleCall', 'decodeEvm'],
+                           NODE_TESTS('test_decode_evm.mjs', 'test_evm_exit.mjs')),
     'onboard_server': ('onboard/server.mjs', ['makeServer', 'clientOf', 'serviceCommand', 'profileVenues'], NODE_TESTS('test_onboard.mjs')),
     'onboard_store': ('onboard/store.py', ['same_owner', 'taken', 'owned', 'sign', 'paid', 'resume', 'connected', 'stuck', 'with_settings', 'register',
                                            'started'], PY_TESTS('test_onboard_store')),
+    # The owner's page (2026-10-12: Tangem, Ledger, Phantom): the off-chain message a
+    # hardware wallet signs, the page's decoder that refuses what the owner did not ask for,
+    # the deposits that set the cap, the exit and revoke the bot obeys, the verifier.
+    'onboard_offchain': ('onboard/intent.mjs', ['offchainFormats', 'offchainShort', 'parseOffchain', 'signedForms', 'verify'],
+                         NODE_TESTS('test_onboard.mjs')),
+    'onboard_units': ('onboard/units.mjs', ['toRaw', 'fromRaw'], NODE_TESTS('test_onboard.mjs', 'test_decode_sol.mjs')),
+    'onboard_decode_sol': ('onboard/decode_sol.mjs', ['ata', 'readPolicy', 'readSettingsActions', 'readExecute', 'prefixOf', 'ruleIndex',
+                                                     'describe', 'namesOf', 'expectedPolicies', 'decodeSol', 'ownerExecute', 'exitPins',
+                                                     'policyUpdates'],
+                           NODE_TESTS('test_decode_sol.mjs', 'test_onboard_verify.mjs')),
+    'onboard_decode_checks': ('onboard/decode_sol.mjs', ['payment', 'deposit', 'withdraw', 'revoke', 'approve', 'close'],
+                              NODE_TESTS('test_decode_sol.mjs')),
+    'onboard_sol_owner': ('onboard/solana.mjs', ['ownerTxs', 'context', 'depositVerdict', 'checkDeposit', 'broadcast', 'confirm', 'status'],
+                          NODE_TESTS('test_onboard_sol.mjs', 'test_onboard.mjs')),
+    'onboard_server_page': ('onboard/server.mjs', ['walletConnectOf', 'csp', 'sender', 'keysMatch'], NODE_TESTS('test_onboard.mjs')),
+    'onboard_store_page': ('onboard/store.py', ['started', 'cap_usd', 'usd_of', 'cap', 'deposited', 'exit_request', 'exits', 'feed_from_file',
+                                                'feed_kind', 'feed'], PY_TESTS('test_onboard_store')),
+    'onboard_verify': ('onboard/verify.mjs', ['flags', 'atCommit', 'pinsOf', 'chainProblems', 'check', 'main'], NODE_TESTS('test_onboard_verify.mjs')),
+    'owner_requests_loop': ('lp/loop.py', ['stop_revoked', 'owner_exit', 'exit_for_owner'], PY_TESTS('test_owner_requests')),
+    'owner_requests_signers': ('lp/signers.py', ['revoked', 'held', 'counts_as_failure'], PY_TESTS('test_owner_requests', 'test_health')),
+    'owner_requests_books': ('lp/books.py', ['latest_kind', 'keep_latest'], PY_TESTS('test_owner_requests')),
+    'owner_requests_db': ('db.py', ['feed_latest_put', 'owner_exit_pending', 'owner_request_done'],
+                          PY_TESTS('test_owner_requests', 'test_onboard_store.OwnerPage')),
     'onboard_fee_terms': ('ops/add_profile.py', ['fee_terms'], PY_TESTS('test_add_profile', 'test_onboard_store')),
     'rpc_policy': ('shared/rpc_policy.mjs', ['endpoints', 'errorKind', 'overEndpoints', 'isEntry'], NODE_TESTS('test_rpc_policy.mjs', 'test_signer_rpc.mjs')),
     'rpc_raydium': ('venues/raydium_clmm/signer.mjs', ['withRpc', 'sendAll'], NODE_TESTS('test_signer_rpc.mjs', 'test_program_errors.mjs', 'test_no_websocket.mjs')),
@@ -423,6 +467,20 @@ SQL_TARGETS = {'deposit_db', 'unichain_book', 'unichain_quote', 'band_profile', 
 # The report prints each survivor's key: copy it here with a reason. The line
 # number is not in the key, so an edit above a mutant keeps its entry valid.
 EQUIVALENT = {
+    # onboard/decode_evm.mjs: `??` -> `||` where the left side is an object, an array, a
+    # non-empty symbol or absent, never 0, false or '' that would read differently.
+    ('onboard_decode_evm', 'nativeSymbol', '\\?\\? -> ||', 'const hit = Object.entries(pins.tokens ?? {}).find(([, t]) => !t.address);', 0):
+        'pins.tokens is an object or absent: ?? and || agree',
+    ('onboard_decode_evm', 'tokenAt', '\\?\\? -> ||', 'return Object.entries(pins.tokens ?? {}).find(([, t]) => t.address && same(t.address, address));', 0):
+        'pins.tokens is an object or absent: ?? and || agree',
+    ('onboard_decode_evm', 'deposit', '\\?\\? -> ||', 'const t = Object.hasOwn(pins.tokens ?? {}, expect.token) ? pins.tokens[expect.token] : undefined;', 0):
+        'pins.tokens is an object or absent: ?? and || agree',
+    ('onboard_decode_evm', 'wrappedOf', '\\?\\? -> ||', "if (typeof w === 'string') return { address: w, symbol: tokenAt(pins, w)?.[0] ?? 'WPOL' };", 0):
+        'a token symbol is a non-empty key or absent: ?? and || agree',
+    ('onboard_decode_evm', 'wrappedOf', '\\?\\? -> ||', 'const [symbol, address] = Object.entries(w ?? {})[0] ?? [];', 0):
+        'w here is an object or absent (a string returned above): ?? and || agree',
+    ('onboard_decode_evm', 'wrappedOf', '\\?\\? -> ||', 'const [symbol, address] = Object.entries(w ?? {})[0] ?? [];', 1):
+        'an entry is an array or absent: ?? and || agree',
     # onboard/server.mjs: `??` -> `||` where the left side is a function, an object, a string
     # or absent, never 0, false or '' that would read differently.
     ('onboard_server', 'makeServer', '\\?\\? -> ||', 'profile: { name: r.name, template: cfg.chains[r.chain].template, settings: cfg.chains[r.chain].settings ?? {}, dex, pool, execute_dexes: execute,', 0):
@@ -806,8 +864,20 @@ EQUIVALENT = {
         'a signature is a non-empty string or missing: ?? and || agree',
     ('vault_swap', 'swapSides', '\\?\\? -> ||', "if (h && h.decimals !== decimals) throw new Refused(`${h.symbol ?? mint} decimals ${h.decimals} disagree with the chain's ${decimals}; refusing`);", 0):
         'parseHints always sets a non-empty symbol: ?? and || agree',
-    ('vault_cli', 'request', '\\?\\? -> ||', 'groups ??= [[sq.ownerExecuteIx({ settings: cfg.settings, signers: [owner], vault: cfg.vault, ixs })]];', 0):
+    ('vault_cli', 'request', '\\?\\? -> ||', 'if (!transactions) groups ??= [[sq.ownerExecuteIx({ settings: cfg.settings, signers: [owner], vault: cfg.vault, ixs })]];', 0):
         'groups is unset or a non-empty list: ??= and ||= agree',
+    ('vault_cli', 'request', '\\?\\? -> ||', 'transactions ??= groups.map(ixs => {', 0):
+        'transactions is unset or a list, and a list is truthy even when empty: ??= and ||= agree',
+    ('vault_withdraw', 'parseAmount', '\\?\\? -> ||', "const frac = m[2] ?? '';", 0):
+        'the regex group is absent or at least one digit, never an empty string: ?? and || agree',
+    ('vault_exit', 'ownerCloseMessages', '\\?\\? -> ||', 'const v = await (builder ?? venueExit(venue)).open(connection, { vault, pools, rpc, priceBps });', 0):
+        'builder is null or an object: ?? and || agree',
+    ('vault_exit_venues', 'dlmmExit', '\\?\\? -> ||', 'const DLMM = pkg.default ?? pkg;', 0):
+        'the package default is the DLMM class or absent: ?? and || agree',
+    ('vault_exit_venues', 'raydiumExit', '\\?\\? -> ||', 'mints.push(...[r.poolInfo.mintA, r.poolInfo.mintB, ...(r.poolKeys.rewardInfos ?? []).map(x => x.mint)]', 0):
+        'rewardInfos is a list or absent: ?? and || agree',
+    ('vault_exit_venues', 'orcaExit', '\\?\\? -> ||', 'rpc ??= createSolanaRpc(connection.rpcEndpoint);', 0):
+        'rpc is null or an RPC object: ??= and ||= agree',
     ('vault_routing', 'housekeeper', 'return None', 'return False', 0):
         'every caller reads housekeeper() as a truth value: None and False agree',
     ('vault_capital', 'profit_wallet_pinned', 'drop operand 0', 'return bool(pin) and wallets.norm(pin) == wallets.norm(config.PROFIT_WALLET) and chains.is_address(config.CHAIN, pin)', 0):

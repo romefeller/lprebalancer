@@ -36,6 +36,9 @@ NAMES = ('ob-one', 'ob-two', 'ob-poly')
 
 def clean():
     with db.cursor(commit=True) as cur:
+        cur.execute('delete from onboard_deposits where onboard_id in (select id from onboard where name = any(%s))', (list(NAMES),))
+        cur.execute('delete from owner_requests where profile = any(%s)', (list(NAMES),))
+        cur.execute('delete from feed_latest where profile = any(%s)', (list(NAMES),))
         cur.execute('delete from onboard where name = any(%s)', (list(NAMES),))
         wallets = [n + '-vault' for n in NAMES]
         cur.execute('delete from config where name = any(%s) or name in (%s, %s)', (list(NAMES), 'ob-tpl-sol', 'ob-tpl-poly'))
@@ -343,3 +346,124 @@ class Settings(unittest.TestCase):
         for bad in ('name', 'pool', 'profit_wallet', 'special', 'fee_bps', 'fee_wallet', 'no_such_column'):
             with self.assertRaisesRegex(store.Refused, bad):
                 store.with_settings(row, {bad: 1}, {'name', 'pool'})
+
+
+class OwnerPage(unittest.TestCase):
+    """The owner's page (sql/039): deposits verified on chain set the cap,
+    exit requests, the bot's latest rows."""
+
+    def setUp(self):
+        clean()
+        templates()
+        self.before = genesis()
+
+    def tearDown(self):
+        self.assertEqual(genesis(), self.before, 'a genesis profile or wallet changed')
+        clean()
+
+    def test_cap_usd_lets_all_of_the_capital_deploy(self):
+        # capital = min(base, max_usd / (2 * side_cap)): the cap leaves every deposited dollar, times the headroom
+        for total, side, head in ((2.0, 0.55, 3.0), (1400.0, 0.55, 3.0), (0.37, 0.6, 1.0), (123.456, 0.55, 2.5)):
+            cap = store.cap_usd(total, side, head)
+            self.assertGreaterEqual(cap / (2 * side), total * head - 1e-9)
+            self.assertLess(cap / (2 * side), total * head + 0.01 / (2 * side) + 1e-9, 'rounded up by under a cent')
+            self.assertEqual(round(cap, 2), cap)
+        self.assertEqual(store.cap_usd(2.0, 0.55, 3.0), 6.6)
+        for bad in ((0, 0.55, 3), (-1, 0.55, 3), (2, 0, 3), (2, 0.55, 0.5)):
+            with self.assertRaises(store.Refused):
+                store.cap_usd(*bad)
+
+    def test_deposits_set_the_cap_once_per_transaction(self):
+        i = begin()
+        register(i)
+        prices = {SOL: 100.0, USDC: 1.0}
+        original = db.token_prices
+        db.token_prices = lambda mints: {m: prices[m] for m in mints if m in prices}
+        try:
+            out = store.run('deposited', {'id': i, 'signature': 'sig-1', 'token': 'SOL', 'mint': SOL, 'amount': '1.355', 'headroom': 3})
+            self.assertEqual(out, {'recorded': True, 'max_usd': store.cap_usd(135.5, 0.55, 3)})
+            self.assertEqual(float(row("select max_usd from config where name = 'ob-one'")['max_usd']), out['max_usd'])
+            again = store.run('deposited', {'id': i, 'signature': 'sig-1', 'token': 'SOL', 'mint': SOL, 'amount': '1.355', 'headroom': 3})
+            self.assertEqual(again, {'recorded': False, 'max_usd': out['max_usd']}, 'the same transaction counts once')
+            more = store.run('deposited', {'id': i, 'signature': 'sig-2', 'token': 'USDC', 'mint': USDC, 'amount': '1400', 'headroom': 3})
+            self.assertEqual(more['max_usd'], store.cap_usd(1535.5, 0.55, 3), 'every deposit, at its own price')
+            # an unpriced token is kept, adds no dollars
+            prices.pop(SOL)
+            store.run('deposited', {'id': i, 'signature': 'sig-3', 'token': 'SOL', 'mint': SOL, 'amount': '5', 'headroom': 3})
+            self.assertEqual(float(row("select max_usd from config where name = 'ob-one'")['max_usd']), more['max_usd'])
+            self.assertEqual(row('select count(*) n from onboard_deposits where onboard_id = %s', i)['n'], 3)
+        finally:
+            db.token_prices = original
+        j = begin('ob-two')
+        with self.assertRaisesRegex(store.Refused, 'has no vault yet'):
+            store.run('deposited', {'id': j, 'signature': 'sig-x', 'token': 'SOL', 'mint': SOL, 'amount': '1', 'headroom': 3})
+
+    def test_register_takes_a_provisional_cap_from_the_signed_deposit(self):
+        original = db.token_prices
+        db.token_prices = lambda mints: {m: 100.0 for m in mints}
+        try:
+            i = begin()
+            register(i, cap={'mint': SOL, 'headroom': 3})
+        finally:
+            db.token_prices = original
+        self.assertEqual(float(row("select max_usd from config where name = 'ob-one'")['max_usd']), store.cap_usd(135.5, 0.55, 3))
+        j = begin('ob-two')
+        register(j, name='ob-two', conn=connected(vault=P['token_2022'], settings=P['associated_token'], policies=[P['compute_budget']]))
+        t = row("select max_usd from config where name = 'ob-tpl-sol'")['max_usd']
+        self.assertEqual(row("select max_usd from config where name = 'ob-two'")['max_usd'], t, 'no cap asked: the template\'s')
+
+    def test_an_exit_request_once_pending_and_done_by_the_loop_or_a_start(self):
+        i = begin()
+        register(i)
+        self.assertEqual(store.run('exits', {'name': 'ob-one'}), {'exit': None})
+        self.assertEqual(store.run('exit', {'name': 'ob-one', 'nonce': 'n1', 'signature': 's1'}), {'requested': True, 'new': True})
+        self.assertEqual(store.run('exit', {'name': 'ob-one', 'nonce': 'n2', 'signature': 's2'}), {'requested': True, 'new': False},
+                         'one pending at a time')
+        pending = db.owner_exit_pending('ob-one')
+        self.assertIsNotNone(pending)
+        self.assertIsNone(store.run('exits', {'name': 'ob-one'})['exit']['done_at'])
+        db.owner_request_done(pending, 'closed')
+        e = store.run('exits', {'name': 'ob-one'})['exit']
+        self.assertEqual(e['outcome'], 'closed')
+        self.assertIsNotNone(e['done_at'])
+        self.assertIsNone(db.owner_exit_pending('ob-one'))
+        # a start after a new request cancels it: the owner wants the bot back
+        store.run('exit', {'name': 'ob-one', 'nonce': 'n3', 'signature': 's3'})
+        store.run('started', {'id': i})
+        self.assertIsNone(db.owner_exit_pending('ob-one'))
+        self.assertRegex(store.run('exits', {'name': 'ob-one'})['exit']['outcome'], 'cancelled')
+        with self.assertRaisesRegex(store.Refused, 'no profile'):
+            store.run('exit', {'name': 'ob-two', 'nonce': 'n4', 'signature': 's4'})
+
+    def test_the_feed_rows_the_page_shows(self):
+        i = begin()
+        register(i)
+        self.assertEqual(store.run('feed', {'name': 'ob-one'}), {'feed': {}})
+        book = {'event': 'in_band', 'fees_total_usd': 1.2, 'equity_usd': 10}
+        db.feed_latest_put('ob-one', 'book', json.dumps(book))
+        db.feed_latest_put('ob-one', 'DAILY', json.dumps({'event': 'DAILY', 'day': 'x'}))
+        db.feed_latest_put('ob-one', 'book', json.dumps(dict(book, equity_usd=11)))
+        f = store.run('feed', {'name': 'ob-one'})['feed']
+        self.assertEqual(f['book']['row']['equity_usd'], 11, 'the newest replaces the last')
+        self.assertEqual(f['DAILY']['row']['day'], 'x')
+        self.assertEqual(store.feed_kind(book), 'book')
+        self.assertEqual(store.feed_kind({'event': 'DAILY'}), 'DAILY')
+        self.assertEqual(store.feed_kind({'event': 'REVOKED'}), 'REVOKED')
+        self.assertIsNone(store.feed_kind({'event': 'in_band', 'fees_total_usd': 1}))
+        self.assertIsNone(store.feed_kind('not a row'))
+
+    def test_the_feed_file_when_the_database_has_none(self):
+        import tempfile
+        d = pathlib.Path(tempfile.mkdtemp())
+        original = store.ROOT
+        try:
+            store.ROOT = d
+            (d / 'run' / 'ob-two').mkdir(parents=True)
+            lines = [json.dumps({'event': 'DAILY', 'day': 'old'}), 'not json', json.dumps({'event': 'in_band', 'fees_total_usd': 1, 'equity_usd': 5}),
+                     json.dumps({'event': 'DAILY', 'day': 'new'}), json.dumps({'event': 'TAPE_SOURCE'})]
+            (d / 'run' / 'ob-two' / 'events.jsonl').write_text('\n'.join(lines) + '\n')
+            f = store.feed_from_file('ob-two')
+            self.assertEqual((f['book']['row']['equity_usd'], f['DAILY']['row']['day']), (5, 'new'))
+            self.assertEqual(store.feed_from_file('nobody'), {})
+        finally:
+            store.ROOT = original

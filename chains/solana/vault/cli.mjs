@@ -15,11 +15,15 @@
 //   node chains/solana/vault/cli.mjs status
 //       the vault in LPBOT_VAULT_*: owners, threshold, whether the policies on
 //       chain are the configured ones, balances.
-//   node chains/solana/vault/cli.mjs request <withdraw|revoke|approve> --owner <k> [...]
-//       an owner's transaction for owner/index.html, as one JSON line. withdraw
-//       --to <wallet> --mint <mint|SOL> --amount <n|all>; revoke; approve
-//       (the policies for the venue, pools and payouts now configured; a
-//       staged policy is created).
+//   node chains/solana/vault/cli.mjs request <withdraw|close|revoke|approve> --owner <k> [...]
+//       an owner's transactions for owner/index.html, as one JSON line. withdraw
+//       --to <wallet> --mint <mint|SOL> --amount <n|all> (an exact decimal), or
+//       --mint ALL [--mints <m>[,<m>]] (each token account of these mints,
+//       default SOL and USDC, emptied and closed, then all the SOL); close
+//       (every position of the vault on LPBOT_VAULT_VENUE's pools, into the
+//       vault, without the bot: vault/exit.mjs); revoke; approve (the policies
+//       for the venue, pools and payouts now configured; a staged policy is
+//       created).
 //   node chains/solana/vault/cli.mjs add-venue --venue <venue> --pools <pool>[,<pool>] [--execute]
 //       stage one more venue on the vault in LPBOT_VAULT_*: its policies'
 //       addresses (the vault's next seeds), and with --execute its accounts
@@ -37,6 +41,7 @@ import { compile } from './policy.mjs';
 import { approvePlan, connectDone, connectPlan, connectProblems, lookupPlan, stagedPolicies, staticAccounts } from './admin.mjs';
 import { readKeypair, vaultConfig, verifyPolicy } from './account.mjs';
 import { venue as venueOf } from './venues.mjs';
+import { ownerCloseMessages, packMessages } from './exit.mjs';
 import SOLANA from '../solana.json' with { type: 'json' };
 import { assertNotHalted } from '../../../shared/halt_guard.mjs';
 import { BOT_ROOT } from '../../../bot_root.mjs';
@@ -200,9 +205,77 @@ async function status() {
   console.log(JSON.stringify(out, null, 1));
 }
 
+// A decimal amount as raw units of a token with `decimals`: digits, an
+// optional point and at most `decimals` digits after it. Exact (BigInt): no
+// sign, exponent or rounding. Pure.
+export function parseAmount(text, decimals) {
+  const m = /^(\d+)(?:\.(\d+))?$/.exec(String(text ?? ''));
+  if (!m) throw new Error(`${text} is not an amount (digits, an optional point and digits)`);
+  const frac = m[2] ?? '';
+  if (frac.length > decimals) throw new Error(`${text} has more than ${decimals} decimals`);
+  return BigInt(m[1]) * 10n ** BigInt(decimals) + BigInt(frac.padEnd(decimals, '0') || '0');
+}
+
+// Raw units as an exact decimal, without trailing zeros. Pure.
+export function formatAmount(raw, decimals) {
+  const v = BigInt(raw);
+  if (v < 0n) throw new Error('a negative amount');
+  const unit = 10n ** BigInt(decimals);
+  const frac = (v % unit).toString().padStart(decimals, '0').replace(/0+$/, '');
+  return frac ? `${v / unit}.${frac}` : `${v / unit}`;
+}
+
+// `f.amount` of a balance `have` (raw): 'all' is the whole of it; anything
+// else must parse (parseAmount), be above zero and at most `have`. `holds`
+// says what the vault holds, in every refusal.
+function amountOf(f, have, decimals, holds) {
+  let raw;
+  try { raw = f.amount === 'all' ? have : parseAmount(f.amount, decimals); } catch (e) { throw new Error(`${e.message}; ${holds}`); }
+  if (!(raw > 0n && raw <= have)) throw new Error(holds);
+  return raw;
+}
+
+const NATIVE_MINT = new PublicKey(SOLANA.native_mint);
+
+// Everything of `mints` the vault holds, then its SOL, to `to`: each token
+// account's balance into `to`'s account (created by the owner if missing),
+// the account closed with its rent to `to`, the SOL last. A WSOL account is
+// closed straight to `to`, which unwraps it. Returns {steps, summary}; the
+// steps go through packMessages.
+async function withdrawAll(connection, cfg, owner, to, mints) {
+  const steps = [], parts = [];
+  for (const mint of mints) {
+    const info = await connection.getAccountInfo(mint);
+    if (!info) throw new Error(`mint ${mint.toBase58()} not found`);
+    const src = spl.getAssociatedTokenAddressSync(mint, cfg.vault, true, info.owner);
+    if (!await connection.getAccountInfo(src)) continue;
+    const have = (await spl.getAccount(connection, src, 'confirmed', info.owner)).amount;
+    if (mint.equals(NATIVE_MINT)) {
+      if (have > 0n) parts.push(`${formatAmount(have, 9)} wrapped SOL`);
+    } else if (have > 0n) {
+      const m = await spl.getMint(connection, mint, 'confirmed', info.owner);
+      const dst = spl.getAssociatedTokenAddressSync(mint, to, true, info.owner);
+      steps.push({ outside: spl.createAssociatedTokenAccountIdempotentInstruction(owner, dst, to, mint, info.owner) });
+      steps.push({ inside: spl.createTransferCheckedInstruction(src, mint, dst, cfg.vault, have, m.decimals, [], info.owner) });
+      parts.push(`${formatAmount(have, m.decimals)} of ${mint.toBase58()}`);
+    }
+    steps.push({ inside: spl.createCloseAccountInstruction(src, to, cfg.vault, [], info.owner) });
+  }
+  // the closes pay their rent straight to `to`: what the vault holds now is all its own
+  const lamports = BigInt(await connection.getBalance(cfg.vault));
+  if (lamports > 0n) {
+    steps.push({ inside: SystemProgram.transfer({ fromPubkey: cfg.vault, toPubkey: to, lamports }) });
+    parts.push(`${formatAmount(lamports, 9)} SOL`);
+  }
+  if (!steps.length) throw new Error(`the vault ${cfg.vault.toBase58()} holds no SOL and no account of ${mints.map(String).join(', ')}`);
+  return { steps, summary: `withdraw everything from the vault ${cfg.vault.toBase58()} to ${to.toBase58()}: `
+    + `${parts.join(', ') || 'nothing but account rent'}; the vault's token accounts closed` };
+}
+
 // An owner's transaction, unsigned, for the signing page: the page sets a
-// fresh blockhash, the owner's wallet signs it, the page sends it.
-export async function request(action, f, { connection = new Connection(RPC, 'confirmed'), env = process.env } = {}) {
+// fresh blockhash, the owner's wallet signs it, the page sends it. `rpc`: a
+// @solana/kit RPC for an Orca close (default: one on the connection's endpoint).
+export async function request(action, f, { connection = new Connection(RPC, 'confirmed'), env = process.env, rpc = null } = {}) {
   const cfg = vaultConfig(env);
   if (!cfg) throw new Error('LPBOT_VAULT_SETTINGS is not set');
   const owner = keysOf(f.owner, '--owner')[0];
@@ -210,17 +283,22 @@ export async function request(action, f, { connection = new Connection(RPC, 'con
   const settings = sq.decodeSettings((await connection.getAccountInfo(cfg.settings, 'confirmed')).data);
   if (!settings.signers.some(s => s.key.equals(owner))) throw new Error(`${owner.toBase58()} is not an owner of this vault`);
   if (settings.threshold > 1) throw new Error(`the vault needs ${settings.threshold} owner signatures; this tool builds one-signature requests`);
-  let groups, summary;
+  let groups, summary, transactions;
   if (action === 'withdraw') {
     const to = keysOf(f.to, '--to')[0];
     if (!to) throw new Error('withdraw needs --to <wallet>');
     const ixs = [];
-    if ((f.mint ?? 'SOL').toUpperCase() === 'SOL') {
-      const have = await connection.getBalance(cfg.vault);
-      const lamports = f.amount === 'all' ? have : Math.round(Number(f.amount) * 1e9);
-      if (!(lamports > 0 && lamports <= have)) throw new Error(`the vault holds ${have / 1e9} SOL`);
+    const which = (f.mint ?? 'SOL').toUpperCase();
+    if (which === 'ALL') {
+      if (f.amount != null && f.amount !== 'all') throw new Error('--mint ALL takes everything; leave out --amount');
+      const all = await withdrawAll(connection, cfg, owner, to, keysOf(f.mints ?? `${SOLANA.native_mint},${SOLANA.usdc_mint}`, '--mints'));
+      summary = all.summary;
+      transactions = packMessages(all.steps, { settings: cfg.settings, vault: cfg.vault, owner });
+    } else if (which === 'SOL') {
+      const have = BigInt(await connection.getBalance(cfg.vault));
+      const lamports = amountOf(f, have, 9, `the vault holds ${formatAmount(have, 9)} SOL`);
       ixs.push(SystemProgram.transfer({ fromPubkey: cfg.vault, toPubkey: to, lamports }));
-      summary = `withdraw ${lamports / 1e9} SOL from the vault ${cfg.vault.toBase58()} to ${to.toBase58()}`;
+      summary = `withdraw ${formatAmount(lamports, 9)} SOL from the vault ${cfg.vault.toBase58()} to ${to.toBase58()}`;
     } else {
       const mint = new PublicKey(f.mint);
       const program = (await connection.getAccountInfo(mint)).owner;
@@ -228,14 +306,19 @@ export async function request(action, f, { connection = new Connection(RPC, 'con
       const src = spl.getAssociatedTokenAddressSync(mint, cfg.vault, true, program);
       const dst = spl.getAssociatedTokenAddressSync(mint, to, true, program);
       const have = (await spl.getAccount(connection, src, 'confirmed', program)).amount;
-      const raw = f.amount === 'all' ? have : BigInt(Math.round(Number(f.amount) * 10 ** m.decimals));
-      if (!(raw > 0n && raw <= have)) throw new Error(`the vault holds ${Number(have) / 10 ** m.decimals} of ${mint.toBase58()}`);
+      const raw = amountOf(f, have, m.decimals, `the vault holds ${formatAmount(have, m.decimals)} of ${mint.toBase58()}`);
       ixs.push(spl.createTransferCheckedInstruction(src, mint, dst, cfg.vault, raw, m.decimals, [], program));
-      summary = `withdraw ${Number(raw) / 10 ** m.decimals} of ${mint.toBase58()} from the vault to ${to.toBase58()}`;
+      summary = `withdraw ${formatAmount(raw, m.decimals)} of ${mint.toBase58()} from the vault to ${to.toBase58()}`;
       groups = [[spl.createAssociatedTokenAccountIdempotentInstruction(owner, dst, to, mint, program),
         sq.ownerExecuteIx({ settings: cfg.settings, signers: [owner], vault: cfg.vault, ixs })]];
     }
-    groups ??= [[sq.ownerExecuteIx({ settings: cfg.settings, signers: [owner], vault: cfg.vault, ixs })]];
+    if (!transactions) groups ??= [[sq.ownerExecuteIx({ settings: cfg.settings, signers: [owner], vault: cfg.vault, ixs })]];
+  } else if (action === 'close') {
+    const venue = env.LPBOT_VAULT_VENUE;
+    if (!venue) throw new Error('close needs LPBOT_VAULT_VENUE');
+    const out = await ownerCloseMessages(connection, { settings: cfg.settings, vault: cfg.vault, owner, venue, pools: cfg.pools, rpc });
+    summary = out.summary;
+    transactions = out.messages;
   } else if (action === 'revoke' || action === 'approve') {
     const venue = env.LPBOT_VAULT_VENUE;
     const payer = keysOf(f.payer, '--payer')[0];
@@ -246,8 +329,8 @@ export async function request(action, f, { connection = new Connection(RPC, 'con
       venues: [{ venue, policies: cfg.policies, pools: cfg.pools, payouts: cfg.payouts }] });
     groups = rules.groups;
     summary = rules.summary;
-  } else throw new Error(`unknown request ${action} (withdraw, revoke, approve)`);
-  const transactions = groups.map(ixs => {
+  } else throw new Error(`unknown request ${action} (withdraw, close, revoke, approve)`);
+  transactions ??= groups.map(ixs => {
     const msg = new TransactionMessage({ payerKey: owner, recentBlockhash: PublicKey.default.toBase58(), instructions: ixs }).compileToLegacyMessage();
     return Buffer.from(msg.serialize()).toString('base64');
   });
@@ -345,7 +428,7 @@ export async function main(argv = process.argv.slice(2)) {
   if (cmd === 'request') return console.log(JSON.stringify(await request(f._[0], f)));
   if (cmd === 'add-venue') return stageVenue(f);
   console.log('commands: keys <dir> | connect --owners .. --venue <v>[,<v>] --pools .. [--payout ..] [--execute] | status '
-    + '| request <withdraw|revoke|approve> --owner <k> [...] | add-venue --venue <v> --pools .. [--execute]');
+    + '| request <withdraw|close|revoke|approve> --owner <k> [...] | add-venue --venue <v> --pools .. [--execute]');
 }
 
 if (isEntry(import.meta.url)) main().catch(e => { console.error('ERROR:', signerError(e)); process.exitCode = 1; });

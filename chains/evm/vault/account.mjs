@@ -35,7 +35,7 @@ export function wrapStep(step, vault) {
 export async function verifyVault(pub, vault) {
   const s = await readState(pub, vault.safe, vault.roles);
   const same = (a, b) => String(a).toLowerCase() === String(b).toLowerCase();
-  if (!s.modules.some(m => same(m, vault.roles))) throw new VaultMismatch(`refused: the Safe ${vault.safe} has not enabled the Roles module ${vault.roles} (the owners revoked the bot?)`);
+  if (!s.modules.some(m => same(m, vault.roles))) throw new VaultMismatch(`refused: the owners revoked the bot: the Safe ${vault.safe} has not enabled the Roles module ${vault.roles}`);
   if (!same(s.avatar, vault.safe) || !same(s.target, vault.safe)) throw new VaultMismatch(`refused: the Roles module ${vault.roles} does not act on the Safe ${vault.safe}`);
   return s;
 }

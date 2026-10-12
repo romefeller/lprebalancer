@@ -13,6 +13,12 @@ per call, JSON in on stdin, one JSON line out on stdout. A refusal is
     started   {id}                       the profile's service was started
     list      {owner}                    this owner's requests, with their vault rows
     get       {name}                     one request by profile name, with its vault rows
+    deposited {id, signature, token, mint, amount, headroom}
+                                         a deposit verified on chain: kept once per transaction,
+                                         and the profile's max_usd set from all of them (cap)
+    exit      {name, nonce, signature}   the owner asked the bot to close and stop (signed)
+    exits     {name}                     the newest exit request of the profile
+    feed      {name}                     the newest book and DAILY rows the profile wrote
 
 It only ever inserts new rows (and updates its own onboard rows): it never
 changes a profile, wallet or vault it did not create.
@@ -178,6 +184,9 @@ def register(cur, r):
         raise Refused(str(e)) from None
     prow = with_settings(prow, p.get('settings') or {}, add_profile.SKIP)
     add_profile.insert_rows(cur, None, prow, None)
+    # the cap from the deposit the owner signed, until the first one is verified on chain
+    if r.get('cap'):
+        cap(cur, row['id'], r['cap']['headroom'], usd_of(r['cap']['mint'], row['deposit']))
     cur.execute("update onboard set state = 'registered', vault = %s, connected = %s, updated_at = now() where id = %s",
                 (c['vault'], json.dumps(c), r['id']))
     return {'profile': p['name'], 'wallet_id': r['wallet_id'], 'vault': c['vault'],
@@ -185,9 +194,130 @@ def register(cur, r):
 
 
 def started(cur, r):
+    """The service runs: the request is started, and an exit the owner asked
+    for before is over (a start after it is the owner's Add capital)."""
     cur.execute("update onboard set state = 'started', updated_at = now() where id = %s and state in "
                 "('registered', 'started')", (r['id'],))
-    return {'started': cur.rowcount == 1}
+    ok = cur.rowcount == 1
+    cur.execute("update owner_requests set done_at = now(), outcome = 'cancelled: the owner started the bot again' "
+                "where profile = (select name from onboard where id = %s) and done_at is null", (r['id'],))
+    return {'started': ok}
+
+
+def cap_usd(total_usd, side_cap, headroom):
+    """The max_usd that lets the bot deploy all of `total_usd`: the capital
+    is min(base, max_usd / (2 * side_cap)) (lp/capital.py), so the ceiling
+    is 2 * side_cap * total, times `headroom` for the price and the fees to
+    grow into. Rounded up to the cent. Pure."""
+    if not (total_usd > 0 and side_cap > 0 and headroom >= 1):
+        raise Refused(f'no cap from total {total_usd}, side cap {side_cap}, headroom {headroom}')
+    cents = 2 * side_cap * headroom * total_usd * 100
+    return float(int(cents) + (0 if cents == int(cents) else 1)) / 100
+
+
+def usd_of(mint, amount):
+    """`amount` of `mint` in dollars now (db.token_prices), or None."""
+    price = db.token_prices([mint]).get(mint)
+    return None if price is None else float(amount) * price
+
+
+def cap(cur, onboard_id, headroom, provisional=None):
+    """Set the profile's max_usd from its deposits: every verified one, or
+    `provisional` (the signed deposit's dollars) while there is none. Returns
+    the new max_usd, or None when no dollar figure is known."""
+    cur.execute('select coalesce(sum(usd), 0) total, count(*) n, count(usd) priced from onboard_deposits where onboard_id = %s',
+                (onboard_id,))
+    d = cur.fetchone()
+    total = float(d['total']) if d['n'] else provisional
+    if not total:
+        return None
+    cur.execute('select c.name, c.side_cap_fraction from config c join onboard o on o.name = c.name where o.id = %s', (onboard_id,))
+    row = cur.fetchone()
+    if not row:
+        raise Refused(f'request {onboard_id} has no profile')
+    value = cap_usd(total, float(row['side_cap_fraction']), float(headroom))
+    cur.execute('update config set max_usd = %s where name = %s', (value, row['name']))
+    return value
+
+
+def deposited(cur, r):
+    """A deposit the server verified on chain (amount and token from the
+    chain, not the page). One row per transaction; the cap follows the sum."""
+    cur.execute("select id from onboard where id = %s and state in ('registered', 'started')", (r['id'],))
+    if not cur.fetchone():
+        raise Refused(f'request {r["id"]} has no vault yet')
+    cur.execute('insert into onboard_deposits (onboard_id, signature, token, amount, usd) values (%s, %s, %s, %s, %s) '
+                'on conflict (signature) do nothing returning id',
+                (r['id'], r['signature'], r['token'], r['amount'], usd_of(r['mint'], r['amount'])))
+    new = cur.fetchone() is not None
+    return {'recorded': new, 'max_usd': cap(cur, r['id'], r['headroom'])}
+
+
+def exit_request(cur, r):
+    """The owner's signed request that the bot close its positions into the
+    vault and stop. One pending at a time: a second is the same request."""
+    cur.execute('select name from config where name = %s', (r['name'],))
+    if not cur.fetchone():
+        raise Refused(f'no profile {r["name"]}')
+    cur.execute("insert into owner_requests (profile, kind, nonce, signature) values (%s, 'exit', %s, %s) "
+                'on conflict do nothing returning id', (r['name'], r['nonce'], r['signature']))
+    row = cur.fetchone()
+    return {'requested': True, 'new': row is not None}
+
+
+def exits(cur, r):
+    cur.execute("select id, created_at, done_at, outcome from owner_requests where profile = %s and kind = 'exit' "
+                'order by id desc limit 1', (r['name'],))
+    e = cur.fetchone()
+    return {'exit': e and {'id': e['id'], 'created_at': e['created_at'].timestamp(),
+                           'done_at': e['done_at'] and e['done_at'].timestamp(), 'outcome': e['outcome']}}
+
+
+FEED_TAIL_BYTES = 4 << 20
+
+
+def feed_from_file(name):
+    """The newest book row and DAILY row of run/<name>/events.jsonl, for a
+    profile that has written none to feed_latest yet. Reads the file's tail
+    only. {} when it cannot be read."""
+    f = ROOT / 'run' / name / 'events.jsonl'
+    try:
+        with open(f, 'rb') as fh:
+            fh.seek(0, 2)
+            size = fh.tell()
+            fh.seek(max(0, size - FEED_TAIL_BYTES))
+            lines = fh.read().decode('utf-8', 'replace').splitlines()
+    except OSError:
+        return {}
+    out = {}
+    for line in reversed(lines):
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        kind = feed_kind(row)
+        if kind and kind not in out:
+            out[kind] = dict(row=row, updated_at=None)
+        if 'book' in out and 'DAILY' in out:
+            break
+    return out
+
+
+def feed_kind(row):
+    """The feed_latest kind of a feed row, or None. Pure."""
+    if not isinstance(row, dict):
+        return None
+    if row.get('event') in ('DAILY', 'REVOKED', 'OWNER_EXIT'):
+        return row['event']
+    return 'book' if 'fees_total_usd' in row and 'equity_usd' in row else None
+
+
+def feed(cur, r):
+    cur.execute('select kind, row, updated_at from feed_latest where profile = %s', (r['name'],))
+    rows = {x['kind']: dict(row=x['row'], updated_at=x['updated_at'].timestamp()) for x in cur.fetchall()}
+    if 'book' not in rows:
+        rows = {**feed_from_file(r['name']), **rows}
+    return {'feed': rows}
 
 
 def _with_vault(cur, rows):
@@ -218,9 +348,10 @@ COMMANDS = {
     'taken': lambda cur, r: {'taken': taken(cur, r['name'], r['wallet_id'])},
     'owned': lambda cur, r: {'count': owned(cur, r['owner'])},
     'sign': sign, 'paid': paid, 'resume': resume, 'connected': connected, 'stuck': stuck, 'register': register,
-    'started': started, 'list': listing, 'get': get,
+    'started': started, 'list': listing, 'get': get, 'deposited': deposited, 'exit': exit_request, 'exits': exits,
+    'feed': feed,
 }
-WRITES = {'sign', 'paid', 'resume', 'connected', 'stuck', 'register', 'started'}
+WRITES = {'sign', 'paid', 'resume', 'connected', 'stuck', 'register', 'started', 'deposited', 'exit'}
 
 
 def run(command, request):

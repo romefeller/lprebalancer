@@ -127,7 +127,7 @@ def counts_as_failure(err):
     """Whether an error is the dependency's fault. Our own refusals, HALT and
     a missing signer are not: they say nothing about the venue. Pure."""
     e = str(err or '')
-    return bool(e) and not re.search(r'^refused:|HALT present|^no signer for', e)
+    return bool(e) and not re.search(r'^refused:|HALT present|^no signer for', e) and not revoked(e)
 
 
 def record_health(key, out, err):
@@ -573,6 +573,14 @@ def mint_refusal(err):
 # A gas price over LPBOT_EVM_MAX_GWEI holds too: the EVM signer sent nothing, and three
 # refused reopens in a spike must not write HALT (edge test, 2026-10-10).
 WAIT_REFUSAL = re.compile(r'^refused: (wallet \S+ lock|claims unmeasurable|halted|max fee \d+ wei/gas exceeds)')
+# The vault's owners took the bot's rights back (chains/solana/vault/account.mjs,
+# chains/evm/vault/account.mjs): nothing the bot sends can act any more.
+REVOKED = re.compile(r'owners revoked the bot')
+
+
+def revoked(err):
+    """Whether a signer's error says the owners revoked the bot. Pure."""
+    return bool(err) and bool(REVOKED.search(str(err)))
 
 
 # A vault whose policies on chain are not this code's rules for its config
@@ -605,7 +613,7 @@ def held(err):
     """Whether a write was refused for a reason that holds the profile where
     it is (mint_refusal, or WAIT_REFUSAL): nothing was sent, no failure is
     counted, no HALT is written, the next poll tries again."""
-    return mint_refusal(err) or (bool(err) and bool(WAIT_REFUSAL.match(str(err))))
+    return mint_refusal(err) or revoked(err) or (bool(err) and bool(WAIT_REFUSAL.match(str(err))))
 
 
 def note_mint_refusal(command, err, out):

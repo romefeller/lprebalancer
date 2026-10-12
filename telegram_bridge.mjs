@@ -518,6 +518,10 @@ export function render(row) {
     case 'idle':          return `idle · ${row.reason}`;
     case 'BREAKER':       return `BREAKER · ${row.reason}\n${row.action}`;
     case 'halted':        return `HALTED · ${row.reason}`;
+    // the owner's page (onboard/): the owner took the rights back, or asked the bot to close and stop
+    case 'REVOKED':       return `REVOKED by the owner · ${row.action ?? 'stopped'}`;
+    case 'OWNER_EXIT':    return `OWNER EXIT · ${row.reason}\n${row.action ?? ''}`;
+    case 'owner_exit_pending': return `owner exit pending · ${row.reason} · ${row.action ?? ''}`;
     case 'PORTFOLIO':
       return portfolioText(row);
     case 'dormant':

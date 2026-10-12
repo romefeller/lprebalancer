@@ -38,6 +38,50 @@ def disabled_hold(state, status):
                      positionMint=status['positionMint'])
 
 
+def stop_revoked(err):
+    """The owners revoked the bot on this vault: say so once, close any exit
+    they asked for, and stop the process (exit 0: the service does not
+    restart it; the owner's Add capital starts it again). Nothing more is
+    sent, no failure is counted, no HALT is written."""
+    books.notify('REVOKED', reason=err, action='stopped: the owners took the bot\'s rights back; nothing more is sent. '
+                                              'Add capital on the owner\'s page approves the rules again and starts the bot')
+    db.event('REVOKED', str(err)[:300])
+    pending = owner_exit()
+    if pending:
+        db.owner_request_done(pending, 'revoked before the bot closed: the owners close it themselves')
+    return 0
+
+
+def owner_exit():
+    """The pending exit the owner asked for (sql/039), or None. A read that
+    fails is no request: the next poll reads again."""
+    if not config.VAULT:
+        return None
+    try:
+        return db.owner_exit_pending(config.PROFILE)
+    except Exception as e:
+        print(f'owner request unreadable: {type(e).__name__}: {books.tidy(e)}', flush=True)
+        return None
+
+
+def exit_for_owner(state, status, request_id):
+    """The owner asked (signed, on their page) that the bot close its
+    position into the vault and stop. Close it, then stop the process (exit
+    0); a close that did not land keeps the request for the next poll.
+    Returns the exit code, or None to go on polling."""
+    if status.get('positionMint'):
+        moves.rebalance(state, status, 'the owner asked to exit', close_only=True, operator=True)
+        check, err = signers.read_status()
+        if check is None or check.get('positionMint'):
+            books.notify('owner_exit_pending', reason=err or 'the position is still open', action='trying again at the next poll')
+            return None
+    db.owner_request_done(request_id, 'closed into the vault; the bot stopped')
+    books.notify('OWNER_EXIT', reason='the owner asked: positions closed into the vault, the bot stopped',
+                 action='nothing more is sent until the owner starts it again')
+    db.event('OWNER_EXIT', 'closed into the vault; stopped')
+    return 0
+
+
 DORMANT_POLL_S = 300              # a dormant profile reads its wallet at most this often
 
 
@@ -113,6 +157,16 @@ def main():
             return 2
 
         status, err = signers.read_status()
+
+        if status is None and signers.revoked(err):
+            return stop_revoked(err)
+        request = owner_exit() if status is not None else None
+        if request:
+            code = exit_for_owner(state, status, request)
+            if code is not None:
+                return code
+            time.sleep(config.POLL_SECONDS)
+            continue
 
         if status is None and state.get('dormant'):
             # A dormant profile holds nothing and attempts nothing: a flaky

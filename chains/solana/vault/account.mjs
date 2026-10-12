@@ -127,7 +127,7 @@ export async function verifyPolicy(connection, cfg, policyKey, compiled) {
     const head = sq.decodePolicyHead(info.data);
     if (!head.settings.equals(cfg.settings)) throw new PolicyMismatch(`policy ${at} belongs to another vault`);
     if (!head.signers.some(s => s.key.equals(policyKey))) {
-      throw awaiting(`policy ${at} no longer lists the bot's policy key: the owners revoked the bot`);
+      throw awaiting(`the owners revoked the bot: policy ${at} no longer lists the bot's policy key`);
     }
     if (!sq.policyStateIs(info.data, compiled.policies[i].policy)) {
       throw awaiting(`policy ${at} differs from the ${compiled.venue} rules and approved pools in the config; `

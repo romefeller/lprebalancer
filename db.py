@@ -119,6 +119,32 @@ def vault_row(wallet_id):
     return dict(v, owners=list(v['owners']), venues=venues)
 
 
+def feed_latest_put(profile, kind, line):
+    """Keep `line` (a feed row, as JSON text, redacted) as the newest of its
+    kind for `profile` (sql/039 feed_latest): what the owner's page shows."""
+    with cursor(commit=True) as cur:
+        cur.execute('insert into feed_latest (profile, kind, row, updated_at) values (%s, %s, %s, now()) '
+                    'on conflict (profile, kind) do update set row = excluded.row, updated_at = now()',
+                    (profile, kind, line))
+
+
+def owner_exit_pending(profile):
+    """The id of the exit the owner asked for and the loop has not done, or
+    None (sql/039 owner_requests)."""
+    with cursor() as cur:
+        cur.execute("select id from owner_requests where profile = %s and kind = 'exit' and done_at is null "
+                    'order by id limit 1', (profile,))
+        r = cur.fetchone()
+    return r['id'] if r else None
+
+
+def owner_request_done(request_id, outcome):
+    """Mark an owner's request done, with what came of it."""
+    with cursor(commit=True) as cur:
+        cur.execute('update owner_requests set done_at = now(), outcome = %s where id = %s and done_at is null',
+                    (str(outcome)[:500], request_id))
+
+
 def wallets():
     with cursor() as cur:
         cur.execute('select id, chain, address, secret_env, label from wallets order by id')

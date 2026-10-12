@@ -142,8 +142,34 @@ def notify(event, **payload):
     paths.FEED.parent.mkdir(parents=True, exist_ok=True)
     with open(paths.FEED, 'a') as fh:
         fh.write(line + '\n')
+    keep_latest(event, row, line)
     print(redact(f'[{row["t"]}] {emoji_for(event, payload)} {event}: {json.dumps(payload, default=str, sort_keys=True)}'),
           flush=True)
+
+
+# The rows the owner's page shows (onboard/, sql/039 feed_latest): the
+# newest book, DAILY, and the owner's stops.
+PAGE_EVENTS = ('DAILY', 'REVOKED', 'OWNER_EXIT')
+
+
+def latest_kind(event, row):
+    """The feed_latest kind of a row, or None: 'book' for a row that carries
+    the book, else the event when the page shows it. Pure."""
+    if event in PAGE_EVENTS:
+        return event
+    return 'book' if 'fees_total_usd' in row and 'equity_usd' in row else None
+
+
+def keep_latest(event, row, line):
+    """A vault profile keeps its newest page rows in the database, where
+    the page's server reads them. Never raises: the feed file is the record."""
+    kind = latest_kind(event, row)
+    if not (kind and config.VAULT):
+        return
+    try:
+        db.feed_latest_put(config.PROFILE, kind, line)
+    except Exception as e:
+        print(f'feed_latest not kept: {type(e).__name__}: {tidy(e)}', flush=True)
 
 
 def nearest(runs, pct, tolerance=2):

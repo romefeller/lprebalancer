@@ -10,11 +10,9 @@
 // settings transaction, and a transaction holds 1232 bytes. compile() packs
 // the rules, in file order, into as few policies as stay under POLICY_BYTES.
 import { createRequire } from 'module';
-import fs from 'node:fs';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { encodeProgramInteraction } from './squads.mjs';
 import SOLANA from '../solana.json' with { type: 'json' };
+import RULES_FILE from './rules.json' with { type: 'json' };
 
 const require = createRequire(import.meta.url);
 const { PublicKey, ComputeBudgetProgram } = require('@solana/web3.js');
@@ -30,7 +28,9 @@ const MAX_CONSTRAINTS = 20;
 // transaction for every packed policy and checks it fits.
 export const POLICY_BYTES = 760;
 
-export const RULES = JSON.parse(fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), 'rules.json'), 'utf8'));
+// A JSON import, not a file read: the onboarding page's bundle compiles the
+// same rules in the browser (onboard/decode_sol.mjs).
+export const RULES = RULES_FILE;
 
 export class NotAllowed extends Error {}
 

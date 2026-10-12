@@ -3,14 +3,22 @@
 //
 //   node onboard/server.mjs [onboard/onboard.json]
 //
-// An owner opens the page, connects a wallet, fills chain, amount, profit
+// An owner opens the page, connects a wallet (an injected one, or any
+// WalletConnect wallet: Tangem, Ledger Live), fills chain, amount, profit
 // wallet and name, and signs ONE message. With that signature the bot creates
 // one vault the owner alone owns (the bot pays; the owner signs nothing on
 // chain for it), registers it and one new profile copied from the chain's
 // template. The owner's wallet then deposits; once the deposit is in the
 // vault the profile's service starts. The page also lists the owner's vaults,
 // with withdraw and revoke built for the owner's wallet to sign, and reads
-// the wallet's balances for its Max button.
+// the wallet's balances for its Max button. For a vault that runs it shows
+// the bot's book as Telegram shows it (the same rows, the same formatter),
+// and lets the owner add capital, withdraw (the bot closes its position into
+// the vault first, or the owner closes it), revoke, and re-grant.
+//
+// The page (bundle.js, built from onboard/web/) decodes every transaction it
+// asks the wallet to sign and refuses one that differs from what the owner
+// asked for under the rules pinned in git: this server is not trusted for that.
 //
 // What it never does: hold an owner's key, send a transaction the owner did
 // not sign (other than the bot's own connect), spend anything without the
@@ -30,6 +38,8 @@ import * as I from './intent.mjs';
 import * as S from './solana.mjs';
 import * as P from './polygon.mjs';
 import { isEntry } from '../shared/rpc_policy.mjs';
+import { message as telegramMessage } from '../telegram_bridge.mjs';
+import { pricedView, shownBand, shownPrice } from '../book_format.mjs';
 
 const require = createRequire(import.meta.url);
 const { Connection } = require('@solana/web3.js');
@@ -63,7 +73,31 @@ export function loadConfig(file = path.join(HERE, 'onboard.json'), env = process
   }
   if (!raw.service.start.some(a => a.includes('{name}'))) throw new Error('service.start must name {name}');
   if (!['127.0.0.1', '::1'].includes(raw.listen.host)) throw new Error(`listen.host ${raw.listen.host}: loopback only (Caddy proxies)`);
+  if (!(raw.capHeadroom >= 1)) throw new Error(`capHeadroom ${raw.capHeadroom}: at least 1`);
+  const wc = raw.walletConnect ?? {};
+  if (!/^wss?:\/\/[a-z0-9.-]+(:\d+)?(\/.*)?$/.test(wc.relayUrl ?? '')) throw new Error(`walletConnect.relayUrl ${wc.relayUrl}: a ws(s) URL`);
   return { ...raw, chains };
+}
+
+// The WalletConnect project id: the environment's (walletConnect.projectIdEnv),
+// else the config's. Not a secret (every dapp page carries its own), but it
+// names the operator's Reown project. Empty: the page offers no WalletConnect.
+export function walletConnectOf(cfg, env = process.env) {
+  const wc = cfg.walletConnect ?? {};
+  const id = String(env[wc.projectIdEnv] || wc.projectId || '').trim();
+  if (id && !/^[0-9a-f]{32}$/.test(id)) throw new Error('the WalletConnect project id is 32 hex characters');
+  return { projectId: id, relayUrl: wc.relayUrl, verify: wc.verify ?? [] };
+}
+
+// The page's Content-Security-Policy: its own scripts and styles only; the
+// WalletConnect relay (and its verify service, whose hidden frame lets a
+// wallet show this site as verified) when a project id is set. Pure.
+export function csp(wc) {
+  const relay = wc.projectId ? [new URL(wc.relayUrl).origin] : [];
+  const verify = wc.projectId ? wc.verify : [];
+  return ["default-src 'none'", "script-src 'self'", "style-src 'self'", `connect-src 'self' ${[...relay, ...verify].join(' ')}`.trim(),
+    "img-src 'self' data:", verify.length ? `frame-src ${verify.join(' ')}` : null,
+    "base-uri 'none'", "form-action 'none'", "frame-ancestors 'none'"].filter(Boolean).join('; ');
 }
 
 // --- rate limits ----------------------------------------------------------------
@@ -133,18 +167,20 @@ class HttpError extends Error {
   constructor(status, message) { super(message); this.status = status; }
 }
 
-const PAGE_HEADERS = {
-  'content-security-policy': "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; "
-    + "base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+const BASE_HEADERS = {
   'x-content-type-options': 'nosniff',
   'referrer-policy': 'no-referrer',
   'cache-control': 'no-store',
 };
 
-function send(res, status, body, type = 'application/json; charset=utf-8') {
-  const data = typeof body === 'string' ? body : JSON.stringify(body);
-  res.writeHead(status, { ...PAGE_HEADERS, 'content-type': type, 'content-length': Buffer.byteLength(data) });
-  res.end(data);
+// A response writer with this page's headers.
+function sender(policy) {
+  const headers = { ...BASE_HEADERS, 'content-security-policy': policy };
+  return (res, status, body, type = 'application/json; charset=utf-8') => {
+    const data = typeof body === 'string' ? body : JSON.stringify(body);
+    res.writeHead(status, { ...headers, 'content-type': type, 'content-length': Buffer.byteLength(data) });
+    res.end(data);
+  };
 }
 
 async function readJson(req, limit) {
@@ -193,8 +229,12 @@ export function makeServer(cfg, deps) {
   const intents = new Map();              // nonce -> {fields, text, expires}
   const hashes = String(deps.inviteHashes ?? '').split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
   const page = fs.readFileSync(path.join(HERE, 'index.html'), 'utf8');
-  const app = fs.readFileSync(path.join(HERE, 'app.js'), 'utf8');
+  // the page's script, built from onboard/web/ (tests serve one built with their own pins)
+  const bundle = fs.readFileSync(deps.bundle ?? path.join(HERE, 'bundle.js'), 'utf8');
   const style = fs.readFileSync(path.join(HERE, 'style.css'), 'utf8');
+  const wc = deps.walletConnect ?? walletConnectOf(cfg);
+  const send = sender(csp(wc));
+  const exits = new Map();                // nonce -> {name, text, expires}: exit requests to sign
   let queue = Promise.resolve();          // one connect at a time: one payer, one seed, one nonce
   const serial = (fn) => { const p = queue.then(fn, fn); queue = p.catch(() => {}); return p; };
 
@@ -214,7 +254,7 @@ export function makeServer(cfg, deps) {
 
   function prune() {
     const t = now();
-    for (const [k, v] of intents) if (v.expires <= t) intents.delete(k);
+    for (const m of [intents, exits]) for (const [k, v] of m) if (v.expires <= t) m.delete(k);
   }
 
   async function checkRoom(f) {
@@ -254,7 +294,7 @@ export function makeServer(cfg, deps) {
     if (it.expires <= now()) throw new HttpError(400, 'the request expired; sign a new one');
     if (body.message !== it.text) throw new HttpError(400, 'the signed message is not the one this server issued');
     const f = it.fields;
-    if (!await I.verify(f.chain, f.owner, it.text, body.signature)) throw new HttpError(401, 'the signature is not the owner\'s');
+    if (!await I.verify(f.chain, f.owner, it.text, body.signature, signedOf(body))) throw new HttpError(401, 'the signature is not the owner\'s');
     if (limits.creates.full(ip) || limits.createsTotal.full('all')) throw new HttpError(429, 'too many new vaults today; try tomorrow');
     const adapter = chainOf(f.chain);
     await checkRoom(f);
@@ -266,6 +306,23 @@ export function makeServer(cfg, deps) {
       fee_bps: f.feeBps, fee_wallet: f.feeWallet, intent: it.text, signature: String(body.signature), nonce, expires: it.expires });
     log({ event: 'signed', chain: f.chain, name: f.name, owner: f.owner });
     return { name: f.name, ...payment };
+  }
+
+  // The bytes a Solana wallet reports it signed (base64), or null: a
+  // hardware wallet signs an off-chain message around the text (intent.mjs).
+  const signedOf = (body) => (typeof body.signedMessage === 'string' && body.signedMessage ? body.signedMessage : null);
+
+  // POST /api/payment: the gas payment of a signed request again, built fresh
+  // (a Solana blockhash lives about a minute: a payment the wallet did not send
+  // in time is rebuilt, never signed for twice). Only a request still waiting
+  // for its payment; only to the payer it signed for.
+  async function payment(ip, body) {
+    gate(ip, body);
+    const r = await requestOf(body.name, false);
+    if (r.state !== 'signed') throw new HttpError(409, `the request is ${r.state}: its gas is paid`);
+    const adapter = chainOf(r.chain);
+    const p = await adapter.payment({ owner: r.owner, payer: r.payer, gas: r.gas, token: r.token, deposit: r.deposit });
+    return { name: r.name, gas: r.gas, ...p };
   }
 
   const running = new Set();              // names whose setup runs in this process
@@ -329,7 +386,8 @@ export function makeServer(cfg, deps) {
         const reg = await deps.store('register', { id: r.id, wallet_id: r.wallet_id, label: r.name, secret_env: adapter.keys.secretEnv,
           policy_key_env: adapter.keys.policyKeyEnv, connected,
           profile: { name: r.name, template: cfg.chains[r.chain].template, settings: cfg.chains[r.chain].settings ?? {}, dex, pool, execute_dexes: execute,
-            rec: await adapter.record(dex, pool) } });
+            rec: await adapter.record(dex, pool) },
+          cap: { mint: adapter.mintOf(r.token), headroom: cfg.capHeadroom } });
         log({ event: 'registered', chain: r.chain, name: r.name, vault: reg.vault });
         return { name: r.name, chain: r.chain, state: 'registered', vault: reg.vault, token: r.token, deposit: r.deposit };
       } catch (e) {
@@ -349,9 +407,13 @@ export function makeServer(cfg, deps) {
   }
 
   // POST /api/tx: an owner's transaction, unsigned. The deposit is the signed
-  // amount; 'add' is more capital, any amount, into a vault that is set up.
-  // A chain whose transactions expire (Solana: a blockhash lives about a minute)
-  // answers one at a time, `index` of `count`, each built when it is asked for.
+  // amount; 'add' is more capital, any amount, into a vault that is set up;
+  // 'close' closes the vault's positions into it (the owner's way out, with
+  // or without the bot); 'withdraw' moves idle money to the owner's wallet
+  // (token ALL: everything). A chain whose transactions expire (Solana: a
+  // blockhash lives about a minute) answers one at a time, `index` of
+  // `count`, each built when it is asked for. `context` names the vault's
+  // accounts for the page's decoder, which checks them against its own pins.
   async function tx(ip, body) {
     gate(ip, body);
     const r = await requestOf(body.name);
@@ -364,24 +426,31 @@ export function makeServer(cfg, deps) {
       if (!t) throw new HttpError(400, `token: one of ${Object.keys(cfg.chains[r.chain].tokens).join(', ')}`);
       answer = await adapter.deposit({ owner: r.owner, vault: r.vault, token, amount: I.addAmount(body.amount, t) });
     }
-    else if (action === 'withdraw' || action === 'revoke' || action === 'approve') {
-      const amount = I.decimal(body.amount);
-      if (action === 'withdraw' && amount !== 'all' && !/^\d{1,12}(\.\d{1,18})?$/.test(amount)) throw new HttpError(400, 'amount: a number or all');
-      answer = await adapter.owner(r.vault_row, { action, owner: r.owner, token: I.text(body.token), amount });
-    } else throw new HttpError(400, 'action: deposit, add, withdraw, revoke or approve');
+    else if (['withdraw', 'revoke', 'approve', 'close'].includes(action)) {
+      const amount = I.decimal(body.amount), token = I.text(body.token);
+      if (action === 'withdraw') {
+        if (token === 'ALL' ? amount !== 'all' : amount !== 'all' && !/^\d{1,12}(\.\d{1,18})?$/.test(amount)) throw new HttpError(400, 'amount: a number or all');
+        if (token !== 'ALL' && !I.own(cfg.chains[r.chain].tokens, token)) throw new HttpError(400, `token: ALL or one of ${Object.keys(cfg.chains[r.chain].tokens).join(', ')}`);
+      }
+      answer = await adapter.owner(r.vault_row, { action, owner: r.owner, token, amount });
+    } else throw new HttpError(400, 'action: deposit, add, withdraw, close, revoke or approve');
     const count = answer.transactions.length;
-    if (!adapter.expires) return { ...answer, count };
+    const context = adapter.context(r);
+    if (!adapter.expires) return { ...answer, count, context };
     const index = body.index === undefined ? 0 : body.index;
+    if (count === 0) return { ...answer, count, context };
     if (!(Number.isInteger(index) && index >= 0 && index < count)) throw new HttpError(400, `index: 0 to ${count - 1}`);
-    return { ...answer, count, index, transactions: [answer.transactions[index]] };
+    return { ...answer, count, index, context, transactions: [answer.transactions[index]] };
   }
 
   // POST /api/start: the profile's service, once the vault holds a deposit.
+  // Idempotent: a running service stays as it is; one the owner stopped (an
+  // exit, a revoke) starts again, and the exit it asked for is over.
   async function start(ip, body) {
     gate(ip, body);
     const r = await requestOf(body.name);
     const st = await chainOf(r.chain).status(r.vault_row);
-    if (!chainOf(r.chain).hasDeposit(st)) throw new HttpError(409, 'the vault holds nothing yet; deposit first');
+    if (!chainOf(r.chain).hasDeposit(st) && !(st.positions > 0)) throw new HttpError(409, 'the vault holds nothing yet; deposit first');
     if (!st.botActive) throw new HttpError(409, 'the bot is revoked on this vault');
     const out = await deps.start(serviceCommand(cfg.service.start, r.name));
     if (out.code !== 0) {
@@ -393,7 +462,40 @@ export function makeServer(cfg, deps) {
     return { name: r.name, started: true };
   }
 
-  // POST /api/vaults: the owner's vaults and what each holds.
+  // What the page shows of a vault: the setup still running, the bot active
+  // on it, or the bot revoked. Pure.
+  function viewOf(r, v) {
+    if (['signed', 'connecting', 'stuck'].includes(r.state)) return 'setup';
+    if (!v.balances) return 'unknown';
+    if (v.botActive === false) return 'revoked';
+    if (r.state === 'registered' && !chainOf(r.chain).hasDeposit(v) && !(v.positions > 0)) return 'setup';
+    return 'active';
+  }
+
+  // The bot's book for the page: the newest rows the profile wrote, rendered
+  // by the Telegram bridge (the same text the owner gets in Telegram), and a
+  // few figures from the same row for the page's tiles.
+  async function statsOf(name) {
+    const { feed } = await deps.store('feed', { name });
+    const book = feed.book?.row, daily = feed.DAILY?.row;
+    if (!book) return null;
+    const pv = pricedView(book);
+    const band = book.lower != null && book.upper != null ? shownBand(book, book.lower, book.upper) : null;
+    const forecast = book.forecast ?? book.band ?? {};
+    return {
+      at: book.t ?? null, text: telegramMessage(book), daily: daily ? telegramMessage(daily) : null,
+      revoked: feed.REVOKED?.row ? telegramMessage(feed.REVOKED.row) : null, exit: feed.OWNER_EXIT?.row ? telegramMessage(feed.OWNER_EXIT.row) : null,
+      tiles: { symbol: pv.symbol, price: shownPrice(book, book.last_price ?? book.price), band,
+        inRange: book.band?.in_range ?? (book.event === 'in_band' ? true : book.event === 'OUT_OF_BAND' ? false : null),
+        equityUsd: book.equity_usd ?? null, feesTodayUsd: book.fees_today_usd ?? null, feesTotalUsd: book.fees_total_usd ?? null,
+        paidUsd: book.split?.paid_usd ?? null, feesPerDayUsd: book.fees_per_day_usd ?? null, aprPct: book.apr_pct ?? null,
+        mode: book.regime?.mode ?? null, pExit24h: forecast.p_exit_24h_regime ?? forecast.p_exit_24h ?? null,
+        pnlUsd: book.since_start?.profit_usd ?? book.pnl_usd ?? null, event: book.event },
+    };
+  }
+
+  // POST /api/vaults: the owner's vaults, what each holds, its view and, for
+  // a vault the bot runs, its book.
   async function vaults(ip, body) {
     gate(ip, body);
     const chain = I.text(body.chain);
@@ -402,15 +504,89 @@ export function makeServer(cfg, deps) {
     const out = [];
     for (const r of rows) {
       const v = { name: r.name, chain: r.chain, state: r.state, vault: r.vault, token: r.token, amount: r.amount, deposit: r.deposit,
-        gas: r.gas, payer: r.payer, error: r.state === 'stuck' ? r.error : undefined, created: r.created_at };
+        gas: r.gas, payer: r.payer, error: r.state === 'stuck' ? r.error : undefined, created: r.created_at,
+        profitWallet: r.profit_wallet, feeWallet: r.fee_wallet };
       if (r.vault_row) {
-        try { Object.assign(v, await chainOf(r.chain).status(r.vault_row)); } catch (e) { v.error = `chain read failed: ${e.message}`; }
+        try { Object.assign(v, await chainOf(r.chain).status(r.vault_row)); } catch (e) { v.error = `the chain could not be read: ${e.message}`; }
         const s = await deps.status(serviceCommand(cfg.service.status, r.name));
         v.service = s.out.trim() || 'unknown';
+        v.botReachable = v.service === 'active';
+        try { v.stats = await statsOf(r.name); } catch (e) { v.stats = null; log({ event: 'stats_failed', name: r.name, error: e.message }); }
+        v.exit = (await deps.store('exits', { name: r.name })).exit;
       }
+      v.view = viewOf(r, v);
       out.push(v);
     }
     return { vaults: out };
+  }
+
+  // POST /api/exit-intent: the message an owner signs to ask the bot to close
+  // its positions into the vault and stop. It moves nothing out of the vault.
+  async function exitIntent(ip, body) {
+    gate(ip, body);
+    const r = await requestOf(body.name);
+    prune();
+    if (exits.size >= L.openIntents) throw new HttpError(503, 'too many open requests; try again in a few minutes');
+    const nonce = I.newNonce(), expires = now() + cfg.intentTtlS * 1000;
+    const text = [`${cfg.site}: close the positions of ${r.name} into its vault and stop the bot.`, '',
+      'This moves no money out of the vault and changes no rule.', `Vault: ${r.vault}`, `Owner: ${r.owner}`,
+      `Nonce: ${nonce}`, `Expires: ${new Date(expires).toISOString()}`].join('\n');
+    exits.set(nonce, { name: r.name, text, expires });
+    return { nonce, message: text };
+  }
+
+  // POST /api/exit: the signed exit request. The bot reads it at its next poll.
+  async function exit(ip, body) {
+    gate(ip, body);
+    const nonce = I.text(body.nonce), e = exits.get(nonce);
+    exits.delete(nonce);
+    if (!e) throw new HttpError(400, 'unknown or used request; sign a new one');
+    if (e.expires <= now()) throw new HttpError(400, 'the request expired; sign a new one');
+    if (body.message !== e.text) throw new HttpError(400, 'the signed message is not the one this server issued');
+    const r = await requestOf(e.name);
+    if (!await I.verify(r.chain, r.owner, e.text, body.signature, signedOf(body))) throw new HttpError(401, 'the signature is not the owner\'s');
+    await deps.store('exit', { name: r.name, nonce, signature: String(body.signature) });
+    log({ event: 'exit_requested', name: r.name });
+    return { name: r.name, requested: true };
+  }
+
+  // POST /api/broadcast: a transaction the owner's wallet signed but did not
+  // send (WalletConnect's solana_signTransaction), sent as it is.
+  async function broadcast(ip, body) {
+    gate(ip, body);
+    const adapter = chainOf(I.text(body.chain));
+    if (!adapter.broadcast) throw new HttpError(400, 'this chain\'s wallet sends its own transactions');
+    const t = I.text(body.transaction);
+    if (!/^[A-Za-z0-9+/]{100,1700}={0,2}$/.test(t)) throw new HttpError(400, 'transaction: a signed transaction, base64');
+    return { signature: await adapter.broadcast(t) };
+  }
+
+  // POST /api/confirm: whether a transaction landed: {state: confirmed | pending | failed}.
+  async function confirm(ip, body) {
+    gate(ip, body);
+    const adapter = chainOf(I.text(body.chain));
+    return adapter.confirm(I.text(body.signature));
+  }
+
+  // POST /api/deposited: a deposit the owner's wallet sent. Its amount is read
+  // from the chain (from the owner, into this vault); the profile's cap
+  // follows the sum of every deposit, so all of the capital is deployed.
+  async function deposited(ip, body) {
+    gate(ip, body);
+    const r = await requestOf(body.name);
+    const adapter = chainOf(r.chain);
+    const signature = I.text(body.signature);
+    const v = await adapter.checkDeposit(signature, { owner: r.owner, vault: r.vault });
+    if (v.state === 'pending') throw new HttpError(409, `${v.reason}; the page asks again`);
+    if (v.state !== 'ok') throw new HttpError(400, v.reason);
+    let maxUsd = null;
+    for (const [i, d] of v.deposits.entries()) {
+      const out = await deps.store('deposited', { id: r.id, signature: i ? `${signature}:${i}` : signature, token: d.token,
+        mint: adapter.mintOf(d.token), amount: d.amount, headroom: cfg.capHeadroom });
+      maxUsd = out.max_usd ?? maxUsd;
+    }
+    log({ event: 'deposited', name: r.name, deposits: v.deposits, max_usd: maxUsd });
+    return { name: r.name, deposits: v.deposits, maxUsd };
   }
 
   // POST /api/max: the most the owner's wallet can put in with `token`
@@ -427,17 +603,19 @@ export function makeServer(cfg, deps) {
   }
 
   function publicConfig() {
-    return { site: cfg.site, feeBps: cfg.fee.bps,
+    return { site: cfg.site, feeBps: cfg.fee.bps, walletConnect: { projectId: wc.projectId, relayUrl: wc.relayUrl, verify: wc.projectId ? wc.verify : [] },
       chains: Object.fromEntries(Object.keys(deps.chains).map(k => {
         const c = cfg.chains[k];
         return [k, { label: c.label, pair: c.pair, template: c.template, payoutToken: c.payoutToken, operatorWallet: c.operatorWallet,
-          gas: I.fromRaw(I.gasTotal(c), I.nativeOf(c)[1].decimals), gasToken: I.nativeOf(c)[0],
+          gas: I.fromRaw(I.gasTotal(c), I.nativeOf(c)[1].decimals), gasToken: I.nativeOf(c)[0], botKeys: deps.chains[k].keys.public,
           tokens: Object.fromEntries(Object.entries(c.tokens).map(([s, t]) => [s, { min: I.minimum(c, s), max: t.max, decimals: t.decimals,
-            native: Boolean(t.native) }])) }];
+            native: Boolean(t.native), address: t.mint ?? t.address ?? null }])) }];
       })) };
   }
 
-  const routes = { '/api/intent': intent, '/api/sign': sign, '/api/pay': pay, '/api/tx': tx, '/api/start': start, '/api/vaults': vaults, '/api/max': max };
+  const routes = { '/api/intent': intent, '/api/sign': sign, '/api/pay': pay, '/api/tx': tx, '/api/start': start, '/api/vaults': vaults,
+    '/api/max': max, '/api/exit-intent': exitIntent, '/api/exit': exit, '/api/broadcast': broadcast, '/api/confirm': confirm,
+    '/api/deposited': deposited, '/api/payment': payment };
 
   return http.createServer(async (req, res) => {
     const ip = clientOf(req);
@@ -453,7 +631,7 @@ export function makeServer(cfg, deps) {
         // the page's links are relative: /bot must be /bot/
         if (p === cfg.base) { res.writeHead(308, { location: `${cfg.base}/` }); return res.end(); }
         if (sub === '/') return send(res, 200, page, 'text/html; charset=utf-8');
-        if (sub === '/app.js') return send(res, 200, app, 'text/javascript; charset=utf-8');
+        if (sub === '/bundle.js') return send(res, 200, bundle, 'text/javascript; charset=utf-8');
         if (sub === '/style.css') return send(res, 200, style, 'text/css; charset=utf-8');
         if (sub === '/api/config') return send(res, 200, publicConfig());
         return send(res, 404, { error: 'not found' });
@@ -481,7 +659,10 @@ export async function solanaAdapter(c, { connection, env = process.env, log }) {
     payment: (a) => S.paymentTxs(connection, c, a), checkPayment: (sig, expect) => S.checkPayment(connection, sig, expect),
     deposit: (a) => S.depositTxs(connection, c, a), owner: (row, a) => S.ownerTxs(connection, c, row, keys, a),
     holdings: (owner, token) => S.holdings(connection, c, owner, token),
-    status: (row) => S.status(connection, c, row, keys), hasDeposit: S.hasDeposit };
+    status: (row) => S.status(connection, c, row, keys), hasDeposit: S.hasDeposit,
+    context: (r) => S.context(r), mintOf: (token) => I.own(c.tokens, token)?.mint ?? null,
+    checkDeposit: (sig, expect) => S.checkDeposit(connection, c, sig, expect),
+    broadcast: (tx) => S.broadcast(connection, tx), confirm: (sig) => S.confirm(connection, sig) };
 }
 
 export function polygonAdapter(c, { env = process.env, deps = null, log }) {
@@ -492,7 +673,19 @@ export function polygonAdapter(c, { env = process.env, deps = null, log }) {
     payment: (a) => P.paymentTxs(keys, c, a), checkPayment: (hash, expect) => P.checkPayment(keys, c, hash, expect),
     deposit: (a) => P.depositTxs(keys, c, a), owner: (row, a) => P.ownerTxs(keys, c, row, a),
     holdings: (owner, token) => P.holdings(keys, c, owner, token),
-    status: (row) => P.status(keys, c, row), hasDeposit: P.hasDeposit };
+    status: (row) => P.status(keys, c, row), hasDeposit: P.hasDeposit,
+    context: (r) => ({ safe: r.vault_row.settings, roles: Object.values(r.vault_row.venues)[0].policies[0] }),
+    mintOf: (token) => I.own(c.tokens, token)?.address ?? null,
+    checkDeposit: (hash, expect) => P.checkDeposit(keys, c, hash, { owner: expect.owner, safe: expect.vault }),
+    confirm: (hash) => P.confirm(keys, hash) };
+}
+
+// The bot's public keys pinned in onboard.json (botKeys) against the key files
+// the environment names: a server whose keys differ from the ones the page's
+// bundle pins would only build transactions the page refuses. Pure.
+export function keysMatch(c, keys) {
+  const pinned = c.botKeys ?? [];
+  return pinned.length === keys.public.length && pinned.every((k, i) => k.toLowerCase() === keys.public[i].toLowerCase());
 }
 
 async function main() {
@@ -503,7 +696,11 @@ async function main() {
   for (const [name, make] of [['solana', () => solanaAdapter(cfg.chains.solana, { connection: new Connection(rpc, 'confirmed'), log })],
     ['polygon', () => polygonAdapter(cfg.chains.polygon, { log })]]) {
     if (!cfg.chains[name]) continue;
-    try { chains[name] = await make(); } catch (e) { log({ event: 'chain_closed', chain: name, reason: e.message }); }
+    try {
+      const a = await make();
+      if (!keysMatch(cfg.chains[name], a.keys)) throw new Error(`the bot's keys ${a.keys.public.join(', ')} are not the ones onboard.json pins`);
+      chains[name] = a;
+    } catch (e) { log({ event: 'chain_closed', chain: name, reason: e.message }); }
   }
   const hashes = process.env[cfg.inviteEnv] ?? '';
   if (!hashes) log({ event: 'no_invite', reason: `${cfg.inviteEnv} is not set: every request is refused` });

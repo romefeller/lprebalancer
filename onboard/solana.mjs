@@ -1,19 +1,21 @@
 // Solana for the onboarding server: which venue a new vault gets, the bot's
 // keys and gas, the connect, and the owner's transactions (deposit, withdraw,
-// revoke) built unsigned for the owner's wallet to sign and send.
+// close, revoke, approve) built unsigned for the owner's wallet to sign and
+// send; deposits read back from the chain; signed transactions sent.
 import { createRequire } from 'module';
 import * as sq from '../chains/solana/vault/squads.mjs';
 import { RULES, compile } from '../chains/solana/vault/policy.mjs';
 import { VENUES } from '../chains/solana/vault/venues.mjs';
 import { readKeypair } from '../chains/solana/vault/account.mjs';
 import { connect, request, rulesRequest } from '../chains/solana/vault/cli.mjs';
+import { vaultPositions } from '../chains/solana/vault/exit.mjs';
 import SOLANA from '../chains/solana/solana.json' with { type: 'json' };
 import { Invalid, fromRaw, nativeOf, own, toRaw } from './intent.mjs';
 
 const bs58 = createRequire(import.meta.url)('bs58').default;
 
 const require = createRequire(import.meta.url);
-const { Message, PublicKey, SystemProgram, Transaction } = require('@solana/web3.js');
+const { Message, PublicKey, SystemProgram, Transaction, VersionedTransaction } = require('@solana/web3.js');
 const spl = require('@solana/spl-token');
 
 // The chain's config with every solana.json key replaced by its address.
@@ -184,17 +186,31 @@ export function requestEnv(row, venue, keys) {
     LPBOT_VAULT_POLICY_KEY: keys.policyPath };
 }
 
-// Withdraw (to the owner's own wallet) or revoke (every venue's policies),
-// as cli.mjs request builds them, each with a fresh blockhash.
+// Withdraw (to the owner's own wallet; token ALL: everything, its accounts
+// closed), close (every venue's positions, into the vault), revoke or
+// approve (every venue's policies), as cli.mjs request builds them, each
+// with a fresh blockhash. A close of a vault without positions is no
+// transaction.
 export async function ownerTxs(connection, c, row, keys, { action, owner, token, amount }) {
   const venues = Object.keys(row.venues);
   let parts;
-  if (action === 'withdraw') {
+  if (action === 'withdraw' && token === 'ALL') {
+    const mints = Object.values(c.tokens).map(t => t.mint).join(',');
+    parts = [await request('withdraw', { owner, to: owner, mint: 'ALL', mints }, { connection, env: requestEnv(row, venues[0], keys) })];
+  } else if (action === 'withdraw') {
     const t = own(c.tokens, token);
     if (!t) throw new Invalid(`token ${token}`);
+    if (amount !== 'all' && (amount.split('.')[1]?.length ?? 0) > t.decimals) throw new Invalid(`amount: at most ${t.decimals} decimals`);
     if (amount !== 'all' && !(toRaw(amount, t.decimals) > 0n)) throw new Invalid('amount: a number or all');
     parts = [await request('withdraw', { owner, to: owner, mint: t.native ? 'SOL' : t.mint, amount },
       { connection, env: requestEnv(row, venues[0], keys) })];
+  } else if (action === 'close') {
+    parts = [];
+    for (const v of venues) {
+      const open = await vaultPositions(connection, { venue: v, pools: row.venues[v].pools, vault: sq.vaultPda(new PublicKey(row.settings)).toBase58() });
+      if (open.length) parts.push(await request('close', { owner }, { connection, env: requestEnv(row, v, keys) }));
+    }
+    if (!parts.length) return { summary: 'nothing to close: the vault holds no position', transactions: [] };
   } else if (action === 'revoke' || action === 'approve') {
     // approve: the bot's policy key back on every policy, with the rules as the
     // bot now compiles them (after a revoke, or after rules.json grew), and the
@@ -260,7 +276,95 @@ export async function status(connection, c, row, keys) {
   const infos = await connection.getMultipleAccountsInfo(policies, 'confirmed');
   const present = infos.filter(Boolean);
   const botActive = present.length > 0 && present.every(i => sq.decodePolicyHead(i.data).signers.some(s => s.key.equals(keys.policyKey.publicKey)));
-  return { vault: vault.toBase58(), balances, botActive, rulesCurrent: rulesCurrent(row, vault, keys, infos) };
+  let positions = 0;
+  for (const [venue, v] of Object.entries(row.venues)) {
+    positions += (await vaultPositions(connection, { venue, pools: v.pools, vault: vault.toBase58() })).length;
+  }
+  return { vault: vault.toBase58(), balances, botActive, rulesCurrent: rulesCurrent(row, vault, keys, infos), positions };
+}
+
+// The accounts of a request's vault the page's decoder checks against its
+// own pins: settings and vault, each venue's policies and pools, and the
+// payout wallets the policies pay (the profit wallet, the fee wallet). Pure.
+export function context(r) {
+  const row = r.vault_row;
+  return { settings: row.settings, vault: sq.vaultPda(new PublicKey(row.settings)).toBase58(),
+    policies: Object.fromEntries(Object.entries(row.venues).map(([v, x]) => [v, x.policies])),
+    pools: Object.fromEntries(Object.entries(row.venues).map(([v, x]) => [v, x.pools])),
+    payoutWallets: [r.profit_wallet, ...(r.fee_wallet ? [r.fee_wallet] : [])] };
+}
+
+// What a deposit transaction moved from the owner into the vault, from its
+// status and parsed transaction (jsonParsed): {state: 'ok', deposits:
+// [{token, amount}]} | {state: 'pending' | 'bad', reason}. Only top-level
+// System transfers from the owner to the vault, and token transfers the
+// owner signed into the vault's account of a configured mint, count. Pure.
+export function depositVerdict(status, parsed, { owner, vault, tokens }) {
+  if (!status) return { state: 'pending', reason: 'the deposit is not on chain (yet)' };
+  if (status.err || parsed?.meta?.err) return { state: 'bad', reason: 'the deposit failed on chain' };
+  if (!['confirmed', 'finalized'].includes(status.confirmationStatus)) return { state: 'pending', reason: 'the deposit is not confirmed yet' };
+  if (!parsed) return { state: 'pending', reason: 'the deposit is not readable yet' };
+  const ixs = parsed.transaction?.message?.instructions;
+  const deposits = [];
+  for (const ix of Array.isArray(ixs) ? ixs : []) {
+    const info = ix.parsed?.info, type = ix.parsed?.type;
+    if (ix.program === 'system' && type === 'transfer' && info.source === owner && info.destination === vault) {
+      const [sym, t] = Object.entries(tokens).find(([, x]) => x.native);
+      deposits.push({ token: sym, raw: BigInt(info.lamports), decimals: t.decimals });
+    }
+    if (['spl-token', 'spl-token-2022'].includes(ix.program) && ['transfer', 'transferChecked'].includes(type) && info.authority === owner) {
+      const hit = Object.entries(tokens).find(([, t]) => !t.native && t.ata === info.destination);
+      if (!hit) continue;
+      const raw = BigInt(info.tokenAmount?.amount ?? info.amount);
+      deposits.push({ token: hit[0], raw, decimals: hit[1].decimals });
+    }
+  }
+  const sum = new Map();
+  for (const d of deposits) sum.set(d.token, { ...d, raw: (sum.get(d.token)?.raw ?? 0n) + d.raw });
+  const out = [...sum.values()].filter(d => d.raw > 0n).map(d => ({ token: d.token, amount: fromRaw(d.raw, d.decimals) }));
+  if (!out.length) return { state: 'bad', reason: `the transaction moves nothing from ${owner} into the vault ${vault}` };
+  return { state: 'ok', deposits: out };
+}
+
+export async function checkDeposit(connection, c, signature, { owner, vault }) {
+  const sig = String(signature);
+  let bytes = null;
+  try { bytes = /^[1-9A-HJ-NP-Za-km-z]{86,88}$/.test(sig) ? bs58.decode(sig) : null; } catch { bytes = null; }
+  if (bytes?.length !== 64) return { state: 'bad', reason: 'not a transaction signature' };
+  const [status] = (await connection.getSignatureStatuses([sig], { searchTransactionHistory: true })).value;
+  const parsed = status ? await connection.getParsedTransaction(sig, { commitment: 'confirmed', maxSupportedTransactionVersion: 0 }) : null;
+  const tokens = {};
+  for (const [sym, t] of Object.entries(c.tokens)) {
+    if (t.native) { tokens[sym] = t; continue; }
+    const mint = new PublicKey(t.mint), program = (await connection.getAccountInfo(mint)).owner;
+    tokens[sym] = { ...t, ata: spl.getAssociatedTokenAddressSync(mint, new PublicKey(vault), true, program).toBase58() };
+  }
+  return depositVerdict(status, parsed, { owner, vault, tokens });
+}
+
+// Send a transaction the owner's wallet signed (a WalletConnect wallet that
+// signs only). The node checks it; the answer is its signature.
+export async function broadcast(connection, base64) {
+  const raw = Buffer.from(base64, 'base64');
+  let tx;
+  try { tx = VersionedTransaction.deserialize(raw); } catch { throw new Invalid('not a signed transaction'); }
+  if (tx.signatures.some(s => s.every(b => b === 0))) throw new Invalid('the transaction is not signed');
+  try {
+    return await connection.sendRawTransaction(raw, { maxRetries: 5 });
+  } catch (e) {
+    throw new Invalid(`the network refused the transaction: ${String(e.message).split('\n')[0].slice(0, 200)}`);
+  }
+}
+
+// Whether a signature landed: confirmed, failed, or pending (not seen yet).
+export async function confirm(connection, signature) {
+  const sig = String(signature);
+  if (!/^[1-9A-HJ-NP-Za-km-z]{86,88}$/.test(sig)) return { state: 'failed', reason: 'not a transaction signature' };
+  const [st] = (await connection.getSignatureStatuses([sig], { searchTransactionHistory: true })).value;
+  if (!st) return { state: 'pending', reason: 'not on chain yet' };
+  if (st.err) return { state: 'failed', reason: `failed on chain: ${JSON.stringify(st.err).slice(0, 200)}` };
+  if (!['confirmed', 'finalized'].includes(st.confirmationStatus)) return { state: 'pending', reason: 'not confirmed yet' };
+  return { state: 'confirmed' };
 }
 
 // Whether every policy on chain holds the rules the bot now compiles for this

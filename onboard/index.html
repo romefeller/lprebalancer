@@ -1,58 +1,144 @@
 <!doctype html>
 <!--
   romefeller.app/bot: an owner creates a vault for the LP bot, deposits, and
-  manages the vaults it owns (onboard/server.mjs serves this page and app.js).
-  The page holds no key and sends nothing itself: the owner's wallet signs and
-  sends every transaction it shows.
+  runs it (onboard/server.mjs serves this page, style.css and bundle.js).
+  The page holds no key: the owner's wallet signs and sends every
+  transaction, and bundle.js decodes each one first and refuses one that is
+  not what the owner asked for.
 -->
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Aperture bot</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<title>Aperture vault</title>
 <link rel="stylesheet" href="style.css">
 </head>
-<body>
+<body data-view="v-connect">
+<header class="bar">
+  <span class="logo">Aperture</span>
+  <span id="who" class="who" hidden>
+    <span id="who-chain" class="pill"></span>
+    <span class="who-id"><span id="who-wallet" class="muted small"></span> <span id="who-addr" class="mono"></span></span>
+    <button id="disconnect" class="link" type="button">Disconnect</button>
+  </span>
+</header>
 <main>
-  <h1>Aperture</h1>
   <p class="lead">Your own vault for the LP bot. You own it; the bot can only run its pool and pay your profit wallet.</p>
+  <div id="alert" class="alert" role="alert" hidden></div>
 
-  <section id="invite-box" hidden>
-    <label for="invite">Invite code</label>
-    <input id="invite" autocomplete="off" spellcheck="false">
+  <section id="v-connect" class="card">
+    <h2>Connect your wallet</h2>
+    <div id="chains" class="tabs" role="tablist" aria-label="Chain"></div>
+    <div class="wallets">
+      <button id="w-injected" class="wallet" type="button" hidden>
+        <span id="w-injected-name" class="wname">Phantom</span><span class="wsub">This browser's wallet · Ledger through Phantom or Solflare</span>
+      </button>
+      <button id="w-wc" class="wallet" type="button" hidden>
+        <span class="wname">WalletConnect</span><span class="wsub">Tangem, Ledger Live, any phone wallet</span>
+      </button>
+      <a id="w-phantom" class="wallet" hidden>
+        <span class="wname">Open in Phantom</span><span class="wsub">Opens this page in the Phantom app</span>
+      </a>
+    </div>
+    <p id="wc-off" class="muted small" hidden>WalletConnect (Tangem, Ledger Live) is not switched on for this page yet.</p>
+    <p id="no-wallet" class="muted small" hidden>No wallet found in this browser. Open this page in your wallet app's browser.</p>
+    <div id="invite-box" hidden>
+      <label for="invite">Invite code</label>
+      <input id="invite" autocomplete="off" spellcheck="false">
+    </div>
   </section>
 
-  <section>
-    <label for="chain">Chain</label>
-    <select id="chain"></select>
-    <button id="connect" class="primary">Connect wallet</button>
-    <p id="wallet" class="mono muted"></p>
+  <section id="v-wc" class="card center" hidden>
+    <h2>Connect with WalletConnect</h2>
+    <p id="wc-status" class="muted"></p>
+    <img id="wc-qr" class="qr" alt="WalletConnect code: scan it with your wallet app" width="300" height="300">
+    <div class="actions">
+      <a id="wc-open" class="button primary">Open wallet app</a>
+      <button id="wc-copy" type="button">Copy link</button>
+    </div>
+    <p class="muted small">Tangem: open the app, tap WalletConnect, then scan this code or paste the link.</p>
+    <button id="wc-cancel" class="link" type="button">Cancel</button>
   </section>
 
-  <section id="form" hidden>
-    <h2>New vault</h2>
-    <label for="amount">Amount to put in the bot</label>
-    <div class="row"><input id="amount" inputmode="decimal" autocomplete="off"><button type="button" id="max">Max</button><select id="token"></select></div>
-    <p id="bounds" class="muted small"></p>
-    <label for="profit">Profit wallet (payouts go here)</label>
-    <input id="profit" autocomplete="off" spellcheck="false">
-    <label for="name">Pool name (shown in Telegram: a-z, 0-9, -)</label>
-    <input id="name" autocomplete="off" spellcheck="false" maxlength="32">
-    <p></p>
-    <button id="sign" class="primary">Sign</button>
-    <pre id="message" hidden></pre>
+  <section id="v-loading" class="card center" hidden>
+    <div class="spinner" aria-hidden="true"></div>
+    <p id="loading-text">Reading your vault…</p>
+    <button id="loading-retry" type="button" hidden>Try again</button>
   </section>
 
-  <section id="mine" hidden>
-    <h2>Your vault</h2>
-    <p class="muted small">One pool per wallet: to put more in, use Add capital on your vault.</p>
-    <div id="vaults"></div>
+  <section id="v-create" class="card" hidden>
+    <h2>Create your position</h2>
+    <label for="c-amount">Amount to put in</label>
+    <div class="row">
+      <input id="c-amount" inputmode="decimal" autocomplete="off" placeholder="0.0">
+      <button id="c-max" type="button" class="small">Max</button>
+      <select id="c-token" aria-label="Token"></select>
+    </div>
+    <p id="c-bounds" class="muted small"></p>
+    <label for="c-profit">Profit wallet (payouts go here)</label>
+    <input id="c-profit" autocomplete="off" spellcheck="false">
+    <label for="c-name">Pool name (a-z, 0-9, dashes)</label>
+    <input id="c-name" autocomplete="off" spellcheck="false" maxlength="32" placeholder="my-pool">
+    <p class="muted small">Next: your wallet signs a message (it moves nothing), pays the bot's gas, and deposits. Each transaction is shown and checked here before your wallet asks.</p>
+    <div class="actions"><button id="c-go" class="primary" type="button">Create position</button></div>
   </section>
 
-  <div id="progress"></div>
+  <section id="v-setup" class="card" hidden>
+    <h2>Finish <span id="s-name"></span></h2>
+    <p id="s-text"></p>
+    <p class="muted small">Nothing is paid twice: the page and the server know what is done.</p>
+    <div class="actions"><button id="s-go" class="primary" type="button">Continue setup</button></div>
+  </section>
 
-  <p id="error" class="warn" role="alert"></p>
+  <section id="v-active" class="card" hidden>
+    <div class="head"><h2 id="a-name"></h2><span id="a-pill" class="pill ok">Running</span></div>
+    <p id="a-banner" class="banner" hidden></p>
+    <div id="a-tiles" class="tiles"></div>
+    <p id="a-empty" class="muted" hidden>The bot has not reported yet. Its first report comes at its first check.</p>
+    <p id="a-at" class="muted small"></p>
+    <button id="a-approve" class="primary wide" type="button" hidden>Approve the updated rules</button>
+    <div class="actions">
+      <button id="a-add" class="primary" type="button">Add capital</button>
+      <button id="a-withdraw" type="button">Withdraw</button>
+      <button id="a-revoke" class="danger" type="button">Revoke</button>
+    </div>
+    <div id="a-bal"></div>
+    <p id="a-daily" class="daily mono small"></p>
+    <details id="a-report" open><summary>The full report, as in Telegram</summary><pre id="a-text"></pre></details>
+  </section>
+
+  <section id="v-revoked" class="card" hidden>
+    <div class="head"><h2 id="r-name"></h2><span class="pill warn">Bot revoked</span></div>
+    <p>Your money is in your vault, under your wallet alone. The bot cannot act on it.</p>
+    <div id="r-bal"></div>
+    <div class="actions"><button id="r-add" class="primary" type="button">Add capital</button></div>
+    <p class="muted small">Add capital gives the bot its rules back (you sign them; this page checks each against the rules it was built with), deposits, and starts the bot.</p>
+  </section>
+
+  <section id="v-sheet" class="card" hidden>
+    <h2 id="sh-title"></h2>
+    <div id="sh-body"></div>
+    <div class="actions"><button id="sh-go" class="primary" type="button"></button><button id="sh-cancel" type="button">Cancel</button></div>
+  </section>
+
+  <section id="v-flow" class="card" hidden>
+    <h2 id="f-title"></h2>
+    <ol id="f-steps" class="steps"></ol>
+    <div id="f-review" class="review" hidden>
+      <h3>What your wallet is asked to sign</h3>
+      <ul id="f-lines"></ul>
+      <p id="f-check" class="ok small"></p>
+      <button id="f-copy" class="link" type="button">Copy the transaction (for the verifier)</button>
+    </div>
+    <div class="actions">
+      <button id="f-retry" class="primary" type="button" hidden>Try again</button>
+      <button id="f-alt" type="button" hidden></button>
+      <button id="f-done" type="button" hidden>Done</button>
+    </div>
+  </section>
 </main>
-<script src="app.js"></script>
+<footer class="foot"><span id="foot-rules" class="muted small"></span></footer>
+<script src="bundle.js"></script>
 </body>
 </html>

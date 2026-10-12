@@ -375,6 +375,83 @@ test('verify (Solana): the owner\'s signature only, over the exact text', async 
   }
 });
 
+// An ed25519 signature over raw bytes.
+function solSignBytes(key, bytes) {
+  const pk = crypto.createPrivateKey({ format: 'jwk', key: { kty: 'OKP', crv: 'Ed25519',
+    d: Buffer.from(key.secretKey.subarray(0, 32)).toString('base64url'), x: Buffer.from(key.publicKey.toBytes()).toString('base64url') } });
+  return crypto.sign(null, Buffer.from(bytes), pk);
+}
+
+// The full off-chain layout: domain, format, signers, length, text.
+function offchainFull(text, format, signers, domain = Buffer.alloc(32, 7)) {
+  const msg = Buffer.from(text, 'utf8'), len = Buffer.alloc(2); len.writeUInt16LE(msg.length);
+  return Buffer.concat([I.OFFCHAIN_DOMAIN, Buffer.from([0]), domain, Buffer.from([format, signers.length]),
+    ...signers.map(k => Buffer.from(k.toBytes())), len, msg]);
+}
+
+test('verify (Solana): a hardware wallet\'s off-chain message of the same text, both layouts', async () => {
+  const text = 'romefeller.app/bot: create one vault\n\nNonce: 3', owner = OWNER.publicKey.toBase58();
+  const v = (sig, signed) => I.verify('solana', owner, text, sig.toString('base64'), signed ? Buffer.from(signed).toString('base64') : null);
+  // the short layout (the Ledger app): accepted with or without the bytes the wallet reports
+  for (const format of [1, 2]) {
+    const short = I.offchainShort(text, format);
+    assert.equal(await v(solSignBytes(OWNER, short)), true, `short, format ${format}, found by the server`);
+    assert.equal(await v(solSignBytes(OWNER, short), short), true, `short, format ${format}, as reported`);
+  }
+  assert.equal(await v(solSignBytes(OWNER, I.offchainShort(text, 0))), false, 'format 0 is printable ASCII: a newline is not');
+  const ascii = 'romefeller.app/bot: one line, Nonce: 4';
+  assert.equal(await I.verify('solana', owner, ascii, solSignBytes(OWNER, I.offchainShort(ascii, 0)).toString('base64')), true, 'format 0 for ASCII');
+  // the full layout: only when the wallet reports the bytes, the owner its one signer
+  const full = offchainFull(text, 1, [OWNER.publicKey]);
+  assert.equal(await v(solSignBytes(OWNER, full), full), true, 'full layout, owner the signer');
+  assert.equal(await v(solSignBytes(OWNER, full)), false, 'full layout without the reported bytes: its domain is unknown');
+  const two = offchainFull(text, 1, [OWNER.publicKey, PROFIT.publicKey]);
+  assert.equal(await v(solSignBytes(OWNER, two), two), false, 'another signer named beside the owner');
+  const other = offchainFull(text, 1, [PROFIT.publicKey]);
+  assert.equal(await v(solSignBytes(OWNER, other), other), false, 'the owner not named');
+  // the same envelope around another text, or a changed one, is refused
+  const tampered = I.offchainShort(`${text}.`, 1);
+  assert.equal(await v(solSignBytes(OWNER, tampered), tampered), false, 'another text');
+  const longer = Buffer.concat([I.offchainShort(text, 1), Buffer.from([0])]);
+  assert.equal(await v(solSignBytes(OWNER, longer), longer), false, 'bytes after the text');
+  const wrongLen = I.offchainShort(text, 1); wrongLen.writeUInt16LE(5, 18);
+  assert.equal(await v(solSignBytes(OWNER, wrongLen), wrongLen), false, 'a length that is not the text\'s');
+  const v1 = I.offchainShort(text, 1); v1[16] = 1;
+  assert.equal(await v(solSignBytes(OWNER, v1), v1), false, 'an unknown version');
+  const f3 = I.offchainShort(text, 3);
+  assert.equal(await v(solSignBytes(OWNER, f3), f3), false, 'an unknown format');
+  // reported bytes that are not what was signed, or not base64
+  assert.equal(await v(solSignBytes(OWNER, Buffer.from(text)), I.offchainShort(text, 1)), false, 'signed raw, reported the envelope');
+  assert.equal(await I.verify('solana', owner, text, solSignBytes(OWNER, Buffer.from(text)).toString('base64'), '!!'), false, 'not base64');
+  // the wrong key over a right envelope
+  assert.equal(await v(solSignBytes(PROFIT, I.offchainShort(text, 1))), false, 'another key');
+});
+
+test('verify (Solana): no format confusion: a transaction is never a message, a message never a transaction', async () => {
+  const owner = OWNER.publicKey.toBase58();
+  const tx = new Transaction().add(require('@solana/web3.js').SystemProgram.transfer({ fromPubkey: OWNER.publicKey, toPubkey: BOT.publicKey, lamports: 1 }));
+  tx.feePayer = OWNER.publicKey; tx.recentBlockhash = PublicKey.default.toBase58();
+  const txBytes = tx.serializeMessage();
+  const sig = solSignBytes(OWNER, txBytes);
+  // a signed transaction does not pass as any intent, reported or found
+  assert.equal(await I.verify('solana', owner, txBytes.toString('utf8'), sig.toString('base64')), false);
+  assert.equal(await I.verify('solana', owner, 'anything', sig.toString('base64'), txBytes.toString('base64')), false);
+  assert.equal(I.parseOffchain(txBytes), null, 'a transaction message is no off-chain message');
+  // an off-chain message is never a transaction: its first byte, 0xff, is no signature count or version
+  const env = I.offchainShort('hello', 1);
+  assert.equal(env[0], 0xff);
+  assert.throws(() => require('@solana/web3.js').Message.from(env));
+  assert.throws(() => require('@solana/web3.js').VersionedMessage.deserialize(env));
+  // property: for any text, every accepted form is the text or an envelope of exactly it
+  fc.assert(fc.property(fc.string({ maxLength: 300 }), (t) => {
+    for (const m of I.signedForms(t, owner)) {
+      if (m.equals(Buffer.from(t, 'utf8'))) continue;
+      const p = I.parseOffchain(m);
+      assert.ok(p && p.text === t && p.layout === 'short');
+    }
+  }), { numRuns: 300 });
+});
+
 test('verify (EVM): personal_sign recovered to the owner only', async () => {
   const text = 'hello\nNonce: 2';
   const sig = await EVM_OWNER.signMessage({ message: text });
@@ -498,6 +575,10 @@ function memoryStore(over = {}) {
     if (cmd === 'get') return { request: rows.find(x => live(x) && x.name === r.name) ?? null };
     if (cmd === 'started') { byId(r.id).state = 'started'; return { started: true }; }
     if (cmd === 'list') return { requests: rows.filter(x => live(x) && x.owner === r.owner) };
+    if (cmd === 'feed') return { feed: {} };
+    if (cmd === 'exits') return { exit: null };
+    if (cmd === 'exit') return { requested: true, new: true };
+    if (cmd === 'deposited') return { recorded: true, max_usd: 9 };
     throw new Error(cmd);
   };
   return { store, rows, calls };
@@ -533,6 +614,11 @@ function fakes(over = {}, cfg = CFG) {
     status: async () => ({ vault: 'VAULT', balances: { SOL: over.deposited ? '1.5' : '0' }, botActive: over.botActive ?? true }),
     hasDeposit: (st) => Number(st.balances.SOL) > 0,
     holdings: async (owner, token) => { calls.holdings.push([owner, token]); return over.held ?? { SOL: 2_000_000_000n, USDC: 0n }; },
+    context: () => ({ settings: 'S', vault: 'VAULT', policies: {}, pools: {}, payoutWallets: [] }),
+    mintOf: (token) => cfg.chains.solana.tokens[token]?.mint ?? null,
+    checkDeposit: async () => over.deposit ?? { state: 'ok', deposits: [{ token: 'SOL', amount: '1' }] },
+    confirm: async () => ({ state: 'confirmed' }),
+    broadcast: async () => 'SIG',
   };
   const server = makeServer(cfg, { chains: { solana: adapter }, store: db.store, inviteHashes: HASH, log: () => {}, now: () => t,
     start: async (cmd) => { calls.start.push(cmd); return { code: over.startCode ?? 0, out: '', err: 'boom' }; },
@@ -893,7 +979,7 @@ test('server: rate limits, sizes, methods and paths', async () => {
     const page = await fetch(`${base}/`);
     assert.equal(page.status, 200);
     assert.match(page.headers.get('content-security-policy'), /script-src 'self'/);
-    assert.equal((await fetch(`${base}/app.js`)).status, 200);
+    assert.equal((await fetch(`${base}/bundle.js`)).status, 200);
     const pub = await (await fetch(`${base}/api/config`)).json();
     assert.deepEqual(Object.keys(pub.chains), ['solana']);
     assert.deepEqual([pub.chains.solana.gas, pub.chains.solana.tokens.SOL.min, pub.chains.solana.tokens.USDC.min], ['0.145', '0.165', '10']);
@@ -1002,3 +1088,157 @@ test('server: wrong invite codes to Max lock the address out like any other', as
     assert.equal(f.calls.holdings.length, 0);
   });
 });
+
+// --- the owner's page: exit requests, deposits, the cap, the views, the CSP (2026-10-12) ---------
+
+const registered = async (f, post) => {
+  await signedUp(post);
+  f.payments.set('P', { state: 'ok' });
+  assert.equal((await post('pay', { invite: INVITE, name: 'my-pool', payment: 'P' })).status, 200);
+};
+
+test('exit: only the owner\'s signature over the issued message asks the bot to close; once per nonce', async () => {
+  const f = fakes({ deposited: true });
+  await serve(f, async ({ post }) => {
+    await registered(f, post);
+    const it = (await post('exit-intent', { invite: INVITE, name: 'my-pool' })).json;
+    assert.match(it.message, /close the positions of my-pool into its vault and stop the bot\.\n\nThis moves no money out of the vault and changes no rule\./);
+    assert.match(it.message, new RegExp(`Owner: ${OWNER.publicKey.toBase58()}`));
+    const exits = () => f.db.calls.filter(([c]) => c === 'exit').length;
+    // another key, another text, no signature: nothing recorded
+    for (const sign of [(m) => solSign(OWNER2, m), (m) => solSign(OWNER, `${m} `), () => '']) {
+      const again = (await post('exit-intent', { invite: INVITE, name: 'my-pool' })).json;
+      const r = await post('exit', { invite: INVITE, nonce: again.nonce, message: again.message, signature: sign(again.message).toString('base64') });
+      assert.equal(r.status, 401, JSON.stringify(r.json));
+    }
+    const tampered = await post('exit', { invite: INVITE, nonce: it.nonce, message: `${it.message}x`, signature: solSign(OWNER, `${it.message}x`).toString('base64') });
+    assert.equal(tampered.status, 400, 'not the issued text');
+    assert.equal(exits(), 0);
+    const fresh = (await post('exit-intent', { invite: INVITE, name: 'my-pool' })).json;
+    const ok = await post('exit', { invite: INVITE, nonce: fresh.nonce, message: fresh.message, signature: solSign(OWNER, fresh.message).toString('base64') });
+    assert.deepEqual([ok.status, ok.json], [200, { name: 'my-pool', requested: true }]);
+    assert.equal(exits(), 1);
+    const replay = await post('exit', { invite: INVITE, nonce: fresh.nonce, message: fresh.message, signature: solSign(OWNER, fresh.message).toString('base64') });
+    assert.equal(replay.status, 400, 'a nonce serves once');
+    // a hardware wallet's off-chain message of the same text
+    const led = (await post('exit-intent', { invite: INVITE, name: 'my-pool' })).json;
+    const env = I.offchainShort(led.message, 1);
+    const pk = crypto.createPrivateKey({ format: 'jwk', key: { kty: 'OKP', crv: 'Ed25519', d: Buffer.from(OWNER.secretKey.subarray(0, 32)).toString('base64url'),
+      x: Buffer.from(OWNER.publicKey.toBytes()).toString('base64url') } });
+    const r = await post('exit', { invite: INVITE, nonce: led.nonce, message: led.message, signature: crypto.sign(null, env, pk).toString('base64'),
+      signedMessage: env.toString('base64') });
+    assert.equal(r.status, 200, JSON.stringify(r.json));
+    assert.equal((await post('exit-intent', { invite: INVITE, name: 'nobody-here' })).status, 404);
+    assert.equal((await post('exit', { name: 'my-pool' })).status, 403, 'no invite');
+  });
+});
+
+test('deposited: the amount comes from the chain; pending asks again; a bad one records nothing; the cap follows', async () => {
+  for (const [verdict, status] of [[{ state: 'pending', reason: 'not on chain' }, 409], [{ state: 'bad', reason: 'moves nothing' }, 400],
+    [{ state: 'ok', deposits: [{ token: 'SOL', amount: '1.355' }, { token: 'USDC', amount: '5' }] }, 200]]) {
+    const f = fakes({ deposited: true, deposit: verdict });
+    await serve(f, async ({ post }) => {
+      await registered(f, post);
+      const r = await post('deposited', { invite: INVITE, name: 'my-pool', signature: 'SIGX' });
+      assert.equal(r.status, status, JSON.stringify(r.json));
+      const rows = f.db.calls.filter(([c]) => c === 'deposited').map(([, x]) => x);
+      if (status !== 200) return assert.equal(rows.length, 0);
+      assert.deepEqual(rows.map(x => [x.signature, x.token, x.amount, x.mint, x.headroom]), [
+        ['SIGX', 'SOL', '1.355', CFG.chains.solana.tokens.SOL.mint, CFG.capHeadroom],
+        ['SIGX:1', 'USDC', '5', CFG.chains.solana.tokens.USDC.mint, CFG.capHeadroom]]);
+      assert.equal(r.json.maxUsd, 9);
+    });
+  }
+  // register asks for the provisional cap from the signed deposit
+  const f = fakes({ deposited: true });
+  await serve(f, async ({ post }) => {
+    await registered(f, post);
+    const reg = f.db.calls.find(([c]) => c === 'register')[1];
+    assert.deepEqual(reg.cap, { mint: CFG.chains.solana.tokens.SOL.mint, headroom: CFG.capHeadroom });
+  });
+});
+
+test('payment: a signed request\'s gas payment is built again, only while it waits for one', async () => {
+  const f = fakes();
+  await serve(f, async ({ post }) => {
+    await signedUp(post);
+    const again = await post('payment', { invite: INVITE, name: 'my-pool' });
+    assert.equal(again.status, 200);
+    assert.deepEqual(JSON.parse(again.json.transactions[0]), { owner: OWNER.publicKey.toBase58(), payer: PAYER, gas: '0.145', token: 'SOL', deposit: '1.355' });
+    assert.equal(again.json.gas, '0.145');
+    f.payments.set('P', { state: 'ok' });
+    await post('pay', { invite: INVITE, name: 'my-pool', payment: 'P' });
+    const paid = await post('payment', { invite: INVITE, name: 'my-pool' });
+    assert.equal(paid.status, 409);
+    assert.match(paid.json.error, /its gas is paid/);
+  });
+});
+
+test('vaults: the view of each vault; owner actions pass close and ALL; withdraw amounts are checked', async () => {
+  const f = fakes({ deposited: true });
+  await serve(f, async ({ post }) => {
+    await registered(f, post);
+    const v = (await post('vaults', { invite: INVITE, chain: 'solana', owner: OWNER.publicKey.toBase58() })).json.vaults[0];
+    assert.equal(v.view, 'active');
+    assert.equal(v.botReachable, true);
+    assert.equal(v.stats, null, 'no book yet');
+    assert.equal(v.exit, null);
+    for (const [a, ok] of [[{ action: 'close' }, 200], [{ action: 'withdraw', token: 'ALL', amount: 'all' }, 200],
+      [{ action: 'withdraw', token: 'ALL', amount: '1' }, 400], [{ action: 'withdraw', token: 'SOL', amount: '1.5' }, 200],
+      [{ action: 'withdraw', token: 'SOL', amount: '1e3' }, 400], [{ action: 'withdraw', token: 'DOGE', amount: '1' }, 400],
+      [{ action: 'teleport' }, 400]]) {
+      const r = await post('tx', { invite: INVITE, name: 'my-pool', ...a });
+      assert.equal(r.status, ok, JSON.stringify([a, r.json]));
+      if (ok === 200) assert.deepEqual(r.json.context, { settings: 'S', vault: 'VAULT', policies: {}, pools: {}, payoutWallets: [] });
+    }
+    // a revoked vault
+    f.adapter.status = async () => ({ vault: 'VAULT', balances: { SOL: '1' }, botActive: false, positions: 0 });
+    assert.equal((await post('vaults', { invite: INVITE, chain: 'solana', owner: OWNER.publicKey.toBase58() })).json.vaults[0].view, 'revoked');
+    // a chain that cannot be read: said, not hidden
+    f.adapter.status = async () => { throw new Error('rpc down'); };
+    const u = (await post('vaults', { invite: INVITE, chain: 'solana', owner: OWNER.publicKey.toBase58() })).json.vaults[0];
+    assert.deepEqual([u.view, u.error], ['unknown', 'the chain could not be read: rpc down']);
+  });
+});
+
+test('broadcast and confirm: a signed transaction is sent as it is; malformed ones are refused before the chain', async () => {
+  const f = fakes();
+  await serve(f, async ({ post }) => {
+    assert.deepEqual((await post('broadcast', { invite: INVITE, chain: 'solana', transaction: 'A'.repeat(200) })).json, { signature: 'SIG' });
+    for (const t of ['short', 'not base64 !!'.repeat(20), 'A'.repeat(1800)]) {
+      assert.equal((await post('broadcast', { invite: INVITE, chain: 'solana', transaction: t })).status, 400, t.slice(0, 10));
+    }
+    assert.equal((await post('broadcast', { invite: INVITE, chain: 'polygon', transaction: 'A'.repeat(200) })).status, 400, 'no such chain here');
+    assert.deepEqual((await post('confirm', { invite: INVITE, chain: 'solana', signature: 'x' })).json, { state: 'confirmed' });
+    assert.equal((await post('confirm', { chain: 'solana', signature: 'x' })).status, 403);
+  });
+});
+
+test('the CSP: own scripts only; the relay and verify origins only with a project id; the id is 32 hex', async () => {
+  const { csp, walletConnectOf, keysMatch } = await import('../onboard/server.mjs');
+  const off = csp({ projectId: '', relayUrl: 'wss://relay.walletconnect.org', verify: ['https://verify.walletconnect.org'] });
+  assert.equal(off, "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; base-uri 'none'; "
+    + "form-action 'none'; frame-ancestors 'none'");
+  const on = csp({ projectId: 'a'.repeat(32), relayUrl: 'wss://relay.walletconnect.org/x', verify: ['https://verify.walletconnect.org'] });
+  assert.match(on, /connect-src 'self' wss:\/\/relay\.walletconnect\.org https:\/\/verify\.walletconnect\.org; img-src 'self' data:; frame-src https:\/\/verify\.walletconnect\.org;/);
+  assert.doesNotMatch(on, /unsafe|\*/);
+  const cfg = { walletConnect: { projectIdEnv: 'WCID', projectId: '', relayUrl: 'wss://r', verify: [] } };
+  assert.equal(walletConnectOf(cfg, {}).projectId, '');
+  assert.equal(walletConnectOf(cfg, { WCID: 'b'.repeat(32) }).projectId, 'b'.repeat(32), 'the environment wins');
+  assert.equal(walletConnectOf({ walletConnect: { ...cfg.walletConnect, projectId: 'c'.repeat(32) } }, {}).projectId, 'c'.repeat(32));
+  for (const bad of ['xyz', 'A'.repeat(32), 'a'.repeat(31)]) assert.throws(() => walletConnectOf(cfg, { WCID: bad }), /32 hex/);
+  assert.equal(CFG.walletConnect.projectId, '', 'no project id in git: the owner gives it');
+  // the pinned keys: the server opens a chain only with the key files git pins
+  assert.equal(keysMatch({ botKeys: ['A', 'B'] }, { public: ['A', 'B'] }), true);
+  assert.equal(keysMatch({ botKeys: ['0xAb'] }, { public: ['0xab'] }), true, 'EVM: any letter case');
+  for (const pub of [['A'], ['B', 'A'], ['A', 'C'], ['A', 'B', 'C']]) assert.equal(keysMatch({ botKeys: ['A', 'B'] }, { public: pub }), false, pub.join());
+  assert.equal(keysMatch({}, { public: ['A'] }), false, 'nothing pinned: closed');
+  assert.deepEqual(CFG.chains.solana.botKeys.length, 2);
+  assert.throws(() => loadConfig(writeTemp({ ...JSON.parse(fs.readFileSync(new URL('../onboard/onboard.json', import.meta.url), 'utf8')), capHeadroom: 0.5 })), /capHeadroom/);
+});
+
+function writeTemp(obj) {
+  const p = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'onboard-cfg-')), 'onboard.json');
+  fs.writeFileSync(p, JSON.stringify(obj));
+  return p;
+}
