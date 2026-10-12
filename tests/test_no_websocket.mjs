@@ -17,12 +17,17 @@ const require = createRequire(import.meta.url);
 const { Keypair, PublicKey, Transaction, TransactionInstruction } = require('@solana/web3.js');
 const ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
 
-// Every script the loop spawns or the onboarding page runs.
+// Every script the loop spawns or the onboarding page runs. The page's own
+// code is onboard/web/main.mjs and what it imports: its bundle (onboard/bundle.js)
+// and the build's node_modules carry web3.js whole, which the page never asks
+// to confirm (it polls the server: /api/confirm).
+const NOT_OURS = new Set(['node_modules', 'bundle.js']);
 function sources() {
   const out = [];
   const walk = (d) => {
     for (const e of fs.readdirSync(d, { withFileTypes: true })) {
       const p = path.join(d, e.name);
+      if (NOT_OURS.has(e.name)) continue;
       if (e.isDirectory()) walk(p);
       else if (/\.(mjs|js)$/.test(e.name)) out.push(p);
     }
