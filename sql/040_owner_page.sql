@@ -46,4 +46,14 @@ create table if not exists rebalancer.onboard_deposits (
   created_at  timestamptz not null default now()
 );
 create index if not exists onboard_deposits_request on rebalancer.onboard_deposits (onboard_id);
+
+-- the sandboxed page (ops/onboard/setup_sandbox.sh, role lp-onboard) records
+-- deposits and exits; it reads feed_latest (a select every new table grants it)
+do $$ begin
+  if exists (select 1 from pg_roles where rolname = 'lp-onboard') then
+    grant insert on rebalancer.onboard_deposits, rebalancer.owner_requests to "lp-onboard";
+    grant update on rebalancer.owner_requests to "lp-onboard";
+    grant usage, select on sequence rebalancer.onboard_deposits_id_seq, rebalancer.owner_requests_id_seq to "lp-onboard";
+  end if;
+end $$;
 commit;
