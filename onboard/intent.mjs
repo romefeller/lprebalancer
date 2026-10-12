@@ -223,8 +223,8 @@ export function offchainShort(text, format) {
 export function parseOffchain(bytes) {
   const b = Buffer.from(bytes);
   if (b.length < 20 || !b.subarray(0, 16).equals(OFFCHAIN_DOMAIN) || b[16] !== 0) return null;
+  // the text at `at`: both callers know the two length bytes are there
   const text = (at, format, signers, layout) => {
-    if (b.length < at + 2) return null;
     const len = b.readUInt16LE(at), msg = b.subarray(at + 2);
     if (msg.length !== len || !offchainFormats(msg).includes(format)) return null;
     let s;

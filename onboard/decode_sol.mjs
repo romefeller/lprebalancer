@@ -94,11 +94,12 @@ function readSettingsActions(data) {
   const signers = r.u8();
   const actions = r.vec(r => {
     const kind = r.u8();
-    if (kind !== 8) return { kind: `settings action ${kind}`, unknown: true };
+    // any other action (a signer, a threshold, another policy kind) is refused, not read
+    if (kind !== 8) throw new Error(`a change other than a policy update (settings action ${kind})`);
     const address = r.key();
     const policySigners = r.vec(r => ({ key: r.key(), permissions: r.u8() }));
     const threshold = r.u16(), timeLock = r.u32(), payload = r.u8();
-    if (payload !== 3) return { kind: 'policyUpdate', address, unknown: true };
+    if (payload !== 3) throw new Error(`a change other than a program-interaction policy (payload ${payload})`);
     const start = r.o;
     const policy = readPolicy(r);
     const bytes = r.b.subarray(start, r.o);
@@ -182,9 +183,6 @@ function describe(ix, ctx) {
     return { text: `Close the token account ${name(k[0])}; its rent goes to ${name(k[1])}`,
       move: { kind: 'closeAccount', account: k[0], dst: k[1], authority: k[2], program: ix.programId } };
   }
-  if ((ix.programId === TOKEN || ix.programId === TOKEN_2022) && d[0] === 17 && d.length === 1) {
-    return { text: `Sync the wrapped SOL account ${name(k[0])}`, move: { kind: 'sync', account: k[0] } };
-  }
   if (ix.programId === ATA && (d.length === 0 || d[0] <= 1)) {
     const sym = ctx.symbols[k[3]] ?? short(k[3]);
     return { text: `Open the ${sym} account of ${name(k[2])} if missing (rent from ${name(k[0])})`,
@@ -196,7 +194,7 @@ function describe(ix, ctx) {
     return { text: 'An unknown compute budget instruction', move: { kind: 'unknown' } };
   }
   const rule = ruleOf(ctx.rules, ix.programId, d);
-  if (rule) return { text: `${ctx.venueNames[rule.venue] ?? 'Program'}: ${rule.name}`, move: { kind: 'venue', rule } };
+  if (rule) return { text: `${ctx.venueNames[rule.venue]}: ${rule.name}`, move: { kind: 'venue', rule } };
   return { text: `An unknown instruction ${d.subarray(0, 8).toString('hex')} of program ${short(ix.programId)}`, move: { kind: 'unknown' } };
 }
 
@@ -220,10 +218,11 @@ function namesOf(expect, pins) {
   if (expect.vault) n[expect.vault] = 'your vault';
   if (pins.payer) n[pins.payer] = 'the bot\'s gas key';
   if (pins.policyKey) n[pins.policyKey] = 'the bot\'s rules key';
-  for (const [venue, list] of Object.entries(pins.pools ?? {})) for (const p of list) n[p] = `the ${venue} pool`;
+  for (const [venue, list] of Object.entries(pins.pools)) for (const p of list) n[p] = `the ${venue} pool`;
   const mints = symbolsOf(pins);
   for (const w of expect.payoutWallets ?? []) {
-    const who = w === pins.operator ? 'the operator\'s fee share' : w === expect.owner ? 'your wallet' : 'your profit wallet';
+    // the owner's own accounts are named below, whatever pays them
+    const who = w === pins.operator ? 'the operator\'s fee share' : 'your profit wallet';
     for (const m of Object.keys(mints)) n[ata(w, m)] = `${who}'s ${mints[m]} account`;
   }
   for (const w of [expect.owner, expect.vault].filter(Boolean)) {
@@ -416,7 +415,6 @@ function close(outer, expect, pins, ctx, lines, no) {
         if (m.authority !== expect.vault || m.dst !== expect.vault) no('a vault account closes to somewhere other than your vault');
         return;
       }
-      if (m.kind === 'sync') return;
       no(`an instruction a close does not need: ${descs[i].text}`);
     });
   }
@@ -425,20 +423,23 @@ function close(outer, expect, pins, ctx, lines, no) {
 
 const CHECKS = { payment, deposit, withdraw, revoke, approve, close };
 
-// A venue instruction of an owner's close: one the venue's exit list names,
-// on an approved pool, paying only the vault.
+// A venue instruction of an owner's close: one the venue's exit list names
+// (a venue rule: the shared rules are read as transfers, accounts and closes
+// before), on an approved pool, paying only the vault. The exit rules pin
+// only these roles; any other pin refuses.
 function exitPins(ix, rule, expect, pins, no) {
-  if (!(EXIT_INSTRUCTIONS[rule.venue] ?? []).includes(rule.name)) return no(`${rule.name} is not a way out of a position`);
-  const mints = ix.keys.map(k => k.pubkey);
-  const vaultAtas = new Set(mints.flatMap(m => [TOKEN, TOKEN_2022].map(p => { try { return ata(expect.vault, m, p); } catch { return null; } })));
+  if (!EXIT_INSTRUCTIONS[rule.venue].includes(rule.name)) return no(`${rule.name} is not a way out of a position`);
+  // the vault's token accounts: its associated ones of the mints the instruction names
+  const vaultAtas = new Set(ix.keys.flatMap(k => [TOKEN, TOKEN_2022].map(p => ata(expect.vault, k.pubkey, p))));
+  const pools = pins.pools[rule.venue];
   for (const p of rule.pins) {
     const key = ix.keys[p.index]?.pubkey;
     if (!key) { no(`${rule.name}: account ${p.index} is missing`); continue; }
     const ok = p.role === 'vault' || p.role === 'vaultOrPayer' ? key === expect.vault
-      : p.role === 'vaultToken' || p.role === 'vaultWsol' ? vaultAtas.has(key)
-        : p.role === 'pool' ? (pins.pools[rule.venue] ?? []).includes(key)
-          : p.role === 'pda' ? (pins.pools[rule.venue] ?? []).some(pool => poolPda(p.seeds, pool, new PublicKey(rule.program)).toBase58() === key)
-            : p.role === 'none' ? key === rule.program : false;
+      : p.role === 'vaultToken' ? vaultAtas.has(key)
+        : p.role === 'pool' ? pools.includes(key)
+          : p.role === 'pda' ? pools.some(pool => poolPda(p.seeds, pool, new PublicKey(rule.program)).toBase58() === key)
+            : false;
     if (!ok) no(`${rule.name}: account ${p.index} (${p.role}) is ${short(key)}, not your vault's`);
   }
 }
@@ -464,7 +465,6 @@ function policyUpdates(outer, expect, pins, ctx, lines, no, signer) {
     const s = readSettingsActions(ix.data);
     if (s.signers !== 1 || ix.keys[4]?.pubkey !== expect.owner) no('it is not signed by your wallet alone');
     for (const a of s.actions) {
-      if (a.kind !== 'policyUpdate' || a.unknown) { no(`a change other than a policy update (${a.kind})`); continue; }
       const w = want[a.address];
       if (!w) { no(`policy ${short(a.address)} is not one of your vault's`); continue; }
       if (a.signers.length !== 1 || a.signers[0].key !== signer || a.signers[0].permissions !== sq.PERMISSION.all) {

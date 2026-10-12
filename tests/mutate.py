@@ -225,7 +225,7 @@ TARGETS = {
     'owner_requests_signers': ('lp/signers.py', ['revoked', 'held', 'counts_as_failure'], PY_TESTS('test_owner_requests', 'test_health')),
     'owner_requests_books': ('lp/books.py', ['latest_kind', 'keep_latest'], PY_TESTS('test_owner_requests')),
     'owner_requests_db': ('db.py', ['feed_latest_put', 'owner_exit_pending', 'owner_request_done'],
-                          PY_TESTS('test_owner_requests', 'test_onboard_store.OwnerPage')),
+                          PY_TESTS('test_owner_requests', 'test_onboard_store.OwnerPage', 'test_onboard_store.OwnerPageEdges')),
     'onboard_fee_terms': ('ops/add_profile.py', ['fee_terms'], PY_TESTS('test_add_profile', 'test_onboard_store')),
     'rpc_policy': ('shared/rpc_policy.mjs', ['endpoints', 'errorKind', 'overEndpoints', 'isEntry'], NODE_TESTS('test_rpc_policy.mjs', 'test_signer_rpc.mjs')),
     'rpc_raydium': ('venues/raydium_clmm/signer.mjs', ['withRpc', 'sendAll'], NODE_TESTS('test_signer_rpc.mjs', 'test_program_errors.mjs', 'test_no_websocket.mjs')),
@@ -467,6 +467,77 @@ SQL_TARGETS = {'deposit_db', 'unichain_book', 'unichain_quote', 'band_profile', 
 # The report prints each survivor's key: copy it here with a reason. The line
 # number is not in the key, so an edit above a mutant keeps its entry valid.
 EQUIVALENT = {
+    # the owner's page (2026-10-12)
+    ('onboard_offchain', 'parseOffchain', '(?<![<>=!])<(?![<=]) -> <=', 'if (b.length < 53) return null;', 0):
+        'the full layout needs 53 bytes; at exactly 53 the count byte gives no room for a signer and a length, so both reject',
+    ('onboard_decode_sol', 'prefixOf', '\\?(?=\\s) -> && false ?', "const b = Buffer.alloc(d.type === 'u8' ? 1 : 4);", 0):
+        'both sides of every comparison come from prefixOf; one-byte rules (account open, close, payout) are read by their own branch first',
+    ('onboard_decode_sol', 'describe', '\\?\\? -> ||', 'const amount = u64At(d, 1), decimals = d[9], sym = ctx.symbols[k[1]] ?? short(k[1]);', 0):
+        'a symbol is a non-empty string or absent: ?? and || pick the same',
+    ('onboard_decode_sol', 'describe', '\\?\\? -> ||', 'const sym = ctx.symbols[k[3]] ?? short(k[3]);', 0):
+        'a symbol is a non-empty string or absent: ?? and || pick the same',
+    ('onboard_decode_sol', 'namesOf', '\\?\\? -> ||', 'for (const w of expect.payoutWallets ?? []) {', 0):
+        'a list or absent: ?? and || give the same list',
+    ('onboard_decode_sol', 'expectedPolicies', '\\?\\? -> ||', 'const payouts = (expect.payoutWallets ?? []).map(w => new PublicKey(ata(w, pins.solana.usdc_mint)));', 0):
+        'a list or absent: ?? and || give the same list',
+    ('onboard_decode_sol', 'ownerExecute', '\\|\\| -> &&', "if (e.signers.length !== 1 || e.signers[0] !== expect.owner) no('the vault transaction is not signed by your wallet alone');", 0):
+        'every inner signer is a signer of the transaction, which the page checks is the owner alone first',
+    ('onboard_decode_sol', 'ownerExecute', "return null; -> return 'mutant';", "if (e.policy) { no('it runs through a bot policy, not as your own transaction'); return null; }", 0):
+        'the problem is recorded before the return; any other value fails the read and the transaction is refused as well',
+    ('onboard_decode_sol', 'policyUpdates', '\\|\\| -> &&', "if (s.signers !== 1 || ix.keys[4]?.pubkey !== expect.owner) no('it is not signed by your wallet alone');", 0):
+        'each signer of the settings call signs the transaction, which the page checks is the owner alone first',
+    ('onboard_decode_sol', 'policyUpdates', '\\?\\? -> ||', 'const venues = Object.keys(expect.policies ?? {});', 0):
+        'an object or absent: ?? and || give the same',
+    ('onboard_decode_sol', 'policyUpdates', '\\?\\? -> ||', 'for (const p of expect.pools[v] ?? []) if (!(pins.pools[v] ?? []).includes(p)) no(`the pool ${short(p)} is not the ${v} pool the rules approve`);', 0):
+        'a list or absent: ?? and || give the same',
+    ('onboard_decode_sol', 'policyUpdates', '\\?\\? -> ||', 'for (const p of expect.pools[v] ?? []) if (!(pins.pools[v] ?? []).includes(p)) no(`the pool ${short(p)} is not the ${v} pool the rules approve`);', 1):
+        'a list or absent: ?? and || give the same',
+    ('onboard_sol_owner', 'ownerTxs', '\\?\\? -> ||', "if (amount !== 'all' && (amount.split('.')[1]?.length ?? 0) > t.decimals) throw new Invalid(`amount: at most ${t.decimals} decimals`);", 0):
+        'a length or absent: an absent or zero length is 0 either way',
+    ('onboard_sol_owner', 'depositVerdict', '\\?\\? -> ||', 'const raw = BigInt(info.tokenAmount?.amount ?? info.amount);', 0):
+        'an amount string is never empty: ?? and || pick the same',
+    ('onboard_sol_owner', 'depositVerdict', '\\?\\? -> ||', 'for (const d of deposits) sum.set(d.token, { ...d, raw: (sum.get(d.token)?.raw ?? 0n) + d.raw });', 0):
+        'a sum of 0n or absent is 0n either way',
+    ('onboard_server_page', 'walletConnectOf', '\\?\\? -> ||', 'const wc = cfg.walletConnect ?? {};', 0):
+        'an object or absent: ?? and || give the same',
+    ('onboard_server_page', 'walletConnectOf', '\\?\\? -> ||', 'return { projectId: id, relayUrl: wc.relayUrl, verify: wc.verify ?? [] };', 0):
+        'a list or absent: ?? and || give the same',
+    ('onboard_server_page', 'keysMatch', '\\?\\? -> ||', 'const pinned = c.botKeys ?? [];', 0):
+        'a list or absent: ?? and || give the same',
+    ('onboard_store_page', 'feed_from_file', 'skip if body', "if 'book' in out and 'DAILY' in out:", 0):
+        'the early stop only saves reading: a kind already found is never replaced',
+    ('onboard_store_page', 'feed_from_file', 'const 0->1', 'fh.seek(0, 2)', 0):
+        'whence 3 and 4 (SEEK_DATA, SEEK_HOLE) find the same end of a regular file; one past the end is clamped by the next seek',
+    ('onboard_store_page', 'feed_from_file', 'const 2->3', 'fh.seek(0, 2)', 0):
+        'whence 3 and 4 (SEEK_DATA, SEEK_HOLE) find the same end of a regular file; one past the end is clamped by the next seek',
+    ('onboard_store_page', 'feed_from_file', 'const 2->4', 'fh.seek(0, 2)', 0):
+        'whence 3 and 4 (SEEK_DATA, SEEK_HOLE) find the same end of a regular file; one past the end is clamped by the next seek',
+    ('onboard_verify', 'chainProblems', '\\?\\? -> ||', 'const policies = Object.values(expect.policies ?? {}).flat();', 0):
+        'an object or absent: ?? and || give the same',
+    ('onboard_verify', 'main', '\\?\\? -> ||', "const problems = await chainProblems(connection ?? new Connection(f.rpc ?? 'https://api.mainnet-beta.solana.com', 'confirmed'), job.expect(0));", 0):
+        'a connection object or absent; an --rpc URL is a non-empty string or absent',
+    ('onboard_verify', 'main', '\\?\\? -> ||', "const problems = await chainProblems(connection ?? new Connection(f.rpc ?? 'https://api.mainnet-beta.solana.com', 'confirmed'), job.expect(0));", 1):
+        'a connection object or absent; an --rpc URL is a non-empty string or absent',
+    ('owner_requests_loop', 'owner_exit', 'flip bool', "print(f'owner request unreadable: {type(e).__name__}: {books.tidy(e)}', flush=True)", 0):
+        'a log line only',
+    ('owner_requests_signers', 'revoked', 'drop operand 0', 'return bool(err) and bool(REVOKED.search(str(err)))', 0):
+        "an absent error reads 'None', which no revoke message matches",
+    ('owner_requests_signers', 'held', 'drop operand 0', 'return mint_refusal(err) or revoked(err) or (bool(err) and bool(WAIT_REFUSAL.match(str(err))))', 1):
+        "an absent error reads 'None', which no wait refusal matches",
+    ('owner_requests_books', 'keep_latest', 'flip bool', "print(f'feed_latest not kept: {type(e).__name__}: {tidy(e)}', flush=True)", 0):
+        'a log line only',
+    ('onboard_server', 'makeServer', '\\?\\? -> ||', "const bundle = fs.readFileSync(deps.bundle ?? path.join(HERE, 'bundle.js'), 'utf8');", 0):
+        'a path or absent: ?? and || pick the same',
+    ('onboard_server', 'makeServer', '\\?\\? -> ||', 'const wc = deps.walletConnect ?? walletConnectOf(cfg);', 0):
+        'an object or absent: ?? and || pick the same',
+    ('onboard_server', 'makeServer', '\\?\\? -> ||', 'at: book.t ?? null, text: telegramMessage(book), daily: daily ? telegramMessage(daily) : null,', 0):
+        'a row time is a non-empty string or absent',
+    ('onboard_server', 'makeServer', '\\?\\? -> ||', 'tiles: { symbol: pv.symbol, price: shownPrice(book, book.last_price ?? book.price), band,', 0):
+        'a price of 0 is no price: shownPrice gives the same either way',
+    ('onboard_server', 'makeServer', '\\?\\? -> ||', 'mode: book.regime?.mode ?? null, pExit24h: forecast.p_exit_24h_regime ?? forecast.p_exit_24h ?? null,', 0):
+        'a mode is a non-empty string or absent',
+    ('onboard_server', 'makeServer', '\\?\\? -> ||', 'maxUsd = out.max_usd ?? maxUsd;', 0):
+        'a cap is a positive figure or null (store.cap_usd never gives 0)',
     # onboard/decode_evm.mjs: `??` -> `||` where the left side is an object, an array, a
     # non-empty symbol or absent, never 0, false or '' that would read differently.
     ('onboard_decode_evm', 'nativeSymbol', '\\?\\? -> ||', 'const hit = Object.entries(pins.tokens ?? {}).find(([, t]) => !t.address);', 0):

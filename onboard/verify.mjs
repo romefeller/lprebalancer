@@ -107,7 +107,7 @@ async function fromServer(f, pins) {
   return { chain, txs, expect: () => expect };
 }
 
-export async function main(argv = process.argv.slice(2), { git } = {}) {
+export async function main(argv = process.argv.slice(2), { git, connection } = {}) {
   const f = flags(argv);
   if (!f.commit) throw new Error('--commit <the git commit whose rules you trust>');
   const polygon = await import(path.join(ROOT, 'chains/evm/polygon.mjs'));
@@ -124,7 +124,7 @@ export async function main(argv = process.argv.slice(2), { git } = {}) {
   }
   let bad = 0;
   if (job.chain === 'solana' && f.rpc !== 'none') {
-    const problems = await chainProblems(new Connection(f.rpc ?? 'https://api.mainnet-beta.solana.com', 'confirmed'), job.expect(0));
+    const problems = await chainProblems(connection ?? new Connection(f.rpc ?? 'https://api.mainnet-beta.solana.com', 'confirmed'), job.expect(0));
     for (const p of problems) console.log(`CHAIN: ${p}`);
     bad += problems.length;
   }

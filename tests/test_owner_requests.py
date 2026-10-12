@@ -132,5 +132,19 @@ class Latest(unittest.TestCase):
                 cur.execute("delete from feed_latest where profile = 'or-test'")
 
 
+class HeldAndKinds(unittest.TestCase):
+    def test_held_is_each_reason_on_its_own(self):
+        self.assertTrue(signers.held('refused: halted (HALT)'), 'a wait refusal')
+        self.assertTrue(signers.held('refused: wallet sol-lp lock busy'))
+        self.assertTrue(signers.held(SOL_REVOKED), 'a revoke')
+        with mock.patch.object(signers, 'mint_refusal', return_value=True):
+            self.assertTrue(signers.held('anything'), 'a mint refusal')
+        for err in (None, '', 'rpc timeout', 'refused: not enough SOL'):
+            self.assertFalse(signers.held(err), err)
+
+    def test_a_book_has_fees_and_equity(self):
+        self.assertIsNone(books.latest_kind('in_band', {'equity_usd': 1}))
+
+
 if __name__ == '__main__':
     unittest.main()

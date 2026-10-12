@@ -8,11 +8,11 @@ import { createRequire } from 'module';
 import fc from 'fast-check';
 import * as sq from '../chains/solana/vault/squads.mjs';
 import { loadConfig } from '../onboard/server.mjs';
-import { broadcast, checkDeposit, confirm, context, depositVerdict } from '../onboard/solana.mjs';
+import { broadcast, checkDeposit, confirm, context, depositVerdict, ownerTxs, status } from '../onboard/solana.mjs';
 import { toRaw } from '../onboard/units.mjs';
 
 const require = createRequire(import.meta.url);
-const { Keypair, PublicKey, SystemProgram, Transaction } = require('@solana/web3.js');
+const { Keypair, PublicKey, SystemProgram, Transaction, TransactionMessage } = require('@solana/web3.js');
 const spl = require('@solana/spl-token');
 const bs58 = require('bs58').default;
 
@@ -96,4 +96,79 @@ test('the context the page checks: the vault from its settings, each venue\'s po
   assert.deepEqual(context(r), { settings, vault: sq.vaultPda(new PublicKey(settings)).toBase58(), policies: { 'raydium-clmm': ['P1', 'P2'] },
     pools: { 'raydium-clmm': ['X'] }, payoutWallets: [OWNER, OTHER] });
   assert.deepEqual(context({ ...r, fee_wallet: null }).payoutWallets, [OWNER], 'the operator\'s own wallet pays no fee share');
+});
+
+// --- the owner's transactions and the vault's state, with the builders stubbed ---------------
+
+const KEYS = { payer: Keypair.generate(), policyKey: Keypair.generate(), policyPath: '/keys/policy.json' };
+const SETTINGS = Keypair.generate().publicKey.toBase58();
+const ROW = { settings: SETTINGS, venues: { 'raydium-clmm': { policies: [Keypair.generate().publicKey.toBase58()], pools: [C.pools['raydium-clmm']], payouts: [] },
+  orca: { policies: [Keypair.generate().publicKey.toBase58()], pools: [C.pools.orca], payouts: [] } } };
+const message = (payer) => Buffer.from(new TransactionMessage({ payerKey: new PublicKey(payer), recentBlockhash: PublicKey.default.toBase58(),
+  instructions: [SystemProgram.transfer({ fromPubkey: new PublicKey(payer), toPubkey: new PublicKey(VAULT), lamports: 1 })] }).compileToLegacyMessage().serialize()).toString('base64');
+const BLOCKHASH = Keypair.generate().publicKey.toBase58();
+const conn = { getLatestBlockhash: async () => ({ blockhash: BLOCKHASH }) };
+
+function stubs(positionsByVenue = {}) {
+  const calls = [];
+  return { calls, deps: {
+    request: async (action, f, { env }) => { calls.push([action, f, env.LPBOT_VAULT_VENUE]); return { summary: `${action} ${env.LPBOT_VAULT_VENUE}`, messages: [message(f.owner)] }; },
+    positions: async (_c, { venue }) => positionsByVenue[venue] ?? [],
+  } };
+}
+
+test('owner transactions: each action builds what it should, for every venue it concerns, with a fresh blockhash', async () => {
+  const run = async (a, s = stubs()) => ({ out: await ownerTxs(conn, C, ROW, KEYS, { owner: OWNER, ...a }, s.deps), calls: s.calls });
+  // withdraw one token: SOL by name, USDC by mint; an amount the token cannot hold is refused before anything is built
+  let r = await run({ action: 'withdraw', token: 'SOL', amount: '1.5' });
+  assert.deepEqual(r.calls, [['withdraw', { owner: OWNER, to: OWNER, mint: 'SOL', amount: '1.5' }, 'raydium-clmm']]);
+  r = await run({ action: 'withdraw', token: 'USDC', amount: 'all' });
+  assert.deepEqual(r.calls[0][1].mint, C.tokens.USDC.mint);
+  for (const [token, amount, re] of [['USDC', '1.0000001', /at most 6 decimals/], ['SOL', '0', /a number or all/], ['SOL', '0.0000000001', /at most 9 decimals/],
+    ['DOGE', '1', /token DOGE/]]) {
+    await assert.rejects(run({ action: 'withdraw', token, amount }), re, `${amount} ${token}`);
+  }
+  r = await run({ action: 'withdraw', token: 'SOL', amount: '0.000000001' });
+  assert.equal(r.calls.length, 1, 'one lamport is an amount');
+  // withdraw everything: every configured mint
+  r = await run({ action: 'withdraw', token: 'ALL', amount: 'all' });
+  assert.deepEqual(r.calls, [['withdraw', { owner: OWNER, to: OWNER, mint: 'ALL', mints: Object.values(C.tokens).map(t => t.mint).join(',') }, 'raydium-clmm']]);
+  // close: only the venues holding a position; none at all is no transaction
+  r = await run({ action: 'close' }, stubs({ orca: [{ position: 'P' }] }));
+  assert.deepEqual(r.calls.map(c => [c[0], c[2]]), [['close', 'orca']]);
+  assert.equal(r.out.transactions.length, 1);
+  r = await run({ action: 'close' }, stubs({}));
+  assert.deepEqual([r.calls, r.out.transactions], [[], []]);
+  assert.match(r.out.summary, /nothing to close/);
+  // revoke and approve: every venue's policies, the bot's keys named
+  for (const action of ['revoke', 'approve']) {
+    r = await run({ action });
+    assert.deepEqual(r.calls.map(c => [c[0], c[2], c[1].payer, c[1]['policy-key']]),
+      ['raydium-clmm', 'orca'].map(v => [action, v, KEYS.payer.publicKey.toBase58(), KEYS.policyKey.publicKey.toBase58()]));
+    assert.equal(r.out.summary, `${action} raydium-clmm; ${action} orca`);
+  }
+  await assert.rejects(run({ action: 'teleport' }), /action teleport/);
+  // each transaction: the message as built, its blockhash the newest
+  const tx = Transaction.from(Buffer.from((await run({ action: 'revoke' })).out.transactions[0], 'base64'));
+  assert.equal(tx.recentBlockhash, BLOCKHASH);
+  assert.equal(tx.feePayer.toBase58(), OWNER);
+});
+
+test('the vault\'s state: balances, whether every policy still names the bot, its positions on every venue', async () => {
+  const head = (signers) => {
+    const n = Buffer.alloc(4); n.writeUInt32LE(signers.length);
+    return Buffer.concat([require('node:crypto').createHash('sha256').update('account:Policy').digest().subarray(0, 8), new PublicKey(SETTINGS).toBuffer(),
+      Buffer.alloc(8), Buffer.from([255]), Buffer.alloc(16), n, ...signers.map(s => Buffer.concat([s.toBuffer(), Buffer.from([7])])), Buffer.alloc(6)]);
+  };
+  const connOf = (infos) => ({ getBalance: async () => 2_500_000_000, getAccountInfo: async (k) => (k.toBase58() === C.tokens.USDC.mint ? { owner: spl.TOKEN_PROGRAM_ID } : null),
+    getMultipleAccountsInfo: async () => infos });
+  const bot = KEYS.policyKey.publicKey, owner = new PublicKey(OWNER);
+  const at = (infos, pos = {}) => status(connOf(infos), C, ROW, KEYS, { positionsOf: async (_c, { venue }) => pos[venue] ?? [] });
+  let s = await at([{ data: head([bot]) }, { data: head([owner, bot]) }], { orca: [1, 2], 'raydium-clmm': [3] });
+  assert.deepEqual([s.balances, s.botActive, s.positions], [{ SOL: '2.5', USDC: '0' }, true, 3]);
+  assert.equal(s.vault, sq.vaultPda(new PublicKey(SETTINGS)).toBase58());
+  s = await at([{ data: head([bot]) }, { data: head([owner]) }]);
+  assert.deepEqual([s.botActive, s.positions], [false, 0], 'one policy without the bot: revoked');
+  assert.equal((await at([{ data: head([bot]) }, null])).botActive, false, 'a policy gone: revoked');
+  assert.equal((await at([])).botActive, false, 'no policy at all: no bot');
 });

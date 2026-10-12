@@ -467,3 +467,100 @@ class OwnerPage(unittest.TestCase):
             self.assertEqual(store.feed_from_file('nobody'), {})
         finally:
             store.ROOT = original
+
+
+class OwnerPageEdges(unittest.TestCase):
+    """The edges of the owner's page rows: no price, no profile, the
+    feed file read from its newest end, the database first."""
+
+    def setUp(self):
+        clean()
+        templates()
+
+    def tearDown(self):
+        clean()
+
+    def test_no_dollar_figure_keeps_the_cap(self):
+        i = begin()
+        register(i)
+        before = row("select max_usd from config where name = 'ob-one'")['max_usd']
+        original = db.token_prices
+        db.token_prices = lambda mints: {}
+        try:
+            out = store.run('deposited', {'id': i, 'signature': 'sig-n', 'token': 'SOL', 'mint': SOL, 'amount': '1', 'headroom': 3})
+        finally:
+            db.token_prices = original
+        self.assertEqual(out, {'recorded': True, 'max_usd': None})
+        self.assertEqual(row("select max_usd from config where name = 'ob-one'")['max_usd'], before)
+        with db.cursor(commit=True) as cur:
+            self.assertIsNone(store.cap(cur, i, 3), 'nothing priced, nothing provisional')
+            self.assertIsNone(store.cap(cur, i, 3, provisional=None))
+
+    def test_a_request_without_a_profile_gets_no_cap(self):
+        i = begin()
+        register(i)
+        with db.cursor(commit=True) as cur:
+            cur.execute("delete from config where name = 'ob-one'")
+        with db.cursor() as cur:
+            with self.assertRaisesRegex(store.Refused, 'has no profile'):
+                store.cap(cur, i, 3, provisional=10.0)
+
+    def test_an_exit_reads_back_as_numbers(self):
+        i = begin()
+        register(i)
+        store.run('exit', {'name': 'ob-one', 'nonce': 'n9', 'signature': 's9'})
+        e = store.run('exits', {'name': 'ob-one'})['exit']
+        self.assertIsInstance(e['created_at'], float)
+        self.assertIsNone(e['done_at'])
+        db.owner_request_done(db.owner_exit_pending('ob-one'), 'x' * 600)
+        e = store.run('exits', {'name': 'ob-one'})['exit']
+        self.assertIsInstance(e['done_at'], float)
+        self.assertEqual(len(e['outcome']), 500, 'an outcome is kept short')
+        json.dumps(e)
+
+    def test_the_feed_file_newest_first_whole_lines_only(self):
+        import tempfile
+        d = pathlib.Path(tempfile.mkdtemp())
+        original, tail = store.ROOT, store.FEED_TAIL_BYTES
+        try:
+            store.ROOT = d
+            (d / 'run' / 'ob-two').mkdir(parents=True)
+            f = d / 'run' / 'ob-two' / 'events.jsonl'
+            book = lambda eq: json.dumps({'event': 'in_band', 'fees_total_usd': 1, 'equity_usd': eq})
+            # two books before the newest DAILY: the newest book wins
+            f.write_text('\n'.join([json.dumps({'event': 'DAILY', 'day': 'd'}), book(1), book(2), json.dumps({'event': 'TAPE_SOURCE'})]) + '\n')
+            out = store.feed_from_file('ob-two')
+            self.assertEqual(set(out), {'book', 'DAILY'})
+            self.assertEqual(out['book']['row']['equity_usd'], 2)
+            # the only line: read from its first byte
+            f.write_text(book(7) + '\n')
+            self.assertEqual(store.feed_from_file('ob-two')['book']['row']['equity_usd'], 7)
+            # a tail that starts inside a line drops that line, keeps the whole ones after it
+            store.FEED_TAIL_BYTES = len(book(8)) + 3
+            f.write_text(book(8) + '\n' + book(9) + '\n')
+            self.assertEqual(store.feed_from_file('ob-two')['book']['row']['equity_usd'], 9)
+        finally:
+            store.ROOT, store.FEED_TAIL_BYTES = original, tail
+
+    def test_the_database_first_the_file_when_it_holds_no_book(self):
+        import tempfile
+        i = begin()
+        register(i)
+        d = pathlib.Path(tempfile.mkdtemp())
+        (d / 'run' / 'ob-one').mkdir(parents=True)
+        (d / 'run' / 'ob-one' / 'events.jsonl').write_text(json.dumps({'event': 'in_band', 'fees_total_usd': 1, 'equity_usd': 3}) + '\n')
+        original = store.ROOT
+        try:
+            store.ROOT = d
+            db.feed_latest_put('ob-one', 'DAILY', json.dumps({'event': 'DAILY', 'day': 'db'}))
+            f = store.run('feed', {'name': 'ob-one'})['feed']
+            self.assertEqual((f['book']['row']['equity_usd'], f['DAILY']['row']['day']), (3, 'db'), 'no book in the database: the file\'s')
+            db.feed_latest_put('ob-one', 'book', json.dumps({'event': 'in_band', 'fees_total_usd': 1, 'equity_usd': 4}))
+            self.assertEqual(store.run('feed', {'name': 'ob-one'})['feed']['book']['row']['equity_usd'], 4, 'the database\'s first')
+        finally:
+            store.ROOT = original
+
+    def test_the_kind_needs_both_figures(self):
+        self.assertIsNone(store.feed_kind({'equity_usd': 1}))
+        self.assertIsNone(store.feed_kind({'fees_total_usd': 1}))
+        self.assertEqual(store.feed_kind({'fees_total_usd': 1, 'equity_usd': 1}), 'book')

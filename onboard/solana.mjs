@@ -7,7 +7,7 @@ import * as sq from '../chains/solana/vault/squads.mjs';
 import { RULES, compile } from '../chains/solana/vault/policy.mjs';
 import { VENUES } from '../chains/solana/vault/venues.mjs';
 import { readKeypair } from '../chains/solana/vault/account.mjs';
-import { connect, request, rulesRequest } from '../chains/solana/vault/cli.mjs';
+import { connect, request as buildRequest, rulesRequest as buildRules } from '../chains/solana/vault/cli.mjs';
 import { vaultPositions } from '../chains/solana/vault/exit.mjs';
 import SOLANA from '../chains/solana/solana.json' with { type: 'json' };
 import { Invalid, fromRaw, nativeOf, own, toRaw } from './intent.mjs';
@@ -190,8 +190,8 @@ export function requestEnv(row, venue, keys) {
 // closed), close (every venue's positions, into the vault), revoke or
 // approve (every venue's policies), as cli.mjs request builds them, each
 // with a fresh blockhash. A close of a vault without positions is no
-// transaction.
-export async function ownerTxs(connection, c, row, keys, { action, owner, token, amount }) {
+// transaction. The last argument (tests): the request builders and the position reader.
+export async function ownerTxs(connection, c, row, keys, { action, owner, token, amount }, { request = buildRequest, rulesRequest = buildRules, positions = vaultPositions } = {}) {
   const venues = Object.keys(row.venues);
   let parts;
   if (action === 'withdraw' && token === 'ALL') {
@@ -207,7 +207,7 @@ export async function ownerTxs(connection, c, row, keys, { action, owner, token,
   } else if (action === 'close') {
     parts = [];
     for (const v of venues) {
-      const open = await vaultPositions(connection, { venue: v, pools: row.venues[v].pools, vault: sq.vaultPda(new PublicKey(row.settings)).toBase58() });
+      const open = await positions(connection, { venue: v, pools: row.venues[v].pools, vault: sq.vaultPda(new PublicKey(row.settings)).toBase58() });
       if (open.length) parts.push(await request('close', { owner }, { connection, env: requestEnv(row, v, keys) }));
     }
     if (!parts.length) return { summary: 'nothing to close: the vault holds no position', transactions: [] };
@@ -264,8 +264,9 @@ export async function affordsRules(connection, owner, steps) {
 
 // What the vault holds and whether the bot may still act (every policy
 // lists the bot's policy key; a policy staged for a venue the owners have
-// not approved yet does not exist and says nothing).
-export async function status(connection, c, row, keys) {
+// not approved yet does not exist and says nothing), and how many positions
+// it holds.
+export async function status(connection, c, row, keys, { positionsOf = vaultPositions } = {}) {
   const vault = sq.vaultPda(new PublicKey(row.settings));
   const balances = {};
   for (const [sym, t] of Object.entries(c.tokens)) {
@@ -278,7 +279,7 @@ export async function status(connection, c, row, keys) {
   const botActive = present.length > 0 && present.every(i => sq.decodePolicyHead(i.data).signers.some(s => s.key.equals(keys.policyKey.publicKey)));
   let positions = 0;
   for (const [venue, v] of Object.entries(row.venues)) {
-    positions += (await vaultPositions(connection, { venue, pools: v.pools, vault: vault.toBase58() })).length;
+    positions += (await positionsOf(connection, { venue, pools: v.pools, vault: vault.toBase58() })).length;
   }
   return { vault: vault.toBase58(), balances, botActive, rulesCurrent: rulesCurrent(row, vault, keys, infos), positions };
 }

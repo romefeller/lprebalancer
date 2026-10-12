@@ -575,8 +575,8 @@ function memoryStore(over = {}) {
     if (cmd === 'get') return { request: rows.find(x => live(x) && x.name === r.name) ?? null };
     if (cmd === 'started') { byId(r.id).state = 'started'; return { started: true }; }
     if (cmd === 'list') return { requests: rows.filter(x => live(x) && x.owner === r.owner) };
-    if (cmd === 'feed') return { feed: {} };
-    if (cmd === 'exits') return { exit: null };
+    if (cmd === 'feed') return { feed: over.feed ?? {} };
+    if (cmd === 'exits') return { exit: over.exit ?? null };
     if (cmd === 'exit') return { requested: true, new: true };
     if (cmd === 'deposited') return { recorded: true, max_usd: 9 };
     throw new Error(cmd);
@@ -611,7 +611,7 @@ function fakes(over = {}, cfg = CFG) {
     record: async () => ({ token_a: {}, token_b: {} }),
     deposit: async (a) => ({ summary: 'deposit', transactions: [JSON.stringify(a)] }),
     owner: async (row, a) => ({ summary: a.action, transactions: ['one', 'two'] }),
-    status: async () => ({ vault: 'VAULT', balances: { SOL: over.deposited ? '1.5' : '0' }, botActive: over.botActive ?? true }),
+    status: async () => ({ vault: 'VAULT', balances: { SOL: over.deposited ? '1.5' : '0' }, botActive: over.botActive ?? true, positions: over.positions ?? 0 }),
     hasDeposit: (st) => Number(st.balances.SOL) > 0,
     holdings: async (owner, token) => { calls.holdings.push([owner, token]); return over.held ?? { SOL: 2_000_000_000n, USDC: 0n }; },
     context: () => ({ settings: 'S', vault: 'VAULT', policies: {}, pools: {}, payoutWallets: [] }),
@@ -1128,6 +1128,13 @@ test('exit: only the owner\'s signature over the issued message asks the bot to 
     const r = await post('exit', { invite: INVITE, nonce: led.nonce, message: led.message, signature: crypto.sign(null, env, pk).toString('base64'),
       signedMessage: env.toString('base64') });
     assert.equal(r.status, 200, JSON.stringify(r.json));
+    // the full layout names its domain: only the bytes the wallet reports can show it
+    const fl = (await post('exit-intent', { invite: INVITE, name: 'my-pool' })).json;
+    const msg = Buffer.from(fl.message), len = Buffer.alloc(2); len.writeUInt16LE(msg.length);
+    const fullEnv = Buffer.concat([I.OFFCHAIN_DOMAIN, Buffer.from([0]), Buffer.alloc(32, 3), Buffer.from([1, 1]), OWNER.publicKey.toBuffer(), len, msg]);
+    const rf = await post('exit', { invite: INVITE, nonce: fl.nonce, message: fl.message, signature: crypto.sign(null, fullEnv, pk).toString('base64'),
+      signedMessage: fullEnv.toString('base64') });
+    assert.equal(rf.status, 200, JSON.stringify(rf.json));
     assert.equal((await post('exit-intent', { invite: INVITE, name: 'nobody-here' })).status, 404);
     assert.equal((await post('exit', { name: 'my-pool' })).status, 403, 'no invite');
   });
@@ -1242,3 +1249,140 @@ function writeTemp(obj) {
   fs.writeFileSync(p, JSON.stringify(obj));
   return p;
 }
+
+test('off-chain messages: the formats at their bounds, and every malformed envelope is no message', () => {
+  assert.deepEqual(I.offchainFormats(Buffer.from(' ~')), [0, 1, 2], 'printable ASCII: 0x20 to 0x7e');
+  assert.deepEqual(I.offchainFormats(Buffer.from('a\x7f')), [1, 2]);
+  assert.deepEqual(I.offchainFormats(Buffer.from('a\x1f')), [1, 2]);
+  assert.deepEqual(I.offchainFormats(Buffer.alloc(0)), [1, 2], 'nothing is not ASCII text');
+  assert.deepEqual(I.offchainFormats(Buffer.alloc(1212, 0x61)), [0, 1, 2], '1212 bytes: limited UTF-8 still');
+  assert.deepEqual(I.offchainFormats(Buffer.alloc(1213, 0x61)), [0, 2]);
+  const text = 'hello';
+  const good = I.offchainShort(text, 1);
+  assert.deepEqual(I.parseOffchain(good), { layout: 'short', format: 1, signers: [], text });
+  const full = (count, extra = Buffer.alloc(0)) => {
+    const msg = Buffer.from(text), len = Buffer.alloc(2); len.writeUInt16LE(msg.length);
+    return Buffer.concat([I.OFFCHAIN_DOMAIN, Buffer.from([0]), Buffer.alloc(32, 9), Buffer.from([1, count]),
+      ...Array.from({ length: count }, () => OWNER.publicKey.toBuffer()), len, msg, extra]);
+  };
+  assert.deepEqual(I.parseOffchain(full(1)), { layout: 'full', format: 1, signers: [OWNER.publicKey.toBase58()], text });
+  for (const [what, b] of [
+    ['too short', good.subarray(0, 19)], ['another domain', Buffer.concat([Buffer.from([0xfe]), good.subarray(1)])],
+    ['version 1', Buffer.concat([good.subarray(0, 16), Buffer.from([1]), good.subarray(17)])],
+    ['no length', good.subarray(0, 19)], ['not UTF-8', Buffer.concat([I.offchainShort('', 2).subarray(0, 18), Buffer.from([1, 0, 0xff])])],
+    ['no signer', full(0)], ['a full layout cut before the length', full(1).subarray(0, 51 + 32 + 1)],
+    ['a full layout with bytes after the text', full(1, Buffer.from([0]))], ['52 bytes', full(1).subarray(0, 52)],
+  ]) assert.equal(I.parseOffchain(b), null, what);
+  assert.equal(I.parseOffchain(full(1).subarray(0, 53)), null, 'the full layout\'s shortest frame holds no text');
+  const empty = Buffer.concat([I.OFFCHAIN_DOMAIN, Buffer.from([0]), Buffer.alloc(32, 9), Buffer.from([1, 1]), OWNER.publicKey.toBuffer(), Buffer.alloc(2)]);
+  assert.deepEqual(I.parseOffchain(empty), { layout: 'full', format: 1, signers: [OWNER.publicKey.toBase58()], text: '' }, 'an empty text ends the frame');
+});
+
+test('verify: the reported bytes are read as strict base64; anything else is no signature', async () => {
+  const text = 'hello\nNonce: 9', owner = OWNER.publicKey.toBase58();
+  const sig = solSign(OWNER, text).toString('base64');
+  const b64 = Buffer.from(text).toString('base64');
+  assert.equal(await I.verify('solana', owner, text, sig, b64), true);
+  // a lenient decoder would read the same bytes through the junk; the server does not
+  assert.equal(await I.verify('solana', owner, text, sig, `${b64.slice(0, 4)}!${b64.slice(4)}`), false);
+  assert.equal(await I.verify('solana', owner, text, sig, `${b64.slice(0, 4)}-${b64.slice(4)}`), false);
+});
+
+test('vaults: the bot\'s book, rendered as Telegram renders it, and the tiles from the same row', async () => {
+  const { message } = await import('../telegram_bridge.mjs');
+  const book = { t: '2026-10-12T18:53:41Z', event: 'in_band', profile: 'my-pool', pair: 'SOL/USDC', token_a: 'SOL', token_b: 'USDC', price: 107.5,
+    last_price: 107.53, lower: 105.4, upper: 109.7, equity_usd: 0, fees_today_usd: 0, fees_total_usd: 0, fees_per_day_usd: 0, apr_pct: 0,
+    split: { paid_usd: 0 }, band: { in_range: false, p_exit_24h: 0.5 }, forecast: { p_exit_24h_regime: 0.25, p_exit_24h: 0.9 }, regime: { mode: 'CALM' },
+    since_start: { profit_usd: 0 } };
+  const daily = { event: 'DAILY', day: '2026-10-11', recentres: 1, fees_usd: 0, vs_hold_usd: 0.02, token_a: 'SOL', token_b: 'USDC' };
+  const revoked = { event: 'REVOKED', action: 'stopped' }, exit = { event: 'OWNER_EXIT', reason: 'asked', action: 'stopped' };
+  const f = fakes({ deposited: true, feed: { book: { row: book }, DAILY: { row: daily }, REVOKED: { row: revoked }, OWNER_EXIT: { row: exit } } });
+  await serve(f, async ({ post }) => {
+    await registered(f, post);
+    const v = (await post('vaults', { invite: INVITE, chain: 'solana', owner: OWNER.publicKey.toBase58() })).json.vaults[0];
+    assert.deepEqual(v.stats.text, message(book), 'the same text as Telegram');
+    assert.deepEqual([v.stats.daily, v.stats.revoked, v.stats.exit, v.stats.at], [message(daily), message(revoked), message(exit), book.t]);
+    assert.deepEqual(v.stats.tiles, { symbol: 'SOL', price: 107.53, band: [105.4, 109.7], inRange: false, equityUsd: 0, feesTodayUsd: 0, feesTotalUsd: 0,
+      paidUsd: 0, feesPerDayUsd: 0, aprPct: 0, mode: 'CALM', pExit24h: 0.25, pnlUsd: 0, event: 'in_band' }, 'zeros are figures, not missing');
+  });
+  // a row without a band or a forecast: the event says in range or out; no band, no price
+  const bare = { event: 'OUT_OF_BAND', pair: 'SOL/USDC', fees_total_usd: 1, equity_usd: 2, price: 100 };
+  for (const [row, inRange] of [[bare, false], [{ ...bare, event: 'in_band' }, true], [{ ...bare, event: 'OPEN' }, null]]) {
+    const g = fakes({ deposited: true, feed: { book: { row } } });
+    await serve(g, async ({ post }) => {
+      await registered(g, post);
+      const t = (await post('vaults', { invite: INVITE, chain: 'solana', owner: OWNER.publicKey.toBase58() })).json.vaults[0].stats;
+      assert.deepEqual([t.tiles.inRange, t.tiles.band, t.tiles.price, t.tiles.mode, t.tiles.pExit24h, t.daily, t.at, t.tiles.pnlUsd],
+        [inRange, null, 100, null, null, null, null, null], row.event);
+    });
+  }
+  const h = fakes({ deposited: true, feed: { book: { row: { ...bare, lower: 99 } } } });
+  await serve(h, async ({ post }) => {
+    await registered(h, post);
+    assert.equal((await post('vaults', { invite: INVITE, chain: 'solana', owner: OWNER.publicKey.toBase58() })).json.vaults[0].stats.tiles.band, null, 'half a band is none');
+  });
+});
+
+test('vaults: the views: a registered vault without money is still being set up; one with a position runs', async () => {
+  for (const [over, view] of [[{}, 'setup'], [{ positions: 1 }, 'active'], [{ deposited: true }, 'active'], [{ botActive: false }, 'revoked']]) {
+    const f = fakes(over);
+    await serve(f, async ({ post }) => {
+      await signedUp(post);
+      const v0 = (await post('vaults', { invite: INVITE, chain: 'solana', owner: OWNER.publicKey.toBase58() })).json.vaults[0];
+      assert.equal(v0.view, 'setup', 'signed, not paid');
+      f.payments.set('P', { state: 'ok' });
+      await post('pay', { invite: INVITE, name: 'my-pool', payment: 'P' });
+      assert.equal((await post('vaults', { invite: INVITE, chain: 'solana', owner: OWNER.publicKey.toBase58() })).json.vaults[0].view, view, JSON.stringify(over));
+    });
+  }
+  // a start with no idle money but a position is a start
+  const f = fakes({ positions: 1 });
+  await serve(f, async ({ post }) => {
+    await registered(f, post);
+    assert.equal((await post('start', { invite: INVITE, name: 'my-pool' })).status, 200);
+  });
+});
+
+test('exit: the reported bytes only when a non-empty string; open exit requests are capped; an exit request expires', async () => {
+  const f = fakes({ deposited: true });
+  await serve(f, async ({ post }) => {
+    await registered(f, post);
+    for (const signedMessage of [123, '', null, { a: 1 }]) {
+      const it = (await post('exit-intent', { invite: INVITE, name: 'my-pool' })).json;
+      const r = await post('exit', { invite: INVITE, nonce: it.nonce, message: it.message, signature: solSign(OWNER, it.message).toString('base64'), signedMessage });
+      assert.equal(r.status, 200, `${JSON.stringify(signedMessage)}: no bytes reported, the text itself`);
+    }
+    const it = (await post('exit-intent', { invite: INVITE, name: 'my-pool' })).json;
+    f.tick(CFG.intentTtlS * 1000);
+    const late = await post('exit', { invite: INVITE, nonce: it.nonce, message: it.message, signature: solSign(OWNER, it.message).toString('base64') });
+    assert.deepEqual([late.status, late.json.error], [400, 'the request expired; sign a new one'], 'at its expiry, expired');
+  });
+  const cfg = { ...CFG, limits: { ...CFG.limits, openIntents: 2 } };
+  const g = fakes({ deposited: true }, cfg);
+  await serve(g, async ({ post }) => {
+    await registered(g, post);
+    assert.equal((await post('exit-intent', { invite: INVITE, name: 'my-pool' })).status, 200);
+    assert.equal((await post('exit-intent', { invite: INVITE, name: 'my-pool' })).status, 200);
+    assert.equal((await post('exit-intent', { invite: INVITE, name: 'my-pool' })).status, 503, 'two open: the third waits');
+  });
+});
+
+test('the page and its config: HTML as HTML, the verify origins only with a project id', async () => {
+  const f = fakes();
+  await serve(f, async ({ base }) => {
+    const page = await fetch(`${base}/`);
+    assert.match(page.headers.get('content-type'), /text\/html/);
+    assert.match(await page.text(), /^<!doctype html>/, 'the page, not a JSON string of it');
+    const cfg = await (await fetch(`${base}/api/config`)).json();
+    assert.deepEqual(cfg.walletConnect, { projectId: '', relayUrl: CFG.walletConnect.relayUrl, verify: [] });
+    assert.deepEqual(cfg.chains.solana.botKeys, [BOT.publicKey.toBase58()]);
+  });
+  const g = fakes();
+  const server = makeServer(CFG, { chains: { solana: g.adapter }, store: g.db.store, inviteHashes: HASH, log: () => {},
+    walletConnect: { projectId: 'a'.repeat(32), relayUrl: 'wss://relay.walletconnect.org', verify: ['https://verify.walletconnect.org'] },
+    start: async () => ({ code: 0 }), status: async () => ({ out: '' }) });
+  await serve({ server }, async ({ base }) => {
+    const cfg = await (await fetch(`${base}/api/config`)).json();
+    assert.deepEqual(cfg.walletConnect.verify, ['https://verify.walletconnect.org']);
+  });
+});

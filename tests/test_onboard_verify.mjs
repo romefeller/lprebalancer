@@ -100,3 +100,30 @@ test('the command: a pasted transaction at HEAD, OK; a tampered one, refused', a
     assert.match(out.join('\n'), /REFUSED[\s\S]*do not sign/);
   } finally { console.log = log; }
 });
+
+test('the command: the chain is read for a Solana vault, never for an EVM one; what it needs, it asks for', async () => {
+  const log = console.log, out = [];
+  console.log = (x) => out.push(String(x));
+  const git = (args) => read(args[1].split(':')[1]);
+  try {
+    const paste = JSON.stringify({ chain: 'solana', tx: approveTx(0), expect });
+    let read0 = 0;
+    const wrongOwner = { getAccountInfo: async () => { read0++; return null; }, getMultipleAccountsInfo: async () => [] };
+    assert.equal(await main(['--commit', 'abcdef1', '--paste', paste], { git, connection: wrongOwner }), 1, 'the vault is not on chain: a problem');
+    assert.equal(read0, 1);
+    assert.match(out.join('\n'), /CHAIN: the settings account .* does not exist/);
+    const never = { getAccountInfo: async () => { throw new Error('read'); } };
+    assert.equal(await main(['--commit', 'abcdef1', '--rpc', 'none', '--paste', paste], { git, connection: never }), 0, '--rpc none reads nothing');
+    const evm = JSON.stringify({ chain: 'polygon', tx: { to: ONBOARD.chains.polygon.botKeys[0], data: '0x', value: '0x1' },
+      expect: { kind: 'payment', owner: '0x70997970C51812dc3A010C7d01b50e0d17dc79C8', lamports: '1' } });
+    assert.equal(await main(['--commit', 'abcdef1', '--paste', evm], { git, connection: never }), 0, 'a Safe: no Solana read');
+  } finally { console.log = log; }
+  await assert.rejects(main(['--paste', '{}'], { git }), /^Error: --commit <the git commit whose rules you trust>$/);
+  for (const missing of ['from', 'invite', 'name', 'owner', 'action']) {
+    const f = { from: 'https://x.test/bot', invite: 'i', name: 'n', owner: 'o', action: 'approve' };
+    delete f[missing];
+    await assert.rejects(main(['--commit', 'abcdef1', ...Object.entries(f).flat().map((v, i) => (i % 2 ? v : `--${v}`))], { git }), new RegExp(`--${missing} is needed`));
+  }
+  assert.equal(PINS.polygon.tokens.POL.address, null, 'the native coin has no token address');
+  assert.equal(PINS.polygon.tokens.WPOL.address, POLYGON.WPOL);
+});
