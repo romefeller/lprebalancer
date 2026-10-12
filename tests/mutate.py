@@ -217,6 +217,7 @@ TARGETS = {
                               NODE_TESTS('test_decode_sol.mjs')),
     'onboard_sol_owner': ('onboard/solana.mjs', ['ownerTxs', 'context', 'depositVerdict', 'checkDeposit', 'broadcast', 'confirm', 'status'],
                           NODE_TESTS('test_onboard_sol.mjs', 'test_onboard.mjs', 'test_vault_add_venue.mjs')),
+    'onboard_polygon_env': ('onboard/polygon.mjs', ['polygonEnv'], NODE_TESTS('test_onboard.mjs')),
     'onboard_server_page': ('onboard/server.mjs', ['walletConnectOf', 'csp', 'sender', 'keysMatch'], NODE_TESTS('test_onboard.mjs')),
     'onboard_store_page': ('onboard/store.py', ['started', 'cap_usd', 'usd_of', 'cap', 'deposited', 'exit_request', 'exits', 'feed_from_file',
                                                 'feed_kind', 'feed'], PY_TESTS('test_onboard_store')),

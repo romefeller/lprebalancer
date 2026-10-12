@@ -1234,7 +1234,14 @@ test('the CSP: own scripts only; the relay and verify origins only with a projec
   assert.equal(walletConnectOf(cfg, { WCID: 'b'.repeat(32) }).projectId, 'b'.repeat(32), 'the environment wins');
   assert.equal(walletConnectOf({ walletConnect: { ...cfg.walletConnect, projectId: 'c'.repeat(32) } }, {}).projectId, 'c'.repeat(32));
   for (const bad of ['xyz', 'A'.repeat(32), 'a'.repeat(31)]) assert.throws(() => walletConnectOf(cfg, { WCID: bad }), /32 hex/);
-  assert.equal(CFG.walletConnect.projectId, '', 'no project id in git: the owner gives it');
+  assert.match(CFG.walletConnect.projectId, /^[0-9a-f]{32}$/, 'the owner\'s Reown project (public config)');
+  const { polygonEnv } = await import('../onboard/polygon.mjs');
+  assert.deepEqual(polygonEnv({ LPBOT_RPC: 'https://solana.example', LPBOT_POLYGON_RPC: 'https://polygon.example' }),
+    { LPBOT_RPC: '', LPBOT_POLYGON_RPC: 'https://polygon.example' }, 'the Solana endpoint never serves Polygon');
+  assert.deepEqual(polygonEnv({ LPBOT_RPC: 'http://127.0.0.1:8545' }), { LPBOT_RPC: 'http://127.0.0.1:8545' }, 'a local fork stays the endpoint');
+  assert.deepEqual(polygonEnv({}), { LPBOT_RPC: '' });
+  const P = await import('../chains/evm/polygon.mjs');
+  assert.deepEqual(P.endpoints(polygonEnv({ LPBOT_RPC: 'https://solana.example', LPBOT_POLYGON_RPC: 'https://polygon.example' }))[0], 'https://polygon.example');
   // the pinned keys: the server opens a chain only with the key files git pins
   assert.equal(keysMatch({ botKeys: ['A', 'B'] }, { public: ['A', 'B'] }), true);
   assert.equal(keysMatch({ botKeys: ['0xAb'] }, { public: ['0xab'] }), true, 'EVM: any letter case');
@@ -1374,7 +1381,7 @@ test('the page and its config: HTML as HTML, the verify origins only with a proj
     assert.match(page.headers.get('content-type'), /text\/html/);
     assert.match(await page.text(), /^<!doctype html>/, 'the page, not a JSON string of it');
     const cfg = await (await fetch(`${base}/api/config`)).json();
-    assert.deepEqual(cfg.walletConnect, { projectId: '', relayUrl: CFG.walletConnect.relayUrl, verify: [] });
+    assert.deepEqual(cfg.walletConnect, { projectId: CFG.walletConnect.projectId, relayUrl: CFG.walletConnect.relayUrl, verify: CFG.walletConnect.verify });
     assert.deepEqual(cfg.chains.solana.botKeys, [BOT.publicKey.toBase58()]);
   });
   const g = fakes();

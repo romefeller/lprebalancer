@@ -77,7 +77,9 @@ function human(e) {
   if (e?.code === 4001 || e?.code === 5000 || /reject|denied|declin|cancel|user (closed|abort)/i.test(m)) return 'You declined in your wallet. Nothing was sent.';
   if (/Failed to fetch|NetworkError|Load failed/i.test(m)) return 'The server does not answer. Check your connection and try again.';
   if (/blockhash not found|block height exceeded|expired/i.test(m)) return 'The network moved on before it landed. Try again: a fresh transaction is built.';
-  return m.replace(/^Error:\s*/, '').replace(/\s+at\s.*$/s, '').slice(0, 400);
+  // a signer's error carries its decoded program error, then log lines: the first line says it
+  const first = m.replace(/^Error:\s*/, '').replace(/\s+at\s.*$/s, '').split('\n').find(l => l.trim()) ?? m;
+  return first.replace(/\s+/g, ' ').trim().slice(0, 300);
 }
 
 class Refusal extends Error {}

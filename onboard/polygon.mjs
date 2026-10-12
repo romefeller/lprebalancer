@@ -6,6 +6,7 @@
 import { concat, encodeAbiParameters, encodeFunctionData, getAddress, parseEventLogs, toFunctionSelector, toHex } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 import { readKey } from '../chains/evm/keyfile.mjs';
+import { isLoopback } from '../chains/evm/rpc.mjs';
 import { clients, connect, poolOf } from '../chains/evm/vault/cli.mjs';
 import { SAFE_ABI, SENTINEL, readState } from '../chains/evm/vault/safe.mjs';
 import { ROLES_ABI, roleKey } from '../chains/evm/vault/roles.mjs';
@@ -24,12 +25,20 @@ export function resolve(c, U = POLYGON) {
   return { ...c, U, tokens, pool: getAddress(c.pool), operatorWallet: getAddress(c.operatorWallet) };
 }
 
+// The environment the Polygon clients read: the server's LPBOT_RPC is its
+// Solana endpoint, so it is left out (LPBOT_POLYGON_RPC, then the public
+// endpoints, chains/evm/polygon.mjs); a loopback one (an anvil fork in the
+// tests) stays the only endpoint. Pure.
+export function polygonEnv(env) {
+  return env.LPBOT_RPC && isLoopback(env.LPBOT_RPC) ? env : { ...env, LPBOT_RPC: '' };
+}
+
 // The bot's key and its clients. `deps` (tests) replaces the clients.
 export function botKeys(c, env = process.env, deps = null) {
   if (deps) return { ...deps, payee: deps.account.address, public: [deps.account.address], secretEnv: c.keyEnv, policyKeyEnv: c.keyEnv };
   const path = env[c.keyEnv];
   if (!path) throw new Error(`${c.keyEnv} must name the bot's EVM key file`);
-  const k = clients({ ...env, WALLET_SECRET_PATH: path, LPBOT_CHAIN: c.U.CHAIN });
+  const k = clients({ ...polygonEnv(env), WALLET_SECRET_PATH: path, LPBOT_CHAIN: c.U.CHAIN });
   const address = privateKeyToAccount(readKey(path)).address;
   return { ...k, payee: address, public: [address], secretEnv: c.keyEnv, policyKeyEnv: c.keyEnv };
 }

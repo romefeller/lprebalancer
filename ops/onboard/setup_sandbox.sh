@@ -133,10 +133,10 @@ SQL
 runuser -u postgres -- psql -d rebalancer -v ON_ERROR_STOP=1 -q \
   -c 'alter default privileges for role ubuntu in schema rebalancer grant select on tables to "lp-onboard"'
 
-say "3. $ENVF (LPBOT_RPC, LPBOT_ONBOARD_INVITE_SHA256, LPBOT_ONBOARD_WC_PROJECT_ID)"
+say "3. $ENVF (LPBOT_RPC, LPBOT_POLYGON_RPC, LPBOT_ONBOARD_INVITE_SHA256, LPBOT_ONBOARD_WC_PROJECT_ID)"
 install -d -m 0750 -o root -g root /etc/lp-onboard
 (umask 077
- { grep -E '^LPBOT_RPC=' "$KEYS/env" || true; grep -E '^LPBOT_ONBOARD_(INVITE_SHA256|WC_PROJECT_ID)=' "$KEYS/onboard.env" || true; } > "$ENVF.new")
+ { grep -E '^LPBOT_(POLYGON_)?RPC=' "$KEYS/env" || true; grep -E '^LPBOT_ONBOARD_(INVITE_SHA256|WC_PROJECT_ID)=' "$KEYS/onboard.env" || true; } > "$ENVF.new")
 chmod 600 "$ENVF.new"; mv "$ENVF.new" "$ENVF"
 grep -q '^LPBOT_ONBOARD_INVITE_SHA256=' "$ENVF" || say "warning: no invite hashes: the page refuses every request"
 grep -q '^LPBOT_RPC=' "$ENVF" || say "warning: no LPBOT_RPC: the page reads Solana from the public endpoint"

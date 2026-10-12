@@ -75,7 +75,7 @@
   "capHeadroom": 3,
   "walletConnect": {
     "projectIdEnv": "LPBOT_ONBOARD_WC_PROJECT_ID",
-    "projectId": "",
+    "projectId": "2666a87c16dc35ef9c6df6d790d46e5c",
     "relayUrl": "wss://relay.walletconnect.org",
     "verify": ["https://verify.walletconnect.org", "https://verify.walletconnect.com"]
   },
