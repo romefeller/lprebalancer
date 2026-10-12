@@ -12,6 +12,19 @@ import { venue as venueOf } from '../chains/solana/vault/venues.mjs';
 const require = createRequire(import.meta.url);
 const { Keypair } = require('@solana/web3.js');
 
+// Folders that hold a test's throwaway keys, removed when the test process
+// exits. 2026-10-12: about 600 key files of fork tests run outside run.sh
+// (its TMPDIR is removed; os.tmpdir() alone is not) were left in /tmp.
+const KEY_DIRS = new Set();
+process.on('exit', () => { for (const d of KEY_DIRS) fs.rmSync(d, { recursive: true, force: true }); });
+
+// A new private folder for throwaway keys, removed at process exit.
+export function keyDir(prefix = 'vault-keys-') {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+  KEY_DIRS.add(dir);
+  return dir;
+}
+
 export const DLMM_PROGRAM = 'LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo';
 export const POOL = 'BGm1tav58oGcsQJehL9WXBFXF7D27vZsKefj4xJKD5Y';
 
@@ -23,7 +36,7 @@ export async function connectedVault({ venues = ['meteora-dlmm'], pools = [POOL]
   await fork.syncClock();
   await fork.clone([sq.programConfigPda()]);
   await fork.clone([sq.decodeProgramConfig(fork.get(sq.programConfigPda()).data).treasury]);
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vault-cli-'));
+  const dir = keyDir('vault-cli-');
   const payer = Keypair.generate(), policyKey = Keypair.generate(), owner = fork.wallet(1), profit = Keypair.generate();
   fork.fund(payer.publicKey, 1);
   fs.writeFileSync(path.join(dir, 'payer.json'), JSON.stringify([...payer.secretKey]));
