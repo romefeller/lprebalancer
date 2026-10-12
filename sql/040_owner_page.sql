@@ -1,4 +1,4 @@
--- 039: the owner's page at romefeller.app/bot (2026-10-12: Tangem, Ledger and
+-- 040: the owner's page at romefeller.app/bot (2026-10-12: Tangem, Ledger and
 -- Phantom; "the same stats as the Telegram message"; owner exit and revoke).
 --
 --   feed_latest      the newest feed row of each kind a vault profile wrote
