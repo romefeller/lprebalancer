@@ -38,7 +38,7 @@ function solSign(key, text) {
 
 const body = (over = {}) => ({ chain: 'solana', token: 'SOL', amount: '1.5', name: 'my-pool',
   owner: OWNER.publicKey.toBase58(), profitWallet: PROFIT.publicKey.toBase58(), ...over });
-const OWNER = Keypair.generate(), PROFIT = Keypair.generate(), BOT = Keypair.generate();
+const OWNER = Keypair.generate(), PROFIT = Keypair.generate(), BOT = Keypair.generate(), OWNER2 = Keypair.generate();
 
 // --- fields -----------------------------------------------------------------------
 
@@ -593,8 +593,8 @@ test('server: a bad payment spends nothing; a payment serves one request only', 
     assert.equal(f.db.rows[0].state, 'signed', 'still waiting for a good payment');
     f.payments.set('GOOD', { state: 'ok' });
     assert.equal((await post('pay', { invite: INVITE, name: 'pool-a', payment: 'GOOD' })).status, 200);
-    // replay: the same payment for another request
-    await signedUp(post, { name: 'pool-b' });
+    // replay: the same payment for another wallet's request
+    await signedUp(post, { name: 'pool-b', owner: OWNER2.publicKey.toBase58() }, OWNER2);
     const replay = await post('pay', { invite: INVITE, name: 'pool-b', payment: 'GOOD' });
     assert.equal(replay.status, 400);
     assert.match(replay.json.error, /already used/);
@@ -673,7 +673,7 @@ test('server: a wallet that cannot pay holds no name; a short bot key stops the 
 });
 
 test('server: a replayed, expired, tampered or foreign signature records nothing', async () => {
-  const f = fakes();
+  const f = fakes({}, { ...CFG, limits: { ...CFG.limits, vaultsPerOwner: 5 } });      // one owner, many tries
   await serve(f, async ({ post }) => {
     const a = await signedUp(post, { name: 'pool-a' });
     const again = await post('sign', { invite: INVITE, nonce: a.it.nonce, message: a.it.message, signature: a.sig });
@@ -726,8 +726,90 @@ test('server: names and vaults per owner', async () => {
   await serve(fakes({ owned: CFG.limits.vaultsPerOwner }), async ({ post }) => {
     const r = await post('intent', { invite: INVITE, ...body() });
     assert.equal(r.status, 403);
-    assert.match(r.json.error, /already owns/);
+    assert.match(r.json.error, /has its vault already: put more capital in with Add capital/);
   });
+});
+
+// --- one pool per wallet: more capital goes into the vault it has -------------------------
+
+test('one pool per wallet: the config allows one vault, and a wallet with one cannot sign for another', async () => {
+  assert.equal(CFG.limits.vaultsPerOwner, 1);
+  const f = fakes({ deposited: true });
+  await serve(f, async ({ post }) => {
+    await signedUp(post);
+    for (const name of ['other-pool', 'my-pool']) {
+      const r = await post('intent', { invite: INVITE, ...body({ name }) });
+      assert.equal(r.status, name === 'my-pool' ? 409 : 403, name);
+    }
+    f.payments.set('P', { state: 'ok' });
+    assert.equal((await post('pay', { invite: INVITE, name: 'my-pool', payment: 'P' })).status, 200);
+    assert.equal((await post('intent', { invite: INVITE, ...body({ name: 'other-pool' }) })).status, 403, 'registered: still its one vault');
+    const other = await post('intent', { invite: INVITE, ...body({ name: 'other-pool', owner: OWNER2.publicKey.toBase58() }) });
+    assert.equal(other.status, 200, 'another wallet makes its own');
+    f.db.rows[0].state = 'failed';
+    assert.equal((await post('intent', { invite: INVITE, ...body({ name: 'other-pool' }) })).status, 200, 'a failed request holds no vault');
+  });
+});
+
+test('add capital: any amount of a chain token into the vault the request made, never elsewhere', async () => {
+  const f = fakes({ deposited: true });
+  await serve(f, async ({ post }) => {
+    await signedUp(post);
+    const early = await post('tx', { invite: INVITE, name: 'my-pool', action: 'add', token: 'USDC', amount: '5' });
+    assert.equal(early.status, 404, 'no vault yet: nothing to add to');
+    f.payments.set('P', { state: 'ok' });
+    await post('pay', { invite: INVITE, name: 'my-pool', payment: 'P' });
+    for (const [token, amount, want] of [['USDC', '5', '5'], ['USDC', '0,5', '0.5'], ['SOL', '0.000000001', '0.000000001'],
+      ['SOL', '50', '50'], ['USDC', '10000', '10000']]) {
+      const r = await post('tx', { invite: INVITE, name: 'my-pool', action: 'add', token, amount, owner: OWNER2.publicKey.toBase58(),
+        vault: 'ELSEWHERE' });
+      assert.equal(r.status, 200, `${amount} ${token}: ${JSON.stringify(r.json)}`);
+      assert.deepEqual(JSON.parse(r.json.transactions[0]), { owner: OWNER.publicKey.toBase58(), vault: 'VAULT', token, amount: want },
+        'the owner and vault of the request, whatever the body says');
+    }
+    for (const [token, amount] of [['USDC', '0'], ['USDC', '-1'], ['USDC', '10000.000001'], ['SOL', '50.1'], ['USDC', '1e3'],
+      ['USDC', '0.0000001'], ['USDC', ''], ['BONK', '5'], ['__proto__', '5'], ['toString', '5'], [undefined, '5']]) {
+      const r = await post('tx', { invite: INVITE, name: 'my-pool', action: 'add', token, amount });
+      assert.equal(r.status, 400, `${amount} ${token}`);
+    }
+  });
+});
+
+test('add capital: Max without the gas or the minimum, and every Max is an amount add takes', () => {
+  const add = { add: true };
+  assert.deepEqual(I.maxAmount(SOL, 'SOL', { SOL: 21_000_000n }, add), { amount: '0.02' }, 'no gas, no minimum: all but the fees');
+  assert.deepEqual(I.maxAmount(SOL, 'SOL', { SOL: SOL_FEES }, add), { short: 'not enough: you have 0.001 SOL, the minimum is 0.001000001 SOL with your fees' });
+  assert.deepEqual(I.maxAmount(SOL, 'USDC', { USDC: 1_000_000n, SOL: USDC_FEES }, add), { amount: '1' });
+  assert.deepEqual(I.maxAmount(SOL, 'USDC', { USDC: 1_000_000n, SOL: USDC_FEES - 1n }, add),
+    { short: 'not enough SOL for your fees: you have 0.002999999 SOL, you need 0.003 SOL' });
+  assert.deepEqual(I.maxAmount(SOL, 'USDC', { USDC: 0n, SOL: GAS }, add), { short: 'not enough: you have 0 USDC, the minimum is 0.000001 USDC' });
+  for (const [c, token] of [[SOL, 'SOL'], [SOL, 'USDC'], [POLY, 'POL'], [POLY, 'WPOL'], [POLY, 'USDT0']]) {
+    const t = c.tokens[token], [native, n] = I.nativeOf(c);
+    const scale = 10n ** BigInt(t.decimals), nscale = 10n ** BigInt(n.decimals);
+    fc.assert(fc.property(fc.bigInt({ min: 0n, max: 200_000n * scale }), fc.bigInt({ min: 0n, max: 10n * nscale }), (have, gasCoin) => {
+      const held = t.native ? { [token]: have } : { [token]: have, [native]: gasCoin };
+      const m = I.maxAmount(c, token, held, add);
+      const fees = I.toRaw(t.fees, n.decimals), room = t.native ? have - fees : have;
+      if (m.short !== undefined) {
+        assert.ok(room <= 0n || (!t.native && gasCoin < fees), m.short);
+        return;
+      }
+      assert.equal(I.addAmount(m.amount, t), m.amount, 'add takes it as it is');
+      const raw = I.toRaw(m.amount, t.decimals);
+      assert.ok(raw > 0n && raw <= room && (raw === I.toRaw(t.max, t.decimals) || raw === room));
+    }), { numRuns: 300 });
+  }
+});
+
+test('add capital: an amount is positive, at most the max, exact to the unit', () => {
+  for (const [c, token] of [[SOL, 'SOL'], [SOL, 'USDC'], [POLY, 'WPOL']]) {
+    const t = c.tokens[token], max = I.toRaw(t.max, t.decimals);
+    fc.assert(fc.property(fc.bigInt({ min: -10n, max: max + 10n }), (raw) => {
+      const s = raw < 0n ? `-${I.fromRaw(-raw, t.decimals)}` : I.fromRaw(raw, t.decimals);
+      if (raw > 0n && raw <= max) assert.equal(I.addAmount(s, t), s);
+      else assert.throws(() => I.addAmount(s, t), I.Invalid);
+    }), { numRuns: 300 });
+  }
 });
 
 test('server: start needs a deposit and an active bot; a failed start says so', async () => {
@@ -850,6 +932,10 @@ test('server: Max reads the owner\'s balances behind the invite; a bad chain, ad
     f.adapter.holdings = async () => ({ SOL: 100_000_000n });
     const short = await post('max', { invite: INVITE, chain: 'solana', owner, token: 'SOL' });
     assert.deepEqual([short.status, short.json], [200, { token: 'SOL', short: 'not enough: you have 0.1 SOL, the minimum is 0.166 SOL with your fees' }]);
+    const added = await post('max', { invite: INVITE, chain: 'solana', owner, token: 'SOL', add: true });
+    assert.deepEqual(added.json, { token: 'SOL', amount: '0.099' }, 'Add capital: no gas, no minimum');
+    const truthy = await post('max', { invite: INVITE, chain: 'solana', owner, token: 'SOL', add: 'yes' });
+    assert.match(truthy.json.short, /minimum is 0.166/, 'only add: true means Add capital');
     assert.deepEqual(f.calls.holdings, [[owner, 'SOL'], [owner, 'USDC']]);
     const pda = PublicKey.findProgramAddressSync([Buffer.from('x')], BOT.publicKey)[0].toBase58();
     for (const [over, status, re] of [[{ invite: 'wrong-invite-code' }, 403, /invite/], [{ invite: undefined }, 403, /invite/],

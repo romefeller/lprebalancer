@@ -26,3 +26,4 @@ pre { white-space: pre-wrap; word-break: break-all; font: 13px/1.4 ui-monospace,
 .ok { color: var(--ok); }
 .vault { border-top: 1px solid var(--line); padding-top: 10px; margin-top: 10px; }
 .vault:first-child { border-top: 0; margin-top: 0; padding-top: 0; }
+.add { margin-top: 10px; }

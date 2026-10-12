@@ -140,7 +140,7 @@ TARGETS = {
     # Self-serve onboarding (onboard/, 2026-10-11): what an owner signs, the gas payment it
     # must make before the bot spends anything, the server's gates, the rows it writes.
     'onboard_intent': ('onboard/intent.mjs', ['decimal', 'address', 'amount', 'toRaw', 'fromRaw', 'name', 'nativeOf', 'gasTotal', 'minimum',
-                                              'maxAmount', 'feeTerms', 'fields', 'verify', 'decodeSignature', 'inviteOk'], NODE_TESTS('test_onboard.mjs')),
+                                              'maxAmount', 'addAmount', 'feeTerms', 'fields', 'verify', 'decodeSignature', 'inviteOk'], NODE_TESTS('test_onboard.mjs')),
     'onboard_sol_payment': ('onboard/solana.mjs', ['vaultVenues', 'paymentVerdict', 'checkPayment', 'gas', 'paymentTxs', 'holdings'],
                             NODE_TESTS('test_onboard.mjs', 'test_onboard_fork.mjs')),
     'onboard_evm_payment': ('onboard/polygon.mjs', ['paymentVerdict', 'checkPayment', 'gas', 'paymentTxs', 'holdings'],

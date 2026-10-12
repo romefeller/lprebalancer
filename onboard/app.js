@@ -227,6 +227,11 @@
       if (e.status !== 409 || /revoked/.test(e.message)) throw e;
     }
     await signAndSend({ name, action: 'deposit' });
+    await startWhenFunded(name);
+  }
+
+  // Start the bot once the money sent to the vault lands.
+  async function startWhenFunded(name) {
     step('Deposit sent. Starting the bot when it lands…');
     for (let i = 0; i < 40; i++) {
       try {
@@ -245,7 +250,9 @@
   async function listVaults() {
     if (!wallet) return;
     const { vaults } = await post('vaults', { chain: wallet.chain, owner: wallet.address });
+    // one pool per wallet: a wallet with a vault adds capital to it, never makes another
     $('mine').hidden = vaults.length === 0;
+    $('form').hidden = vaults.length > 0;
     $('vaults').replaceChildren(...vaults.map(card));
   }
 
@@ -282,6 +289,7 @@
       box.append(el('button', { text: 'Deposit', onclick: () => act('Deposit', () => deposit(v.name)) }));
       box.append(el('button', { text: 'Start', onclick: () => act('Start', () => post('start', { name: v.name })) }));
     }
+    if (v.state === 'registered' || v.state === 'started') box.append(addCapital(v, act));
     const token = el('select', {}, ...Object.keys(v.balances || {}).map(s => el('option', { value: s, text: s })));
     const amount = el('input', { placeholder: 'amount or all', inputmode: 'decimal', value: 'all' });
     box.append(el('div', { class: 'row' }, amount, token));
@@ -300,6 +308,31 @@
       } }));
     }
     return box;
+  }
+
+  // Add capital: more money into the vault this wallet has, any amount, at any
+  // time. The owner's wallet signs the transfer; the bot puts it in the pool.
+  function addCapital(v, act) {
+    const tokens = cfg.chains[v.chain].tokens;
+    const amount = el('input', { placeholder: 'amount', inputmode: 'decimal', autocomplete: 'off' });
+    const token = el('select', {}, ...Object.keys(tokens).map(s => el('option', { value: s, text: s })));
+    const max = el('button', { type: 'button', text: 'Max', onclick: async () => {
+      say('');
+      const t = token.value;
+      max.disabled = true;
+      try {
+        const m = await post('max', { chain: v.chain, owner: wallet.address, token: t, add: true });
+        if (token.value === t) { if (m.amount) amount.value = m.amount; else say(m.short); }
+      } catch (e) { say(e.message ?? e); }
+      max.disabled = false;
+    } });
+    return el('div', { class: 'add' }, el('label', { text: 'Add capital to this vault' }),
+      el('div', { class: 'row' }, amount, max, token),
+      el('button', { class: 'primary', text: 'Add capital', onclick: () => act('Add capital', async () => {
+        await signAndSend({ name: v.name, action: 'add', token: token.value, amount: amount.value.trim() });
+        if (v.state === 'started') step('The bot puts it in the pool at its next check.', 'ok');
+        else await startWhenFunded(v.name);
+      }) }));
   }
 
   // --- start ------------------------------------------------------------------------

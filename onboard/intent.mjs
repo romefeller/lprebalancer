@@ -68,6 +68,12 @@ export function amount(s, token, extra = 0n) {
   return fromRaw(raw, token.decimals);
 }
 
+// More capital for a vault that exists: a positive amount of `token` up to
+// its max. No minimum: the gas was paid when the vault was made. Pure.
+export function addAmount(s, token) {
+  return amount(s, { ...token, min: '0' });
+}
+
 // A decimal string to integer units, and back. Pure, exact.
 export function toRaw(s, decimals) {
   const [i, f = ''] = String(s).split('.');
@@ -114,20 +120,21 @@ export function minimum(c, token) {
 // holds: `held` maps the token's and the native coin's symbols to raw units.
 // The native coin keeps back the owner's fees (tokens.fees); a token goes in
 // whole, and the native coin must hold the bot's gas and the fees beside it.
+// `add`: more capital for a vault that exists, so no gas and no minimum.
 // Never above the token's max. {amount} (a decimal with a point) or {short}
 // (why there is none). Pure.
-export function maxAmount(c, token, held) {
+export function maxAmount(c, token, held, { add = false } = {}) {
   const t = c.tokens[token], [native, n] = nativeOf(c);
-  const fees = toRaw(t.fees, n.decimals), have = held[token];
-  const min = toRaw(minimum(c, token), t.decimals);
+  const fees = toRaw(t.fees, n.decimals), have = held[token], gas = add ? 0n : gasTotal(c);
+  const min = add ? 1n : toRaw(minimum(c, token), t.decimals);
   const room = t.native ? have - fees : have;
   if (room < min) {
     const need = t.native ? `${fromRaw(min + fees, t.decimals)} ${token} with your fees` : `${fromRaw(min, t.decimals)} ${token}`;
     return { short: `not enough: you have ${fromRaw(have, t.decimals)} ${token}, the minimum is ${need}` };
   }
-  if (!t.native && held[native] < gasTotal(c) + fees) {
-    return { short: `not enough ${native} for the bot's gas and your fees: you have ${fromRaw(held[native], n.decimals)} ${native}, `
-      + `you need ${fromRaw(gasTotal(c) + fees, n.decimals)} ${native}` };
+  if (!t.native && held[native] < gas + fees) {
+    return { short: `not enough ${native} for ${add ? 'your fees' : 'the bot\'s gas and your fees'}: you have ${fromRaw(held[native], n.decimals)} ${native}, `
+      + `you need ${fromRaw(gas + fees, n.decimals)} ${native}` };
   }
   const max = toRaw(t.max, t.decimals);
   return { amount: fromRaw(room < max ? room : max, t.decimals) };

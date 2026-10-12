@@ -33,7 +33,8 @@
     "intentTtlS: how long a message to sign is good for; paymentSlackS: how much older than the",
     "signed request its gas payment's block time may be (block clocks drift).",
     "limits: {max, windowS} per client address unless said; vaultsPerOwner counts every vault",
-    "the owner's wallet owns. service.start runs with {name} replaced by a checked profile name."
+    "the owner's wallet owns or is creating: 1, one pool per wallet; more capital goes into that",
+    "vault (Add capital). service.start runs with {name} replaced by a checked profile name."
   ],
   "listen": { "host": "127.0.0.1", "port": 8090 },
   "base": "/bot",
@@ -47,7 +48,7 @@
     "badInvites": { "max": 5, "windowS": 3600 },
     "creates": { "max": 3, "windowS": 86400 },
     "createsTotal": { "max": 10, "windowS": 86400 },
-    "vaultsPerOwner": 3,
+    "vaultsPerOwner": 1,
     "openIntents": 500
   },
   "fee": { "bps": 1000 },

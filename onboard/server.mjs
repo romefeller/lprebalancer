@@ -197,8 +197,9 @@ export function makeServer(cfg, deps) {
   async function checkRoom(f) {
     const wallet = f.name + I.WALLET_SUFFIX;
     if ((await deps.store('taken', { name: f.name, wallet_id: wallet })).taken) throw new HttpError(409, `the name ${f.name} is taken`);
+    // one pool per wallet: more capital goes into the vault it has (Add capital)
     if ((await deps.store('owned', { owner: f.owner })).count >= L.vaultsPerOwner) {
-      throw new HttpError(403, `this wallet already owns ${L.vaultsPerOwner} vaults, the most allowed`);
+      throw new HttpError(403, 'this wallet has its vault already: put more capital in with Add capital under Your vaults');
     }
   }
 
@@ -324,7 +325,8 @@ export function makeServer(cfg, deps) {
     return r;
   }
 
-  // POST /api/tx: an owner's transaction, unsigned. The deposit is the signed amount.
+  // POST /api/tx: an owner's transaction, unsigned. The deposit is the signed
+  // amount; 'add' is more capital, any amount, into a vault that is set up.
   // A chain whose transactions expire (Solana: a blockhash lives about a minute)
   // answers one at a time, `index` of `count`, each built when it is asked for.
   async function tx(ip, body) {
@@ -334,11 +336,16 @@ export function makeServer(cfg, deps) {
     const action = I.text(body.action);
     let answer;
     if (action === 'deposit') answer = await adapter.deposit({ owner: r.owner, vault: r.vault, token: r.token, amount: r.deposit });
+    else if (action === 'add') {
+      const token = I.text(body.token), t = I.own(cfg.chains[r.chain].tokens, token);
+      if (!t) throw new HttpError(400, `token: one of ${Object.keys(cfg.chains[r.chain].tokens).join(', ')}`);
+      answer = await adapter.deposit({ owner: r.owner, vault: r.vault, token, amount: I.addAmount(body.amount, t) });
+    }
     else if (action === 'withdraw' || action === 'revoke' || action === 'approve') {
       const amount = I.decimal(body.amount);
       if (action === 'withdraw' && amount !== 'all' && !/^\d{1,12}(\.\d{1,18})?$/.test(amount)) throw new HttpError(400, 'amount: a number or all');
       answer = await adapter.owner(r.vault_row, { action, owner: r.owner, token: I.text(body.token), amount });
-    } else throw new HttpError(400, 'action: deposit, withdraw, revoke or approve');
+    } else throw new HttpError(400, 'action: deposit, add, withdraw, revoke or approve');
     const count = answer.transactions.length;
     if (!adapter.expires) return { ...answer, count };
     const index = body.index === undefined ? 0 : body.index;
@@ -384,7 +391,8 @@ export function makeServer(cfg, deps) {
   }
 
   // POST /api/max: the most the owner's wallet can put in with `token`
-  // (intent.mjs maxAmount), from its balances on chain. Reads only.
+  // (intent.mjs maxAmount), from its balances on chain; `add: true` for more
+  // capital into its vault (no gas, no minimum). Reads only.
   async function max(ip, body) {
     gate(ip, body);
     const chain = I.text(body.chain);
@@ -392,7 +400,7 @@ export function makeServer(cfg, deps) {
     const owner = I.address(chain, body.owner, 'owner');
     const token = I.text(body.token), c = cfg.chains[chain];
     if (!I.own(c.tokens, token)) throw new HttpError(400, `token: one of ${Object.keys(c.tokens).join(', ')}`);
-    return { token, ...I.maxAmount(c, token, await adapter.holdings(owner, token)) };
+    return { token, ...I.maxAmount(c, token, await adapter.holdings(owner, token), { add: body.add === true }) };
   }
 
   function publicConfig() {
