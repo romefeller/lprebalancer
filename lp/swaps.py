@@ -29,14 +29,22 @@ def idle_deploys_left(times, now, per_day=IDLE_DEPLOYS_PER_DAY):
     return max(0, per_day - sum(1 for t in (times or []) if now - t < tuning.DAY_S))
 
 
+def can_add():
+    """Whether idle cash goes into the open position by the signer's
+    `increase`. Not from a vault: its rules allow no add (an add takes any
+    position id, a stranger's too), so a vault's idle cash, an owner's Add
+    capital too, goes in by a re-centre."""
+    return config.DEX in INCREASE_DEXES and not config.VAULT
+
+
 def adds_open_leftover():
     """Whether this profile adds an open's leftover to the position (owner,
     2026-10-08: "almost 99% in LP, idle money is bad"; the same strategy on
-    every pool but the DJT swing test). Only where the venue's signer has
-    `increase`: there the leftover goes in as a swap of the leftover alone
+    every pool but the DJT swing test). Only where the profile can add
+    (can_add): there the leftover goes in as a swap of the leftover alone
     and one add, not a re-centre. The swing (LPBOT_SWING_POOLS) keeps the
     leftover excused, as before."""
-    return config.DEX in INCREASE_DEXES and not config.SWING_POOLS
+    return can_add() and not config.SWING_POOLS
 
 
 def idle_to_deploy(deployable_usd, equity_usd, seconds_since_open):
@@ -101,7 +109,7 @@ def deploy_idle(state, status, wbal, rv, price):
             db.event('deploy_idle_deferred', f'${idle:.2f} idle: {why}')
         return False
     state['idle_deploys'] = [t for t in (state.get('idle_deploys') or []) if now - t < tuning.DAY_S] + [now]; paths.save(state)
-    if config.DEX in INCREASE_DEXES:
+    if can_add():
         return add_idle(state, status, wbal, idle, price)
     k = rv['choice'] if rv else math.sqrt(status['upperPrice'] / status['lowerPrice'])
     books.notify_book('DEPLOY_IDLE', idle_usd=round(idle, 2), price=price, lower=status['lowerPrice'],

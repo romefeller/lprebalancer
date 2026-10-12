@@ -318,7 +318,7 @@ TARGETS = {
     # the hot pause's fee side on Uniswap v3 venues (2026-10-08)
     'v3_fee_pool': ('venues/uniswap_v3/pools.py', ['v3_fee_state', 'uniswap_v3_fee_state'], PY_TESTS('test_polygon_hot_pause', 'test_hot_pause')),
     # an open's leftover into the position where the venue can add (2026-10-08)
-    'open_leftover': ('lp/swaps.py', ['adds_open_leftover', 'deploy_idle', 'idle_deploys_left'], PY_TESTS('test_deploy_leftover', 'test_deploy_idle', 'test_increase_idle')),
+    'open_leftover': ('lp/swaps.py', ['can_add', 'adds_open_leftover', 'deploy_idle', 'idle_deploys_left'], PY_TESTS('test_deploy_leftover', 'test_deploy_idle', 'test_increase_idle')),
     'v3_fee_loop': ('lp/board.py', ['sample_fee_growth', 'sample_v3_fee_growth'], PY_TESTS('test_polygon_hot_pause', 'test_hot_pause', 'test_venues')),
     'evm_signer': ('venues/aerodrome/signer.mjs', ['guard', 'marketRefusals', 'spendable', 'positionView', 'simulateSequence',
                                             'runSteps', 'planOpen', 'closeCalls', 'checkRecipient', 'isNative',

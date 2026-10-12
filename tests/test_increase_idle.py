@@ -198,6 +198,13 @@ class Routing(Hook):
         out, moves, added = self.go_dex('uniswap-v3-polygon')
         self.assertEqual(out, 'added'); self.assertEqual(moves, [])
 
+    def test_a_vault_recentres_where_a_key_adds(self):
+        # a vault's rules allow no add: its idle cash (an owner's Add capital too) goes in by a re-centre
+        with mock.patch.object(config, 'VAULT', {'kind': 'safe'}):
+            for dex in lp.swaps.INCREASE_DEXES:
+                out, moves, added = self.go_dex(dex)
+                self.assertTrue(out, dex); self.assertEqual(len(moves), 1, dex); self.assertEqual(added, [], dex)
+
     def test_other_venues_keep_the_recentre(self):
         for dex in ('orca', 'meteora-dlmm', 'byreal', 'uniswap-v3-unichain', 'aerodrome-slipstream'):
             out, moves, added = self.go_dex(dex)

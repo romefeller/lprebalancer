@@ -61,6 +61,10 @@ class Leftover(Hook):
                                  ('uniswap-v3-unichain', (), False), ('aerodrome-slipstream', (), False)):
             with mock.patch.object(config, 'DEX', dex), mock.patch.object(config, 'SWING_POOLS', swing):
                 self.assertIs(lp.swaps.adds_open_leftover(), want, (dex, swing))
+        for dex in lp.swaps.INCREASE_DEXES:
+            with mock.patch.object(config, 'DEX', dex), mock.patch.object(config, 'SWING_POOLS', ()), \
+                    mock.patch.object(config, 'VAULT', {'kind': 'squads'}):
+                self.assertIs(lp.swaps.adds_open_leftover(), False, f'{dex} from a vault: no add')
 
     def test_sol_usdc_adds_the_open_leftover(self):
         out, added, moves, st, _ = self.go_dex('raydium-clmm')
