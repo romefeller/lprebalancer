@@ -14,6 +14,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { createRequire } from 'module';
 import { Fork } from './_svm.mjs';
+import { keyDir } from './_vault.mjs';
 import * as sq from '../chains/solana/vault/squads.mjs';
 import { RULES, compile, vaultWsolAccount } from '../chains/solana/vault/policy.mjs';
 import { actingAccount, AWAITS_OWNERS, PolicyMismatch } from '../chains/solana/vault/account.mjs';
@@ -134,7 +135,7 @@ test('a Meteora-only vault adds Raydium: owner approves once, the bot closes on 
     addresses: staticAccounts({ vault, policies: plan.policies, venues: [dlmmVenue], pools: [await dlmmVenue.poolAccounts(connection, DLMM_POOL)] }) });
   for (const ixs of lookup.txs) { const r = await fork.send(ixs, payer); assert.ok(r.ok, r.logs.join('\n')); }
   fork.nextSlot();
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vault-add-venue-'));
+  const dir = keyDir('vault-add-venue-');                 // removed at exit (tests/_vault.mjs)
   const policyPath = path.join(dir, 'policy.json'), payerPath = path.join(dir, 'payer.json');
   fs.writeFileSync(policyPath, JSON.stringify([...policyKey.secretKey]));
   fs.writeFileSync(payerPath, JSON.stringify([...payer.secretKey]));
