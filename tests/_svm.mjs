@@ -15,7 +15,7 @@ import path from 'node:path';
 
 const require = createRequire(import.meta.url);
 const { LiteSvm, Account } = require('litesvm/dist/internal');
-const { Connection, PublicKey, Transaction, Keypair, AddressLookupTableAccount, VersionedTransaction } = require('@solana/web3.js');
+const { Connection, PublicKey, Transaction, Keypair, AddressLookupTableAccount, VersionedTransaction, SendTransactionError } = require('@solana/web3.js');
 const { AccountLayout, TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID } = require('@solana/spl-token');
 
 const bs58 = require('bs58').default;
@@ -193,7 +193,8 @@ export class Fork {
       sendRawTransaction: async (raw) => {
         const tx = VersionedTransaction.deserialize(raw);
         const r = await fork.sendSigned(tx);
-        if (!r.ok) throw new Error(`fork: transaction failed\n${r.logs.join('\n')}`);
+        // as a node's preflight refusal: a SendTransactionError carrying the logs
+        if (!r.ok) throw new SendTransactionError({ action: 'simulate', signature: '', transactionMessage: 'fork: transaction failed', logs: r.logs });
         return bs58.encode(tx.signatures[0]);
       },
       confirmTransaction: async () => ({ value: { err: null } }),

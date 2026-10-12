@@ -105,7 +105,8 @@ TARGETS = {
     'replay_regime': ('lp/regime.py', ['move_gap_ok', 'moves_left', 'tight_reopen'], PY_TESTS('test_replay', 'test_rebalancer.Proactive', 'test_calm', 'test_edges_0930')),
     'replay_harvest': ('lp/harvest.py', ['harvest_ready'], PY_TESTS('test_replay', 'test_rebalancer.Proactive', 'test_calm', 'test_edges_0930')),
     'replay_db': ('db.py', ['record_replay_poll'], PY_TESTS('test_replay.Recording')),
-    'books': ('lp/books.py', ['regime_at_move', 'notify_book', 'emoji_for', 'tidy'], PY_TESTS('test_move_books', 'test_observability', 'test_rebalancer', 'test_edges_0930')),
+    'books': ('lp/books.py', ['regime_at_move', 'notify_book', 'emoji_for', 'tidy'], PY_TESTS('test_move_books', 'test_observability', 'test_rebalancer', 'test_edges_0930',
+                                                                                           'test_program_logs')),
     'deployment': ('db.py', ['_pct', '_deployment', 'deployment_now', '_pnl'], PY_TESTS('test_move_books', 'test_audit_more', 'test_edges_0930', 'test_db')),
     # Vaults (2026-10-10): what the bot may do with an owner's money, how it is
     # wrapped, and where payouts and the fee share may go.
@@ -184,10 +185,10 @@ TARGETS = {
     'onboard_fee_terms': ('ops/add_profile.py', ['fee_terms'], PY_TESTS('test_add_profile', 'test_onboard_store')),
     'rpc_policy': ('shared/rpc_policy.mjs', ['endpoints', 'errorKind', 'overEndpoints', 'isEntry'], NODE_TESTS('test_rpc_policy.mjs', 'test_signer_rpc.mjs')),
     'rpc_raydium': ('venues/raydium_clmm/signer.mjs', ['withRpc', 'sendAll'], NODE_TESTS('test_signer_rpc.mjs')),
-    'rpc_dlmm': ('venues/meteora_dlmm/signer.mjs', ['withRpc', 'sendAll'], NODE_TESTS('test_signer_rpc.mjs')),
+    'rpc_dlmm': ('venues/meteora_dlmm/signer.mjs', ['withRpc', 'sendAll'], NODE_TESTS('test_signer_rpc.mjs', 'test_program_errors.mjs')),
     'rpc_pancake': ('venues/pancakeswap_v3/signer.mjs', ['withRpc', 'sendOne'], NODE_TESTS('test_signer_rpc.mjs')),
-    'rpc_byreal': ('venues/byreal/signer.mjs', ['withRpc', 'sendAll', 'confirm'], NODE_TESTS('test_signer_rpc.mjs')),
-    'rpc_orca': ('venues/orca/signer.mjs', ['withRpc', 'sendOnce'], NODE_TESTS('test_signer_rpc.mjs')),
+    'rpc_byreal': ('venues/byreal/signer.mjs', ['withRpc', 'sendAll', 'confirm'], NODE_TESTS('test_signer_rpc.mjs', 'test_program_errors.mjs')),
+    'rpc_orca': ('venues/orca/signer.mjs', ['withRpc', 'sendOnce'], NODE_TESTS('test_signer_rpc.mjs', 'test_program_errors.mjs')),
     # Token-2022 stocks (MU, DJT, MSFTx): scaled UI amounts, pause and hook refusals, and the
     # signers' mint reads and position marks built on them.
     'token2022': ('shared/token2022.mjs', ['effectiveMultiplier', 'mintFacts', 'readMints', 'rawToUi', 'uiToRaw',
@@ -301,11 +302,28 @@ TARGETS = {
     'quiet_db': ('db.py', ['tape_ref_pool'], PY_TESTS('test_quiet_pool')),
     # 2026-10-02: a payout's priority fee, and the send loop that proves an expired one never landed
     'payout_send': ('chains/solana/payout.mjs', ['payoutCuPrice'], NODE_TESTS('test_payout_send.mjs')),
-    'tx_send': ('shared/tx_send.mjs', ['sendUntilLanded', 'awaitLanded'], NODE_TESTS('test_payout_send.mjs', 'test_signer_rpc.mjs')),
+    'tx_send': ('shared/tx_send.mjs', ['sendUntilLanded', 'awaitLanded'], NODE_TESTS('test_payout_send.mjs', 'test_signer_rpc.mjs',
+                                                                                    'test_program_errors.mjs')),
+    # 2026-10-12 audit: a program failure's decoded error and log tail, from the signer to the
+    # events table and Telegram; the DLMM open rebuilt once on InvalidBinArray; the sandboxed
+    # onboarding page's config overrides.
+    'program_errors': ('shared/program_errors.mjs', ['decodeCustom', 'collectLogs', 'safeLogs', 'failingProgram', 'baseMessage',
+                                                     'decodedText', 'logTail', 'describeFailure', 'instructionPrograms', 'errorText',
+                                                     'simulationFailure', 'within', 'enrichError'],
+                       NODE_TESTS('test_program_errors.mjs')),
+    'program_errors_signer': ('shared/signer_errors.mjs', ['signerError'],
+                              NODE_TESTS('test_program_errors.mjs', 'test_signer_helpers.mjs', 'test_raydium_landing.mjs')),
+    'program_errors_evm_uni': ('venues/uniswap_v3/signer.mjs', ['errorLine'], NODE_TESTS('test_program_errors.mjs')),
+    'program_errors_evm_aero': ('venues/aerodrome/signer.mjs', ['errorLine'], NODE_TESTS('test_program_errors.mjs')),
+    'program_logs_py': ('lp/books.py', ['program_logs'], PY_TESTS('test_program_logs', 'test_observability')),
+    'program_logs_chain': ('lp/signers.py', ['failure_logs', 'failure_detail'], PY_TESTS('test_program_logs')),
+    'program_logs_bridge': ('telegram_bridge.mjs', ['logLines', 'message'], NODE_TESTS('test_telegram_bridge.mjs')),
+    'dlmm_rebuild': ('venues/meteora_dlmm/signer.mjs', ['rebuildableOpenFailure', 'open'], NODE_TESTS('test_vault_dlmm_fork.mjs')),
+    'onboard_sandbox': ('onboard/server.mjs', ['loadConfig'], NODE_TESTS('test_onboard_sandbox.mjs', 'test_onboard.mjs')),
     'deposit_mark': ('lp/moves.py', ['opened_mark', 'settle_deposit'], PY_TESTS('test_deposit_mark')),
     'deposit_db': ('db.py', ['set_deposit'], PY_TESTS('test_deposit_mark')),
     'tx_send_price': ('shared/tx_send.mjs', ['priorityCuPrice'], NODE_TESTS('test_payout_send.mjs', 'test_raydium_landing.mjs')),
-    'raydium_landing': ('venues/raydium_clmm/signer.mjs', ['sendLanded', 'sendAll', 'rebuildOnRefusal'], NODE_TESTS('test_raydium_landing.mjs')),
+    'raydium_landing': ('venues/raydium_clmm/signer.mjs', ['sendLanded', 'sendAll', 'rebuildOnRefusal'], NODE_TESTS('test_raydium_landing.mjs', 'test_program_errors.mjs')),
     'swap_send': ('venues/jupiter/swap.mjs', ['sendSwap'], NODE_TESTS('test_payout_send.mjs')),
     # 2026-10-02: the swing (a profile on one pool in its market's session, another outside it)
     'swing_calendar': ('swing.py', ['session', 'is_open', 'wanted', 'decide', 'audit'],
@@ -872,8 +890,49 @@ EQUIVALENT = {
         'a float-noise tolerance: 2x on its scale changes nothing',
     ('risk', 'risk_metrics', 'const 1e-06->5e-07', 'if sd > 1e-6 * rms24:', 0):
         'a float-noise tolerance: 2x on its scale changes nothing',
+    # 2026-10-12 audit: the program's words in a failure line (shared/program_errors.mjs).
+    ('program_errors', 'decodeCustom', '(?<![<>=!])<(?![<=]) -> <=', 'const name = p.errors[String(c)] ?? (p.anchor && c < 6000 ? TABLE.anchor[String(c)] : undefined);', 0):
+        "every program in the table has its own 6000 and TABLE.anchor holds no 6000: < and <= find the same name",
+    ('program_errors', 'decodeCustom', '\\?\\? -> ||', 'const name = p.errors[String(c)] ?? (p.anchor && c < 6000 ? TABLE.anchor[String(c)] : undefined);', 0):
+        'an error name is a non-empty string or absent: ?? and || pick the same',
+    ('program_errors', 'decodeCustom', '\\?\\? -> ||', 'return { program: p.name, name: name ?? null };', 0):
+        'name is a non-empty string or undefined: ?? and || give the same',
+    ('program_errors', 'decodedText', '\\?\\? -> ||', "const who = d ? `${d.program} ${d.name ?? 'unknown code'}`", 0):
+        'd.name is a non-empty string or null: ?? and || give the same',
+    ('program_errors', 'describeFailure', '\\?\\? -> ||', 'const all = logs ?? collectLogs(error);', 0):
+        'logs is an array (truthy, even empty) or null: ?? and || pick the same',
+    ('program_errors', 'describeFailure', '\\?\\? -> ||', 'const f = failingProgram(raw, all, programIds.length ? programIds : (error?.programIds ?? []));', 0):
+        'programIds is an array or absent: ?? and || pick the same',
+    ('program_errors', 'describeFailure', '\\?(?=\\s) -> && false ?', 'out = secrets === undefined ? redact(out) : redact(out, secrets);', 0):
+        "redact's default parameter is secretValues() exactly when secrets is undefined: both branches mask the same",
+    ('program_errors', 'instructionPrograms', '\\?\\? -> ||', 'const msg = raw?.message ?? VersionedTransaction.deserialize(Uint8Array.from(raw)).message;', 0):
+        'a transaction message is an object (truthy) or absent: ?? and || pick the same',
+    ('program_errors', 'instructionPrograms', '\\?\\? -> ||', 'return msg.compiledInstructions.map(ix => keys[ix.programIdIndex]?.toBase58() ?? null);', 0):
+        'a base58 address is a non-empty string or absent: ?? and || give the same',
+    ('program_errors', 'simulationFailure', '\\?\\? -> ||', '{ logs: logs ?? [], programIds: tx ? instructionPrograms(tx) : [] });', 0):
+        'logs is an array or null: ?? and || pick the same',
+    ('program_errors', 'enrichError', '\\?\\? -> ||', 'const programIds = raw ? instructionPrograms(raw) : (error.programIds ?? []);', 0):
+        'programIds is an array or absent: ?? and || pick the same',
+    ('program_errors', 'enrichError', '\\?\\? -> ||', 'try { logs = (await within(error.getLogs(connection), timeoutMs)) ?? []; } catch { logs = []; }', 0):
+        'getLogs gives an array, or within gives undefined: ?? and || pick the same',
+    ('program_errors', 'enrichError', '\\?\\? -> ||', 'logs = tx?.meta?.logMessages ?? [];', 0):
+        'logMessages is an array or absent: ?? and || pick the same',
+    ('program_errors_signer', 'signerError', '\\?\\? -> ||', "const scan = [error?.message ?? String(error), ...collectLogs(error)].join(' ');", 0):
+        'scan is searched only for the slippage words; an empty message and String(error) ("Error") hold none',
+    ('program_errors_signer', 'signerError', '\\?(?=\\s) -> && false ?', 'const text = error?.described ? String(error.message) : describeFailure(error);', 0):
+        'describeFailure of a described error gives its message again (idempotent, the property test): both branches give the same line',
+    ('program_logs_py', 'program_logs', 'drop operand 1', "m = re.search(PROGRAM_LOGS_MARK, str(text or ''))", 0):
+        "None reads 'None' and '' reads '': neither holds ' | logs: ', so both give []",
+    ('dlmm_rebuild', 'rebuildableOpenFailure', '\\?\\? -> ||', 'const f = failingProgram(String(e.message ?? e), collectLogs(e), e.programIds ?? []);', 0):
+        'an empty message and String(e) ("Error") hold no custom code: the logs decide either way',
+    ('dlmm_rebuild', 'rebuildableOpenFailure', '\\?\\? -> ||', 'const f = failingProgram(String(e.message ?? e), collectLogs(e), e.programIds ?? []);', 1):
+        'programIds is an array or absent: ?? and || pick the same',
+    ('dlmm_rebuild', 'open', '\\?\\? -> ||', 'const sleep = deps.sleep ?? (ms => new Promise(r => setTimeout(r, ms)));', 0):
+        'deps.sleep is a function or absent: ?? and || pick the same',
+    ('books', 'emoji_for', 'drop operand 1', "if (payload or {}).get('gas_low') and 'GAS_LOW' in EVENT_EMOJI:", 0):
+        'event_emoji.json holds GAS_LOW (test_observability reads the map): the membership test is always true',
     # Signer send paths: `e?.message ?? e` only builds the text of an error.
-    ('raydium_landing', 'sendAll', '\\?\\? -> ||', 'signatures: sigs, error: String(e?.message ?? e).slice(0, 300) }, null, 1));', 0):
+    ('raydium_landing', 'sendAll', '\\?\\? -> ||', 'signatures: sigs, error: String(e?.message ?? e).slice(0, 1800) }, null, 1));', 0):
         'error-message text only: ?? and || differ only for an error with an empty message',
     ('raydium_landing', 'sendAll', '\\?\\? -> ||', 'throw Object.assign(new Error(`partial send: ${sigs.length}/${builts.length} sent; ${e?.message ?? e}`), { sent: true });', 0):
         'error-message text only: ?? and || differ only for an error with an empty message',
@@ -889,16 +948,12 @@ EQUIVALENT = {
         'error-message text only: ?? and || differ only for an error with an empty message',
     ('rpc_dlmm', 'sendAll', '\\?\\? -> ||', 'if (!sigs.length) throw new AfterSignError(`send failed after signing (not retried): ${e?.message ?? e}`);', 0):
         'error-message text only: ?? and || differ only for an error with an empty message',
-    ('rpc_dlmm', 'sendAll', '\\?\\? -> ||', 'return { sigs, error: String(e?.message ?? e).slice(0, 300) };', 0):
-        'error-message text only: ?? and || differ only for an error with an empty message',
     ('rpc_pancake', 'sendOne', '\\?\\? -> ||', 'if (!e.afterSend) throw new AfterSignError(`send failed after signing (not retried): ${e?.message ?? e}`);', 0):
         'error-message text only: ?? and || differ only for an error with an empty message',
-    ('rpc_byreal', 'sendAll', '\\?\\? -> ||', 'return { sigs, error: String(e?.message ?? e).slice(0, 300) };', 0):
+    ('rpc_byreal', 'sendAll', '\\?\\? -> ||', 'return { sigs, error: e?.described ? e.message : String(e?.message ?? e).slice(0, 300) };', 0):
         'error-message text only: ?? and || differ only for an error with an empty message',
     ('onboard_server', 'profileVenues', '\\?\\? -> ||', 'const v = connected.venues ?? { [connected.venue]: { pools: connected.pools } };', 0):
         'a connect report\'s venues is an object (truthy) or absent: ?? and || pick the same',
-    ('rpc_orca', 'sendOnce', '\\?\\? -> ||', 'throw new AfterSignError(`send failed after signing (not retried): ${e?.message ?? e}`);', 0):
-        'error-message text only: ?? and || differ only for an error with an empty message',
     # venues/orca/swap.mjs
     ('swap_orca', 'planSwap', '(?<![<>=!-])>(?![>=]) -> >=', 'const raw = amount > 0 ? BigInt(Math.floor(amount * 10 ** sellInfo.decimals)) : 0n;', 0):
         'only amount 0 (or -0) differs, and BigInt(Math.floor(0)) is 0n, the same as the else branch',
@@ -1101,20 +1156,20 @@ EQUIVALENT_OLD = {
     # no older copy has this line. Candidates now: 'f"retry in {wait / 60:.0f} min: {err}", flush=True)'
     # no older copy has this line. Candidates now: "recent = [t for t in state.get('calm_times', []) if now - t "
     # no older copy has this line. Candidates now: 'if lower and upper and upper > lower > 0:' / 'if lower and upper and upper > lower > 0:' #1
-    ('books', 'regime_at_move', 'swap Gt->GtE @L209'):
+    ('books', 'regime_at_move', 'swap Gt->GtE', 'if lower and upper and upper > lower > 0:', 1):
         'lower = 0 is caught by `lower and` first; upper = lower gives half 1.0, refused by `upper > lower`',
     # 2 mutants on this line share the old key; it hides all of them. Candidates now: 'return CLOSED, True, 0.0' / "wait = min(max(0.0, float(rec.get('retry_at') or 0.0) - now)" / "wait = min(max(0.0, float(rec.get('retry_at') or 0.0) - now)" #1
     ('health', 'verdict', 'const 0.0->1.0 @L80'):
         'retry_at None with failures on record: 0.0 or 1.0 are both decades past, allowed either way',
     # no older copy has this line. Candidates now: 'def chain(*args, dex=None, timeout=420, extra_env=None):'
     # no older copy has this line. Candidates now: "v['p_held'] = next((p for w, p in (v.get('probs') or []) if "
-    ('books', 'regime_at_move', 'swap Lt->LtE @L215'):
+    ('books', 'regime_at_move', 'swap Lt->LtE', "v['p_held'] = next((p for w, p in (v.get('probs') or []) if abs(float(w) - pct) < 1e-6), None)", 0):
         'widths and probs are both rounded to 2 decimals: a difference is 0 or >= 0.01',
     # no older copy has this line. Candidates now: "v['p_held'] = next((p for w, p in (v.get('probs') or []) if "
-    ('books', 'regime_at_move', 'const 1e-06->1.5e-06 @L215'):
+    ('books', 'regime_at_move', 'const 1e-06->1.5e-06', "v['p_held'] = next((p for w, p in (v.get('probs') or []) if abs(float(w) - pct) < 1e-6), None)", 0):
         'widths and probs are both rounded to 2 decimals: a difference is 0 or >= 0.01',
     # no older copy has this line. Candidates now: "v['p_held'] = next((p for w, p in (v.get('probs') or []) if "
-    ('books', 'regime_at_move', 'const 1e-06->5e-07 @L215'):
+    ('books', 'regime_at_move', 'const 1e-06->5e-07', "v['p_held'] = next((p for w, p in (v.get('probs') or []) if abs(float(w) - pct) < 1e-6), None)", 0):
         'widths and probs are both rounded to 2 decimals: a difference is 0 or >= 0.01',
     # no older copy has this line. Candidates now: 'if not whole or whole <= 0:'
     ('deployment', '_pct', 'swap LtE->Lt @L946'):

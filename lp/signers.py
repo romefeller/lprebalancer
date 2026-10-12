@@ -33,7 +33,8 @@ SIGNERS = {'orca': str(paths.ROOT / 'venues/orca/signer.mjs'),
            'orca-swap': str(paths.ROOT / 'venues/orca/swap.mjs'),                     # the fallback swap
            'payout': str(paths.ROOT / 'chains/solana/payout.mjs'),                    # to the profit wallet only
            'janitor': str(paths.ROOT / 'chains/solana/janitor.mjs')}                  # closes empty token accounts
-LAST_CHAIN_ERROR = {}             # {'args', 'text'}: the last signer failure in full, for the events table
+LAST_CHAIN_ERROR = {}             # {'args', 'text', 'logs'}: the last signer failure in full, for the events
+                                  # table; emptied at every call, so it never speaks of an earlier one
 SIGNER_ENV_WITHHELD = ('TELEGRAM_',)     # environment prefixes no signer gets (_chain)
 
 
@@ -420,6 +421,7 @@ def locked_chain(*args, dex, timeout, extra_env):
 
 
 def _chain(*args, dex=None, timeout=tuning.SIGNER_TIMEOUT_S, extra_env=None):
+    LAST_CHAIN_ERROR.clear()
     script = SIGNERS.get(dex or config.DEX)
     if not script or not pathlib.Path(script).exists():
         return None, f'no signer for {dex or config.DEX}'
@@ -490,10 +492,11 @@ def _chain(*args, dex=None, timeout=tuning.SIGNER_TIMEOUT_S, extra_env=None):
             continue
         err = out.get('error') or ('partial transaction execution' if out.get('partial') else None)
         if r.returncode or err:
-            LAST_CHAIN_ERROR.update(args=' '.join(map(str, args[:1])), text=str(err or r.stderr or text)[:2000])
+            full = str(err or r.stderr or text)
+            LAST_CHAIN_ERROR.update(args=' '.join(map(str, args[:1])), text=full[:2000], logs=books.program_logs(full))
             return out, books.tidy(err or r.stderr or text) or f'signer exited {r.returncode}'
         return out, None
-    LAST_CHAIN_ERROR.update(args=' '.join(map(str, args[:1])), text=text[:2000])
+    LAST_CHAIN_ERROR.update(args=' '.join(map(str, args[:1])), text=text[:2000], logs=books.program_logs(text))
     return None, books.tidy(text) or (f'signer exited {r.returncode}' if r.returncode else 'no signer result')
 
 
@@ -582,6 +585,20 @@ def awaits_owners(err):
     """Whether a signer refused because the vault awaits its owners' approval
     (rules changed, a venue staged, the bot revoked). Pure."""
     return bool(err) and bool(AWAITS_OWNERS.search(str(err)))
+
+
+def failure_logs():
+    """The program log lines of the signer call that just failed (at most
+    books.LOG_LINES, redacted), or [] when it carried none. Read it right
+    after the failing chain() call: the next call empties it."""
+    return list(LAST_CHAIN_ERROR.get('logs') or [])
+
+
+def failure_detail(err, logs=None):
+    """`err` and the failing call's program log lines (`logs`, else
+    failure_logs()), for the events table."""
+    logs = failure_logs() if logs is None else logs
+    return f"{err} | logs: {' ; '.join(logs)}" if logs else str(err)
 
 
 def held(err):

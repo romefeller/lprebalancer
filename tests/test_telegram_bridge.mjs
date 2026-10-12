@@ -6,7 +6,7 @@ import fs from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import os from 'node:os';
 import path from 'node:path';
-import { feedFiles, migrateState, readNew, tailAll, message, render, aSide, payoutHeld, MOVED_FEED, LEGACY_FEED }
+import { feedFiles, migrateState, readNew, tailAll, message, render, aSide, payoutHeld, logLines, MOVED_FEED, LEGACY_FEED }
   from '../telegram_bridge.mjs';
 import { poolLabel, redact, secretValues, portfolioText, equityLine, sinceStartLine, walletName } from '../book_format.mjs';
 
@@ -672,4 +672,30 @@ test('the wrap of native POL says what was wrapped and what stays for gas', () =
   assert.strictEqual(message({ event: 'WRAP', pair: 'WPOL/USDT0', amount: 4000, symbol: 'POL', kept: 10, signature: '0xabc' }),
     '[WPOL/USDT0] 🪙 WRAP · 4000 POL into the pool token · 10 POL kept for gas\n0xabc');
   assert.ok(message({ event: 'wrap_failed', amount: 1, symbol: 'POL', reason: 'r' }).includes('WRAP FAILED · 1 POL stays native · r'));
+});
+
+// 2026-10-12: a failed write's program log lines come under its message,
+// bounded and redacted, and never twice (the default render skips them).
+test('a failed write shows the program logs, at most 10 lines of 160 characters, secrets masked', () => {
+  const logs = Array.from({ length: 14 }, (_, i) => `Program log: line ${i} ` + 'x'.repeat(i === 13 ? 300 : 3));
+  logs[12] = 'Program log: https://rpc.example/?api-key=abcdefabcdef123456';
+  const text = message({ event: 'open_failed', reason: 'program error: Meteora DLMM InvalidBinArray (6027 = 0x178b)', failures: 1, logs });
+  const lines = text.split('\n');
+  const at = lines.indexOf('program logs:');
+  assert.ok(at > 0, text);
+  const shown = lines.slice(at + 1);
+  assert.equal(shown.length, 10);
+  assert.ok(shown.every(l => l.length <= 160));
+  assert.equal(shown[0], 'Program log: line 4 xxx');
+  assert.ok(!text.includes('abcdefabcdef123456'));
+  assert.equal(logLines({ event: 'x' }), '');
+  assert.equal(logLines({ logs: 'not a list' }), '');
+  assert.equal(logLines(null), '');
+  const other = message({ event: 'some_new_event', reason: 'r', logs: ['Program log: once'] });
+  assert.equal(other.split('Program log: once').length, 2, other);
+});
+
+test('a log line of exactly 160 characters is shown whole', () => {
+  const exact = 'L'.repeat(160);
+  assert.equal(logLines({ logs: [exact, 'M'.repeat(161)] }), `\nprogram logs:\n${exact}\n${'M'.repeat(159)}…`);
 });

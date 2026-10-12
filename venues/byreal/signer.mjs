@@ -40,6 +40,7 @@
 //   node venues/byreal/signer.mjs open <pool> <lowerPrice> <upperPrice> <maxA> <maxB> [--execute]
 //   node venues/byreal/signer.mjs harvest <position> [--execute]
 //   node venues/byreal/signer.mjs close <position> [--execute]
+import { signerError } from '../../shared/signer_errors.mjs';
 import fs from 'node:fs';
 import { positionRent } from '../../shared/position_rent.mjs';
 import { consistentFees, BYREAL_LAYOUT } from '../../shared/fee_snapshot.mjs';
@@ -51,6 +52,7 @@ import { BOT_ROOT } from '../../bot_root.mjs';
 import { createRequire } from 'node:module';
 import { waitTurn } from '../jupiter/gate.mjs';
 import { awaitLanded, BLOCKHASH_LIFETIME } from '../../shared/tx_send.mjs';
+import { enrichError } from '../../shared/program_errors.mjs';
 import SOLANA from '../../chains/solana/solana.json' with { type: 'json' };
 import { JUPITER, jupiterHeaders } from '../jupiter/api.mjs';
 import { actingAccount } from '../../chains/solana/vault/account.mjs';
@@ -462,14 +464,17 @@ async function simulate(connection, tx) {
 export async function sendAll(connection, txs, payer) {
   const sigs = [];
   for (const tx of Array.isArray(txs) ? txs : [txs]) {
+    let sig = null;
     try {
       tx.sign([payer]);
-      const sig = await connection.sendRawTransaction(tx.serialize(),
+      sig = await connection.sendRawTransaction(tx.serialize(),
         { skipPreflight: false, preflightCommitment: 'confirmed', maxRetries: 3 });
       sigs.push(sig);
       await confirm(connection, sig);
     } catch (e) {
-      return { sigs, error: String(e?.message ?? e).slice(0, 300) };
+      // the program's words: decoded error and log tail (shared/program_errors.mjs)
+      await enrichError(e, { connection, raw: tx.serialize(), signature: sig });
+      return { sigs, error: e?.described ? e.message : String(e?.message ?? e).slice(0, 300) };
     }
   }
   return { sigs, error: null };
@@ -747,4 +752,4 @@ async function main() {
 }
 
 // The CLI runs only when node starts this file; a test import runs nothing.
-if (isEntry(import.meta.url)) main().catch(e => { console.error('ERROR:', e.message); process.exitCode = 1; });
+if (isEntry(import.meta.url)) main().catch(e => { console.error('ERROR:', signerError(e)); process.exitCode = 1; });

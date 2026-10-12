@@ -37,6 +37,8 @@
 //   node venues/orca/signer.mjs harvest <mint> [--execute]
 //   node venues/orca/signer.mjs close <mint> [--execute]
 //   node venues/orca/signer.mjs rebalance <mintA> <mintB> <targetUsdA> <targetUsdB> [--execute]   (a vault's swap)
+import { signerError } from '../../shared/signer_errors.mjs';
+import { describeFailure } from '../../shared/program_errors.mjs';
 import fs from 'node:fs';
 import { createRequire } from 'node:module';
 import path from 'node:path';
@@ -302,11 +304,13 @@ export async function withRpc(fn, deps = {}) {
 
 // The SDK callback signs, sends and confirms. A failure in it may follow a
 // send that reached a node: it is never rotated or retried (AfterSignError).
+// The SDK sends on @solana/kit: a preflight refusal carries its logs in
+// e.context; describeFailure puts the decoded error and their tail in the line.
 export async function sendOnce(result) {
   try {
     return await result.callback();
   } catch (e) {
-    throw new AfterSignError(`send failed after signing (not retried): ${e?.message ?? e}`);
+    throw new AfterSignError(`send failed after signing (not retried): ${describeFailure(e)}`);
   }
 }
 
@@ -737,4 +741,4 @@ async function main() {
 }
 
 // The CLI runs only when node starts this file; a test import runs nothing.
-if (isEntry(import.meta.url)) main().catch(e => { console.error('ERROR:', e.message); process.exitCode = 1; });
+if (isEntry(import.meta.url)) main().catch(e => { console.error('ERROR:', signerError(e)); process.exitCode = 1; });

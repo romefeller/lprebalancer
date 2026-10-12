@@ -170,6 +170,7 @@ def add_idle(state, status, wbal, idle, price):
     if cap_a <= 0 or cap_b <= 0:
         return False                                     # in range an add takes both tokens: the signer refuses one
     out, err = signers.chain('increase', mint, f'{cap_a:.9f}', f'{cap_b:.9f}', '--execute', record=False)
+    logs = signers.failure_logs()                        # the status reads below empty them
     if signers.held(err):
         return False
     after, _ = signers.read_status(mint)
@@ -186,8 +187,9 @@ def add_idle(state, status, wbal, idle, price):
     if added is None and sent and not err:
         added = float(out.get('depositUsd') or 0.0)      # the read failed: the signer's chain amounts
     if added is None:
-        books.notify('increase_failed', reason=err or 'no signature', idle_usd=round(idle, 2))
-        db.event('increase_failed', f'${idle:.2f} idle: {err or "no signature"}')
+        books.notify('increase_failed', reason=err or 'no signature', idle_usd=round(idle, 2),
+                     **({'logs': logs} if logs else {}))
+        db.event('increase_failed', signers.failure_detail(f'${idle:.2f} idle: {err or "no signature"}', logs))
         return False
     if err:
         books.notify('increase_recovered', detail='the add reported an error but the position grew', added_usd=round(added, 4))
@@ -459,8 +461,10 @@ def balance_wallet(state, bal, rec, share_a=None):
         return bal
     if err or not out or out.get('partial') or not out.get('sent'):
         state['failures'] += 1; paths.save(state)
-        db.event('swap_failed', err or 'no signature')
+        logs = signers.failure_logs()
+        db.event('swap_failed', signers.failure_detail(err or 'no signature', logs))
         books.notify('swap_failed', reason=err or 'no signature', failures=state['failures'],
+                     **({'logs': logs} if logs else {}),
                      signature=(out or {}).get('signature'))
         if state['failures'] >= config.MAX_CONSECUTIVE_FAILURES:
             books.halt(f'{state["failures"]} consecutive failures')

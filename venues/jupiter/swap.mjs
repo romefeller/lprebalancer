@@ -38,6 +38,8 @@
 // (ratio, default 0.01 = 1%); Jupiter's own simulation of the built transaction
 // failed; the quote is older than QUOTE_MAX_AGE_MS at send time; the wallet
 // holds less than the amount to sell.
+import { signerError } from '../../shared/signer_errors.mjs';
+import { simulationFailure } from '../../shared/program_errors.mjs';
 import { NeverLanded, sendUntilLanded } from '../../shared/tx_send.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -362,7 +364,7 @@ async function verifyBalances(connection, payer, tx, inInfo, outInfo, rawIn, quo
   const pre = await connection.getMultipleAccountsInfo(uniq.map(k => new PublicKey(k)));
   const sim = await connection.simulateTransaction(tx, { sigVerify: false, replaceRecentBlockhash: true,
     accounts: { encoding: 'base64', addresses: uniq } });
-  if (sim.value.err) throw new Error(`simulation failed: ${JSON.stringify(sim.value.err).slice(0, 160)}`);
+  if (sim.value.err) throw new Error(simulationFailure(sim.value.err, sim.value.logs, tx));
   const post = sim.value.accounts;
   const val = (list, i, native) => {
     const x = list[i];
@@ -596,5 +598,5 @@ async function main() {
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === new URL(import.meta.url).pathname) {
-  main().catch(e => { console.error('ERROR:', e.message); process.exitCode = 1; });
+  main().catch(e => { console.error('ERROR:', signerError(e)); process.exitCode = 1; });
 }

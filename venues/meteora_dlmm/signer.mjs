@@ -37,9 +37,11 @@
 //   node venues/meteora_dlmm/signer.mjs harvest <position> [--execute]
 //   node venues/meteora_dlmm/signer.mjs close <position> [--execute]
 //   node venues/meteora_dlmm/signer.mjs rebalance <mintA> <mintB> <targetUsdA> <targetUsdB> [--execute]
+import { signerError } from '../../shared/signer_errors.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
 import { sendUntilLanded } from '../../shared/tx_send.mjs';
+import { errorText, failingProgram, collectLogs } from '../../shared/program_errors.mjs';
 import { assertNotHalted } from '../../shared/halt_guard.mjs';
 import { BOT_ROOT } from '../../bot_root.mjs';
 import { createRequire } from 'node:module';
@@ -349,7 +351,7 @@ export async function sendAll(connection, txs, acting) {
       // Nothing confirmed, but the send may still reach a node: never
       // rotated, never retried (AfterSignError).
       if (!sigs.length) throw new AfterSignError(`send failed after signing (not retried): ${e?.message ?? e}`);
-      return { sigs, error: String(e?.message ?? e).slice(0, 300) };
+      return { sigs, error: errorText(e) };
     }
   }
   return { sigs, error: null };
@@ -380,10 +382,50 @@ async function simulate(connection, acting, ixs, extra) {
   }
 }
 
+// An open the DLMM program refused at preflight with InvalidBinArray (6027)
+// or NonContinuousBinArrays (6028) is built once more on fresh pool state.
+// 2026-10-12 17:00:31Z (test0): the deposit is sized relative to the active
+// bin, the active bin moved between the build and the send, and the band's
+// edge sat near a bin-array boundary (multiples of 70 bins), so the bins the
+// program computed fell in an array the transaction did not name. A
+// preflight refusal sends nothing and costs no fee; the rebuild re-reads the
+// active bin, re-checks the band and makes new position keys. Only before
+// anything was sent: a later failure is a partial send, never retried.
+export const OPEN_ATTEMPTS = 2;
+export const OPEN_REBUILD_PAUSE_MS = 1500;
+export const REBUILD_CODES = new Set([6027, 6028]);
+
+// Whether an open's send failure is one rebuild fixes: nothing was sent
+// (`sigs` empty, no afterSend) and the DLMM program refused with a code in
+// REBUILD_CODES. The program comes from the logs ("Program LBUZ... failed")
+// or the failing instruction's program id: the same code from another
+// program (Squads' 6027 is SpendingLimitExceeded) is not rebuilt. Pure.
+export function rebuildableOpenFailure(e, sigs = []) {
+  if (sigs.length || !e || e.afterSend) return false;
+  const f = failingProgram(String(e.message ?? e), collectLogs(e), e.programIds ?? []);
+  return !!f && f.programId === SOLANA.programs.meteora_dlmm && REBUILD_CODES.has(f.code);
+}
+
 // maxA and maxB are UI amounts (what the wallet shows); the deposit is sized
 // in pool-native units at the pool price and reported back in UI units.
-export async function open(pool, lower, upper, maxA, maxB, execute, deps) {
-  return withRpc(async ({ connection, payer, acting }) => {
+export async function open(pool, lower, upper, maxA, maxB, execute, deps = {}) {
+  const sleep = deps.sleep ?? (ms => new Promise(r => setTimeout(r, ms)));
+  return withRpc(async (ctx) => {
+    for (let attempt = 1; ; attempt += 1) {
+      const r = await openOnce(ctx, pool, lower, upper, maxA, maxB, execute, attempt < OPEN_ATTEMPTS);
+      if (!r?.rebuild) return r;
+      console.error(`open refused at preflight, nothing sent: ${errorText(r.rebuild, 200).split(' | logs: ')[0]}; `
+        + `rebuilding on fresh pool state (attempt ${attempt + 1}/${OPEN_ATTEMPTS})`);
+      await sleep(OPEN_REBUILD_PAUSE_MS);
+    }
+  }, undefined, deps);
+}
+
+// One build and send of an open. Returns {rebuild: error} when `mayRebuild`
+// and the send failed as rebuildableOpenFailure says; otherwise prints the
+// report as before.
+async function openOnce({ connection, payer, acting }, pool, lower, upper, maxA, maxB, execute, mayRebuild) {
+  {
     const dlmm = await DLMM.create(connection, new PublicKey(pool));
     const info = await describe(pool, dlmm, connection);
     assertWritable(info.mints);
@@ -461,13 +503,14 @@ export async function open(pool, lower, upper, maxA, maxB, execute, deps) {
         }
       }
     } catch (e) {
+      if (mayRebuild && rebuildableOpenFailure(e, sigs)) return { rebuild: e };
       console.log(JSON.stringify({ ...report, sent: sigs.length > 0, partial: true, signatures: sigs,
-        signature: sigs[sigs.length - 1] ?? null, error: String(e?.message ?? e).slice(0, 300) }, null, 1));
+        signature: sigs[sigs.length - 1] ?? null, error: errorText(e) }, null, 1));
       process.exitCode = 1;
       return;
     }
     console.log(JSON.stringify({ ...report, sent: true, signature: sigs[sigs.length - 1], signatures: sigs }, null, 1));
-  }, undefined, deps);
+  }
 }
 
 // A position's rent goes back to the key that paid it. The payer pays it at
@@ -639,4 +682,4 @@ async function main() {
 }
 
 // The CLI runs only when node starts this file; a test import runs nothing.
-if (isEntry(import.meta.url)) main().catch(e => { console.error('ERROR:', e.message); process.exitCode = 1; });
+if (isEntry(import.meta.url)) main().catch(e => { console.error('ERROR:', signerError(e)); process.exitCode = 1; });

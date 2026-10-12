@@ -24,6 +24,7 @@
 // or one with a transfer hook refuses. The recipient's associated token
 // account is created if missing (idempotent instruction; the LP wallet pays
 // its rent once, about 0.002 SOL). The native mint So111...112 sends lamports.
+import { signerError } from '../../shared/signer_errors.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
 import { assertNotHalted } from '../../shared/halt_guard.mjs';
@@ -280,7 +281,7 @@ async function main() {
 
 if (isEntry(import.meta.url)) {
   main().catch(e => {
-    console.error('ERROR:', String(e?.message ?? e).replace(/[{}]/g, ' '));
+    console.error('ERROR:', signerError(e).replace(/[{}]/g, ' '));
     process.exitCode = 1;
   });
 }

@@ -49,6 +49,7 @@
 // Without --execute the real instructions are built AND simulated with
 // connection.simulateTransaction; the report carries the simulation logs.
 // Extra env: LPBOT_PRIORITY_MICROLAMPORTS (compute unit price, default 20000).
+import { signerError } from '../../shared/signer_errors.mjs';
 import fs from 'node:fs';
 import { positionRent } from '../../shared/position_rent.mjs';
 import { SLIPPAGE_REFUSAL } from '../../shared/slippage.mjs';
@@ -785,4 +786,4 @@ async function main() {
 }
 
 // The CLI runs only when node starts this file; a test import runs nothing.
-if (isEntry(import.meta.url)) main().catch(e => { console.error('ERROR:', e.message); process.exitCode = 1; });
+if (isEntry(import.meta.url)) main().catch(e => { console.error('ERROR:', signerError(e)); process.exitCode = 1; });

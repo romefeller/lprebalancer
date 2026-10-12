@@ -14,6 +14,7 @@
 //
 // 2026-09-28: four empty accounts (mSOL, RAY, ZEC, JitoSOL) held 0.00705 SOL.
 // A close costs 5,000 lamports and returns 1.5-2.0 million.
+import { signerError } from '../../shared/signer_errors.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
 import { assertNotHalted } from '../../shared/halt_guard.mjs';
@@ -125,5 +126,5 @@ async function main() {
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
-  main().catch(e => { console.error(`ERROR: ${e.message}`); process.exit(1); });
+  main().catch(e => { console.error(`ERROR: ${signerError(e)}`); process.exit(1); });
 }

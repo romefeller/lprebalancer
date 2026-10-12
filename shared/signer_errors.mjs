@@ -1,8 +1,15 @@
+import { collectLogs, describeFailure } from './program_errors.mjs';
+
 // Program failures must take precedence over incidental RPC retry messages.
+// The text is one bounded line with the decoded program error and the last
+// program log lines (shared/program_errors.mjs); a slippage refusal keeps its
+// fixed head, which the loop and rebuildOnRefusal match.
 export function signerError(error) {
-  const text = [error?.message ?? String(error), ...(error?.logs ?? [])].join(' ');
-  if (/PriceSlippageCheck|price slippage check|custom program error: 0x1781|["']?Custom["']?\s*:\s*6017\b/i.test(text)) {
-    return 'PriceSlippageCheck (6017): price moved beyond the slippage limit';
+  const text = error?.described ? String(error.message) : describeFailure(error);
+  const scan = [error?.message ?? String(error), ...collectLogs(error)].join(' ');
+  if (/PriceSlippageCheck|price slippage check|custom program error: 0x1781|["']?Custom["']?\s*:\s*6017\b/i.test(scan)) {
+    const detail = text.indexOf(' | program error: ');
+    return 'PriceSlippageCheck (6017): price moved beyond the slippage limit' + (detail >= 0 ? text.slice(detail) : '');
   }
   return text;
 }

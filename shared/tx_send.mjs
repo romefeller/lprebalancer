@@ -7,6 +7,8 @@
 // re-sends the same signed bytes every REBROADCAST_MS until they confirm,
 // and after lastValidBlockHeight asks the chain once more: no record means
 // the transaction never landed and never can (NeverLanded).
+import { enrichError } from './program_errors.mjs';
+
 export const REBROADCAST_MS = 2_000;
 // Block heights a blockhash stays valid for (Solana: 150 blocks after its own).
 export const BLOCKHASH_LIFETIME = 150;
@@ -32,12 +34,25 @@ export function priorityCuPrice(recent, units, cap, floor) {
 // reports it as partial and never sends it twice; NeverLanded (the block
 // height passed lastValidBlockHeight and a history search does not find the
 // signature) is the one later error that proves nothing went out.
+//
+// A program failure (the preflight's or the chain's) comes back with the
+// program's own words: the decoded custom error of the failing program and
+// the last program log lines (shared/program_errors.mjs, enrichError).
 export async function sendUntilLanded(connection, raw, lastValidBlockHeight, { sleep = ms => new Promise(r => setTimeout(r, ms)) } = {}) {
-  const signature = await connection.sendRawTransaction(raw, { skipPreflight: false, maxRetries: 0 });
+  let signature;
+  try {
+    signature = await connection.sendRawTransaction(raw, { skipPreflight: false, maxRetries: 0 });
+  } catch (e) {
+    throw await enrichError(e, { connection, raw });
+  }
   try {
     return await awaitLanded(connection, signature, lastValidBlockHeight, { sleep,
       resend: () => connection.sendRawTransaction(raw, { skipPreflight: true, maxRetries: 0 }) });
   } catch (e) {
+    // a refusal on chain (never NeverLanded, a status read or a timeout: their text never says this)
+    if (/failed on chain/.test(String(e?.message))) {
+      await enrichError(e, { connection, raw, signature });
+    }
     throw Object.assign(e, { afterSend: true, signature });
   }
 }

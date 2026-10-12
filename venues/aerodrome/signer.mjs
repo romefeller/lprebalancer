@@ -380,6 +380,15 @@ export function revertText(e) {
   return String(e?.shortMessage ?? e?.message ?? e).split('\n')[0].slice(0, 200);
 }
 
+// The first line of a viem error (its messages run to many lines: request
+// bodies, docs links) and the revert reason when the chain gave one, so a
+// failed write says why it reverted. Pure.
+export function errorLine(e, limit = 300) {
+  const head = String(e?.shortMessage ?? e?.message ?? e).split('\n')[0];
+  const why = revertText(e);
+  return (why && !head.includes(why) ? `${head} | revert: ${why}` : head).slice(0, limit);
+}
+
 async function nonceFor(pub, me) {
   const [latest, pending] = await Promise.all([
     pub.getTransactionCount({ address: me, blockTag: 'latest' }),
@@ -427,7 +436,7 @@ export async function runSteps(ctx, steps, cfg, deps = {}) {
       // A signed transaction whose send threw may still have reached a node: it counts.
       if (hash) sent.push({ label: step.label, hash, receipt: null });
       if (!sent.length) throw e;
-      return { sent, error: String(e?.shortMessage ?? e?.message ?? e).split('\n')[0].slice(0, 300) };
+      return { sent, error: errorLine(e) };
     }
   }
   return { sent, error: null };
@@ -899,7 +908,7 @@ async function main() {
 if (isEntry(import.meta.url)) {
   main().catch(e => {
     // viem messages run to many lines (request bodies, docs links): the first line only.
-    console.error('ERROR:', String(e?.shortMessage ?? e?.message ?? e).split('\n')[0].replace(/[{}]/g, ' '));
+    console.error('ERROR:', errorLine(e, 1000).replace(/[{}]/g, ' '));
     process.exitCode = 1;
   });
 }

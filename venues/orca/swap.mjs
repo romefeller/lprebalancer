@@ -38,6 +38,8 @@
 // Reads: getAccountInfo / getMultipleAccounts / getEpochInfo / simulate /
 // getRecentPrioritizationFees / getSignatureStatuses / getBlockHeight only. No indexed read (getTokenAccountsByOwner),
 // so every endpoint from rpc_policy.endpoints() can serve it.
+import { signerError } from '../../shared/signer_errors.mjs';
+import { simulationFailure } from '../../shared/program_errors.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
 import { assertNotHalted } from '../../shared/halt_guard.mjs';
@@ -411,7 +413,7 @@ function compile(payer, blockhash, ixs) {
 async function simulate(connection, tx, addresses) {
   const sim = await connection.simulateTransaction(tx, { sigVerify: false, replaceRecentBlockhash: true,
     accounts: addresses ? { encoding: 'base64', addresses } : undefined });
-  if (sim.value.err) throw new Refused(`simulation failed: ${JSON.stringify(sim.value.err).slice(0, 160)} ${(sim.value.logs ?? []).slice(-3).join(' | ').slice(0, 300)}`);
+  if (sim.value.err) throw new Refused(simulationFailure(sim.value.err, sim.value.logs, tx));
   return sim.value;
 }
 
@@ -593,5 +595,5 @@ export async function main(argv = process.argv.slice(2)) {
 }
 
 if (isEntry(import.meta.url)) {
-  main().catch(e => { console.error('ERROR:', e.message); process.exitCode = 1; });
+  main().catch(e => { console.error('ERROR:', signerError(e)); process.exitCode = 1; });
 }

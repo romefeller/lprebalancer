@@ -9,6 +9,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { createRequire } from 'module';
 import { Fork } from './_svm.mjs';
+import { keyDir } from './_vault.mjs';
 import * as sq from '../chains/solana/vault/squads.mjs';
 import { compile, NotAllowed } from '../chains/solana/vault/policy.mjs';
 import { actingAccount, PolicyMismatch } from '../chains/solana/vault/account.mjs';
@@ -49,7 +50,7 @@ async function vaultOnFork({ usdc = 200_000_000n, payoutWallets = [] } = {}) {
   fork.fund(vault, 2);
   await fork.clone([USDC]);
   fork.tokenAccount(getAssociatedTokenAddressSync(USDC, vault, true), USDC, vault, usdc);
-  const keyFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'vault-')), 'policy.json');
+  const keyFile = path.join(keyDir('vault-'), 'policy.json');
   fs.writeFileSync(keyFile, JSON.stringify([...policyKey.secretKey]));
   const env = { LPBOT_VAULT_SETTINGS: settings.toBase58(), LPBOT_VAULT_POLICIES: policies.join(','),
     LPBOT_VAULT_POLICY_KEY: keyFile, LPBOT_VAULT_POOLS: POOL.toBase58(), LPBOT_VAULT_PAYOUTS: payouts.join(','),
@@ -410,4 +411,141 @@ test('payout: the vault pays the profit and fee wallets, and nothing else', { ti
   assert.ok(last.sent && last.recipientAccountExisted, JSON.stringify(last));
   assert.equal(fork.tokenAmount(getAssociatedTokenAddressSync(USDC, vault, true)), 0n);
   assert.equal(fork.tokenAmount(getAssociatedTokenAddressSync(USDC, profit, true)), 199_500_000n);
+});
+
+// --- an open refused because the active bin moved (2026-10-12, test0) --------
+
+// Sell SOL into the pool until its active bin is `bins` lower than now. The
+// fork's blockhash is kept, so a transaction signed before still lands, as it
+// would on mainnet within its blockhash's life.
+async function pushDown(fork, dlmm, bins) {
+  await dlmm.refetchStates();
+  const target = dlmm.lbPair.activeId - bins;
+  const trader = fork.wallet(20000);
+  const expire = fork.svm.expireBlockhash;
+  fork.svm.expireBlockhash = () => {};
+  try {
+    for (let i = 0; i < 80 && dlmm.lbPair.activeId > target; i += 1) {
+      const amount = new BN(100e9 + i);                // a new transaction each time under one blockhash
+      const q = dlmm.swapQuote(amount, true, new BN(500), await dlmm.getBinArrayForSwap(true));
+      const t = await dlmm.swap({ inToken: NATIVE_MINT, outToken: USDC, inAmount: amount, minOutAmount: new BN(0), lbPair: POOL,
+        user: trader.publicKey, binArraysPubkey: q.binArraysPubkey });
+      const r = await fork.send(t.instructions, trader);
+      assert.ok(r.ok, r.logs.join('\n'));
+      await dlmm.refetchStates();
+    }
+  } finally { fork.svm.expireBlockhash = expire; }
+  assert.ok(dlmm.lbPair.activeId <= target, `active bin ${dlmm.lbPair.activeId}, wanted ${target}`);
+}
+
+// A band whose lowest bin is the first bin of a bin array (a multiple of 70),
+// at least `gap` bins under the active bin, and a few bins above it.
+function edgeBand(dlmm, gap) {
+  const active = dlmm.lbPair.activeId;
+  let low = Math.floor(active / 70) * 70;
+  if (active - low < gap) low -= 70;
+  const price = (id) => Number(dlmm.fromPricePerLamport(Number(dlmmPkg.getPriceOfBinByBinId(id, dlmm.lbPair.binStep))));
+  // just inside the bins: getBinIdFromPrice rounds the lower edge down, the upper up
+  return { low, lower: price(low) * (1 + 1e-7), upper: price(active + 4) * (1 - 1e-7) };
+}
+
+// The signer's open, run against `connection` with `beforeSend` called before
+// each send reaches the fork. Returns the last report, every stderr line and
+// the number of sends.
+async function openWith(signer, { connection, payer, acting }, band, beforeSend) {
+  let sends = 0;
+  const wrapped = Object.create(connection, { sendRawTransaction: { value: async (raw, opts) => {
+    sends += 1;
+    await beforeSend(sends, raw);
+    return connection.sendRawTransaction(raw, opts);
+  } } });
+  const deps = { urls: ['http://fork.test'], connectFn: async () => ({ connection: wrapped, payer, acting }), sleep: async () => {} };
+  const said = [], errs = [], log = console.log, err = console.error;
+  console.log = (x) => said.push(x); console.error = (...x) => errs.push(x.join(' '));
+  try { await signer.open(POOL.toBase58(), String(band.lower), String(band.upper), '1', '100', true, deps); }
+  finally { console.log = log; console.error = err; }
+  return { report: said.filter(x => typeof x === 'string' && x.startsWith('{')).map(JSON.parse).at(-1), errs, sends };
+}
+
+async function keyOnFork() {
+  const fork = new Fork();
+  await fork.program(DLMM_PROGRAM);
+  await fork.syncClock();
+  await fork.clone([USDC]);
+  const payer = fork.wallet(5);
+  fork.tokenAccount(getAssociatedTokenAddressSync(USDC, payer.publicKey), USDC, payer.publicKey, 200_000_000n);
+  const connection = fork.connection();
+  const acting = await actingAccount({ connection, payer, venue: 'meteora-dlmm', env: {} });
+  return { fork, connection, acting, payer };
+}
+
+async function statusOf(signer, ctx) {
+  const said = [], log = console.log;
+  console.log = (x) => said.push(x);
+  try {
+    await signer.status(undefined, { urls: ['http://fork.test'], sleep: async () => {},
+      connectFn: async () => ({ connection: ctx.connection, payer: ctx.payer, acting: ctx.acting }) });
+  } finally { console.log = log; }
+  return JSON.parse(said.find(x => typeof x === 'string' && x.startsWith('{')));
+}
+
+for (const mode of ['vault', 'key']) {
+  test(`${mode}: the active bin moves under a band edge on a bin-array boundary; the open is rebuilt once and lands`,
+    { timeout: 300_000 }, async () => {
+      const ctx = mode === 'vault' ? await vaultOnFork() : await keyOnFork();
+      assert.equal(ctx.acting.mode, mode);
+      const signer = await import('../venues/meteora_dlmm/signer.mjs');
+      process.env.LPBOT_POOL = POOL.toBase58();
+      process.env.LPBOT_MAX_USD = '100000';
+      const dlmm = await DLMM.create(ctx.connection, POOL);
+      const band = edgeBand(dlmm, 6);
+      // the price falls 3 bins between the build and the first send only
+      const r = await openWith(signer, ctx, band, async (n) => { if (n === 1) await pushDown(ctx.fork, dlmm, 3); });
+      assert.equal(r.report.sent, true, JSON.stringify(r.report) + r.errs.join('\n'));
+      assert.ok(!r.report.partial, JSON.stringify(r.report));
+      assert.equal(r.report.minBinId, band.low);
+      const refused = r.errs.find(l => /open refused at preflight, nothing sent/.test(l));
+      assert.ok(refused, r.errs.join('\n'));
+      assert.match(refused, /Meteora DLMM (InvalidBinArray \(6027|NonContinuousBinArrays \(6028)/);
+      assert.match(refused, /attempt 2\/2/);
+      assert.equal((await statusOf(signer, ctx)).positionMint, r.report.positionMint, 'one position: the rebuilt one');
+    });
+}
+
+test('an open refused twice reports the program\'s words, sent nothing, and is not tried a third time', { timeout: 300_000 }, async () => {
+  const ctx = await keyOnFork();
+  const signer = await import('../venues/meteora_dlmm/signer.mjs');
+  process.env.LPBOT_POOL = POOL.toBase58();
+  process.env.LPBOT_MAX_USD = '100000';
+  const dlmm = await DLMM.create(ctx.connection, POOL);
+  const band = edgeBand(dlmm, 12);
+  const r = await openWith(signer, ctx, band, async () => { await pushDown(ctx.fork, dlmm, 3); });
+  assert.equal(r.sends, 2);
+  assert.equal(r.report.sent, false);
+  assert.equal(r.report.partial, true);
+  assert.deepEqual(r.report.signatures, []);
+  assert.match(r.report.error, /\| program error: Meteora DLMM (InvalidBinArray|NonContinuousBinArrays) \((6027|6028) = 0x178[bc]\)( at instruction \d+)? \| logs: .*Error Code: (InvalidBinArray|NonContinuousBinArrays)/);
+  assert.ok(r.report.error.length <= 1800);
+  assert.equal((await statusOf(signer, ctx)).positions, 0);
+  process.exitCode = 0;                            // the signer marks its failure; this test expects it
+});
+
+test('a refusal of another program, or one after a send, is never rebuilt', async () => {
+  const signer = await import('../venues/meteora_dlmm/signer.mjs');
+  const { rebuildableOpenFailure } = signer;
+  const dlmmLog = [`Program ${DLMM_PROGRAM.toBase58()} failed: custom program error: 0x178b`];
+  const squadsLog = [`Program ${sq.PROGRAM_ID.toBase58()} failed: custom program error: 0x178b`];
+  const e = (logs, extra = {}) => Object.assign(new Error('Transaction simulation failed: Error processing Instruction 2: custom program error: 0x178b'),
+    { programLogs: logs }, extra);
+  assert.equal(rebuildableOpenFailure(e(dlmmLog)), true);
+  assert.equal(rebuildableOpenFailure(e(['x', ...dlmmLog, ...squadsLog])), true);           // DLMM inside the vault's call
+  assert.equal(rebuildableOpenFailure(e([`Program ${DLMM_PROGRAM.toBase58()} failed: custom program error: 0x178c`])), true);
+  assert.equal(rebuildableOpenFailure(e(squadsLog)), false);                                 // Squads' 6027: SpendingLimitExceeded
+  assert.equal(rebuildableOpenFailure(e([`Program ${DLMM_PROGRAM.toBase58()} failed: custom program error: 0x178d`])), false);
+  assert.equal(rebuildableOpenFailure(e(dlmmLog), ['SIG']), false);                          // something landed
+  assert.equal(rebuildableOpenFailure(e(dlmmLog, { afterSend: true })), false);              // sent, unconfirmed
+  assert.equal(rebuildableOpenFailure(e([], { programIds: ['a', 'b', DLMM_PROGRAM.toBase58()] })), true);
+  assert.equal(rebuildableOpenFailure(e([], { programIds: ['a', 'b', sq.PROGRAM_ID.toBase58()] })), false);
+  assert.equal(rebuildableOpenFailure(new Error('429 Too Many Requests')), false);
+  assert.equal(rebuildableOpenFailure(null), false);
 });

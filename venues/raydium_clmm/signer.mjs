@@ -520,7 +520,7 @@ export async function sendAll(builts, report, send = sendBuilt) {
     } catch (e) {
       if (!sigs.length) throw e;
       console.log(JSON.stringify({ ...report, sent: true, partial: true, signature: sigs[sigs.length - 1],
-        signatures: sigs, error: String(e?.message ?? e).slice(0, 300) }, null, 1));
+        signatures: sigs, error: String(e?.message ?? e).slice(0, 1800) }, null, 1));
       throw Object.assign(new Error(`partial send: ${sigs.length}/${builts.length} sent; ${e?.message ?? e}`), { sent: true });
     }
   }

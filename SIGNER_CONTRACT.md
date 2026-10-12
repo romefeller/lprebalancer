@@ -43,6 +43,16 @@ from stderr and treats a nonzero exit, `error`, or `partial` as a failure.
 Never print multiple result objects. After a submission may have occurred,
 the signer must not retry the whole operation on another RPC endpoint.
 
+A Solana program failure (`ERROR:` line or a report's `error`) is one line
+that adds the program's own words (shared/program_errors.mjs, 2026-10-12):
+`<message> | program error: Meteora DLMM InvalidBinArray (6027 = 0x178b) at
+instruction 7 | logs: <line> ; <line> ...`. The failing program is the first
+`Program <id> failed` log line, else the failing instruction's program; the
+last 10 log lines, 160 characters each, at most 1,800 characters, redacted.
+The loop shows the decoded part (books.tidy) and keeps the log lines for the
+events table and Telegram (books.program_logs). An EVM failure adds
+` | revert: <reason>`.
+
 ## Output fields the loop reads
 
 `balance`:

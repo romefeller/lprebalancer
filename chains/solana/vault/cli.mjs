@@ -28,6 +28,7 @@
 //
 // Keys: WALLET_SECRET_PATH (payer) and LPBOT_VAULT_POLICY_KEY (policy), as the
 // signers read them. The owners' keys are only ever public keys here.
+import { signerError } from '../../../shared/signer_errors.mjs';
 import { createRequire } from 'module';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -347,4 +348,4 @@ export async function main(argv = process.argv.slice(2)) {
     + '| request <withdraw|revoke|approve> --owner <k> [...] | add-venue --venue <v> --pools .. [--execute]');
 }
 
-if (isEntry(import.meta.url)) main().catch(e => { console.error('ERROR:', e.message); process.exitCode = 1; });
+if (isEntry(import.meta.url)) main().catch(e => { console.error('ERROR:', signerError(e)); process.exitCode = 1; });

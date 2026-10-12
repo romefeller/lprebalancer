@@ -299,7 +299,9 @@ def dividend(state, status):
         except Exception as e:          # the split must never stop the loop
             books.notify('payout_failed', reason=f'{type(e).__name__}: {books.tidy(e)}')
         return True
-    books.notify('harvest_skipped', reason=err or 'no signature returned', kind='dividend')
+    logs = signers.failure_logs()
+    books.notify('harvest_skipped', reason=err or 'no signature returned', kind='dividend',
+                 **({'logs': logs} if logs else {}))
     return False
 
 

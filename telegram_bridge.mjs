@@ -135,7 +135,20 @@ export function payoutHeld(row) {
 // with every secret-shaped string masked.
 export function message(row) {
   const label = row && row.event !== 'PORTFOLIO' ? poolLabel(row) : '';
-  return redact(`${label ? label + ' ' : ''}${emojiFor(row.event, EMOJI, row)} ${render(row)}`);
+  return redact(`${label ? label + ' ' : ''}${emojiFor(row.event, EMOJI, row)} ${render(row)}${logLines(row)}`);
+}
+
+// A failed write's program log lines (lp/books.program_logs: at most 10,
+// each at most 160 characters), one per line under the message. Bounded
+// here again: a feed row is written by another process. Pure.
+export const LOG_LINES = 10;
+export function logLines(row) {
+  const logs = Array.isArray(row?.logs) ? row.logs.slice(-LOG_LINES) : [];
+  if (!logs.length) return '';
+  return '\nprogram logs:\n' + logs.map(l => {
+    const one = String(l).split(/\s+/).join(' ');
+    return one.length > 160 ? `${one.slice(0, 159)}…` : one;
+  }).join('\n');
 }
 
 // The pool's base token: the row's token_a, else the first half of its pair.
@@ -523,7 +536,7 @@ export function render(row) {
         + ` · ${row.action ?? 'nothing sent; retried at the next poll'}`;
     // the pool's label is the prefix: the row's own copy of it is not repeated
     default: {
-      const { profile, wallet_id, wallet_tag, chain, pair, ...rest } = row;
+      const { profile, wallet_id, wallet_tag, chain, pair, logs, ...rest } = row;   // logs: logLines
       return `${event} · ${JSON.stringify(rest)}`;
     }
   }

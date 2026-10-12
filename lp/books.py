@@ -20,6 +20,24 @@ def band_label(k):
 
 NOISE = re.compile(r'^\s*bigint: Failed to load bindings|^\s*\(node:\d+\) \[?\w*\]? ?(Experimental|Deprecation)Warning'
                    r'|^\s*\(Use `node --trace-')
+# The parts a signer adds to a program failure (shared/program_errors.mjs):
+# " | program error: <decoded>" and " | logs: <line> ; <line> ; ...".
+PROGRAM_ERROR_MARK = r'\| program error: ([^|]+?)\s*(?:\||$)'
+PROGRAM_LOGS_MARK = r'\| logs: (.*?)\s*(?:\n|$)'
+LOG_LINES = 10            # at most this many log lines reach the feed and Telegram
+LOG_LINE_CHARS = 160
+
+
+def program_logs(text):
+    """The program log lines a signer's failure text carries (its ' | logs: '
+    part), the last LOG_LINES of them, each at most LOG_LINE_CHARS long and
+    redacted; [] when it carries none. Pure but for redact's environment."""
+    m = re.search(PROGRAM_LOGS_MARK, str(text or ''))
+    if not m:
+        return []
+    lines = [ln.strip() for ln in m.group(1).split(' ; ') if ln.strip()]
+    return [redact(ln if len(ln) <= LOG_LINE_CHARS else ln[:LOG_LINE_CHARS - 1] + '…')
+            for ln in lines[-LOG_LINES:]]
 
 
 def tidy(err, limit=140):
@@ -40,6 +58,11 @@ def tidy(err, limit=140):
     # A program rejection is authoritative even if earlier RPC retries logged 429.
     if re.search(r'PriceSlippageCheck|price slippage check|0x1781\b|Custom["\s:]+6017\b', s, re.I):
         return 'PriceSlippageCheck (6017): price moved beyond the slippage limit'
+    # A signer that decoded the failing program's error (shared/program_errors.mjs)
+    # says it best: "Meteora DLMM InvalidBinArray (6027 = 0x178b) at instruction 7".
+    decoded = re.search(PROGRAM_ERROR_MARK, s)
+    if decoded:
+        return f'program error: {decoded.group(1).strip()}'[:limit]
     # The specific part of a program failure first: an Anchor "Error Message",
     # the custom error code, a JSON-RPC message. A simulation failure's log
     # dump buried them (2026-09-28 18:56: only "Program data: 7XCU..." kept).

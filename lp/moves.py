@@ -137,6 +137,7 @@ def reopen(state, reason, band=None, recovering=False, exit_side=0):
         return False
     out, err = signers.chain('open', pool, f'{lower:.6f}', f'{upper:.6f}',
                              f'{cap_a:.9f}', f'{cap_b:.9f}', '--execute')
+    logs = signers.failure_logs()                        # the program's words; the status read below empties them
     if signers.held(err):
         return False                                     # held, said once by chain(): no failure, no retry storm
     if err:
@@ -150,8 +151,8 @@ def reopen(state, reason, band=None, recovering=False, exit_side=0):
             out = {'positionMint': status['positionMint'], 'signature': None}
         else:
             state['failures'] += 1; paths.save(state)
-            db.event('open_failed', err)
-            books.notify('open_failed', reason=err, failures=state['failures'])
+            db.event('open_failed', signers.failure_detail(err, logs))
+            books.notify('open_failed', reason=err, failures=state['failures'], **({'logs': logs} if logs else {}))
             if state['failures'] >= config.MAX_CONSECUTIVE_FAILURES:
                 books.halt(f'{state["failures"]} consecutive failures')
             return False
@@ -263,7 +264,9 @@ def rebalance(state, status, reason, target=None, band=None, calm_move=False, ex
         # Meteora and Byreal signers answer "nothing to claim" with no
         # signature, and treating that as a failure would leave the band out
         # of range until the bot halted.
-        books.notify('harvest_skipped', reason=err or (out or {}).get('note') or 'no signature returned')
+        logs = signers.failure_logs()
+        books.notify('harvest_skipped', reason=err or (out or {}).get('note') or 'no signature returned',
+                     **({'logs': logs} if logs else {}))
 
     if calm_move and target is None and not close_only:
         state['pending_reopen'] = {'mint': mint, 'pool': config.POOL, 'dex': config.DEX,
@@ -273,6 +276,7 @@ def rebalance(state, status, reason, target=None, band=None, calm_move=False, ex
 
     venue = signers.health_key(('close',), config.DEX)
     out, err = signers.chain('close', mint, '--execute', record=False)
+    logs = signers.failure_logs()                        # the status reads below empty them
     if signers.held(err):
         state.pop('pending_reopen', None); paths.save(state)
         return                      # held: said once by chain(), no failure counted
@@ -285,6 +289,7 @@ def rebalance(state, status, reason, target=None, band=None, calm_move=False, ex
         if check is not None and check.get('positionMint') == mint:
             books.notify('close_retry', reason=err)
             out, err = signers.chain('close', mint, '--execute', record=False)
+            logs = signers.failure_logs()
     if err:
         # A close that reports failure may have landed. This exact false
         # negative left a position closed and the capital idle in production.
@@ -304,8 +309,8 @@ def rebalance(state, status, reason, target=None, band=None, calm_move=False, ex
             state.pop('pending_reopen', None)
             signers.record_health(venue, None, err)            # one close, one failure, whatever the attempts
             state['failures'] += 1; paths.save(state)
-            db.event('close_failed', err)
-            books.notify('close_failed', reason=err, failures=state['failures'])
+            db.event('close_failed', signers.failure_detail(err, logs))
+            books.notify('close_failed', reason=err, failures=state['failures'], **({'logs': logs} if logs else {}))
             if state['failures'] >= config.MAX_CONSECUTIVE_FAILURES:
                 books.halt(f'{state["failures"]} consecutive failures')
             return
