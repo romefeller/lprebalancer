@@ -398,6 +398,38 @@ def operator_target(spec):
             'token_b': rec['token_b'], 'net_day_pct': None, 'band_pct': None}
 
 
+def move_waits(target):
+    """Why an operator move of a Squads vault profile to `target` must wait,
+    or None. The vault acts on a venue only through policies its owners
+    approved, so the move closes nothing before the target's signer reads
+    the vault there (its read checks every policy of the venue on chain): a
+    venue staged on the vault waits for the owners' signature. Any refusal
+    of that read waits too: a close whose open cannot follow would leave the
+    capital idle. Not a vault, or the venue it is on: never waits."""
+    if not config.VAULT or config.VAULT['kind'] != 'squads' or target['dex'] == config.DEX:
+        return None
+    _out, err = signers.chain('balance', target['address'], dex=target['dex'])
+    return err or None
+
+
+def operator_move(state):
+    """The MIGRATE file's target, consumed, or None. A refused target is
+    consumed with its reason said (operator_target); one that must wait
+    (move_waits) leaves the file for the next poll, its reason said once."""
+    target = operator_target(paths.MIGRATE.read_text().split())
+    why = move_waits(target) if target else None
+    if why:
+        if state.get('move_waits') != why:
+            state['move_waits'] = why; paths.save(state)
+            books.notify('migrate_waits', target=f"{target['dex']} {target['address']}", reason=why,
+                         action='the MIGRATE file stays: the move runs once the target venue reads')
+        return None
+    paths.MIGRATE.unlink(missing_ok=True)
+    if state.pop('move_waits', None):
+        paths.save(state)
+    return target
+
+
 def repoint_with_leftovers(state, target):
     """repoint(), and remember in state['left_behind'] the old pool's tokens
     the new pool does not hold (sell_left_behind sells them). A reopen intent

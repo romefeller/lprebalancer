@@ -15,6 +15,10 @@ writes nothing.
     LPBOT_DSN=dbname=rebalancer python3 ops/add_vault.py payouts --wallet tangem-vault \\
         --venue meteora-dlmm --payout <wallet>[,<wallet>] [--mints <mint>[,<mint>]] [--apply]
 
+    # one more venue on the same vault (never a second vault): stage it, then store it
+    node chains/solana/vault/cli.mjs add-venue --venue raydium-clmm --pools <pool> --execute > staged.json
+    LPBOT_DSN=dbname=rebalancer python3 ops/add_vault.py venue --wallet tangem-vault --json staged.json [--apply]
+
 A Safe vault (chains/evm/vault/cli.mjs connect --execute > vault.json) registers the
 same way. It has one key: its --policy-key-env is its --secret-env. Its payout wallets
 are in the bot's role, so a new payout wallet is a new connect.
@@ -163,6 +167,43 @@ def payouts(args):
           'signed on owner/index.html.')
 
 
+def venue_row(v, staged):
+    """The policy row of a venue staged on vault `v` (db.vault_row) from what
+    `cli.mjs add-venue` printed. Refused: another vault's staging, a venue
+    the vault has, a dry run of the lookup accounts it needs. Pure."""
+    if staged.get('settings') != v['settings']:
+        raise Refused(f"the staging is for the vault {staged.get('settings')}, not {v['settings']}")
+    name = staged.get('venue')
+    if name not in VENUES[v['kind']] or v['kind'] != 'squads':
+        raise Refused(f'venue {name!r} has no Squads vault rules')
+    if name in v['venues']:
+        raise Refused(f'the vault has {name} already')
+    if staged.get('sent') is not True and staged.get('lookupAdds'):
+        raise Refused(f"the lookup table lacks {staged['lookupAdds']} of the venue's accounts: run add-venue with --execute first")
+    policies = addresses(staged.get('policies'), 'policies')
+    pools = addresses(staged.get('pools'), 'pools')
+    if not policies or not pools:
+        raise Refused(f'{name}: no policies or no pools')
+    return (v['wallet_id'], name, policies, pools, addresses(staged.get('payouts'), 'payouts'))
+
+
+def venue(args):
+    """Store a venue staged on an existing vault. The bot acts on it once the
+    owners approve (Approve bot rules); until then its signer refuses."""
+    v = db.vault_row(args.wallet)
+    if not v:
+        raise Refused(f'wallet {args.wallet} has no vault')
+    text = sys.stdin.read() if args.json == '-' else pathlib.Path(args.json).read_text()
+    row = venue_row(v, json.loads(text))
+    print('policy:', row)
+    if not args.apply:
+        print('DRY RUN: pass --apply to write.')
+        return
+    with db.cursor(commit=True) as cur:
+        cur.execute('insert into vault_policies (wallet_id, venue, policies, pools, payouts) values (%s, %s, %s, %s, %s)', row)
+    print(f'written. Add {row[1]} to the profile\'s execute_dexes; the owners approve with Approve bot rules.')
+
+
 def main(argv):
     p = argparse.ArgumentParser(description=__doc__.split('\n')[0])
     sub = p.add_subparsers(dest='cmd', required=True)
@@ -174,9 +215,12 @@ def main(argv):
     q.add_argument('--wallet', required=True), q.add_argument('--venue', required=True)
     q.add_argument('--payout', required=True), q.add_argument('--mints')
     q.add_argument('--apply', action='store_true')
+    s = sub.add_parser('venue')
+    s.add_argument('--wallet', required=True), s.add_argument('--json', required=True)
+    s.add_argument('--apply', action='store_true')
     args = p.parse_args(argv)
     try:
-        (register if args.cmd == 'register' else payouts)(args)
+        {'register': register, 'payouts': payouts, 'venue': venue}[args.cmd](args)
     except Refused as e:
         raise SystemExit(f'refused: {e}')
 

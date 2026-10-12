@@ -572,6 +572,18 @@ def mint_refusal(err):
 WAIT_REFUSAL = re.compile(r'^refused: (wallet \S+ lock|claims unmeasurable|halted|max fee \d+ wei/gas exceeds)')
 
 
+# A vault whose policies on chain are not this code's rules for its config
+# (chains/solana/vault/account.mjs AWAITS_OWNERS): the owners end it with one
+# signature (Approve bot rules); until then every signer call refuses.
+AWAITS_OWNERS = re.compile(r"vault awaits the owners' approval")
+
+
+def awaits_owners(err):
+    """Whether a signer refused because the vault awaits its owners' approval
+    (rules changed, a venue staged, the bot revoked). Pure."""
+    return bool(err) and bool(AWAITS_OWNERS.search(str(err)))
+
+
 def held(err):
     """Whether a write was refused for a reason that holds the profile where
     it is (mint_refusal, or WAIT_REFUSAL): nothing was sent, no failure is

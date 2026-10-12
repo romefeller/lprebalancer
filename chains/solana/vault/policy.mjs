@@ -20,6 +20,8 @@ const require = createRequire(import.meta.url);
 const { PublicKey, ComputeBudgetProgram } = require('@solana/web3.js');
 
 const TOKEN_PROGRAM = new PublicKey(SOLANA.programs.token);
+const ASSOCIATED_TOKEN = new PublicKey(SOLANA.programs.associated_token);
+const NATIVE_MINT = new PublicKey(SOLANA.native_mint);
 // Byte 32 of an SPL token account is its owner (spl-token state.rs Account).
 const TOKEN_OWNER_OFFSET = 32;
 const MAX_CONSTRAINTS = 20;
@@ -55,7 +57,18 @@ export function poolPda(seeds, pool, programId) {
   return PublicKey.findProgramAddressSync(parts, programId)[0];
 }
 
+// The vault's WSOL associated token account: the one account a plain SOL
+// transfer of the vault may go to. Pure.
+export function vaultWsolAccount(vault) {
+  return PublicKey.findProgramAddressSync([new PublicKey(vault).toBuffer(), TOKEN_PROGRAM.toBuffer(), NATIVE_MINT.toBuffer()],
+    ASSOCIATED_TOKEN)[0];
+}
+
 // What a pin requires of its account, for one vault. `ctx` = {vault, payer, pools, payouts}.
+// vaultWsol is pinned by key: no token program checks a plain SOL transfer,
+// and an owner-field check passes an account the bot could take the SOL
+// from (an SPL Multisig whose bytes 32..64 are the vault's key, or a token
+// account of a mint whose authority freezes or burns it).
 function pin({ role, index, seeds }, programId, ctx) {
   const keys = (list, what) => {
     if (!list?.length) throw new Error(`role ${role} needs at least one ${what}`);
@@ -70,7 +83,7 @@ function pin({ role, index, seeds }, programId, ctx) {
     case 'payout': return keys(ctx.payouts, 'payout token account');
     case 'none': return keys([programId], 'program');
     case 'vaultToken': return { index, data: ownedByVault };
-    case 'vaultWsol': return { index, owner: TOKEN_PROGRAM, data: ownedByVault };
+    case 'vaultWsol': return keys([vaultWsolAccount(ctx.vault)], 'vault');
     default: throw new Error(`unknown role ${role}`);
   }
 }

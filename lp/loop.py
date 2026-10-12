@@ -73,6 +73,25 @@ def dormant(state, bal):
     return False
 
 
+def awaiting_owners(state, status, err):
+    """Hold a vault profile whose policies await the owners' approval: every
+    signer refuses until they sign (Approve bot rules), and that is no read
+    failure, so no HALT after max_unreadable_polls. Said once when it starts
+    and once when it ends. True while it holds."""
+    if status is None and signers.awaits_owners(err):
+        if not state.get('awaits_owners'):
+            books.notify('vault_awaits_owners', reason=err,
+                         action='holding: nothing moves until the owners approve the bot rules')
+            db.event('vault_awaits_owners', str(err))
+        state['awaits_owners'] = str(err); paths.save(state)
+        return True
+    if status is not None and state.pop('awaits_owners', None):
+        paths.save(state)
+        books.notify('vault_approved', detail='the owners approved the bot rules: the bot acts again')
+        db.event('vault_approved', 'the vault policies are the configured ones')
+    return False
+
+
 def main():
     if paths.halted():
         print(f'HALT present: {paths.halted()}')
@@ -101,6 +120,9 @@ def main():
             print(f'status unreadable while dormant: {err}', flush=True)
             time.sleep(max(DORMANT_POLL_S, config.POLL_SECONDS))
             continue
+        if awaiting_owners(state, status, err):
+            time.sleep(config.POLL_SECONDS)
+            continue
         if status is None:
             state['read_failures'] += 1; paths.save(state)
             books.notify('status_unreadable', reason=err,
@@ -127,9 +149,7 @@ def main():
                 # An operator move with nothing held (the swing's switch when
                 # an open failed): no close, the pool changes and what the
                 # old pair left behind is sold before the dormant test.
-                spec = paths.MIGRATE.read_text().split()
-                paths.MIGRATE.unlink()
-                target = board.operator_target(spec)
+                target = board.operator_move(state)
                 if target:
                     db.event('MIGRATE_REQUESTED', f'operator: {target["dex"]} {target["address"]} (no position)')
                     board.repoint_with_leftovers(state, target)
@@ -317,10 +337,9 @@ def main():
 
         if paths.MIGRATE.exists():
             # "<dex> <pool>". Consumed before it runs. The same gates as an
-            # automatic move: a signer must exist and be armed for the DEX.
-            spec = paths.MIGRATE.read_text().split()
-            paths.MIGRATE.unlink()
-            target = board.operator_target(spec)
+            # automatic move: a signer must exist and be armed for the DEX. A
+            # vault's move to a venue the owners have not approved yet waits.
+            target = board.operator_move(state)
             if target:
                 db.event('MIGRATE_REQUESTED', f'operator: {target["dex"]} {target["address"]}')
                 books.notify('MIGRATE', held=f'{config.DEX} {config.PAIR_LABEL}',

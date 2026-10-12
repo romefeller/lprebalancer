@@ -18,7 +18,13 @@
 //   node chains/solana/vault/cli.mjs request <withdraw|revoke|approve> --owner <k> [...]
 //       an owner's transaction for owner/index.html, as one JSON line. withdraw
 //       --to <wallet> --mint <mint|SOL> --amount <n|all>; revoke; approve
-//       (the policies for the venue, pools and payouts now configured).
+//       (the policies for the venue, pools and payouts now configured; a
+//       staged policy is created).
+//   node chains/solana/vault/cli.mjs add-venue --venue <venue> --pools <pool>[,<pool>] [--execute]
+//       stage one more venue on the vault in LPBOT_VAULT_*: its policies'
+//       addresses (the vault's next seeds), and with --execute its accounts
+//       in the vault's lookup table. ops/add_vault.py venue stores the row;
+//       the owners then approve (request approve, Approve bot rules).
 //
 // Keys: WALLET_SECRET_PATH (payer) and LPBOT_VAULT_POLICY_KEY (policy), as the
 // signers read them. The owners' keys are only ever public keys here.
@@ -27,7 +33,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import * as sq from './squads.mjs';
 import { compile } from './policy.mjs';
-import { connectDone, connectPlan, connectProblems, lookupPlan, staticAccounts } from './admin.mjs';
+import { approvePlan, connectDone, connectPlan, connectProblems, lookupPlan, stagedPolicies, staticAccounts } from './admin.mjs';
 import { readKeypair, vaultConfig, verifyPolicy } from './account.mjs';
 import { venue as venueOf } from './venues.mjs';
 import SOLANA from '../solana.json' with { type: 'json' };
@@ -233,18 +239,12 @@ export async function request(action, f, { connection = new Connection(RPC, 'con
     const venue = env.LPBOT_VAULT_VENUE;
     const payer = keysOf(f.payer, '--payer')[0];
     if (!venue || !payer) throw new Error(`${action} needs LPBOT_VAULT_VENUE and --payer <the bot's payer key>`);
-    const compiled = compile(venue, { vault: cfg.vault, payer, pools: cfg.pools, payouts: cfg.payouts });
-    if (compiled.policies.length !== cfg.policies.length) throw new Error('the rules now need a different number of policies; reconnect');
     const policyKey = keysOf(f['policy-key'], '--policy-key')[0];
     if (action === 'approve' && !policyKey) throw new Error('approve needs --policy-key <the bot\'s policy key>');
-    // Revoke keeps every rule but names the owner as the policy's only signer.
-    const signer = action === 'revoke' ? owner : policyKey;
-    groups = cfg.policies.map((address, i) => [sq.settingsSyncIx({ settings: cfg.settings, signers: [owner], rentPayer: owner,
-      extra: [address], actions: [{ kind: 'policyUpdate', address, policy: compiled.policies[i].policy, signers: [{ key: signer }] }] })]);
-    summary = action === 'revoke'
-      ? `revoke the bot: ${cfg.policies.length} policies of the vault ${cfg.vault.toBase58()} will name only you`
-      : `approve for the bot (${signer.toBase58()}) on ${venue}: pools ${cfg.pools.map(String).join(', ')}; `
-        + `payouts ${cfg.payouts.map(String).join(', ') || 'none'}`;
+    const rules = await rulesRequest(action, { connection, settings: cfg.settings, owner, payer, policyKey,
+      venues: [{ venue, policies: cfg.policies, pools: cfg.pools, payouts: cfg.payouts }] });
+    groups = rules.groups;
+    summary = rules.summary;
   } else throw new Error(`unknown request ${action} (withdraw, revoke, approve)`);
   const transactions = groups.map(ixs => {
     const msg = new TransactionMessage({ payerKey: owner, recentBlockhash: PublicKey.default.toBase58(), instructions: ixs }).compileToLegacyMessage();
@@ -252,6 +252,84 @@ export async function request(action, f, { connection = new Connection(RPC, 'con
   });
   return { kind: 'lp-bot vault request', network: 'solana:mainnet', vault: cfg.vault.toBase58(), owner: owner.toBase58(),
     action, summary, messages: transactions };
+}
+
+// The owner's transactions for approve or revoke over `venues` of one vault
+// ([{venue, policies, pools, payouts}], as the bot's config names them), in
+// the order admin.mjs approvePlan gives: new policies first, updates last.
+// Approve: the rules this code compiles, the bot's policy key their signer;
+// a policy staged for a new venue is created. Revoke: the same rules, the
+// owner their only signer; a staged policy stays uncreated. {groups,
+// summary, steps}; nothing to sign is an error.
+export async function rulesRequest(action, { connection, settings, owner, payer, policyKey, venues }) {
+  settings = new PublicKey(settings);
+  const vault = sq.vaultPda(settings);
+  const signer = action === 'revoke' ? owner : policyKey;
+  if (!signer) throw new Error(`${action} needs the bot's policy key`);
+  const settingsInfo = await connection.getAccountInfo(settings, 'confirmed');
+  if (!settingsInfo) throw new Error(`the vault settings ${settings.toBase58()} do not exist`);
+  const addresses = venues.flatMap(v => v.policies.map(k => new PublicKey(k)));
+  const infos = addresses.length ? await connection.getMultipleAccountsInfo(addresses, 'confirmed') : [];
+  let at = 0;
+  const steps = approvePlan({ settings, settingsData: settingsInfo.data, owner, signer, create: action === 'approve',
+    venues: venues.map(v => {
+      const keys = (xs) => xs.map(k => new PublicKey(k));
+      const compiled = compile(v.venue, { vault, payer, pools: keys(v.pools), payouts: keys(v.payouts) });
+      const mine = infos.slice(at, at + v.policies.length);
+      at += v.policies.length;
+      return { venue: v.venue, compiled, addresses: v.policies, infos: mine };
+    }) });
+  if (!steps.length) throw new Error(`nothing to ${action}: every policy of the vault ${vault.toBase58()} is already as asked`);
+  const created = steps.filter(s => s.kind === 'create').length;
+  const summary = action === 'revoke'
+    ? `revoke the bot: ${steps.length} policies of the vault ${vault.toBase58()} will name only you`
+    : `approve for the bot (${signer.toBase58()}) on ${venues.map(v => `${v.venue} (pools ${v.pools.map(String).join(', ')})`).join(' and ')}; `
+      + `payouts ${[...new Set(venues.flatMap(v => v.payouts.map(String)))].join(', ') || 'none'}`
+      + (created ? `; ${created} new policies, their rent paid by you` : '');
+  return { groups: steps.map(s => s.ixs), summary, steps };
+}
+
+// Stage a venue on a vault that exists (its config in `env`, the
+// LPBOT_VAULT_* of a venue it has): the addresses its policies get when the
+// owners approve them (the vault's next policy seeds), and the accounts its
+// transactions need in the vault's lookup table. With --execute the bot adds
+// those to the table (its own transactions; the payer is the table's
+// authority). Prints the venue's row for ops/add_vault.py venue. The owners
+// then approve with one signature per policy (rulesRequest). Never a second
+// vault: one vault per wallet.
+export async function stageVenue(f, { connection = new Connection(RPC, 'confirmed'), env = process.env, payer = null, log = console.log } = {}) {
+  const cfg = vaultConfig(env);
+  if (!cfg) throw new Error('LPBOT_VAULT_SETTINGS is not set: stage a venue on a vault that exists');
+  const venue = String(f.venue ?? '').trim();
+  const pools = keysOf(f.pools, '--pools');
+  if (!venue || !pools.length) throw new Error('add-venue needs --venue and --pools');
+  if (venue === env.LPBOT_VAULT_VENUE) throw new Error(`${venue} is the venue the environment names: the vault has it already`);
+  payer ??= await readKeypair(process.env.WALLET_SECRET_PATH ?? '');
+  await poolsByVenue(connection, [venue], pools);
+  const settings = sq.decodeSettings((await connection.getAccountInfo(cfg.settings, 'confirmed')).data);
+  const poolInfo = await Promise.all(pools.map(p => venueOf(venue).poolAccounts(connection, p)));
+  const compiled = compile(venue, { vault: cfg.vault, payer: payer.publicKey, pools, payouts: cfg.payouts });
+  const policies = stagedPolicies(cfg.settings, settings.policySeed, compiled.policies.length);
+  const exist = await connection.getMultipleAccountsInfo(policies, 'confirmed');
+  if (exist.some(Boolean)) throw new Error(`a policy at the vault's next seeds exists already (${policies.filter((_, i) => exist[i]).join(', ')})`);
+  if (!cfg.lookup) throw new Error('the vault has no lookup table (LPBOT_VAULT_LOOKUP)');
+  const table = (await connection.getAddressLookupTable(cfg.lookup)).value;
+  if (!table) throw new Error(`vault lookup table ${cfg.lookup.toBase58()} does not exist`);
+  if (!table.state.authority?.equals(payer.publicKey)) throw new Error(`the bot's payer is not the authority of the lookup table ${cfg.lookup.toBase58()}`);
+  const addresses = staticAccounts({ vault: cfg.vault, policies, venues: [venueOf(venue)], pools: poolInfo });
+  const lookup = lookupPlan({ payer: payer.publicKey, table: cfg.lookup, have: table.state.addresses, addresses });
+  const report = { settings: cfg.settings.toBase58(), vault: cfg.vault.toBase58(), venue, policies: policies.map(String),
+    pools: pools.map(String), payouts: cfg.payouts.map(String), lookup: cfg.lookup.toBase58(),
+    lookupAdds: addresses.filter(a => !table.state.addresses.some(k => k.equals(a))).length };
+  if (!f.execute) {
+    log(JSON.stringify({ ...report, sent: false }, null, 1));
+    log('DRY RUN: pass --execute to add the accounts to the lookup table. The owners approve the policies after.');
+    return report;
+  }
+  const signatures = await sendAll(connection, payer, lookup.txs);
+  const done = { ...report, signatures, sent: true };
+  log(JSON.stringify(done, null, 1));
+  return done;
 }
 
 export async function main(argv = process.argv.slice(2)) {
@@ -264,8 +342,9 @@ export async function main(argv = process.argv.slice(2)) {
     return console.log(JSON.stringify(payoutAccounts(keysOf(f.wallets, '--wallets'), keysOf(f.mints ?? SOLANA.usdc_mint, '--mints')).map(String)));
   }
   if (cmd === 'request') return console.log(JSON.stringify(await request(f._[0], f)));
+  if (cmd === 'add-venue') return stageVenue(f);
   console.log('commands: keys <dir> | connect --owners .. --venue <v>[,<v>] --pools .. [--payout ..] [--execute] | status '
-    + '| request <withdraw|revoke|approve> --owner <k> [...]');
+    + '| request <withdraw|revoke|approve> --owner <k> [...] | add-venue --venue <v> --pools .. [--execute]');
 }
 
 if (isEntry(import.meta.url)) main().catch(e => { console.error('ERROR:', e.message); process.exitCode = 1; });

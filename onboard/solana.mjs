@@ -6,7 +6,7 @@ import * as sq from '../chains/solana/vault/squads.mjs';
 import { RULES, compile } from '../chains/solana/vault/policy.mjs';
 import { VENUES } from '../chains/solana/vault/venues.mjs';
 import { readKeypair } from '../chains/solana/vault/account.mjs';
-import { connect, request } from '../chains/solana/vault/cli.mjs';
+import { connect, request, rulesRequest } from '../chains/solana/vault/cli.mjs';
 import SOLANA from '../chains/solana/solana.json' with { type: 'json' };
 import { Invalid, fromRaw, nativeOf, own, toRaw } from './intent.mjs';
 
@@ -197,12 +197,19 @@ export async function ownerTxs(connection, c, row, keys, { action, owner, token,
       { connection, env: requestEnv(row, venues[0], keys) })];
   } else if (action === 'revoke' || action === 'approve') {
     // approve: the bot's policy key back on every policy, with the rules as the
-    // bot now compiles them (after a revoke, or after rules.json grew)
-    parts = [];
-    for (const v of venues) {
-      parts.push(await request(action, { owner, payer: keys.payer.publicKey.toBase58(), 'policy-key': keys.policyKey.publicKey.toBase58() },
-        { connection, env: requestEnv(row, v, keys) }));
-    }
+    // bot now compiles them (after a revoke, or after rules.json grew), and the
+    // policies of a venue staged on this vault created; every venue in one
+    // request, new policies first (cli.mjs rulesRequest)
+    const r = await rulesRequest(action, { connection, settings: row.settings, owner: new PublicKey(owner), payer: keys.payer.publicKey,
+      policyKey: keys.policyKey.publicKey, venues: venues.map(venue => ({ venue, ...row.venues[venue] })) });
+    if (action === 'approve') await affordsRules(connection, owner, r.steps);
+    const { blockhash } = await connection.getLatestBlockhash('confirmed');
+    return { summary: r.summary, transactions: r.groups.map(ixs => {
+      const tx = new Transaction().add(...ixs);
+      tx.feePayer = new PublicKey(owner);
+      tx.recentBlockhash = blockhash;
+      return asWire(tx);
+    }) };
   } else throw new Invalid(`action ${action}`);
   const { blockhash } = await connection.getLatestBlockhash('confirmed');
   const transactions = parts.flatMap(p => p.messages.map(b64 => {
@@ -213,8 +220,35 @@ export async function ownerTxs(connection, c, row, keys, { action, owner, token,
   return { summary: parts.map(p => p.summary).join('; '), transactions };
 }
 
+// The SOL an approval takes from the owner's wallet, which pays it: a fee
+// per transaction, the rent of each new policy and of what an update grows
+// a policy by, and the wallet's own rent-exempt floor, which it may not drop
+// below. Refuses before the wallet is asked to sign what would fail. Bounds
+// over the program's allocations, measured on the fork 2026-10-12: 1324
+// bytes the largest policy (test0's first Raydium one; every venue's for
+// the largest vault: 353 to 1231), 183 bytes the most an update grew one (a
+// DLMM policy of an older release). tests/test_vault_add_venue_fork.mjs
+// checks both bounds and that the owner spends less than asked for.
+export const POLICY_ACCOUNT_BYTES = 1536;
+export const POLICY_GROWTH_BYTES = 256;
+export async function affordsRules(connection, owner, steps) {
+  const created = steps.filter(s => s.kind === 'create').length;
+  const rentOf = async (n) => BigInt(await connection.getMinimumBalanceForRentExemption(n));
+  const floor = await rentOf(0);
+  const grow = (await rentOf(POLICY_GROWTH_BYTES)) - floor;
+  const need = BigInt(created) * await rentOf(POLICY_ACCOUNT_BYTES) + BigInt(steps.length - created) * grow
+    + BigInt(steps.length) * 10_000n + floor;
+  const have = BigInt(await connection.getBalance(new PublicKey(owner), 'confirmed'));
+  if (have < need) {
+    throw new Invalid(`your wallet holds ${fromRaw(have, 9)} SOL; approving needs ${fromRaw(need, 9)} `
+      + `(${created} new policies' rent, ${steps.length} transaction fees, and the wallet's own minimum)`);
+  }
+  return need;
+}
+
 // What the vault holds and whether the bot may still act (every policy
-// lists the bot's policy key).
+// lists the bot's policy key; a policy staged for a venue the owners have
+// not approved yet does not exist and says nothing).
 export async function status(connection, c, row, keys) {
   const vault = sq.vaultPda(new PublicKey(row.settings));
   const balances = {};
@@ -224,7 +258,8 @@ export async function status(connection, c, row, keys) {
   }
   const policies = Object.values(row.venues).flatMap(v => v.policies).map(p => new PublicKey(p));
   const infos = await connection.getMultipleAccountsInfo(policies, 'confirmed');
-  const botActive = infos.length > 0 && infos.every(i => i && sq.decodePolicyHead(i.data).signers.some(s => s.key.equals(keys.policyKey.publicKey)));
+  const present = infos.filter(Boolean);
+  const botActive = present.length > 0 && present.every(i => sq.decodePolicyHead(i.data).signers.some(s => s.key.equals(keys.policyKey.publicKey)));
   return { vault: vault.toBase58(), balances, botActive, rulesCurrent: rulesCurrent(row, vault, keys, infos) };
 }
 

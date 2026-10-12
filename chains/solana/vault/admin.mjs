@@ -86,6 +86,63 @@ export function connectProblems(settingsData, { owners, threshold, botKeys }) {
   return problems;
 }
 
+// The owners' transactions that make a vault's policies what the bot now
+// compiles, one per policy: an existing one is updated (its rules, and
+// `signer` as its only signer), a missing one is created at the vault's next
+// policy seed. A venue added to an existing vault is staged as policies at
+// those seeds (stagedPolicies) and created here: one vault per wallet, never
+// a second one. `venues` = [{venue, compiled, addresses, infos}], infos
+// being the accounts at `addresses` (null: missing). `create: false` (a
+// revoke) leaves a missing policy missing.
+//
+// In seed order, whatever has landed: the signing page asks for each
+// transaction by its index, rebuilt from the chain each time, so the list
+// must not shift as the owner signs (a policy created by an earlier one is
+// updated at its own place; `current` says it already holds these rules).
+// A policy at a new venue's seed waits for the ones before it. Until every
+// policy of a venue is in place the bot does not act on it, and a move to it
+// waits (account.mjs verifyPolicy, lp/board.py move_waits). `owner` signs
+// and pays the fees and the rent. Pure.
+export function approvePlan({ settings, settingsData, owner, signer, venues, create = true }) {
+  settings = new PublicKey(settings);
+  let next = (sq.decodeSettings(settingsData).policySeed ?? 0n) + 1n;
+  const steps = [];
+  for (const v of venues) {
+    if (v.addresses.length !== v.compiled.policies.length) {
+      throw new Error(`the ${v.venue} rules compile to ${v.compiled.policies.length} policies; the config lists ${v.addresses.length}`);
+    }
+    v.compiled.policies.forEach(({ policy }, i) => {
+      const address = new PublicKey(v.addresses[i]), info = v.infos[i];
+      if (!info) {
+        if (!create) return;
+        const want = sq.policyPda(settings, next);
+        if (!want.equals(address)) {
+          throw new Error(`${v.venue} policy ${address.toBase58()} is not the vault's next policy (seed ${next}: ${want.toBase58()})`);
+        }
+        steps.push({ venue: v.venue, address, seed: next, kind: 'create', current: false,
+          action: { kind: 'policyCreate', seed: next, policy, signers: [{ key: signer }] } });
+        next += 1n;
+        return;
+      }
+      if (!info.owner.equals(sq.PROGRAM_ID)) throw new Error(`${address.toBase58()} is not a Squads account`);
+      const head = sq.decodePolicyHead(info.data);
+      if (!head.settings.equals(settings)) throw new Error(`policy ${address.toBase58()} belongs to another vault`);
+      const current = head.signers.length === 1 && head.signers[0].key.equals(signer) && sq.policyStateIs(info.data, policy);
+      steps.push({ venue: v.venue, address, seed: head.seed, kind: 'update', current,
+        action: { kind: 'policyUpdate', address, policy, signers: [{ key: signer }] } });
+    });
+  }
+  return steps.sort((a, b) => Number(a.seed - b.seed)).map(st => ({ ...st,
+    ixs: [sq.settingsSyncIx({ settings, signers: [owner], rentPayer: owner, extra: [st.address], actions: [st.action] })] }));
+}
+
+// The addresses `count` policies of a venue get when the owners approve
+// them on a vault whose last policy seed is `policySeed`, after `before`
+// other staged ones. Pure.
+export function stagedPolicies(settings, policySeed, count, before = 0) {
+  return Array.from({ length: count }, (_, i) => sq.policyPda(new PublicKey(settings), BigInt(policySeed ?? 0n) + BigInt(before + i + 1)));
+}
+
 // The accounts a vault's transactions on these pools share: everything but
 // signers and per-position accounts. `venues` are entries of venues.mjs,
 // `pools` = [{accounts, mints}] from their poolAccounts. Pure; the order is

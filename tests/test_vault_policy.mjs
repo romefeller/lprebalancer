@@ -326,6 +326,9 @@ test('withVaultBudget: an SDK compute limit gains the vault cost of each policy 
   const cfg = { vault: f.vault, payer: f.payer, policies: f.compiled.policies.map(() => key()), policyKey: key() };
   const out = wrap([limit(100_000), f.dlmm('swap2')], cfg, f.compiled);
   assert.equal(unitsOf(out[0]), 100_000 + VAULT_CALL_UNITS);
+  // instructions that need no vault are no policy call: one call, however many run beside it
+  const beside = wrap([limit(100_000), price, other, f.dlmm('swap2')], cfg, f.compiled);
+  assert.equal(unitsOf(beside[0]), 100_000 + VAULT_CALL_UNITS);
 });
 
 test('codec: inner accounts are listed once, writable if any use writes, the vault never a signer', () => {

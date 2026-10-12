@@ -61,7 +61,9 @@ export async function readKeypair(file) {
 // With one: the vault, after checking that the policy on chain is exactly the
 // one these rules compile to, so the bot never signs against a policy it did
 // not expect (an owner's edit, a revoke, a wrong address in the config).
-export async function actingAccount({ connection, payer, venue, env = process.env }) {
+// `compiled`: what the policies hold, when not this code's rules (a test's
+// vault made by an older release).
+export async function actingAccount({ connection, payer, venue, env = process.env, compiled: given = null }) {
   const cfg = vaultConfig(env);
   if (!cfg) {
     return { mode: 'key', owner: payer.publicKey, payer, wrap: (ixs) => ixs,
@@ -74,7 +76,7 @@ export async function actingAccount({ connection, payer, venue, env = process.en
       } };
   }
   const policyKey = await readKeypair(cfg.policyKeyPath);
-  const compiled = compile(venue, { vault: cfg.vault, payer: payer.publicKey, pools: cfg.pools, payouts: cfg.payouts });
+  const compiled = given ?? compile(venue, { vault: cfg.vault, payer: payer.publicKey, pools: cfg.pools, payouts: cfg.payouts });
   await verifyPolicy(connection, cfg, policyKey.publicKey, compiled);
   const tables = [];
   if (cfg.lookup) {
@@ -104,24 +106,32 @@ function needed(ixs, candidates) {
 
 export class PolicyMismatch extends Error {}
 
+// What a PolicyMismatch says when the owners can end it with one signature
+// ("Approve bot rules"): the rules or the pools changed, a policy staged for
+// a new venue is not created yet, the bot was revoked. The loop holds on it
+// without counting failures (lp/loop.py); every other mismatch is a wrong
+// config. The text is matched there.
+export const AWAITS_OWNERS = 'vault awaits the owners\' approval';
+const awaiting = (why) => new PolicyMismatch(`${AWAITS_OWNERS}: ${why}`);
+
 export async function verifyPolicy(connection, cfg, policyKey, compiled) {
   if (cfg.policies.length !== compiled.policies.length) {
-    throw new PolicyMismatch(`the ${compiled.venue} rules compile to ${compiled.policies.length} policies; `
+    throw awaiting(`the ${compiled.venue} rules compile to ${compiled.policies.length} policies; `
       + `the config lists ${cfg.policies.length}`);
   }
   const infos = await connection.getMultipleAccountsInfo(cfg.policies, 'confirmed');
   infos.forEach((info, i) => {
     const at = cfg.policies[i].toBase58();
-    if (!info) throw new PolicyMismatch(`vault policy ${at} does not exist (removed by the owners?)`);
+    if (!info) throw awaiting(`vault policy ${at} does not exist (not approved yet, or removed by the owners)`);
     if (!info.owner.equals(sq.PROGRAM_ID)) throw new PolicyMismatch(`${at} is not a Squads account`);
     const head = sq.decodePolicyHead(info.data);
     if (!head.settings.equals(cfg.settings)) throw new PolicyMismatch(`policy ${at} belongs to another vault`);
     if (!head.signers.some(s => s.key.equals(policyKey))) {
-      throw new PolicyMismatch(`policy ${at} no longer lists the bot's policy key: the owners revoked the bot`);
+      throw awaiting(`policy ${at} no longer lists the bot's policy key: the owners revoked the bot`);
     }
     if (!sq.policyStateIs(info.data, compiled.policies[i].policy)) {
-      throw new PolicyMismatch(`policy ${at} differs from the ${compiled.venue} rules and approved pools in the config; `
-        + 'the owners must approve the change (vault.mjs policy)');
+      throw awaiting(`policy ${at} differs from the ${compiled.venue} rules and approved pools in the config; `
+        + 'the owners must approve the change (Approve bot rules)');
     }
   });
 }

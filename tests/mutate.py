@@ -139,6 +139,22 @@ TARGETS = {
     'vault_swap': ('shared/pool_swap.mjs', ['sellable', 'swapSides'],
                    NODE_TESTS('test_vault_dlmm_fork.mjs', 'test_vault_raydium_fork.mjs', 'test_vault_orca_fork.mjs')),
     'vault_swap_dlmm': ('venues/meteora_dlmm/signer.mjs', ['rebalance'], NODE_TESTS('test_vault_dlmm_fork.mjs')),
+    # 2026-10-12, one more venue on a vault that exists (test0 to Raydium): the WSOL pin by key,
+    # the owners' approval in seed order, the staging, the cost check, the loop's waits.
+    'vault_wsol_pin': ('chains/solana/vault/policy.mjs', ['vaultWsolAccount', 'pin'],
+                       NODE_TESTS('test_vault_add_venue.mjs', 'test_vault_add_venue_fork.mjs')),
+    'vault_approve_plan': ('chains/solana/vault/admin.mjs', ['approvePlan', 'stagedPolicies'],
+                           NODE_TESTS('test_vault_add_venue.mjs', 'test_vault_add_venue_fork.mjs')),
+    'vault_awaits_owners': ('chains/solana/vault/account.mjs', ['verifyPolicy'],
+                            NODE_TESTS('test_vault_add_venue.mjs', 'test_vault_add_venue_fork.mjs')),
+    'vault_rules_request': ('chains/solana/vault/cli.mjs', ['rulesRequest', 'stageVenue'],
+                            NODE_TESTS('test_vault_add_venue.mjs', 'test_vault_add_venue_fork.mjs', 'test_vault_cli_fork.mjs')),
+    'onboard_rules': ('onboard/solana.mjs', ['affordsRules', 'ownerTxs', 'status'],
+                      NODE_TESTS('test_vault_add_venue.mjs', 'test_vault_add_venue_fork.mjs', 'test_onboard_fork.mjs')),
+    'vault_wait_loop': ('lp/loop.py', ['awaiting_owners'], PY_TESTS('test_vault_add_venue')),
+    'vault_wait_board': ('lp/board.py', ['move_waits', 'operator_move'], PY_TESTS('test_vault_add_venue', 'test_swing')),
+    'vault_wait_signers': ('lp/signers.py', ['awaits_owners'], PY_TESTS('test_vault_add_venue')),
+    'add_vault_venue': ('ops/add_vault.py', ['venue_row'], PY_TESTS('test_vault_add_venue.Pure')),
     'fee_share': ('fees.py', ['fee_share'], PY_TESTS('test_vault_config')),
     'vault_config': ('config.py', ['vault_env'], PY_TESTS('test_vault_config')),
     'vault_routing': ('lp/signers.py', ['route', 'housekeeper', 'vault_swaps'], PY_TESTS('test_vault_config')),
@@ -1034,6 +1050,25 @@ EQUIVALENT = {
         'the minimums of a harvest (liquidity 0): the program checks them only when liquidity > 0 (decrease_liquidity.rs)',
     ('byreal_vault_signer', 'vaultDecrease', '\\bnew BN\\(0\\) -> new BN(1)', 'let amountMinA = new BN(0), amountMinB = new BN(0);', 1):
         'the minimums of a harvest (liquidity 0): the program checks them only when liquidity > 0 (decrease_liquidity.rs)',
+    # 2026-10-12, one more venue on a vault that exists
+    ('vault_approve_plan', 'approvePlan', '\\?\\? -> ||', 'let next = (sq.decodeSettings(settingsData).policySeed ?? 0n) + 1n;', 0):
+        'policySeed is a bigint or null; 0n || 0n is 0n: ?? and || agree',
+    ('vault_approve_plan', 'stagedPolicies', '\\?\\? -> ||', 'return Array.from({ length: count }, (_, i) => sq.policyPda(new PublicKey(settings), BigInt(policySeed ?? 0n) + BigInt(before + i + 1)));', 0):
+        'policySeed is a bigint or null; 0n || 0n is 0n: ?? and || agree',
+    ('vault_account', 'actingAccount', '\\?\\? -> ||', 'const compiled = given ?? compile(venue, { vault: cfg.vault, payer: payer.publicKey, pools: cfg.pools, payouts: cfg.payouts });', 0):
+        'given is a compiled object or null: ?? and || pick the same',
+    ('vault_rules_request', 'stageVenue', '\\?\\? -> ||', "const venue = String(f.venue ?? '').trim();", 0):
+        "a flag is a string or absent; '' and absent both give no venue",
+    ('vault_rules_request', 'stageVenue', '\\?\\? -> ||', "payer ??= await readKeypair(process.env.WALLET_SECRET_PATH ?? '');", 0):
+        'payer is a Keypair or null: ??= and ||= agree',
+    ('vault_rules_request', 'stageVenue', '\\?\\? -> ||', "payer ??= await readKeypair(process.env.WALLET_SECRET_PATH ?? '');", 1):
+        "the path is a string or absent; '' and absent both read no key",
+    ('vault_wait_loop', 'awaiting_owners', 'return None', 'return False', 0):
+        'the loop reads the answer as a truth value: None and False hold alike',
+    ('vault_wait_board', 'move_waits', 'drop operand 1', 'return err or None', 0):
+        "err is a text or None; '' and None are both no wait to the caller",
+    ('vault_wait_signers', 'awaits_owners', 'drop operand 0', 'return bool(err) and bool(AWAITS_OWNERS.search(str(err)))', 0):
+        "str(None) and '' hold no marker: the search alone says the same",
 }
 
 
