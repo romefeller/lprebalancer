@@ -371,6 +371,12 @@ test('approve: a venue staged on the vault: its new policies at the vault\'s nex
     assert.match(r.lines[0], /^New policy .*exactly the rules in git/);
   }
   refused(decodeSol(wire(create(0, OWNER)), e('revoke'), PINS), /a revoke creates no policy/);
+  // a start or an expiry on a new policy: the rules set none
+  for (const [back, re] of [[3, /a policy with a start/], [2, /a policy with an expiry/]]) {
+    const [ix] = create(0);
+    const d = Buffer.from(ix.data); d[d.length - back] = 1;
+    refused(decodeSol(wire([new TransactionInstruction({ programId: ix.programId, keys: ix.keys, data: d })]), e('approve'), PINS), re);
+  }
   refused(decodeSol(wire(create(0, STRANGER)), e('approve'), PINS), /not the bot's rules key/);
   refused(decodeSol(wire(create(0, POLICY_KEY, compiled[0].policy, 99n)), e('approve'), PINS), /not one of your vault's/, 'another seed');
   const last = compiled.length - 1;

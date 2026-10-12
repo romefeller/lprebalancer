@@ -161,7 +161,7 @@ TARGETS = {
     'vault_rules_request': ('chains/solana/vault/cli.mjs', ['rulesRequest', 'stageVenue'],
                             NODE_TESTS('test_vault_add_venue.mjs', 'test_vault_add_venue_fork.mjs', 'test_vault_cli_fork.mjs')),
     'onboard_rules': ('onboard/solana.mjs', ['affordsRules', 'ownerTxs', 'status'],
-                      NODE_TESTS('test_vault_add_venue.mjs', 'test_vault_add_venue_fork.mjs', 'test_onboard_fork.mjs')),
+                      NODE_TESTS('test_vault_add_venue.mjs', 'test_onboard_sol.mjs', 'test_vault_add_venue_fork.mjs', 'test_onboard_fork.mjs')),
     'vault_wait_loop': ('lp/loop.py', ['awaiting_owners'], PY_TESTS('test_vault_add_venue')),
     'vault_wait_board': ('lp/board.py', ['move_waits', 'operator_move'], PY_TESTS('test_vault_add_venue', 'test_swing')),
     'vault_wait_signers': ('lp/signers.py', ['awaits_owners'], PY_TESTS('test_vault_add_venue')),
@@ -216,7 +216,7 @@ TARGETS = {
     'onboard_decode_checks': ('onboard/decode_sol.mjs', ['payment', 'deposit', 'withdraw', 'revoke', 'approve', 'close'],
                               NODE_TESTS('test_decode_sol.mjs')),
     'onboard_sol_owner': ('onboard/solana.mjs', ['ownerTxs', 'context', 'depositVerdict', 'checkDeposit', 'broadcast', 'confirm', 'status'],
-                          NODE_TESTS('test_onboard_sol.mjs', 'test_onboard.mjs')),
+                          NODE_TESTS('test_onboard_sol.mjs', 'test_onboard.mjs', 'test_vault_add_venue.mjs')),
     'onboard_server_page': ('onboard/server.mjs', ['walletConnectOf', 'csp', 'sender', 'keysMatch'], NODE_TESTS('test_onboard.mjs')),
     'onboard_store_page': ('onboard/store.py', ['started', 'cap_usd', 'usd_of', 'cap', 'deposited', 'exit_request', 'exits', 'feed_from_file',
                                                 'feed_kind', 'feed'], PY_TESTS('test_onboard_store')),
@@ -492,7 +492,9 @@ EQUIVALENT = {
         'a list or absent: ?? and || give the same',
     ('onboard_decode_sol', 'policyUpdates', '\\?\\? -> ||', 'for (const p of expect.pools[v] ?? []) if (!(pins.pools[v] ?? []).includes(p)) no(`the pool ${short(p)} is not the ${v} pool the rules approve`);', 1):
         'a list or absent: ?? and || give the same',
-    ('onboard_sol_owner', 'ownerTxs', '\\?\\? -> ||', "if (amount !== 'all' && (amount.split('.')[1]?.length ?? 0) > t.decimals) throw new Invalid(`amount: at most ${t.decimals} decimals`);", 0):
+    ('onboard_sol_owner', 'ownerTxs', '\\?\\? -> ||', "if (amount !== 'all' && (amount.split('.')[1]?.length ?? 0) > t.decimals) throw new Invalid(`amount: a number or all, at most ${t.decimals} decimals`);", 0):
+        'a length or absent: an absent or zero length is 0 either way',
+    ('onboard_rules', 'ownerTxs', '\\?\\? -> ||', "if (amount !== 'all' && (amount.split('.')[1]?.length ?? 0) > t.decimals) throw new Invalid(`amount: a number or all, at most ${t.decimals} decimals`);", 0):
         'a length or absent: an absent or zero length is 0 either way',
     ('onboard_sol_owner', 'depositVerdict', '\\?\\? -> ||', 'const raw = BigInt(info.tokenAmount?.amount ?? info.amount);', 0):
         'an amount string is never empty: ?? and || pick the same',
@@ -1712,6 +1714,9 @@ def worker_setup(i):
                                                                            'node_modules', '.git', '.claude'))
     if (ROOT / 'node_modules').is_dir():
         (base / 'lp_bot' / 'node_modules').symlink_to(ROOT / 'node_modules')
+    # the page's build tools and Chromium (onboard/web), for the browser tests
+    if (ROOT / 'onboard' / 'web' / 'node_modules').is_dir():
+        (base / 'lp_bot' / 'onboard' / 'web' / 'node_modules').symlink_to(ROOT / 'onboard' / 'web' / 'node_modules')
     # The Solana packages live in the nearest node_modules above the tree that
     # holds them: the parent's for the live checkout, further up for a git
     # worktree under it (the tree's own node_modules, viem, is in the copy).

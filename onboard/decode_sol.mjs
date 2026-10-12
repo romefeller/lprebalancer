@@ -105,6 +105,8 @@ function readSettingsActions(data, settings) {
   r.bytes(8);
   const signers = r.u8();
   const readSigners = (r) => r.vec(r => ({ key: r.key(), permissions: r.u8() }));
+  // a start or an expiry (an option holding a time): the rules set none, so any is refused, not read
+  const noTime = (r, what) => { if (r.u8() !== 0) throw new Error(`a policy with ${what}`); };
   const actions = r.vec(r => {
     const kind = r.u8();
     if (kind === 8) {
@@ -112,17 +114,18 @@ function readSettingsActions(data, settings) {
       const policySigners = readSigners(r);
       const threshold = r.u16(), timeLock = r.u32();
       const { policy, bytes } = policyAt(r);
-      const expiration = r.option(r => r.u8());
-      return { kind: 'policyUpdate', address, signers: policySigners, threshold, timeLock, policy, bytes, expiration };
+      noTime(r, 'an expiry');
+      return { kind: 'policyUpdate', address, signers: policySigners, threshold, timeLock, policy, bytes };
     }
     if (kind === 7) {
       const seed = r.u64();
       const { policy, bytes } = policyAt(r);
       const policySigners = readSigners(r);
       const threshold = r.u16(), timeLock = r.u32();
-      const start = r.option(r => r.u8()), expiration = r.option(r => r.u8());
+      noTime(r, 'a start');
+      noTime(r, 'an expiry');
       return { kind: 'policyCreate', address: sq.policyPda(new PublicKey(settings), seed).toBase58(), signers: policySigners, threshold, timeLock,
-        policy, bytes, expiration: start ?? expiration };
+        policy, bytes };
     }
     throw new Error(`a change other than a policy update (settings action ${kind})`);
   }, 16);
@@ -492,7 +495,7 @@ function policyUpdates(outer, expect, pins, ctx, lines, no, signer) {
       if (a.signers.length !== 1 || a.signers[0].key !== signer || a.signers[0].permissions !== sq.PERMISSION.all) {
         no(`policy ${short(a.address)} would name ${a.signers.map(s => short(s.key)).join(', ')}, not ${who}`);
       }
-      if (a.threshold !== 1 || a.timeLock !== 0 || a.expiration !== null) no('a threshold, time lock or expiry other than the rules\'');
+      if (a.threshold !== 1 || a.timeLock !== 0) no('a threshold or time lock other than the rules\'');
       if (a.policy.hooks || a.policy.spendingLimits || a.policy.accountIndex !== 0) no('hooks, spending limits or another vault account');
       const same = w.policy && Buffer.from(a.bytes).equals(sq.encodeProgramInteraction(w.policy));
       lines.push(`${a.kind === 'policyCreate' ? 'New policy' : 'Policy'} ${short(a.address)} (${w.venue}): signer ${who}; ${a.policy.constraints.length} allowed instructions${same ? ', exactly the rules in git' : ''}:`);
