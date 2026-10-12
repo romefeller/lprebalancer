@@ -1,45 +1,97 @@
 # The self-serve page romefeller.app/bot (onboard/server.mjs): an owner creates a
 # vault and one profile for the LP bot. Caddy proxies /bot* to 127.0.0.1:8090.
 #
-# Install (once, after review):
-#   sudo install -m 644 ops/lp-onboard.service /etc/systemd/system/
-#   sudo install -m 440 ops/onboard/lp-onboard.sudoers /etc/sudoers.d/lp-onboard && sudo visudo -c
-#   sudo systemctl daemon-reload && sudo systemctl enable --now lp-onboard
+# Sandboxed (2026-10-12 security audit). The page faces the internet, so it runs
+# as its own system user `lp-onboard`, not as ubuntu (who may sudo anything and
+# owns every bot key). Install, verify and roll back with ops/onboard/setup_sandbox.sh
+# (as root); it tries this unit on port 8091 before it replaces the running one.
 #
-# No key and no secret in this file: the variables hold PATHS of the bot's keys
-# (the same ones every vault instance signs with, ops/lp-bot@.service), and
-# ~/.kamino-keys/onboard.env holds LPBOT_ONBOARD_INVITE_SHA256 (the SHA-256 of
-# each invite code, comma-separated). ~/.kamino-keys/env gives the RPC endpoints.
-# The server starts a new profile with `sudo -n systemctl enable --now
-# lp-bot@<name>.service` and nothing else (the sudoers snippet): sudo needs
-# NoNewPrivileges off.
+# What the process can reach:
+#   - the code: /home/ubuntu/agent-fin/lp_bot, read-only. Nothing else of /home.
+#   - three keys, as systemd credentials (read by systemd as root, given to this
+#     process only, in $CREDENTIALS_DIRECTORY): the vault payer and policy keys
+#     every vault instance signs with, and the EVM vault key. Never the LP
+#     wallet's key, the profit wallet's, ~/.kamino-keys/env or onboard.env.
+#   - Postgres as role "lp-onboard" (peer auth over the Unix socket): SELECT on
+#     the rebalancer schema, INSERT and UPDATE on the six tables the store
+#     writes (setup_sandbox.sh).
+#   - /var/lib/lp-onboard (StateDirectory): the start spool. It cannot sudo
+#     (NoNewPrivileges); it starts a profile's service by writing an empty file
+#     named after the profile to /var/lib/lp-onboard/start, and the root helper
+#     lp-onboard-start.service (ops/onboard/lp-onboard-start.sh) checks the name
+#     and runs `systemctl enable --now lp-bot@<name>.service`, nothing else.
+#   - the network (RPC endpoints), the Postgres socket and D-Bus (systemctl is-active).
+#
+# Environment: only what server.mjs and its children read. /etc/lp-onboard/env
+# (root, 0600, written by setup_sandbox.sh) holds LPBOT_RPC (the keyed Solana RPC)
+# and LPBOT_ONBOARD_INVITE_SHA256, copied from ~/.kamino-keys/env and onboard.env.
+# Not TELEGRAM_BOT_TOKEN, JUPITER_API_KEY, ALCHEMY_RPC_KEY or KAMINO_RPC_KEY: no
+# code the server runs reads them (LPBOT_RPC wins over KAMINO_RPC_KEY in config.py,
+# and the server calls no Jupiter API). Rerun setup_sandbox.sh after changing
+# LPBOT_RPC or the invite hashes.
+#
+# MemoryDenyWriteExecute is off: V8 compiles JavaScript into memory it then runs
+# (W+X). `node --jitless` would allow it, but it also turns off WebAssembly, which
+# the Orca SDK core (@orca-so/whirlpools-core) needs.
 [Unit]
-Description=Aperture onboarding page (romefeller.app/bot)
+Description=Aperture onboarding page (romefeller.app/bot), sandboxed
 After=network-online.target postgresql.service
 Wants=network-online.target
 
 [Service]
 Type=simple
-User=ubuntu
+User=lp-onboard
+Group=lp-onboard
 WorkingDirectory=/home/ubuntu/agent-fin/lp_bot
-EnvironmentFile=-/home/ubuntu/.kamino-keys/env
-EnvironmentFile=-/home/ubuntu/.kamino-keys/onboard.env
+EnvironmentFile=/etc/lp-onboard/env
 Environment=PATH=/usr/bin:/bin
+Environment=PYTHONDONTWRITEBYTECODE=1
 Environment=LPBOT_DSN=dbname=rebalancer
 Environment=SOLANA_RPC_URL=https://api.mainnet-beta.solana.com
-Environment=LPBOT_VAULT_SOL_PAYER_PATH=/home/ubuntu/.kamino-keys/vault-test/payer.json
-Environment=LPBOT_VAULT_SOL_POLICY_PATH=/home/ubuntu/.kamino-keys/vault-test/policy.json
-Environment=LPBOT_VAULT_EVM_KEY_PATH=/home/ubuntu/.kamino-keys/vault-test/evm.secret
+Environment="LPBOT_ONBOARD_START=/usr/bin/touch /var/lib/lp-onboard/start/{name}"
+LoadCredential=payer.json:/home/ubuntu/.kamino-keys/vault-test/payer.json
+LoadCredential=policy.json:/home/ubuntu/.kamino-keys/vault-test/policy.json
+LoadCredential=evm.secret:/home/ubuntu/.kamino-keys/vault-test/evm.secret
+Environment=LPBOT_VAULT_SOL_PAYER_PATH=%d/payer.json
+Environment=LPBOT_VAULT_SOL_POLICY_PATH=%d/policy.json
+Environment=LPBOT_VAULT_EVM_KEY_PATH=%d/evm.secret
+StateDirectory=lp-onboard lp-onboard/start
+StateDirectoryMode=0700
 ExecStart=/usr/bin/node /home/ubuntu/agent-fin/lp_bot/onboard/server.mjs
 Restart=on-failure
 RestartSec=10
 MemoryHigh=200M
 MemoryMax=300M
-PrivateTmp=true
-ProtectSystem=full
-ProtectKernelTunables=true
-ProtectControlGroups=true
+TasksMax=64
+UMask=0077
+
+# --- the sandbox ---
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=tmpfs
+BindReadOnlyPaths=/home/ubuntu/agent-fin/lp_bot
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectProc=invisible
+ProcSubset=pid
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RemoveIPC=yes
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+SystemCallErrorNumber=EPERM
 
 [Install]
 WantedBy=multi-user.target

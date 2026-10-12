@@ -1,0 +1,11 @@
+# Runs lp-onboard-start.service when the sandboxed onboarding page asks for a
+# profile's start (a file in its spool). ops/onboard/setup_sandbox.sh installs it.
+[Unit]
+Description=Start requests of the onboarding page
+
+[Path]
+DirectoryNotEmpty=/var/lib/lp-onboard/start
+Unit=lp-onboard-start.service
+
+[Install]
+WantedBy=paths.target

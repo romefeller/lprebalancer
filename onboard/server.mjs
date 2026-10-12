@@ -39,8 +39,19 @@ const STORE = path.join(HERE, 'store.py');
 
 // --- the config ---------------------------------------------------------------
 
-export function loadConfig(file = path.join(HERE, 'onboard.json')) {
+// Two values the service environment may set over the file (ops/onboard/setup.sh):
+// LPBOT_ONBOARD_START, the start command as words, for the sandboxed unit,
+// which cannot sudo (NoNewPrivileges) and asks a root helper through a spool
+// file instead; LPBOT_ONBOARD_PORT, a loopback port to try the new unit on
+// beside the running one.
+export function loadConfig(file = path.join(HERE, 'onboard.json'), env = process.env) {
   const raw = JSON.parse(fs.readFileSync(file, 'utf8'));
+  if (env.LPBOT_ONBOARD_START) raw.service = { ...raw.service, start: env.LPBOT_ONBOARD_START.trim().split(/\s+/) };
+  if (env.LPBOT_ONBOARD_PORT) {
+    const port = Number(env.LPBOT_ONBOARD_PORT);
+    if (!(Number.isInteger(port) && port >= 1024 && port <= 65535)) throw new Error(`LPBOT_ONBOARD_PORT ${env.LPBOT_ONBOARD_PORT}`);
+    raw.listen = { ...raw.listen, port };
+  }
   const chains = {};
   if (raw.chains.solana) chains.solana = S.resolve(raw.chains.solana);
   if (raw.chains.polygon) chains.polygon = P.resolve(raw.chains.polygon);

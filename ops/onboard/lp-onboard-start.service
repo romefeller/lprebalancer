@@ -1,0 +1,13 @@
+# Starts the profiles the onboarding page asked for (ops/onboard/lp-onboard-start.sh).
+# Root, because enabling a unit needs it; the script checks every name first and
+# runs `systemctl enable --now lp-bot@<name>.service` and nothing else.
+[Unit]
+Description=Start lp-bot instances the onboarding page asked for
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/lp-onboard-start
+PrivateTmp=yes
+ProtectHome=yes
+NoNewPrivileges=yes
+RestrictAddressFamilies=AF_UNIX
