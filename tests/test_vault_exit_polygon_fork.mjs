@@ -19,7 +19,7 @@ import { createPublicClient, createWalletClient, decodeFunctionData, encodeFunct
 import { privateKeyToAccount } from 'viem/accounts';
 import { polygon } from 'viem/chains';
 import * as U from '../chains/evm/polygon.mjs';
-import { connect } from '../chains/evm/vault/cli.mjs';
+import { ownerCreatesVault } from './_evm_vault.mjs';
 import { SAFE_ABI, SENTINEL } from '../chains/evm/vault/safe.mjs';
 import { ownerCloseCalls, vaultPositions } from '../chains/evm/vault/exit.mjs';
 import * as P from '../onboard/polygon.mjs';
@@ -117,14 +117,9 @@ test('fork (Polygon vault exit): deposit checked, revoke, owner close, withdraw 
   fs.writeFileSync(botKey, `${KEYS.bot}\n`, { mode: 0o600 });
   const owner = acct.owner.address;
 
-  // 1. Connect: the bot creates the vault; the owner is its only owner.
-  const log = console.log; console.log = () => {};
-  let c;
-  try {
-    c = await connect({ owners: owner, pools: POOL, payout: acct.profit.address, execute: true }, { U, account: acct.bot, pub, wallet: walletOf('bot') });
-  } finally { console.log = log; }
-  assert.deepEqual(c.problems, []);
-  const safe = c.vault, roles = c.roles;
+  // 1. The owner creates its own vault; it is the vault's only owner.
+  const c = await ownerCreatesVault({ U, pub, ownerWallet: walletOf('owner'), bot: acct.bot.address, pools: POOL, payouts: [acct.profit.address] });
+  const safe = c.safe, roles = c.roles;
   const keys = P.botKeys(C, {}, { U, account: acct.bot, pub, wallet: walletOf('bot') });
   const row = { settings: safe.toLowerCase(), venues: { [VENUE]: { policies: [roles.toLowerCase()], pools: [POOL.toLowerCase()], payouts: [acct.profit.address] } } };
   const env = { LPBOT_VAULT_SAFE: safe, LPBOT_VAULT_ROLES: roles, LPBOT_VAULT_VENUE: c.venue, LPBOT_VAULT_POOLS: POOL,

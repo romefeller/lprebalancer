@@ -1,14 +1,15 @@
 // The bot's role on a Safe vault, compiled from rules.json for one vault: which functions of
 // which contracts it may call, and what each argument must be (Zodiac Roles v2 conditions).
-// Pure: no network, so every scope is testable before anything is signed.
+// Pure: no network, so every scope is testable before anything is signed. Browser-safe (the
+// owner's page compiles the same role to check the setup it signs).
 //
 // A condition is a tree; the contract takes it flattened, breadth first (ConditionFlat). The
 // checks in `integrity` mirror the contract's Integrity.sol, so a wrong tree fails here and
 // not in a transaction.
-import fs from 'node:fs';
 import { encodeAbiParameters, encodeFunctionData, getAddress, parseAbi, parseAbiItem, stringToHex, toFunctionSelector } from 'viem';
+import RULES from './rules.json' with { type: 'json' };
 
-export const RULES = JSON.parse(fs.readFileSync(new URL('./rules.json', import.meta.url), 'utf8'));
+export { RULES };
 
 // Zodiac Roles v2 enums (contracts/Types.sol of the deployed mastercopy).
 export const TYPE = Object.freeze({ None: 0, Static: 1, Dynamic: 2, Tuple: 3, Array: 4, Calldata: 5, AbiEncoded: 6 });

@@ -1,6 +1,6 @@
 // A Polygon vault on an anvil fork, on the real deployed contracts (Safe 1.4.1, Zodiac Roles v2,
-// Uniswap v3): chains/evm/vault/cli.mjs connects it with no owner signature, the Uniswap
-// signer runs the vault through its role (swap, open, harvest, close, pay out), the role
+// Uniswap v3): the owner's wallet creates it (chains/evm/vault/cli.mjs request create; the
+// bot's key is never an owner and pays nothing), the Uniswap signer runs the vault through its role (swap, open, harvest, close, pay out), the role
 // refuses every call that would send money elsewhere, and the owner withdraws and revokes
 // with the Safe while the bot cannot. Skipped when anvil is not installed or cannot fork.
 //
@@ -17,7 +17,7 @@ import { createPublicClient, createWalletClient, encodeFunctionData, http, parse
 import { privateKeyToAccount } from 'viem/accounts';
 import { polygon } from 'viem/chains';
 import * as U from '../chains/evm/polygon.mjs';
-import { connect } from '../chains/evm/vault/cli.mjs';
+import { ownerCreatesVault } from './_evm_vault.mjs';
 import { ROLES_ABI } from '../chains/evm/vault/roles.mjs';
 import { SAFE_ABI, SENTINEL, preValidated } from '../chains/evm/vault/safe.mjs';
 
@@ -116,16 +116,12 @@ test('fork (Polygon vault): connect, run through the role, refusals, owner withd
   const bot = keyFile('bot'), trader = keyFile('trader');
   for (const a of Object.values(acct)) await rpc('anvil_setBalance', [a.address, '0x56BC75E2D63100000']);      // 100 POL each
 
-  // 1. Connect: the bot creates and sets up the vault; no owner signs.
-  const log = console.log; console.log = () => {};
-  let c;
-  try {
-    c = await connect({ owners: acct.owner.address, pools: POOL, payout: PROFIT, execute: true },
-      { U, account: acct.bot, pub, wallet: walletOf('bot') });
-  } finally { console.log = log; }
-  assert.deepEqual(c.problems, []);
-  t.diagnostic(`connect gas ${JSON.stringify(c.gas)}, ${c.cost.toFixed(4)} POL at the fork's gas price`);
-  const safe = c.vault, vault = { safe, roles: c.roles, role: c.role };
+  // 1. The owner creates its own vault; the bot's key sends nothing.
+  const botNonce = await pub.getTransactionCount({ address: acct.bot.address });
+  const c = await ownerCreatesVault({ U, pub, ownerWallet: walletOf('owner'), bot: acct.bot.address, pools: POOL, payouts: [PROFIT] });
+  assert.equal(await pub.getTransactionCount({ address: acct.bot.address }), botNonce, 'the bot sent nothing');
+  t.diagnostic(`owner set-up gas ${JSON.stringify(c.gas)}`);
+  const safe = c.safe, vault = { safe, roles: c.roles, role: c.role };
   assert.deepEqual(await pub.readContract({ address: safe, abi: SAFE_ABI, functionName: 'getOwners' }), [acct.owner.address]);
   const env = { LPBOT_VAULT_SAFE: safe, LPBOT_VAULT_ROLES: c.roles, LPBOT_VAULT_VENUE: c.venue, LPBOT_VAULT_POOLS: POOL,
     LPBOT_VAULT_PAYOUTS: PROFIT, LPBOT_PROFIT_WALLET: PROFIT };

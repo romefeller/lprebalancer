@@ -1,9 +1,8 @@
-// The Safe of a vault: what connects it (Safe, Roles module, role, owners) and what checks
-// it. The bot's key creates the Safe as its only owner, sets everything up in one Safe
-// transaction, adds the owners and removes itself: no owner signs anything to connect.
+// The Safe of a vault: its ABIs, the encoders its set-up uses (owner_setup.mjs) and what
+// checks it. The owner's wallet creates and sets up the Safe; the bot's key is never an owner.
 // Encoders are pure; readState is the one network read.
 import { concat, encodeAbiParameters, encodeFunctionData, encodePacked, getAddress, pad, parseAbi, size } from 'viem';
-import { roleCalls, ROLES_ABI } from './roles.mjs';
+import { ROLES_ABI } from './roles.mjs';
 
 export const SAFE_ABI = parseAbi([
   'function setup(address[] owners, uint256 threshold, address to, bytes data, address fallbackHandler, address paymentToken, uint256 payment, address paymentReceiver)',
@@ -26,8 +25,7 @@ export const MODULE_FACTORY_ABI = parseAbi([
 const MULTISEND_ABI = parseAbi(['function multiSend(bytes transactions) payable']);
 
 export const SENTINEL = '0x0000000000000000000000000000000000000001';
-const ZERO = '0x0000000000000000000000000000000000000000';
-const CALL = 0, DELEGATECALL = 1;
+const CALL = 0;
 // keccak256("guard_manager.guard.address"): the Safe's transaction guard slot (GuardManager.sol)
 const GUARD_SLOT = 0x4a204f620c8c5ccdca3fd54d003badd85ba500436a431f0cbda4f558c93c34c8n;
 
@@ -43,31 +41,9 @@ export function multiSend(calls) {
     encodePacked(['uint8', 'address', 'uint256', 'uint256', 'bytes'], [CALL, getAddress(c.to), 0n, BigInt(size(c.data)), c.data])))] });
 }
 
-// The Safe's initializer: the bot alone, threshold 1, the 1.4.1 fallback handler.
-export const safeSetup = (bot, fallbackHandler) => encodeFunctionData({ abi: SAFE_ABI, functionName: 'setup',
-  args: [[getAddress(bot)], 1n, ZERO, '0x', getAddress(fallbackHandler), ZERO, 0n, ZERO] });
-
 // The Roles module's initializer: the Safe owns it, and it acts on the Safe.
 export const rolesSetup = (safe) => encodeFunctionData({ abi: ROLES_ABI, functionName: 'setUp',
   args: [encodeAbiParameters([{ type: 'address' }, { type: 'address' }, { type: 'address' }], [safe, safe, safe])] });
-
-// Every call of the set-up, in order: the module, the role, the owners, the bot leaves.
-// Owners are added at the head of the Safe's list, so the first one added comes before the bot.
-export function setupCalls({ safe, roles, compiled, bot, owners, threshold }) {
-  const self = (functionName, args) => ({ to: getAddress(safe), data: encodeFunctionData({ abi: SAFE_ABI, functionName, args }) });
-  return [
-    self('enableModule', [roles]),
-    ...roleCalls(compiled, roles, bot),
-    ...owners.map(o => self('addOwnerWithThreshold', [getAddress(o), 1n])),
-    self('removeOwner', [getAddress(owners[0]), getAddress(bot), BigInt(threshold)]),
-  ];
-}
-
-// One Safe transaction from its sole owner `bot`: a delegatecall of MultiSendCallOnly.
-export function execAsOwner({ multiSendCallOnly, calls, bot }) {
-  return encodeFunctionData({ abi: SAFE_ABI, functionName: 'execTransaction',
-    args: [getAddress(multiSendCallOnly), 0n, multiSend(calls), DELEGATECALL, 0n, 0n, 0n, ZERO, ZERO, preValidated(bot)] });
-}
 
 export function checkOwners(owners, threshold, botKeys) {
   const list = owners.map(o => getAddress(o));
@@ -92,7 +68,7 @@ export async function readState(pub, safe, roles) {
   return { owners, threshold: Number(threshold), modules, guard: BigInt(guard) === 0n ? null : guard, rolesOwner, avatar, target };
 }
 
-// What is wrong with a vault just connected: the bot an owner, other owners or threshold,
+// What is wrong with a vault just set up: the bot an owner, other owners or threshold,
 // another module, a guard, a Roles module that is not the Safe's own. [] when right.
 export function connectProblems(state, { safe, roles, owners, threshold, botKeys }) {
   const same = (a, b) => String(a).toLowerCase() === String(b).toLowerCase();

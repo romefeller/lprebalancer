@@ -7,7 +7,7 @@ import fc from 'fast-check';
 import { decodeAbiParameters, decodeFunctionData, getAddress, hexToString, size, slice } from 'viem';
 import * as U from '../chains/evm/polygon.mjs';
 import { allows, compile, flatten, integrity, NotAllowed, OP, ROLES_ABI, roleCalls, roleKey, RULES, TYPE } from '../chains/evm/vault/roles.mjs';
-import { checkOwners, connectProblems, execAsOwner, multiSend, preValidated, SAFE_ABI, setupCalls } from '../chains/evm/vault/safe.mjs';
+import { checkOwners, connectProblems, multiSend, preValidated } from '../chains/evm/vault/safe.mjs';
 import { acting, vaultConfig, VaultMismatch, verifyVault, wrapStep } from '../chains/evm/vault/account.mjs';
 import { plan, poolOf } from '../chains/evm/vault/cli.mjs';
 
@@ -145,29 +145,16 @@ test('allows: the selector and the target, never a value', () => {
   assert.ok(allows(c, { to: U.USDT0, data: approve, value: 0n }));
 });
 
-test('safe: the set-up adds the module first, the owners, and the bot leaves last at the threshold', () => {
-  const c = compile(VENUE, base()), safe = A(50), roles = A(51), bot = A(52), owners = [A(53), A(54)];
-  const calls = setupCalls({ safe, roles, compiled: c, bot, owners, threshold: 2 });
-  const head = decodeFunctionData({ abi: SAFE_ABI, data: calls[0].data });
-  assert.deepEqual([calls[0].to, head.functionName, head.args], [safe, 'enableModule', [roles]]);
-  const tail = calls.slice(-3).map(x => decodeFunctionData({ abi: SAFE_ABI, data: x.data }));
-  assert.deepEqual(tail.map(x => [x.functionName, x.args]), [
-    ['addOwnerWithThreshold', [owners[0], 1n]], ['addOwnerWithThreshold', [owners[1], 1n]],
-    ['removeOwner', [owners[0], bot, 2n]]]);
-  assert.equal(calls.length, 1 + roleCalls(c, roles, bot).length + 3);
-  // one Safe transaction: a delegatecall of MultiSendCallOnly, signed by its sender
-  const exec = decodeFunctionData({ abi: SAFE_ABI, data: execAsOwner({ multiSendCallOnly: A(60), calls, bot }) });
-  assert.deepEqual([exec.args[0], exec.args[1], exec.args[3]], [A(60), 0n, 1]);
-  assert.equal(exec.args[9], preValidated(bot));
-  // the packed list carries every call, in order, with no value
-  const packed = decodeFunctionData({ abi: [{ type: 'function', name: 'multiSend', inputs: [{ type: 'bytes' }], outputs: [] }], data: exec.args[2] }).args[0];
+test('safe: the multisend packs each call with no value, in order', () => {
+  const calls = [{ to: A(60), data: '0x1234' }, { to: A(61), data: '0x' }];
+  const packed = decodeFunctionData({ abi: [{ type: 'function', name: 'multiSend', inputs: [{ type: 'bytes' }], outputs: [] }], data: multiSend(calls) }).args[0];
   let at = 0;
   for (const call of calls) {
     assert.equal(slice(packed, at, at + 1), '0x00');
     assert.equal(getAddress(slice(packed, at + 1, at + 21)), call.to);
     assert.equal(BigInt(slice(packed, at + 21, at + 53)), 0n);
     const n = Number(BigInt(slice(packed, at + 53, at + 85)));
-    assert.equal(slice(packed, at + 85, at + 85 + n), call.data);
+    if (n) assert.equal(slice(packed, at + 85, at + 85 + n), call.data);
     at += 85 + n;
   }
   assert.equal(at, size(packed));
@@ -191,7 +178,7 @@ test('safe: owners and threshold are checked before anything is sent', () => {
   for (const t of [0, 3, 1.5, NaN]) assert.throws(() => checkOwners([A(2), A(3)], t, [bot]), /threshold/);
 });
 
-test('safe: the check after connect catches every way the vault can be wrong', () => {
+test('safe: the check after the set-up catches every way the vault can be wrong', () => {
   const safe = A(50), roles = A(51), bot = A(52), owner = A(53);
   const good = { owners: [owner], threshold: 1, modules: [roles], guard: null, rolesOwner: safe, avatar: safe, target: safe };
   const want = { safe, roles, owners: [owner.toLowerCase()], threshold: 1, botKeys: [bot] };
@@ -313,20 +300,21 @@ test('signStep: the fee cap and the gas are checked at their bounds; a later ste
   assert.deepEqual([seen.at(-1).to, seen.at(-1).value], [A(2), 0n]);
 });
 
-test('connect plan: genuine pools only, defaults, and what it refuses before sending', async () => {
+test('plan: genuine pools only, one owner who is not the bot, defaults, and what it refuses before anything is built', async () => {
   const factory = U.V3.factory, pool = A(0x99);
   const answers = (o = {}) => ({ factory, token0: U.WPOL, token1: U.USDT0, fee: 500, getPool: pool, ...o });
-  const deps = (o) => ({ pub: stub(answers(o)), U, account: { address: A(1) } });
+  const deps = (o) => ({ pub: stub(answers(o)), U, bot: A(1) });
   assert.deepEqual(await poolOf(stub(answers()), U, pool), { pool, token0: U.WPOL, token1: U.USDT0, fee: 500 });
   await assert.rejects(poolOf(stub(answers({ factory: A(5) })), U, pool), /not a pool of the Uniswap v3 factory/);
   await assert.rejects(poolOf(stub(answers({ getPool: A(6) })), U, pool), /not a pool of the Uniswap v3 factory/);
-  const p = await plan({ owners: A(2), pools: pool }, deps());
-  assert.deepEqual([p.threshold, p.venue, p.owners, p.payouts], [1, U.DEX, [A(2)], []]);
+  const p = await plan({ owner: A(2).toLowerCase(), pools: pool }, deps());
+  assert.deepEqual([p.owner, p.venue, p.payouts, p.pools], [A(2), U.DEX, [], [{ pool, token0: U.WPOL, token1: U.USDT0, fee: 500 }]]);
   assert.equal(p.compiled.functions.filter(f => f.signature.startsWith('transfer')).length, 0);
-  await assert.rejects(plan({ owners: A(2), pools: pool, threshold: 0 }, deps()), /threshold 0/);
-  await assert.rejects(plan({ owners: A(2), pools: pool, venue: '' }, deps()), /no vault rules for venue/);
-  await assert.rejects(plan({ owners: A(2), pools: '' }, deps()), /at least one approved pool/);
-  await assert.rejects(plan({ owners: A(1), pools: pool }, deps()), /bot's key/);
-  await assert.rejects(plan({ owners: 'x', pools: pool }, deps()), /--owners: x is not an address/);
-  assert.equal((await plan({ owners: `${A(2)},${A(3)}`, threshold: '2', pools: pool, payout: A(9) }, deps())).threshold, 2);
+  assert.deepEqual((await plan({ owner: A(2), pools: pool, payout: `${A(9)},${A(8)}` }, deps())).payouts, [A(9), A(8)]);
+  await assert.rejects(plan({ owner: A(2), pools: pool, venue: '' }, deps()), /no vault rules for venue/);
+  await assert.rejects(plan({ owner: A(2), pools: '' }, deps()), /at least one approved pool/);
+  await assert.rejects(plan({ owner: A(1), pools: pool }, deps()), /bot's key/);
+  await assert.rejects(plan({ owner: 'x', pools: pool }, deps()), /--owner: x is not an address/);
+  await assert.rejects(plan({ pools: pool }, deps()), /at least one owner/);
+  await assert.rejects(plan({ owner: `${A(2)},${A(3)}`, pools: pool }, deps()), /--owner: one owner/);
 });
