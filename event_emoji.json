@@ -53,6 +53,7 @@
  "recentre_deferred": "⏳",
  "open_recovered": "🩹",
  "close_recovered": "🩹",
+ "swap_recovered": "🩹",
  "swap_fallback": "🔀",
  "PORTFOLIO": "📊",
  "dormant": "😴",

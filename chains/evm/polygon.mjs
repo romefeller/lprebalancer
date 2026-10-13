@@ -10,7 +10,7 @@
 // unwraps, so the gas POL is never part of the pool's side A.
 import { getAddress } from 'viem';
 import { polygon } from 'viem/chains';
-import { isLoopback } from './rpc.mjs';
+import { isLoopback, evmEndpoints } from './rpc.mjs';
 
 const A = s => getAddress(s.toLowerCase());
 
@@ -59,12 +59,11 @@ export const REFERENCES = Object.freeze({
 export const POLYGON_PUBLICNODE = 'https://polygon-bor-rpc.publicnode.com';
 export const POLYGON_DRPC = 'https://polygon.drpc.org';
 
-// LPBOT_RPC (the loop sets it from config.RPC), then LPBOT_POLYGON_RPC, then the public
-// endpoints. A loopback LPBOT_RPC (an anvil fork in tests) is the ONLY endpoint.
+// LPBOT_POLYGON_RPC, then the public endpoints; a loopback LPBOT_RPC (an anvil fork in
+// tests) is the ONLY endpoint, and no other LPBOT_RPC is used: in the service environment it
+// is the Solana endpoint (rpc.evmEndpoints).
 export function polygonEndpoints(env = process.env) {
-  if (env.LPBOT_RPC && isLoopback(env.LPBOT_RPC)) return [env.LPBOT_RPC];
-  return [env.LPBOT_RPC, env.LPBOT_POLYGON_RPC, POLYGON_PUBLICNODE, POLYGON_DRPC]
-    .filter((v, i, a) => v && a.indexOf(v) === i);
+  return evmEndpoints(env, 'LPBOT_POLYGON_RPC', [POLYGON_PUBLICNODE, POLYGON_DRPC]);
 }
 
 // Endpoints that answer eth_simulateV1 (both public ones do, 2026-10-08). On a loopback

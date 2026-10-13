@@ -30,7 +30,7 @@ const signer = path.join(dir, '..', 'venues/uniswap_v3/signer.mjs');
 const POOL = '0x9B08288C3Be4F62bbf8d1C20Ac9C5e6f9467d8B7';                 // WPOL/USDT0 0.05%
 const VENUE = 'uniswap-v3-polygon';
 const FORK_URLS = process.env.LPBOT_POLYGON_FORK_URL ? [process.env.LPBOT_POLYGON_FORK_URL]
-  : ['https://polygon-bor-rpc.publicnode.com', 'https://polygon.drpc.org'];
+  : ['https://polygon.drpc.org', 'https://polygon-bor-rpc.publicnode.com'];   // dRPC first: publicnode answers a receipt anvil lacks with 403 -32602 (2026-10-13)
 // Fresh keys: anvil's well-known test addresses carry code on Polygon mainnet (EIP-7702
 // sweepers) that forwards any POL they receive.
 const KEYS = Object.fromEntries(['bot', 'owner', 'stranger', 'profit'].map(k => [k, `0x${crypto.randomBytes(32).toString('hex')}`]));

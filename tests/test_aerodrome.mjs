@@ -382,39 +382,57 @@ test('overBase: rotates past rate limits, stops at once on a fatal error, names 
     { sleep: async () => {} }), /all RPC endpoints failed: a\.example: busy \| a\.example: busy \| b\.example: busy/);
 });
 
+test('overBase: a pause between the tries of one endpoint, none after its last try', async () => {
+  const pauses = [];
+  await assert.rejects(overBase(['https://a.example', 'https://b.example'], async () => { throw Object.assign(new Error('busy'), { status: 429 }); },
+    { tries: 3, pauseMs: 10, sleep: async ms => { pauses.push(ms); } }), /all RPC endpoints failed/);
+  assert.deepStrictEqual(pauses, [10, 20, 10, 20]);
+});
+
 // --- sending: never retried after the first send ---------------------------------------
+// A node: a send it refuses never lands (its receipt is never found); the i-th landed send
+// reverts when i === revertAt. The receipt lookup polls on a fake clock.
 function fakeCtx({ sendThrowsAt = -1, revertAt = -1 } = {}) {
   let i = 0;
+  const landed = new Map();
   const pub = {
-    sendRawTransaction: async () => { if (i === sendThrowsAt) throw new Error('nonce too low'); },
-    waitForTransactionReceipt: async () => ({ status: (i++ === revertAt) ? 'reverted' : 'success', gasUsed: 1n, effectiveGasPrice: 1n, logs: [] }),
+    sendRawTransaction: async ({ serializedTransaction }) => {
+      if (i === sendThrowsAt) { i++; throw new Error('nonce too low'); }
+      landed.set(serializedTransaction, { status: (i++ === revertAt) ? 'reverted' : 'success', gasUsed: 1n, effectiveGasPrice: 1n, logs: [] });
+    },
+    getTransactionReceipt: async ({ hash }) => {
+      const r = landed.get(hash);
+      if (!r) throw new Error(`Transaction receipt with hash "${hash}" could not be found.`);
+      return r;
+    },
   };
   return { pub, nonce: 7 };
 }
+const fastReceipts = () => { let t = 0; return { sleep: async () => {}, now: () => (t += 1000) }; };
 const steps = [{ label: 'approve' }, { label: 'mint' }];
 const signer = (failAt = -1) => {
   let n = 0;
-  return async () => { if (n === failAt) throw new Error('simulation reverted: STF'); return { serialized: '0x', hash: `0xh${n++}` }; };
+  return async () => { if (n === failAt) throw new Error('simulation reverted: STF'); const h = `0xh${n++}`; return { serialized: h, hash: h }; };
 };
 
 test('runSteps: a failure before anything is signed throws (safe to retry)', async () => {
-  await assert.rejects(S.runSteps(fakeCtx(), steps, CFG, { signStep: signer(0) }), /STF/);
+  await assert.rejects(S.runSteps(fakeCtx(), steps, CFG, { signStep: signer(0), receipt: fastReceipts() }), /STF/);
 });
 
 test('runSteps: a send that throws after signing is reported partial, with its hash', async () => {
   const ctx = fakeCtx({ sendThrowsAt: 0 });
-  const r = await S.runSteps(ctx, steps, CFG, { signStep: signer() });
+  const r = await S.runSteps(ctx, steps, CFG, { signStep: signer(), receipt: fastReceipts() });
   assert.deepStrictEqual(r.sent.map(s => s.hash), ['0xh0']);
   assert.match(r.error, /nonce too low/);
   assert.strictEqual(ctx.nonce, 7, 'a send the node refused does not consume the nonce');
 });
 
 test('runSteps: a failure after the first confirmed send is partial, never thrown', async () => {
-  const r1 = await S.runSteps(fakeCtx(), steps, CFG, { signStep: signer(1) });
+  const r1 = await S.runSteps(fakeCtx(), steps, CFG, { signStep: signer(1), receipt: fastReceipts() });
   assert.deepStrictEqual(r1.sent.map(s => s.label), ['approve']);
   assert.match(r1.error, /STF/);
   const ctx = fakeCtx({ revertAt: 1 });
-  const r2 = await S.runSteps(ctx, steps, CFG, { signStep: signer() });
+  const r2 = await S.runSteps(ctx, steps, CFG, { signStep: signer(), receipt: fastReceipts() });
   assert.deepStrictEqual(r2.sent.map(s => s.hash), ['0xh0', '0xh1']);
   assert.match(r2.error, /reverted on chain/);
   assert.strictEqual(ctx.nonce, 9);
@@ -422,7 +440,7 @@ test('runSteps: a failure after the first confirmed send is partial, never throw
 
 test('runSteps: all confirmed, nonces consecutive', async () => {
   const ctx = fakeCtx();
-  const r = await S.runSteps(ctx, steps, CFG, { signStep: signer() });
+  const r = await S.runSteps(ctx, steps, CFG, { signStep: signer(), receipt: fastReceipts() });
   assert.strictEqual(r.error, null);
   assert.strictEqual(r.sent.length, 2);
   assert.strictEqual(ctx.nonce, 9);
@@ -696,9 +714,11 @@ test('checkRecipient: the LP wallet check compares, it does not refuse every kno
   assert.strictEqual(S.checkRecipient(PIN, CFG, OTHER), PIN);
 });
 
-test('baseEndpoints: a non-loopback LPBOT_RPC keeps the public fallbacks', () => {
+test('baseEndpoints: a non-loopback LPBOT_RPC (the Solana endpoint of the service env) is never used', () => {
   assert.deepStrictEqual(baseEndpoints({ LPBOT_RPC: 'https://k.example' }),
-    ['https://k.example', 'https://mainnet.base.org', 'https://base-rpc.publicnode.com']);
+    ['https://mainnet.base.org', 'https://base-rpc.publicnode.com']);
+  assert.deepStrictEqual(baseEndpoints({ LPBOT_RPC: 'https://k.example', LPBOT_BASE_RPC: 'https://mainnet.base.org' }),
+    ['https://mainnet.base.org', 'https://base-rpc.publicnode.com'], 'no endpoint twice');
 });
 
 test('evmErrorKind: 500-504 rotate, 499 and 505 do not; every transport name rotates; marks beat causes', () => {

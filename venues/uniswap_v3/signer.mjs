@@ -18,10 +18,10 @@
 //
 // Every write: HALT check, pool genuineness, the price reference check (marketRefusals), a
 // refusal list, the whole sequence simulated in one eth_simulateV1 call, then per
-// transaction: HALT check, eth_call, estimateGas, sign, send, wait for the receipt, check
-// its status. A pending transaction from this wallet refuses the command. After the first
-// send nothing is retried: a failure part-way is printed with `sent: true, partial: true`
-// and every hash.
+// transaction: HALT check, eth_call, estimateGas, sign, send, the receipt from any endpoint
+// (chains/evm/landing.mjs), check its status. A pending transaction from this wallet refuses the command. After the first
+// send nothing is retried: a failure part-way is printed with `sent: true, partial: true`,
+// every hash and each one's receipt status (`receipts`).
 //
 // A vault (LPBOT_VAULT_SAFE, chains/evm/vault/): the Safe holds the tokens and the position
 // NFTs and is every call's subject and recipient; the key sends each step through the
@@ -52,6 +52,7 @@ import { isEntry } from '../../shared/rpc_policy.mjs';
 import { planRebalance, TARGET_TOLERANCE } from '../../shared/rebalance_plan.mjs';
 import { readKey } from '../../chains/evm/keyfile.mjs';
 import { overBase, evmErrorKind } from '../../chains/evm/rpc.mjs';
+import { sendSteps, receiptsOf } from '../../chains/evm/landing.mjs';
 import { chainModule } from '../../chains/evm/chains.mjs';
 import * as M from '../../chains/evm/clmath.mjs';
 import { acting, vaultConfig, verifyVault } from '../../chains/evm/vault/account.mjs';
@@ -497,31 +498,22 @@ export async function signStep(ctx, step, cfg) {
   return { serialized, hash: keccak256(serialized) };
 }
 
-// Send the steps in order, each after the previous one's receipt. Throws only if NOTHING
-// was sent; after the first send a failure comes back as {sent, error} so the caller
-// prints a partial report instead of letting the endpoint loop retry the whole operation.
-export async function runSteps(ctx, steps, cfg, deps = {}) {
-  const sign = deps.signStep ?? signStep;
-  const sent = [];
-  for (const step of steps) {
-    let hash = null;
-    try {
-      const s = await sign(ctx, step, cfg);
-      hash = s.hash;
-      await ctx.pub.sendRawTransaction({ serializedTransaction: s.serialized });
-      ctx.nonce += 1;
-      const receipt = await ctx.pub.waitForTransactionReceipt({ hash, timeout: RECEIPT_TIMEOUT_MS, pollingInterval: 1000 });
-      if (receipt.status !== 'success') throw new Error(`transaction ${hash} (${step.label}) reverted on chain`);
-      sent.push({ label: step.label, hash, receipt });
-      ctx.minBlock = receipt.blockNumber;          // the next step is checked at or past this block
-    } catch (e) {
-      // A signed transaction whose send threw may still have reached a node: it counts.
-      if (hash) sent.push({ label: step.label, hash, receipt: null });
-      if (!sent.length) throw e;
-      return { sent, error: errorLine(e) };
-    }
+// The clients asked for a receipt: the connected one first, then every other endpoint of the
+// chain (a context without a url, as in tests, has its own client only).
+function receiptClients(ctx) {
+  if (!ctx.receiptClients) {
+    const others = ctx.url ? U.endpoints().filter(u => u !== ctx.url) : [];
+    ctx.receiptClients = [ctx.pub, ...others.map(u => createPublicClient({ chain: U.VIEM_CHAIN, transport: http(u, { retryCount: 0, timeout: 10_000 }) }))];
   }
-  return { sent, error: null };
+  return ctx.receiptClients;
+}
+
+// Send the steps in order (chains/evm/landing.mjs): each step's receipt is asked of every
+// endpoint, so a step that landed is never reported failed (2026-10-13). Throws only if
+// NOTHING was sent; after the first send a failure comes back as {sent, error}.
+export async function runSteps(ctx, steps, cfg, deps = {}) {
+  return sendSteps(ctx, steps, cfg, { sign: deps.signStep ?? signStep, clients: () => receiptClients(ctx), errorLine,
+    timeoutMs: RECEIPT_TIMEOUT_MS, receipt: deps.receipt });
 }
 
 function feeEth(sent) {
@@ -533,7 +525,8 @@ function feeEth(sent) {
 // Print the report of a write that sent something; partial when it stopped part-way.
 function reportSent(base, r, extra = {}) {
   const out = { ...base, ...extra, signature: r.sent[r.sent.length - 1]?.hash ?? null,
-    signatures: r.sent.map(s => s.hash), steps: r.sent.map(s => s.label), feeEth: feeEth(r.sent), sent: true };
+    signatures: r.sent.map(s => s.hash), steps: r.sent.map(s => s.label), receipts: receiptsOf(r.sent), feeEth: feeEth(r.sent), sent: true };
+  if (r.recovered?.length) out.recovered = r.recovered;
   if (r.error) { out.partial = true; out.error = r.error; process.exitCode = 1; }
   console.log(JSON.stringify(out, null, 1));
   return out;
@@ -1093,7 +1086,8 @@ async function send(token, amountArg, toArg, execute) {
     }
     ctx.nonce = await nonceFor(pub, ctx.from);
     const r = await runSteps(ctx, [step], cfg);
-    const out = { ...report, signature: r.sent[0]?.hash ?? null, sent: true };
+    const out = { ...report, signature: r.sent[0]?.hash ?? null, receipts: receiptsOf(r.sent), sent: true };
+    if (r.recovered?.length) out.recovered = r.recovered;
     if (r.error) { out.partial = true; out.error = r.error; process.exitCode = 1; }
     console.log(JSON.stringify(out, null, 1));
     return out;

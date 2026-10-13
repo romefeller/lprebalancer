@@ -426,6 +426,16 @@ def balance_wallet(state, bal, rec, share_a=None):
         time.sleep(pause)
         out, err = signers.chain('rebalance', mint_a, mint_b, target_a, target_b, '--execute', dex=swap_dex, extra_env=env,
                                  record=False)
+    # The chain's receipts outrank the error that came with them (EVM signers):
+    # a swap that landed is a swap, never a failure for the breaker; an exact
+    # approval that landed before the swap was sent is a swap not sent
+    # (2026-10-13: three landed Polygon swaps were counted as failures and
+    # wrote HALT).
+    view = signers.landed_view(out, 'swap')
+    if view == 'landed' and err:
+        books.notify('swap_recovered', reason=err, signature=out.get('signature'))
+        db.event('swap_recovered', f"{out.get('signature')} landed although the signer said: {err}")
+        out, err = dict(out, partial=False, error=None, sent=True), None
     if signers.held(err):
         return None                 # the open would be refused too: hold, no failure counted
     # The swapper's own health ('jupiter' on Solana, the venue signer on Base);
@@ -439,8 +449,9 @@ def balance_wallet(state, bal, rec, share_a=None):
         out, err = signers.chain('rebalance', mint_a, mint_b, target_a, target_b, '--execute',
                                  *fallback_pool_args(mint_a, mint_b), dex=SWAP_FALLBACK, extra_env=env, record=False)
     signers.record_health('swap', out, err)
-    if (err or not out) and not (out or {}).get('signature') and not (out or {}).get('partial'):
-        # Nothing was sent. A side the band needs is (almost) empty: hold, no
+    if ((err or not out) and not (out or {}).get('signature') and not (out or {}).get('partial')) \
+            or (err and view == 'unsent'):
+        # Nothing was sent (or only approvals, which landed). A side the band needs is (almost) empty: hold, no
         # failure counted, the next poll swaps again. An open would be refused
         # and three refusals write HALT (2026-10-09: DJT 0, USDC $13.70).
         if one_side_short(usd_a, usd_b, frac_a, frac_b, C):

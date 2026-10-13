@@ -297,6 +297,25 @@ def signatures_of(out):
     return [x for x in sigs if isinstance(x, str) and x]
 
 
+def landed_view(out, step):
+    """What the chain's receipts in a signer's answer say of an operation
+    whose last step is labelled `step` (the EVM signers' `receipts`:
+    label, hash, status per sent transaction; chains/evm/landing.mjs).
+    'landed' when every sent transaction landed with status success and
+    one of them is `step`: the operation happened, whatever error came with
+    it. 'unsent' when every sent transaction landed with status success but
+    none is `step` (an exact approval landed, the step itself was never
+    sent): nothing failed on chain. None otherwise (no receipts, a revert, a
+    transaction no endpoint has). Pure. 2026-10-13: three Polygon swaps
+    landed while the signer said they failed, and HALT was written."""
+    rows = (out or {}).get('receipts')
+    if not isinstance(rows, list) or not rows:
+        return None
+    if not all(isinstance(r, dict) and r.get('status') == 'success' for r in rows):
+        return None
+    return 'landed' if any(r.get('label') == step for r in rows) else 'unsent'
+
+
 def settle_pending(wait_s=0.0):
     """Book the wallet's pending write (wallet_settle), if one is there: its
     balances after it, read at or past the slot its signatures confirmed at,

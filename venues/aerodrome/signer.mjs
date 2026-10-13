@@ -47,6 +47,7 @@ import { isEntry, AfterSignError } from '../../shared/rpc_policy.mjs';
 import { planRebalance } from '../../shared/rebalance_plan.mjs';
 import { readKey } from '../../chains/evm/keyfile.mjs';
 import { baseEndpoints, overBase, evmErrorKind } from '../../chains/evm/rpc.mjs';
+import { sendSteps, receiptsOf } from '../../chains/evm/landing.mjs';
 import * as A from '../../chains/evm/base_addresses.mjs';
 import * as M from '../../chains/evm/clmath.mjs';
 
@@ -416,30 +417,22 @@ async function signStep(ctx, step, cfg) {
   return { serialized, hash: keccak256(serialized) };
 }
 
-// Send the steps in order, each after the previous one's receipt. Throws only if NOTHING
-// was sent; after the first send a failure comes back as {sent, error} so the caller
-// prints a partial report instead of letting the endpoint loop retry the whole operation.
-export async function runSteps(ctx, steps, cfg, deps = {}) {
-  const sign = deps.signStep ?? signStep;
-  const sent = [];
-  for (const step of steps) {
-    let hash = null;
-    try {
-      const s = await sign(ctx, step, cfg);
-      hash = s.hash;
-      await ctx.pub.sendRawTransaction({ serializedTransaction: s.serialized });
-      ctx.nonce += 1;
-      const receipt = await ctx.pub.waitForTransactionReceipt({ hash, timeout: RECEIPT_TIMEOUT_MS, pollingInterval: 2000 });
-      if (receipt.status !== 'success') throw new Error(`transaction ${hash} (${step.label}) reverted on chain`);
-      sent.push({ label: step.label, hash, receipt });
-    } catch (e) {
-      // A signed transaction whose send threw may still have reached a node: it counts.
-      if (hash) sent.push({ label: step.label, hash, receipt: null });
-      if (!sent.length) throw e;
-      return { sent, error: errorLine(e) };
-    }
+// The clients asked for a receipt: the connected one first, then every other Base endpoint
+// (a context without a url, as in tests, has its own client only).
+function receiptClients(ctx) {
+  if (!ctx.receiptClients) {
+    const others = ctx.url ? baseEndpoints().filter(u => u !== ctx.url) : [];
+    ctx.receiptClients = [ctx.pub, ...others.map(u => createPublicClient({ chain: base, transport: http(u, { retryCount: 0, timeout: 10_000 }) }))];
   }
-  return { sent, error: null };
+  return ctx.receiptClients;
+}
+
+// Send the steps in order (chains/evm/landing.mjs): each step's receipt is asked of every
+// endpoint, so a step that landed is never reported failed (2026-10-13). Throws only if
+// NOTHING was sent; after the first send a failure comes back as {sent, error}.
+export async function runSteps(ctx, steps, cfg, deps = {}) {
+  return sendSteps(ctx, steps, cfg, { sign: deps.signStep ?? signStep, clients: () => receiptClients(ctx), errorLine,
+    timeoutMs: RECEIPT_TIMEOUT_MS, receipt: deps.receipt });
 }
 
 function feeEth(sent) {
@@ -451,7 +444,8 @@ function feeEth(sent) {
 // Print the report of a write that sent something; partial when it stopped part-way.
 function reportSent(base, r, extra = {}) {
   const out = { ...base, ...extra, signature: r.sent[r.sent.length - 1]?.hash ?? null,
-    signatures: r.sent.map(s => s.hash), steps: r.sent.map(s => s.label), feeEth: feeEth(r.sent), sent: true };
+    signatures: r.sent.map(s => s.hash), steps: r.sent.map(s => s.label), receipts: receiptsOf(r.sent), feeEth: feeEth(r.sent), sent: true };
+  if (r.recovered?.length) out.recovered = r.recovered;
   if (r.error) { out.partial = true; out.error = r.error; process.exitCode = 1; }
   console.log(JSON.stringify(out, null, 1));
   return out;
@@ -832,7 +826,8 @@ async function send(token, amountArg, toArg, execute) {
     }
     ctx.nonce = await nonceFor(pub, me);
     const r = await runSteps(ctx, [step], cfg);
-    const out = { ...report, signature: r.sent[0]?.hash ?? null, sent: true };
+    const out = { ...report, signature: r.sent[0]?.hash ?? null, receipts: receiptsOf(r.sent), sent: true };
+    if (r.recovered?.length) out.recovered = r.recovered;
     if (r.error) { out.partial = true; out.error = r.error; process.exitCode = 1; }
     console.log(JSON.stringify(out, null, 1));
     return out;

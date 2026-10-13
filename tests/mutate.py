@@ -75,7 +75,7 @@ TARGETS = {
     'one_outcome_signers': ('lp/signers.py', ['record_health', 'chain'], PY_TESTS('test_jupiter_gate', 'test_health', 'test_deploy_all', 'test_deploy_idle', 'test_sweep',
                              'test_multi_loop', 'test_scaled', 'test_review_edges', 'test_orca_fallback_pool',
                              'test_hardening')),
-    'one_outcome_swaps': ('lp/swaps.py', ['balance_wallet', 'sweep_foreign'], PY_TESTS('test_jupiter_gate', 'test_health', 'test_deploy_all', 'test_deploy_idle', 'test_sweep',
+    'one_outcome_swaps': ('lp/swaps.py', ['balance_wallet', 'sweep_foreign'], PY_TESTS('test_jupiter_gate', 'test_health', 'test_deploy_all', 'test_reopen_shape', 'test_deploy_idle', 'test_sweep',
                              'test_multi_loop', 'test_scaled', 'test_review_edges', 'test_orca_fallback_pool',
                              'test_hardening')),
     # 2026-10-09 DJT halt: the Orca fallback's pool, the left-behind sale's fallback, the one-side hold.
@@ -303,7 +303,7 @@ TARGETS = {
     'loop_hooks': ('lp/housekeeping.py', ['janitor', 'run_audits'], PY_TESTS('test_audit.Hooks', 'test_audit_more.Hooks', 'test_audit_more.JanitorKeepsWhatComesBack', 'test_audit_more.JanitorReplan', 'test_audit_more.JanitorUnsignedClose')),
     'janitor_js': ('chains/solana/janitor.mjs', ['planClose', 'closeInstructions', 'verifyCloseTx'], NODE_TESTS('test_janitor.mjs')),
     'book_format': ('book_format.mjs', ['equityLine', 'lpLine', 'sinceStartLine'], NODE_TESTS('test_book_format.mjs')),
-    'deploy_idle': ('lp/swaps.py', ['idle_to_deploy', 'deploy_idle', 'balance_wallet'], PY_TESTS('test_deploy_idle', 'test_deploy_all', 'test_multi_loop', 'test_scaled', 'test_review_edges', 'test_jupiter_gate', 'test_health', 'test_edges_0930')),
+    'deploy_idle': ('lp/swaps.py', ['idle_to_deploy', 'deploy_idle', 'balance_wallet'], PY_TESTS('test_deploy_idle', 'test_deploy_all', 'test_reopen_shape', 'test_deploy_leftover', 'test_increase_idle', 'test_hardening.SwapMints', 'test_orca_fallback_pool', 'test_multi_loop', 'test_scaled', 'test_review_edges', 'test_jupiter_gate', 'test_health', 'test_edges_0930')),
     'idle_capital': ('lp/swaps.py', ['idle_to_deploy', 'deploy_idle', 'plan_sweep', 'sweep_foreign'], PY_TESTS('test_deploy_idle', 'test_sweep', 'test_multi_loop', 'test_scaled', 'test_review_edges', 'test_health', 'test_edges_0930')),
     'orca_fees': ('venues/orca/fees.mjs', ['growthInside', 'ownFees', 'checkOrca', 'transferFeeOf', 'feesFromOrcaSnapshot',
                                     'snapshotAddresses', 'consistentOrcaFees'], NODE_TESTS('test_orca_fees.mjs')),
@@ -438,7 +438,15 @@ TARGETS = {
                                             'runSteps', 'planOpen', 'closeCalls', 'checkRecipient', 'isNative',
                                             'deploymentOf', 'describe', 'ownPositions'],
                    NODE_TESTS('test_aerodrome.mjs')),
-    'evm_rpc': ('chains/evm/rpc.mjs', ['baseEndpoints', 'isLoopback', 'evmErrorKind', 'overBase'], NODE_TESTS('test_aerodrome.mjs')),
+    'evm_rpc': ('chains/evm/rpc.mjs', ['evmEndpoints', 'baseEndpoints', 'isLoopback', 'evmErrorKind', 'overBase'],
+                NODE_TESTS('test_aerodrome.mjs', 'test_uniswap.mjs', 'test_uniswap_polygon.mjs')),
+    # A transaction that landed is never reported failed (2026-10-13, poly-wpol-usdt: -32602 on
+    # the receipt from publicnode, three landed swaps reported failed, HALT).
+    'evm_landing': ('chains/evm/landing.mjs', ['findReceipt', 'sendSteps', 'receiptsOf'], NODE_TESTS('test_evm_landing.mjs')),
+    'landing_uniswap': ('venues/uniswap_v3/signer.mjs', ['receiptClients', 'runSteps'],
+                        NODE_TESTS('test_evm_landing.mjs', 'test_uniswap.mjs', 'test_uniswap_polygon.mjs')),
+    'landing_aerodrome': ('venues/aerodrome/signer.mjs', ['receiptClients', 'runSteps'], NODE_TESTS('test_evm_landing.mjs', 'test_aerodrome.mjs')),
+    'landed_view': ('lp/signers.py', ['landed_view'], PY_TESTS('test_deploy_all.LandedView', 'test_deploy_all.LandedSwaps')),
     'liq_factor': ('lp/tape.py', ['liquidity_view'], PY_TESTS('test_hardening.Liquidity', 'test_hardening.LiquiditySmoothed',
                             'test_hardening.LiquidityViewExact')),
     'liq_window': ('db.py', ['pool_stats_summary'], PY_TESTS('test_db.PoolStatsWindow', 'test_hardening.LiquiditySmoothed')),
@@ -729,8 +737,16 @@ EQUIVALENT = {
         'a decimal string of a bigint is never empty: ?? and || pick the same',
     ('uniswap_signer', 'simulateSequence', '\\?\\? -> ||', "await pub.call({ account: me, to: s.to, data: s.data, value: s.value ?? 0n });", 0):
         'value is a bigint or absent; || replaces 0n with 0n',
-    ('uniswap_signer', 'runSteps', '\\?\\? -> ||', "const sign = deps.signStep ?? signStep;", 0):
+    ('uniswap_signer', 'runSteps', '\\?\\? -> ||', "return sendSteps(ctx, steps, cfg, { sign: deps.signStep ?? signStep, clients: () => receiptClients(ctx), errorLine,", 0):
         'deps.signStep is a function or absent: ?? and || pick the same',
+    ('landing_uniswap', 'runSteps', '\\?\\? -> ||', "return sendSteps(ctx, steps, cfg, { sign: deps.signStep ?? signStep, clients: () => receiptClients(ctx), errorLine,", 0):
+        'deps.signStep is a function or absent: ?? and || pick the same',
+    ('evm_signer', 'runSteps', '\\?\\? -> ||', "return sendSteps(ctx, steps, cfg, { sign: deps.signStep ?? signStep, clients: () => receiptClients(ctx), errorLine,", 0):
+        'deps.signStep is a function or absent: ?? and || pick the same',
+    ('landing_aerodrome', 'runSteps', '\\?\\? -> ||', "return sendSteps(ctx, steps, cfg, { sign: deps.signStep ?? signStep, clients: () => receiptClients(ctx), errorLine,", 0):
+        'deps.signStep is a function or absent: ?? and || pick the same',
+    ('evm_landing', 'sendSteps', '\\?\\? -> ||', "const why = sendError ?? new Error(`no endpoint has a receipt for ${s.hash} (${step.label}): ${found.error ? errorLine(found.error) : 'not found'}`);", 0):
+        'sendError is null or what sendRawTransaction threw, a viem Error object: never falsy where it is not nullish',
     ('uniswap_signer', 'checkRecipient', '\\?\\? -> ||', "if (!isAddress(String(to ?? ''), { strict: false })) throw new Error(`refused: destination ${to} is not an address`);", 0):
         'the falsy values || would also replace (0, false, NaN, empty) are no address either way',
     ('book_inverted', 'pricedView', '\\?\\? -> ||', "return { symbol: inverted ? b : (a ?? 'SOL'), inverted };", 0):

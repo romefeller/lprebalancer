@@ -127,6 +127,16 @@ second position. After the first send, catch errors, print the report with
 `sent: true`, `partial: true`, the signatures so far and the error, and exit 1.
 The loop re-reads the chain and believes what it finds.
 
+An EVM signer learns from the chain whether each sent transaction landed
+(chains/evm/landing.mjs): it asks every endpoint for the receipt until one has
+it, and an RPC error on the way (2026-10-13: publicnode answers -32602 for a
+receipt it does not have yet) is "not yet", never a failure. Its report lists
+`receipts`: `{label, hash, status}` per sent transaction, status `success`,
+`reverted` or `unknown` (no endpoint had a receipt in time). A step that landed
+although its send reported an error is named in `recovered`. The loop believes
+the receipts over an error (lp/signers.landed_view): a swap whose receipt says
+success is a swap, not a failure.
+
 ## Prices are B per A
 
 Every price the signer speaks is token B per token A in human units, where A

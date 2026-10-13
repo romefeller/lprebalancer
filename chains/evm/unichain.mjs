@@ -7,7 +7,7 @@
 // pool id is keccak256(abi.encode(USDC, HYPE, 500, 10, address(0))): no hooks.
 import { getAddress } from 'viem';
 import { unichain } from 'viem/chains';
-import { isLoopback } from './rpc.mjs';
+import { isLoopback, evmEndpoints } from './rpc.mjs';
 
 // Every address in its EIP-55 form, computed from lower case: a hand-typed checksum can be
 // wrong, and viem refuses a wrongly cased address (2026-10-04: a v4 quote failed so).
@@ -56,13 +56,11 @@ export const UNICHAIN_PUBLIC = 'https://mainnet.unichain.org';
 export const UNICHAIN_PUBLICNODE = 'https://unichain-rpc.publicnode.com';
 export const UNICHAIN_DRPC = 'https://unichain.drpc.org';
 
-// LPBOT_RPC (the loop sets it from config.RPC), then LPBOT_UNICHAIN_RPC, then the public
-// endpoints. A loopback LPBOT_RPC (an anvil fork in tests) is the ONLY endpoint: falling
-// back from a fork to mainnet would sign the fork's transactions for the real chain.
+// LPBOT_UNICHAIN_RPC, then the public endpoints; a loopback LPBOT_RPC (an anvil fork in
+// tests) is the ONLY endpoint, and no other LPBOT_RPC is used: in the service environment it
+// is the Solana endpoint (rpc.evmEndpoints).
 export function unichainEndpoints(env = process.env) {
-  if (env.LPBOT_RPC && isLoopback(env.LPBOT_RPC)) return [env.LPBOT_RPC];
-  return [env.LPBOT_RPC, env.LPBOT_UNICHAIN_RPC, UNICHAIN_PUBLIC, UNICHAIN_PUBLICNODE, UNICHAIN_DRPC]
-    .filter((v, i, a) => v && a.indexOf(v) === i);
+  return evmEndpoints(env, 'LPBOT_UNICHAIN_RPC', [UNICHAIN_PUBLIC, UNICHAIN_PUBLICNODE, UNICHAIN_DRPC]);
 }
 
 // Endpoints that answer eth_simulateV1 (mainnet.unichain.org does not, 2026-10-04). On a

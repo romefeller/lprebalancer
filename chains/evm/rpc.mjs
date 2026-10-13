@@ -10,14 +10,21 @@ import { errorKind as solanaErrorKind, AfterSignError } from '../../shared/rpc_p
 export const BASE_PUBLIC = 'https://mainnet.base.org';
 export const BASE_PUBLICNODE = 'https://base-rpc.publicnode.com';
 
-// LPBOT_RPC (CORE sets it from config.RPC), then LPBOT_BASE_RPC, then the public pair.
-// SOLANA_RPC_URL is never read here: on a Base profile it would be a Solana URL.
-// A loopback LPBOT_RPC (an anvil fork in tests) is the ONLY endpoint: falling back from a
-// fork to mainnet would sign the fork's transactions for the real chain.
-export function baseEndpoints(env = process.env) {
+// The endpoints of an EVM chain: the chain's own variable (`ownKey`, e.g. LPBOT_POLYGON_RPC),
+// then its public endpoints. A loopback LPBOT_RPC (an anvil fork in tests) is the ONLY
+// endpoint: falling back from a fork to mainnet would sign the fork's transactions for the
+// real chain. Any other LPBOT_RPC is never used: the shared service environment
+// (~/.kamino-keys/env) sets it to the SOLANA endpoint. The loop's LPBOT_RPC for an EVM
+// profile is config.RPC, which is the chain's own variable or its public endpoint: both are
+// in the list already. SOLANA_RPC_URL is never read here.
+export function evmEndpoints(env, ownKey, publics) {
   if (env.LPBOT_RPC && isLoopback(env.LPBOT_RPC)) return [env.LPBOT_RPC];
-  return [env.LPBOT_RPC, env.LPBOT_BASE_RPC, BASE_PUBLIC, BASE_PUBLICNODE]
-    .filter((v, i, a) => v && a.indexOf(v) === i);
+  return [env[ownKey], ...publics].filter((v, i, a) => v && a.indexOf(v) === i);
+}
+
+// LPBOT_BASE_RPC, then the public pair (evmEndpoints).
+export function baseEndpoints(env = process.env) {
+  return evmEndpoints(env, 'LPBOT_BASE_RPC', [BASE_PUBLIC, BASE_PUBLICNODE]);
 }
 
 export function isLoopback(url) {

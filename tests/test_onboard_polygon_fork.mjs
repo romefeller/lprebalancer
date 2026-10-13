@@ -33,7 +33,7 @@ import { loadConfig, makeServer, polygonAdapter, pythonStore } from '../onboard/
 const KEYS = Object.fromEntries(['bot', 'owner', 'owner2', 'stranger', 'maxer'].map(k => [k, `0x${crypto.randomBytes(32).toString('hex')}`]));
 const acct = Object.fromEntries(Object.entries(KEYS).map(([k, v]) => [k, privateKeyToAccount(v)]));
 const FORK_URLS = process.env.LPBOT_POLYGON_FORK_URL ? [process.env.LPBOT_POLYGON_FORK_URL]
-  : ['https://polygon-bor-rpc.publicnode.com', 'https://polygon.drpc.org'];
+  : ['https://polygon.drpc.org', 'https://polygon-bor-rpc.publicnode.com'];   // dRPC first: publicnode answers a receipt anvil lacks with 403 -32602 (2026-10-13)
 const INVITE = 'polygon-fork-invite';
 const NAME = 'ob-tgp-fork', NAME2 = 'ob-tgp-two', NAME3 = 'ob-tgp-max', TEMPLATE = 'ob-tgp-tpl';
 const ERC20 = parseAbi(['function balanceOf(address) view returns (uint256)']);

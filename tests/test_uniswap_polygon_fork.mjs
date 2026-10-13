@@ -21,9 +21,9 @@ import { V3, WPOL, USDT0 } from '../chains/evm/polygon.mjs';
 const dir = path.dirname(new URL(import.meta.url).pathname);
 const signer = path.join(dir, '..', 'venues/uniswap_v3/signer.mjs');
 const POOL = '0x9B08288C3Be4F62bbf8d1C20Ac9C5e6f9467d8B7';
-// publicnode first, then dRPC: a busy public endpoint must not turn the test into a skip.
+// dRPC first, then publicnode: a busy public endpoint must not turn the test into a skip.
 const FORK_URLS = process.env.LPBOT_POLYGON_FORK_URL ? [process.env.LPBOT_POLYGON_FORK_URL]
-  : ['https://polygon-bor-rpc.publicnode.com', 'https://polygon.drpc.org'];
+  : ['https://polygon.drpc.org', 'https://polygon-bor-rpc.publicnode.com'];   // dRPC first: publicnode answers a receipt anvil lacks with 403 -32602 (2026-10-13)
 let FORK_FROM = FORK_URLS.join(' or ');
 const LP = { key: '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80', addr: '0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266' };
 const TRADER = { key: '0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d', addr: '0x70997970C51812dc3A010C7d01b50e0d17dc79C8' };
@@ -150,6 +150,10 @@ test('fork (Polygon): rebalance -> open -> trade -> harvest -> close, pinned sen
   t.diagnostic(`route ${sw.json.routePlan[0].label}; impact ${sw.json.priceImpactPercent}%`);
   const to = await targets(sw.json.signatures);
   assert.deepStrictEqual(to, [USDT0.toLowerCase(), V3.router.toLowerCase()], 'approve USDT0, then swap on SwapRouter02');
+  // each sent transaction with its receipt status (the loop's landed_view reads it, 2026-10-13)
+  assert.deepStrictEqual(sw.json.receipts, [{ label: `approve ${USDT0}`, hash: sw.json.signatures[0], status: 'success' },
+    { label: 'swap', hash: sw.json.signatures[1], status: 'success' }]);
+  assert.strictEqual(sw.json.partial, undefined); assert.strictEqual(sw.json.recovered, undefined);
   assert.strictEqual(run(['rebalance', WPOL, USDT0, '100', '100'], lp).json.noop, true, 'at target: no second swap');
   assert.ok(run(['balance'], lp).json.sol < w0.sol, 'gas paid in POL');
   const gas = { swap: await gasOf(sw.json.signatures) };

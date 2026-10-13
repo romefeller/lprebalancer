@@ -381,3 +381,87 @@ class BalanceWalletEdges(BalanceWallet):
         for ans in (({'partial': True}, 'boom'), ({'partial': True, 'signature': 'p', 'sent': True}, None)):
             out, _, seen, _, state, *_ = self.go(self.LOP, answers=(ans,))
             self.assertIsNone(out, ans); self.assertEqual(state['failures'], 1, ans); self.assertIn('swap_failed', seen)
+
+
+class LandedSwaps(BalanceWallet):
+    """A swap the chain's receipts show landed is never a failure (2026-10-13,
+    poly-wpol-usdt: three landed swaps reported failed by the signer, HALT)."""
+    ERR = 'Invalid parameters were provided to the RPC method.'
+    OK = {'label': 'approve', 'hash': 'A1', 'status': 'success'}
+    SWAP = {'label': 'swap', 'hash': 'S2', 'status': 'success'}
+
+    def answer(self, *receipts, **extra):
+        return dict({'sent': True, 'partial': True, 'error': self.ERR, 'signature': receipts[-1]['hash'],
+                     'signatures': [r['hash'] for r in receipts], 'receipts': list(receipts),
+                     'swapUsdValue': 7.62, 'sold': {}, 'bought': {}}, **extra), self.ERR
+
+    def test_the_incident_a_landed_swap_with_an_rpc_error_is_a_swap(self):
+        after = dict(self.LOP, balanceA=0.95, balanceB=110.0)
+        state = {'failures': 2}
+        with mock.patch.object(config, 'MAX_CONSECUTIVE_FAILURES', 3):
+            out, calls, seen, events, state, halted, raw = self.go(self.LOP, answers=(self.answer(self.OK, self.SWAP),),
+                                                                   state=state, after=after)
+        self.assertEqual(out, after); self.assertEqual(len(calls), 1, 'never sent again')
+        self.assertEqual(state['failures'], 2, 'not counted'); self.assertEqual(halted, [])
+        self.assertNotIn('swap_failed', seen); self.assertEqual(seen[:2], ['swap_recovered', 'SWAP'])
+        self.assertEqual(events[0], ('swap_recovered', f'S2 landed although the signer said: {self.ERR}'))
+        self.assertEqual(events[1], ('SWAP', 'S2 usd 7.62'))
+        rec = [kw for e, kw in raw if e == 'swap_recovered'][0]
+        self.assertEqual(rec, {'reason': self.ERR, 'signature': 'S2'})
+
+    def test_three_landed_swaps_in_a_row_write_no_halt(self):
+        state = {'failures': 0}
+        for _ in range(3):
+            out, _, seen, _, state, halted, _ = self.go(self.LOP, answers=(self.answer(self.SWAP),), state=state)
+            self.assertIsNotNone(out); self.assertEqual(halted, []); self.assertNotIn('swap_failed', seen)
+        self.assertEqual(state['failures'], 0)
+
+    def test_the_landed_swap_feeds_the_breaker_a_success(self):
+        recs = []
+        with mock.patch.object(lp.signers, 'record_health', lambda k, o, e: recs.append((k, (o or {}).get('partial'), e))):
+            self.go(self.LOP, answers=(self.answer(self.SWAP),))
+        self.assertEqual(recs, [('jupiter', False, None), ('swap', False, None)])
+
+    def test_only_an_approval_landed_the_swap_was_never_sent_no_failure(self):
+        out, calls, seen, events, state, halted, _ = self.go(self.LOP, answers=(self.answer(self.OK),))
+        self.assertEqual(out, self.LOP); self.assertEqual(len(calls), 1)
+        self.assertEqual(state['failures'], 0); self.assertEqual(halted, [])
+        self.assertIn('swap_skipped', seen); self.assertNotIn('swap_failed', seen); self.assertNotIn('swap_recovered', seen)
+        self.assertTrue(state['open_unbalanced'])
+
+    def test_an_approval_alone_without_an_error_is_not_a_swap_skip(self):
+        # no error: the outcome check below decides (sent, not partial), as before
+        ans = ({'sent': True, 'signature': 'A1', 'receipts': [self.OK]}, None)
+        out, _, seen, *_ = self.go(self.LOP, answers=(ans,))
+        self.assertNotIn('swap_skipped', seen); self.assertNotIn('swap_recovered', seen)
+
+    def test_a_revert_or_a_missing_receipt_stays_a_failure(self):
+        for bad in ({'label': 'swap', 'hash': 'S2', 'status': 'reverted'}, {'label': 'swap', 'hash': 'S2', 'status': 'unknown'}):
+            out, _, seen, _, state, _, _ = self.go(self.LOP, answers=(self.answer(self.OK, bad),))
+            self.assertIsNone(out, bad); self.assertEqual(state['failures'], 1, bad)
+            self.assertIn('swap_failed', seen); self.assertNotIn('swap_recovered', seen)
+        out, _, seen, _, state, _, _ = self.go(self.LOP, answers=(self.answer({'label': 'approve', 'hash': 'A1', 'status': 'reverted'}),))
+        self.assertIsNone(out); self.assertEqual(state['failures'], 1); self.assertNotIn('swap_skipped', seen)
+
+    def test_a_clean_landed_swap_says_no_recovery(self):
+        ans = ({'sent': True, 'signature': 'S2', 'receipts': [self.SWAP], 'swapUsdValue': 1.0}, None)
+        out, _, seen, events, state, *_ = self.go(self.LOP, answers=(ans,))
+        self.assertNotIn('swap_recovered', seen); self.assertEqual(events, [('SWAP', 'S2 usd 1.0')])
+
+
+class LandedView(unittest.TestCase):
+    def test_the_receipts_decide(self):
+        v = lp.signers.landed_view
+        ok = lambda label: {'label': label, 'hash': 'h', 'status': 'success'}
+        self.assertEqual(v({'receipts': [ok('approve'), ok('swap')]}, 'swap'), 'landed')
+        self.assertEqual(v({'receipts': [ok('swap')]}, 'swap'), 'landed')
+        self.assertEqual(v({'receipts': [ok('approve')]}, 'swap'), 'unsent')
+        self.assertEqual(v({'receipts': [ok('approve'), ok('permit2 x')]}, 'swap'), 'unsent')
+        self.assertEqual(v({'receipts': [ok('swap')]}, 'mint'), 'unsent')
+        for bad in ('reverted', 'unknown', None, 'SUCCESS'):
+            self.assertIsNone(v({'receipts': [ok('approve'), dict(ok('swap'), status=bad)]}, 'swap'), bad)
+            self.assertIsNone(v({'receipts': [dict(ok('approve'), status=bad), ok('swap')]}, 'swap'), bad)
+        for out in (None, {}, {'receipts': None}, {'receipts': []}, {'receipts': 'swap'}, {'receipts': {'label': 'swap'}},
+                    {'receipts': 5}, {'receipts': True},
+                    {'receipts': [ok('swap'), 'success']}, {'receipts': [None]}):
+            self.assertIsNone(v(out, 'swap'), out)

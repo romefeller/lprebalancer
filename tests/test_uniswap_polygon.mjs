@@ -47,7 +47,9 @@ test('polygon endpoints: a loopback LPBOT_RPC is the only one; no Unichain or de
   assert.deepStrictEqual(P.polygonEndpoints({ LPBOT_RPC: 'http://127.0.0.1:8545', LPBOT_POLYGON_RPC: 'https://own.example' }), ['http://127.0.0.1:8545']);
   assert.deepStrictEqual(P.simulationEndpoints({ LPBOT_RPC: 'http://127.0.0.1:8545' }), ['http://127.0.0.1:8545']);
   const pub = P.polygonEndpoints({ LPBOT_RPC: 'https://x.example', LPBOT_POLYGON_RPC: 'https://own.example', LPBOT_UNICHAIN_RPC: 'https://uni.example' });
-  assert.deepStrictEqual(pub, ['https://x.example', 'https://own.example', P.POLYGON_PUBLICNODE, P.POLYGON_DRPC]);
+  // a remote LPBOT_RPC is the service environment's Solana endpoint: never used (2026-10-13)
+  assert.deepStrictEqual(pub, ['https://own.example', P.POLYGON_PUBLICNODE, P.POLYGON_DRPC]);
+  assert.deepStrictEqual(P.polygonEndpoints({ LPBOT_RPC: 'https://solana.example/rpc' }), [P.POLYGON_PUBLICNODE, P.POLYGON_DRPC]);
   assert.deepStrictEqual(P.polygonEndpoints({}), [P.POLYGON_PUBLICNODE, P.POLYGON_DRPC]);
   // a remote LPBOT_RPC is not a simulator: simulation stays on the endpoints that answer eth_simulateV1
   assert.deepStrictEqual(P.simulationEndpoints({ LPBOT_RPC: 'https://x.example' }), [P.POLYGON_PUBLICNODE, P.POLYGON_DRPC]);
@@ -291,7 +293,7 @@ test('runSteps: the step after a sent one is checked at or past its receipt bloc
   const blocks = [];
   const ctx = { nonce: 1, pub: {
     async sendRawTransaction() {},
-    async waitForTransactionReceipt({ hash }) { return { status: 'success', blockNumber: hash === 'h1' ? 500n : 501n, gasUsed: 1n, effectiveGasPrice: 1n }; },
+    async getTransactionReceipt({ hash }) { return { status: 'success', blockNumber: hash === 'h1' ? 500n : 501n, gasUsed: 1n, effectiveGasPrice: 1n }; },
   } };
   let n = 0;
   const sign = async (c) => { blocks.push(c.minBlock); n += 1; return { serialized: '0x', hash: `h${n}` }; };

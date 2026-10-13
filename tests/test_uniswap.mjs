@@ -67,8 +67,9 @@ test('every address constant is in EIP-55 form (a wrong checksum made viem refus
 test('endpoints: a loopback LPBOT_RPC is the only endpoint, for writes and simulation', () => {
   assert.deepStrictEqual(U.unichainEndpoints({ LPBOT_RPC: 'http://127.0.0.1:8545' }), ['http://127.0.0.1:8545']);
   assert.deepStrictEqual(U.simulationEndpoints({ LPBOT_RPC: 'http://127.0.0.1:8545' }), ['http://127.0.0.1:8545']);
-  const pub = U.unichainEndpoints({ LPBOT_RPC: 'https://x.example' });
-  assert.strictEqual(pub[0], 'https://x.example'); assert.ok(pub.includes(U.UNICHAIN_PUBLIC));
+  // a remote LPBOT_RPC is the service environment's Solana endpoint: never used (2026-10-13)
+  const pub = U.unichainEndpoints({ LPBOT_RPC: 'https://x.example', LPBOT_UNICHAIN_RPC: 'https://own.example' });
+  assert.deepStrictEqual(pub, ['https://own.example', U.UNICHAIN_PUBLIC, U.UNICHAIN_PUBLICNODE, U.UNICHAIN_DRPC]);
   assert.ok(!U.simulationEndpoints({}).includes(U.UNICHAIN_PUBLIC), 'mainnet.unichain.org has no eth_simulateV1');
 });
 
@@ -265,14 +266,14 @@ test('simulateSequence: falls back to per-call calls when no endpoint answers et
 
 // --- sending ---------------------------------------------------------------------------------------
 test('runSteps: throws when nothing was sent; reports partial after the first send, never retries', async () => {
-  const pub = { sendRawTransaction: async () => '0x', waitForTransactionReceipt: async () => ({ status: 'success', gasUsed: 1n, effectiveGasPrice: 1n, logs: [] }) };
+  const pub = { sendRawTransaction: async () => '0x', getTransactionReceipt: async () => ({ status: 'success', gasUsed: 1n, effectiveGasPrice: 1n, logs: [] }) };
   await assert.rejects(S.runSteps({ pub, nonce: 0 }, [{ label: 'a' }], CFG, { signStep: async () => { throw new Error('refused: no gas'); } }), /no gas/);
   let n = 0;
   const sign = async () => { n += 1; if (n === 2) throw new Error('boom'); return { serialized: '0x', hash: `0x${n}` }; };
   const r = await S.runSteps({ pub, nonce: 0 }, [{ label: 'a' }, { label: 'b' }, { label: 'c' }], CFG, { signStep: sign });
   assert.deepStrictEqual(r.sent.map(s => s.hash), ['0x1']); assert.match(r.error, /boom/);
   assert.strictEqual(n, 2, 'nothing after the failure');
-  const rev = { ...pub, waitForTransactionReceipt: async () => ({ status: 'reverted' }) };
+  const rev = { ...pub, getTransactionReceipt: async () => ({ status: 'reverted' }) };
   const r2 = await S.runSteps({ pub: rev, nonce: 0 }, [{ label: 'a' }], CFG, { signStep: async () => ({ serialized: '0x', hash: '0xaa' }) });
   assert.deepStrictEqual(r2.sent.map(s => s.hash), ['0xaa'], 'a signed, sent, reverted tx still counts'); assert.match(r2.error, /reverted on chain/);
 });
