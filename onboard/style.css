@@ -97,6 +97,9 @@ pre { white-space: pre-wrap; overflow-wrap: anywhere; font: 12.5px/1.45 ui-monos
 @keyframes pulse { 50% { opacity: .45; } }
 @media (prefers-reduced-motion: reduce) { .step[data-state="active"] .dot, .spinner { animation: none; } }
 .review { margin-top: 16px; border-top: 1px solid var(--line); padding-top: 12px; }
+.walletcall { margin-top: 16px; border-radius: 10px; padding: 12px 14px; background: var(--info-bg); color: var(--info); border: 1px solid var(--info); }
+.walletcall p { margin: 0 0 8px; font-weight: 600; }
+.walletcall .button { display: block; text-align: center; font-size: 18px; padding: 14px; }
 .review ul { margin: 0; padding-left: 18px; font-size: 14px; }
 .review li { overflow-wrap: anywhere; margin: 2px 0; }
 .review li.inner { margin-left: 16px; list-style: circle; }

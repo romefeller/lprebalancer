@@ -117,7 +117,7 @@ TARGETS = {
                                                      'putSettingsAction', 'compileInner', 'policyExecuteIx', 'ownerExecuteIx',
                                                      'decodeSettings', 'policyStateIs'],
                     NODE_TESTS('test_vault_policy.mjs', 'test_vault_fork.mjs')),
-    'vault_admin': ('chains/solana/vault/admin.mjs', ['connectPlan', 'connectDone', 'connectProblems', 'staticAccounts', 'lookupPlan'],
+    'vault_admin': ('chains/solana/vault/admin.mjs', ['ownerSetupPlan', 'setupDone', 'packSteps', 'connectProblems', 'staticAccounts', 'lookupPlan'],
                     NODE_TESTS('test_vault_policy.mjs', 'test_vault_cli_fork.mjs', 'test_vault_venues_fork.mjs')),
     'vault_account': ('chains/solana/vault/account.mjs', ['vaultConfig', 'actingAccount', 'needed', 'verifyPolicy', 'wrap', 'withVaultBudget'],
                       NODE_TESTS('test_vault_policy.mjs', 'test_vault_dlmm_fork.mjs')),
@@ -132,7 +132,8 @@ TARGETS = {
                    NODE_TESTS('test_vault_exit.mjs', 'test_vault_exit_fork.mjs')),
     'vault_exit_venues': ('chains/solana/vault/exit.mjs', ['clmmMinimums', 'mintPrograms', 'dlmmExit', 'raydiumExit', 'byrealExit', 'orcaExit',
                                                            'vaultPositions'], NODE_TESTS('test_vault_exit_fork.mjs')),
-    'vault_connect': ('chains/solana/vault/cli.mjs', ['poolsByVenue', 'connect'], NODE_TESTS('test_vault_venues_fork.mjs', 'test_vault_cli_fork.mjs')),
+    'vault_connect': ('chains/solana/vault/cli.mjs', ['poolsByVenue', 'setupRequest', 'finishSetup'],
+                      NODE_TESTS('test_vault_venues_fork.mjs', 'test_vault_cli_fork.mjs')),
     'vault_venues': ('chains/solana/vault/venues.mjs', ['raydiumLayout', 'whirlpoolLayout', 'venue'],
                      NODE_TESTS('test_vault_venues_fork.mjs', 'test_vault_raydium_fork.mjs', 'test_vault_orca_fork.mjs')),
     'raydium_vault': ('venues/raydium_clmm/vault.mjs', ['ata', 'ensureAtas', 'wrapSol', 'unwrapSol', 'poolMints', 'around', 'nativeIn',
@@ -172,23 +173,36 @@ TARGETS = {
     'vault_capital': ('lp/capital.py', ['gas_for_open', 'profit_wallet_pinned'], PY_TESTS('test_vault_config', 'test_payout')),
     'evm_roles': ('chains/evm/vault/roles.mjs', ['shape', 'oneOf', 'equal', 'condition', 'flatten', 'integrity', 'targetsOf',
                                                  'rulesFor', 'compile', 'roleCalls', 'allows'], NODE_TESTS('test_evm_vault.mjs')),
-    'evm_safe': ('chains/evm/vault/safe.mjs', ['preValidated', 'multiSend', 'setupCalls', 'execAsOwner', 'checkOwners', 'readState',
-                                               'connectProblems'], NODE_TESTS('test_evm_vault.mjs', 'test_vault_polygon_fork.mjs')),
+    'evm_safe': ('chains/evm/vault/safe.mjs', ['preValidated', 'multiSend', 'checkOwners', 'readState', 'connectProblems'],
+                 NODE_TESTS('test_evm_vault.mjs', 'test_owner_setup.mjs', 'test_vault_polygon_fork.mjs')),
     'evm_account': ('chains/evm/vault/account.mjs', ['vaultConfig', 'wrapStep', 'verifyVault', 'acting'],
                     NODE_TESTS('test_evm_vault.mjs', 'test_vault_polygon_fork.mjs')),
     'evm_vault_signer': ('venues/uniswap_v3/signer.mjs', ['connect', 'approvedPool', 'holdings', 'simulate', 'signStep', 'closeSteps',
                                                           'checkVaultRecipient'],
                          NODE_TESTS('test_evm_vault.mjs', 'test_uniswap.mjs', 'test_uniswap_polygon.mjs', 'test_vault_polygon_fork.mjs')),
-    'evm_vault_cli': ('chains/evm/vault/cli.mjs', ['poolOf', 'plan', 'connect'], NODE_TESTS('test_evm_vault.mjs', 'test_vault_polygon_fork.mjs')),
+    'evm_vault_cli': ('chains/evm/vault/cli.mjs', ['poolOf', 'plan', 'vaultReport', 'request', 'check'], NODE_TESTS('test_evm_vault.mjs', 'test_owner_setup.mjs')),
+    # The owner creates its own Polygon vault (2026-10-13): the bot is never an owner and
+    # pays nothing; the page decodes the set-up and the funding; the check of the vault on chain.
+    'evm_owner_setup': ('chains/evm/vault/owner_setup.mjs', ['moduleProxyCode', 'moduleRuntime', 'salted', 'saltOf', 'safeInitializer', 'predictSafe',
+                                                           'predictRoles', 'configureCalls', 'ownerSetupCalls', 'fundToken', 'fundCalls',
+                                                           'grantProblems', 'rolesLogs', 'verifySetup'],
+                        NODE_TESTS('test_owner_setup.mjs', 'test_decode_evm.mjs')),
+    'onboard_evm_setup': ('onboard/polygon.mjs', ['affords', 'payoutsOf', 'setupTxs', 'verifySetup'], NODE_TESTS('test_owner_setup.mjs')),
+    'onboard_decode_evm_vault': ('onboard/decode_evm.mjs', ['safeCall', 'vaultPins', 'unpack', 'callName', 'createVault', 'fund', 'envelope', 'decodeEvm'],
+                                 NODE_TESTS('test_decode_evm.mjs')),
     'add_vault': ('ops/add_vault.py', ['addresses', 'register_rows', 'register', 'payouts', 'insert_rows'], PY_TESTS('test_add_vault', 'test_onboard_store')),
     # Self-serve onboarding (onboard/, 2026-10-11): what an owner signs, the gas payment it
     # must make before the bot spends anything, the server's gates, the rows it writes.
     'onboard_intent': ('onboard/intent.mjs', ['decimal', 'address', 'amount', 'name', 'nativeOf', 'gasTotal', 'minimum',
                                               'maxAmount', 'addAmount', 'feeTerms', 'fields', 'verify', 'decodeSignature', 'inviteOk'], NODE_TESTS('test_onboard.mjs')),
-    'onboard_sol_payment': ('onboard/solana.mjs', ['vaultVenues', 'paymentVerdict', 'checkPayment', 'gas', 'paymentTxs', 'holdings'],
-                            NODE_TESTS('test_onboard.mjs', 'test_onboard_fork.mjs')),
-    'onboard_evm_payment': ('onboard/polygon.mjs', ['paymentVerdict', 'checkPayment', 'gas', 'paymentTxs', 'holdings'],
-                            NODE_TESTS('test_onboard.mjs', 'test_onboard_polygon_fork.mjs')),
+    'onboard_sol_payment': ('onboard/solana.mjs', ['vaultVenues', 'paymentVerdict', 'checkPayment', 'gas', 'holdings', 'funding', 'findFunding', 'findDeposit'],
+                            NODE_TESTS('test_onboard.mjs', 'test_onboard_sol.mjs', 'test_onboard_fork.mjs')),
+    # The owner's own set-up (2026-10-13: the bot never a signer, never fronting a cost):
+    # its transactions, what it costs the owner, where it stands, the bot's finish.
+    'onboard_sol_setup': ('onboard/solana.mjs', ['setupFlags', 'setupTxs', 'setupCost', 'finishVault', 'setupState', 'depositIxs', 'depositTxs'],
+                          NODE_TESTS('test_onboard_sol.mjs', 'test_onboard_fork.mjs')),
+    'onboard_evm_payment': ('onboard/polygon.mjs', ['paymentVerdict', 'checkPayment', 'gas', 'affords', 'holdings'],
+                            NODE_TESTS('test_onboard.mjs', 'test_owner_setup.mjs')),
     # The owner's way out of a Polygon vault (2026-10-12): close from the Safe, withdraw all,
     # re-grant, the deposit check, and the page's decoder of every owner transaction.
     'evm_exit': ('chains/evm/vault/exit.mjs', ['ownerExec', 'vaultPositions', 'closeData', 'ownerCloseCalls', 'regrantCall'],
@@ -201,8 +215,8 @@ TARGETS = {
                                                       'revoke', 'approve', 'close', 'moduleCall', 'decodeEvm'],
                            NODE_TESTS('test_decode_evm.mjs', 'test_evm_exit.mjs')),
     'onboard_server': ('onboard/server.mjs', ['makeServer', 'clientOf', 'serviceCommand', 'profileVenues'], NODE_TESTS('test_onboard.mjs')),
-    'onboard_store': ('onboard/store.py', ['same_owner', 'taken', 'owned', 'sign', 'paid', 'resume', 'connected', 'stuck', 'with_settings', 'register',
-                                           'started'], PY_TESTS('test_onboard_store')),
+    'onboard_store': ('onboard/store.py', ['same_owner', 'taken', 'owned', 'sign', 'planned', 'paid', 'resume', 'connected', 'stuck', 'with_settings',
+                                           'register', 'started'], PY_TESTS('test_onboard_store')),
     # The owner's page (2026-10-12: Tangem, Ledger, Phantom): the off-chain message a
     # hardware wallet signs, the page's decoder that refuses what the owner did not ask for,
     # the deposits that set the cap, the exit and revoke the bot obeys, the verifier.
@@ -213,15 +227,19 @@ TARGETS = {
                                                      'describe', 'namesOf', 'expectedPolicies', 'decodeSol', 'ownerExecute', 'exitPins',
                                                      'policyUpdates'],
                            NODE_TESTS('test_decode_sol.mjs', 'test_onboard_verify.mjs')),
-    'onboard_decode_checks': ('onboard/decode_sol.mjs', ['payment', 'deposit', 'withdraw', 'revoke', 'approve', 'close'],
+    'onboard_decode_checks': ('onboard/decode_sol.mjs', ['deposit', 'withdraw', 'revoke', 'approve', 'close'],
                               NODE_TESTS('test_decode_sol.mjs')),
+    'onboard_decode_setup': ('onboard/decode_sol.mjs', ['decodeSolSet', 'setupPolicies', 'readCreate', 'setupPart', 'setupWhole', 'approvePart',
+                                                       'approveWhole'],
+                             NODE_TESTS('test_decode_sol.mjs')),
+    'onboard_wallet_link': ('onboard/web/wallet_link.mjs', ['safeLink', 'walletLink'], NODE_TESTS('test_wallet_link.mjs')),
     'onboard_sol_owner': ('onboard/solana.mjs', ['ownerTxs', 'context', 'depositVerdict', 'checkDeposit', 'broadcast', 'confirm', 'status'],
                           NODE_TESTS('test_onboard_sol.mjs', 'test_onboard.mjs', 'test_vault_add_venue.mjs')),
     'onboard_polygon_env': ('onboard/polygon.mjs', ['polygonEnv'], NODE_TESTS('test_onboard.mjs')),
     'onboard_server_page': ('onboard/server.mjs', ['walletConnectOf', 'csp', 'sender', 'keysMatch'], NODE_TESTS('test_onboard.mjs')),
     'onboard_store_page': ('onboard/store.py', ['started', 'cap_usd', 'usd_of', 'cap', 'deposited', 'exit_request', 'exits', 'feed_from_file',
                                                 'feed_kind', 'feed'], PY_TESTS('test_onboard_store')),
-    'onboard_verify': ('onboard/verify.mjs', ['flags', 'atCommit', 'pinsOf', 'chainProblems', 'check', 'main'], NODE_TESTS('test_onboard_verify.mjs')),
+    'onboard_verify': ('onboard/verify.mjs', ['flags', 'atCommit', 'pinsOf', 'chainProblems', 'check', 'setupExpectOf', 'fromServer', 'main'], NODE_TESTS('test_onboard_verify.mjs')),
     'owner_requests_loop': ('lp/loop.py', ['stop_revoked', 'owner_exit', 'exit_for_owner'], PY_TESTS('test_owner_requests')),
     'owner_requests_signers': ('lp/signers.py', ['revoked', 'held', 'counts_as_failure'], PY_TESTS('test_owner_requests', 'test_health')),
     'owner_requests_books': ('lp/books.py', ['latest_kind', 'keep_latest'], PY_TESTS('test_owner_requests')),
@@ -468,6 +486,82 @@ SQL_TARGETS = {'deposit_db', 'unichain_book', 'unichain_quote', 'band_profile', 
 # The report prints each survivor's key: copy it here with a reason. The line
 # number is not in the key, so an edit above a mutant keeps its entry valid.
 EQUIVALENT = {
+    ('vault_connect', 'setupRequest', '(?<![<>=!-])>(?![>=]) -> >=', 'seed = (seed > config.smartAccountIndex ? seed : config.smartAccountIndex) + 1n;', 0):
+        'a taken seed is never above the program\'s index (its creation set the index to it): at equal both pick the same',
+    ('vault_connect', 'setupRequest', '\\?(?=\\s) -> && false ?', 'seed = (seed > config.smartAccountIndex ? seed : config.smartAccountIndex) + 1n;', 0):
+        'a taken seed is never above the program\'s index, so the index is always the larger',
+    ('vault_connect', 'setupRequest', '\\?\\? -> ||', "const venues = (f.venue ?? '').split(',').map(v => v.trim()).filter(Boolean);", 0):
+        "--venue missing or '' gives '' either way",
+    ('vault_connect', 'setupRequest', '\\?\\? -> ||', 'done = setupDone(settingsInfo?.data ?? null, policyInfos.map(Boolean), { owner });', 0):
+        'account data is a Buffer (an object, truthy) or absent: ?? and || pick the same',
+    ('vault_connect', 'finishSetup', '\\?\\? -> ||', 'have: table?.state.addresses ?? [], addresses: setup.lookupAddresses });', 0):
+        'a table\'s addresses are a list or the table is absent: ?? and || give the same',
+    ('onboard_sol_payment', 'funding', '\\?\\? -> ||', 'const vault = r.connected?.planned?.vault ?? null;', 0):
+        'a planned vault is an address or absent: ?? and || give the same',
+    ('onboard_sol_payment', 'funding', '\\?\\? -> ||', "return { state: 'pending', reason: told?.reason ?? 'the set-up\\'s gas payment is not readable yet' };", 0):
+        'a verdict\'s reason is a sentence, never empty: ?? and || give the same',
+    ('onboard_sol_setup', 'finishVault', '\\?\\? -> ||', 'return finishSetup(setup, { connection, payer: keys.payer, policyKey: keys.policyKey.publicKey, lookup: r.connected?.lookup ?? null,', 0):
+        'a saved table is an address or absent: ?? and || give the same',
+    ('onboard_server', 'makeServer', '\\?\\? -> ||', 'const setupOf = (adapter, r, planned) => adapter.setup({ owner: r.owner, profitWallet: r.profitWallet ?? r.profit_wallet,', 0):
+        'a profit wallet is an address (never empty) or absent: ?? and || give the same',
+    ('onboard_server', 'makeServer', '\\?\\? -> ||', 'return { name: r.name, chain: r.chain, done: s.done, transactions: s.transactions ?? [], calls: s.calls ?? null, chainId: s.chainId ?? null,', 0):
+        'a list or absent: ?? and || give the same',
+    ('onboard_server', 'makeServer', '\\?\\? -> ||', 'return { name: r.name, chain: r.chain, done: s.done, transactions: s.transactions ?? [], calls: s.calls ?? null, chainId: s.chainId ?? null,', 1):
+        'an object or absent: ?? and || give the same',
+    ('onboard_server', 'makeServer', '\\?\\? -> ||', 'return { name: r.name, chain: r.chain, done: s.done, transactions: s.transactions ?? [], calls: s.calls ?? null, chainId: s.chainId ?? null,', 2):
+        'a chain id is a positive number or absent: ?? and || give the same',
+    ('onboard_server', 'makeServer', '\\?\\? -> ||', 'cost: s.cost ?? null, expires: new Date(expires).toISOString(),', 0):
+        'a cost is a decimal string, never empty, or absent',
+    ('onboard_server', 'makeServer', '\\?\\? -> ||', 'profitWallet: r.profitWallet ?? r.profit_wallet, feeWallet: r.feeWallet ?? r.fee_wallet ?? null },', 0):
+        'a profit wallet is an address (never empty) or absent: ?? and || give the same',
+    ('onboard_server', 'makeServer', '\\?\\? -> ||', 'context: { ...s.planned, report: s.report ?? null } };', 0):
+        'a report is an object or absent: ?? and || give the same',
+    ('onboard_server', 'makeServer', '\\?\\? -> ||', 'const s = await setupOf(adapter, { ...r, gas: terms.gas, deposit: terms.deposit }, r.connected?.planned ?? null);', 0):
+        'a plan is an object or absent: ?? and || give the same',
+    ('onboard_server', 'makeServer', '\\?\\? -> ||', 'return setup(r.name, adapter, r.connected?.deposit ?? null);', 0):
+        'a deposit is a signature (never empty) or absent: ?? and || give the same',
+    ('onboard_server', 'makeServer', '\\?\\? -> ||', 'let kept = { ...(r.connected ?? {}), deposit };', 0):
+        'the saved plan is an object or absent: ?? and || give the same',
+    ('onboard_server', 'makeServer', '\\?\\? -> ||', "await deps.store('stuck', { id: r.id, error: e.message, connected: connected ?? kept }).catch(() => {});", 0):
+        'a report is an object or null: ?? and || give the same',
+    ('onboard_server', 'makeServer', '\\?(?=\\s) -> && false ?', 'const v = await adapter.funding(r, { payment: body.payment == null ? null : I.text(body.payment),', 0):
+        'I.text of an absent payment is \'\', which the funding reads as none, as it reads null',
+    # The owner's own set-up (2026-10-13): lists the page builds, or absent
+    ('onboard_decode_setup', 'setupPolicies', '\\?\\? -> ||', 'for (const venue of expect.venues ?? []) {', 0):
+        'expect.venues is a list or absent: ?? and || give the same',
+    ('onboard_decode_setup', 'setupPart', '\\?\\? -> ||', 'for (const v of expect.venues ?? []) {', 0):
+        'expect.venues is a list or absent: ?? and || give the same',
+    ('onboard_decode_setup', 'setupPart', '\\?\\? -> ||', 'for (const p of expect.pools?.[v] ?? []) if (!(pins.pools[v] ?? []).includes(p)) no(`the pool ${short(p)} is not the ${v} pool the rules approve`);', 0):
+        'a venue\'s pools are a list or absent: ?? and || give the same',
+    ('onboard_decode_setup', 'setupPart', '\\?\\? -> ||', 'for (const p of expect.pools?.[v] ?? []) if (!(pins.pools[v] ?? []).includes(p)) no(`the pool ${short(p)} is not the ${v} pool the rules approve`);', 1):
+        'the pinned pools of a venue are a list or absent: ?? and || give the same',
+    ('onboard_decode_setup', 'setupPart', '\\?\\? -> ||', 'if (!(expect.pools?.[v] ?? []).length) no(`no pool for ${v}`);', 0):
+        'a venue\'s pools are a list or absent: ?? and || give the same',
+    ('onboard_decode_setup', 'setupPart', '\\?\\? -> ||', "if ((expect.payoutWallets ?? []).slice(1).some(w => w !== pins.operator)) no('a payout wallet beside yours that is not the operator\\'s');", 0):
+        'the payout wallets are a list or absent: ?? and || give the same',
+    ('onboard_decode_setup', 'setupWhole', '\\?\\? -> ||', "if (all.length && state.policies.at(-1) !== all.length) no(`the set ends at policy ${state.policies.at(-1) ?? 'none'}, not ${all.length}: rules would be missing`);", 0):
+        'a policy seed is 1 or more, or absent: ?? and || print the same',
+    ('onboard_wallet_link', 'safeLink', '\\?\\? -> ||', "const s = String(href ?? '').trim();", 0):
+        'a falsy href (0, false, \'\') has no scheme either way: no link',
+    ('onboard_wallet_link', 'walletLink', '\\?\\? -> ||', "const name = String(metadata?.name ?? '').slice(0, 64) || 'your wallet';", 0):
+        'a falsy name falls back to \'your wallet\' either way',
+    ('onboard_wallet_link', 'walletLink', '\\?\\? -> ||', 'const r = metadata?.redirect ?? {};', 0):
+        'a falsy redirect has no native or universal link either way',
+    ('onboard_verify', 'fromServer', '\\?\\? -> ||', 'if (!r.ok) throw new Error(j.error ?? `the server answered ${r.status}`);', 0):
+        'the server\'s error is a sentence or absent, never empty: ?? and || say the same',
+    ('onboard_verify', 'fromServer', '\\?\\? -> ||', "const chain = f.chain ?? 'solana';", 0):
+        '--chain takes a value (flags refuses a flag without one): a name or absent',
+    ('onboard_verify', 'fromServer', '\\?\\? -> ||', 'const ctx = answer.context ?? {};', 0):
+        'the context is an object or absent: ?? and || give the same',
+    ('onboard_verify', 'setupExpectOf', '\\?\\? -> ||', 'const t = it.terms, ctx = it.context, venues = Object.keys(ctx.report?.venues ?? {});', 0):
+        'the venues are an object or absent: ?? and || give the same',
+    # the owner's own Polygon vault (2026-10-13)
+    ('evm_owner_setup', 'rolesLogs', '(?<![<>=!])<(?![<=]) -> <=', 'const b = a + step - 1n < head ? a + step - 1n : head;', 0):
+        'when a + step - 1 equals the head both branches give the head',
+    ('evm_vault_cli', 'request', '\\?\\? -> ||', 'const log = deps.log ?? console.log;', 0):
+        'deps.log is a function or absent: ?? and || pick the same',
+    ('evm_vault_cli', 'check', '\\?\\? -> ||', 'const log = deps.log ?? console.log;', 0):
+        'deps.log is a function or absent: ?? and || pick the same',
     # the owner's page (2026-10-12)
     ('onboard_offchain', 'parseOffchain', '(?<![<>=!])<(?![<=]) -> <=', 'if (b.length < 53) return null;', 0):
         'the full layout needs 53 bytes; at exactly 53 the count byte gives no room for a signer and a length, so both reject',
@@ -559,8 +653,6 @@ EQUIVALENT = {
     # or absent, never 0, false or '' that would read differently.
     ('onboard_server', 'makeServer', '\\?\\? -> ||', 'profile: { name: r.name, template: cfg.chains[r.chain].template, settings: cfg.chains[r.chain].settings ?? {}, dex, pool, execute_dexes: execute,', 0):
         'a chain\'s settings are an object or absent: ?? and || agree',
-    ('onboard_server', 'makeServer', '\\?\\? -> ||', 'planned: r.connected?.planned ?? null,', 0):
-        'a saved plan is an object or absent: ?? and || agree',
     ('onboard_server', 'makeServer', '\\?\\? -> ||', 'const now = deps.now ?? (() => Date.now());', 0):
         'deps.now is a function or absent: ?? and || pick the same',
     ('onboard_server', 'makeServer', '\\?\\? -> ||', 'const log = deps.log ?? ((o) => console.log(JSON.stringify({ t: new Date(now()).toISOString(), ...o })));', 0):
@@ -1205,22 +1297,6 @@ EQUIVALENT = {
     # Squads vault mode of Raydium, Orca, Byreal (2026-10-11)
     ('vault_policy', 'instructionsOf', '\\?\\? -> ||', 'const without = new Set(v.without ?? []);', 0):
         '"without" is a list or missing in rules.json: ?? and || agree',
-    ('vault_connect', 'connect', '(?<![<>=!-])>(?![>=]) -> >=', 'if (config.creationFee > 0n) log(`note: the program charges ${Number(config.creationFee) / 1e9} SOL per account`);', 0):
-        'report-only: a note on stderr when the program charges a fee',
-    ('vault_connect', 'connect', '> 0n -> >= 0n', 'if (config.creationFee > 0n) log(`note: the program charges ${Number(config.creationFee) / 1e9} SOL per account`);', 0):
-        'report-only: a note on stderr when the program charges a fee',
-    ('vault_connect', 'connect', '\\?\\? -> ||', "const venues = (f.venue ?? '').split(',').map(v => v.trim()).filter(Boolean);", 0):
-        "--venue missing or '' gives '' either way",
-    ('vault_connect', 'connect', '\\?\\? -> ||', "payer ??= await readKeypair(process.env.WALLET_SECRET_PATH ?? '');", 0):
-        'payer is a Keypair or null: ??= and ||= assign the same',
-    ('vault_connect', 'connect', '\\?\\? -> ||', "payer ??= await readKeypair(process.env.WALLET_SECRET_PATH ?? '');", 1):
-        'an environment value is a string or absent; an empty one and none both read no key',
-    ('vault_connect', 'connect', '\\?\\? -> ||', "policyKey ??= await readKeypair(process.env.LPBOT_VAULT_POLICY_KEY ?? '');", 0):
-        'policyKey is a Keypair or null: ??= and ||= assign the same',
-    ('vault_connect', 'connect', '\\?\\? -> ||', "policyKey ??= await readKeypair(process.env.LPBOT_VAULT_POLICY_KEY ?? '');", 1):
-        'an environment value is a string or absent; an empty one and none both read no key',
-    ('vault_connect', 'connect', '\\?\\? -> ||', 'const landed = connectDone(settingsInfo?.data ?? null, policyInfos.map(Boolean), { owners, creator: payer.publicKey });', 0):
-        'account data is a Buffer (an object, truthy) or absent: ?? and || pick the same',
     ('raydium_vault', 'around', '\\?\\? -> ||', 'return [ComputeBudgetProgram.setComputeUnitLimit({ units: budget?.units ?? VAULT_CU_LIMIT }),', 0):
         'a budget names EXIT_CU_LIMIT or VAULT_CU_LIMIT units, never 0: ?? and || agree',
     ('raydium_vault', 'decreaseIxs', '\\?\\? -> ||', 'const rewards = (poolKeys.rewardInfos ?? []).map(r => ({ mint: r.mint.address, program: r.mint.programId }));', 0):

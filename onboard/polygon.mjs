@@ -1,16 +1,18 @@
-// Polygon for the onboarding server: the bot's key and gas, the connect (a
-// Safe and its Roles module, chains/evm/vault/), and the owner's transactions
-// (deposit, withdraw, revoke, approve, close) as {to, data, value} for the
-// owner's wallet to send. A Safe with one owner at threshold 1 runs a
-// transaction its owner sends with a pre-validated signature: no Safe app needed.
+// Polygon for the onboarding server: the bot's key and gas, and the owner's
+// transactions as {to, data, value} for the owner's wallet to send: the vault's
+// set-up (the owner creates its own Safe and Roles module, chains/evm/vault/
+// owner_setup.mjs; the bot is never an owner and pays nothing), the funding, and
+// deposit, withdraw, revoke, approve, close. A Safe with one owner at threshold 1
+// runs a transaction its owner sends with a pre-validated signature: no Safe app needed.
 import { concat, encodeAbiParameters, encodeFunctionData, getAddress, parseEventLogs, toFunctionSelector, toHex } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 import { readKey } from '../chains/evm/keyfile.mjs';
 import { isLoopback } from '../chains/evm/rpc.mjs';
-import { clients, connect, poolOf } from '../chains/evm/vault/cli.mjs';
+import { clients, plan, poolOf, vaultReport } from '../chains/evm/vault/cli.mjs';
 import { SAFE_ABI, SENTINEL, readState } from '../chains/evm/vault/safe.mjs';
 import { ROLES_ABI, roleKey } from '../chains/evm/vault/roles.mjs';
 import { ownerCloseCalls, ownerExec, regrantCall, vaultPositions } from '../chains/evm/vault/exit.mjs';
+import { fundCalls, ownerSetupCalls, verifySetup as chainVerify } from '../chains/evm/vault/owner_setup.mjs';
 import * as POLYGON from '../chains/evm/polygon.mjs';
 import { Invalid, fromRaw, nativeOf, own, toRaw } from './intent.mjs';
 
@@ -50,10 +52,10 @@ export async function gas(keys, c) {
   return { ok: wei >= need, have: fromRaw(wei, 18), need: fromRaw(need, 18), symbol: c.U.NATIVE_SYMBOL, key: keys.account.address };
 }
 
-// The owner's gas payment: one POL transfer to the bot's key. It refuses
-// when the wallet cannot also cover the deposit that follows.
-export async function paymentTxs(keys, c, { owner, payer, gas: amount, token, deposit }) {
+// Refuses when the owner's wallet cannot pay the bot's gas and the deposit.
+async function affords(keys, c, { owner, gas: amount, token, deposit }) {
   const wei = toRaw(amount, 18), t = own(c.tokens, token);
+  if (!t) throw new Invalid(`token ${token}`);
   const pol = await keys.pub.getBalance({ address: owner });
   const needPol = wei + (t.native ? toRaw(deposit, 18) : 0n);
   if (pol <= needPol) throw new Invalid(`your wallet holds ${fromRaw(pol, 18)} POL; the gas and the deposit need ${fromRaw(needPol, 18)} and fees`);
@@ -61,8 +63,7 @@ export async function paymentTxs(keys, c, { owner, payer, gas: amount, token, de
     const have = await balanceOf(keys.pub, t.address, owner);
     if (have < toRaw(deposit, t.decimals)) throw new Invalid(`your wallet holds ${fromRaw(have, t.decimals)} ${token}; the deposit is ${deposit}`);
   }
-  return { summary: `pay the bot ${amount} POL for the setup and the running gas, to ${payer}`, chainId: c.U.CHAIN_ID,
-    transactions: [call(payer, '0x', wei)] };
+  return { wei, t };
 }
 
 // What is wrong with a gas payment, from its receipt, transaction, block and
@@ -100,13 +101,39 @@ export async function poolRecord(keys, c) {
   return { token_a: side(p.token0), token_b: side(p.token1) };
 }
 
-export async function connectVault(keys, c, f, log) {
-  const venue = c.venues[0];
-  const wallets = [f.profitWallet, ...(f.feeWallet ? [f.feeWallet] : [])];
-  const out = await connect({ owners: f.owner, pools: c.pool, payout: wallets.join(','), venue, execute: true },
-    { U: c.U, account: keys.account, pub: keys.pub, wallet: keys.wallet, log });
-  if (out.problems?.length) throw Object.assign(new Error(`the vault is not as planned: ${out.problems.join('; ')}`), { connected: { ...out, sent: false } });
-  return out;
+// The vault's payout wallets: the profit wallet, then the fee wallet when there is one.
+function payoutsOf(f) {
+  return [f.profitWallet, ...(f.feeWallet ? [f.feeWallet] : [])].join(',');
+}
+
+// The owner's vault, built for the owner's wallet to send: `setup` (the Safe, then one Safe
+// transaction for the Roles module and the bot's role; what is on chain already is left out,
+// [] when done) and `fund` (the deposit, then the bot's gas last). saltNonce (owner_setup.mjs
+// saltOf) fixes the addresses, so a resume rebuilds the same vault. `fromBlock`: keep the one
+// from the FIRST build; verifySetup reads the Roles module's events from it. `report` is what
+// onboard/store.py register reads, once verifySetup finds nothing wrong.
+export async function setupTxs(keys, c, { owner, profitWallet, feeWallet, token, deposit, gas: amount, saltNonce }) {
+  const bot = keys.account.address;
+  const { wei, t } = await affords(keys, c, { owner, gas: amount, token, deposit });
+  const p = await plan({ owner, pools: c.pool, payout: payoutsOf({ profitWallet, feeWallet }), venue: c.venues[0] }, { pub: keys.pub, U: c.U, bot });
+  const salt = BigInt(saltNonce);
+  let s = ownerSetupCalls({ U: c.U, owner: p.owner, bot, compiled: p.compiled, saltNonce: salt });
+  const [safeCode, rolesCode] = await Promise.all([keys.pub.getCode({ address: s.safe }), keys.pub.getCode({ address: s.roles })]);
+  const created = Boolean(safeCode && safeCode !== '0x'), rolesDeployed = Boolean(rolesCode && rolesCode !== '0x');
+  if (rolesDeployed) s = ownerSetupCalls({ U: c.U, owner: p.owner, bot, compiled: p.compiled, saltNonce: salt, rolesDeployed });
+  const enabled = created && rolesDeployed && (await readState(keys.pub, s.safe, s.roles)).modules.some(m => m.toLowerCase() === s.roles.toLowerCase());
+  const setup = enabled ? [] : created ? s.txs.slice(1) : s.txs;
+  const fund = fundCalls({ U: c.U, c, safe: s.safe, token, amountRaw: toRaw(deposit, t.decimals), gasWei: wei, botKey: bot });
+  return { safe: s.safe, roles: s.roles, saltNonce: String(salt), chainId: c.U.CHAIN_ID, fromBlock: String(await keys.pub.getBlockNumber({ cacheTime: 0 })),
+    setup, fund, report: vaultReport({ U: c.U, p, safe: s.safe, roles: s.roles, bot }) };
+}
+
+// What is wrong with the owner's vault on chain (owner_setup.mjs verifySetup): [] when it is
+// the vault setupTxs built, with the role the pinned rules compile.
+export async function verifySetup(keys, c, { owner, safe, roles, profitWallet, feeWallet, fromBlock }) {
+  const bot = keys.account.address;
+  const p = await plan({ owner, pools: c.pool, payout: payoutsOf({ profitWallet, feeWallet }), venue: c.venues[0] }, { pub: keys.pub, U: c.U, bot });
+  return chainVerify(keys.pub, { U: c.U, safe: getAddress(safe), roles: getAddress(roles), owner: p.owner, bot, compiled: p.compiled, fromBlock: BigInt(fromBlock) });
 }
 
 const erc20 = (functionName, args) => encodeFunctionData({ abi: POLYGON.ERC20_ABI, functionName, args });

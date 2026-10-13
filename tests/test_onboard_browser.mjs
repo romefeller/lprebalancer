@@ -11,12 +11,13 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
 import { createRequire } from 'module';
-import { browser, testBundle, openPage, solanaWallet, shot, flowDone, PHONE, DESKTOP } from './_browser.mjs';
+import { browser, testBundle, openPage, solanaWallet, shot, flowDone, edSign, PHONE, DESKTOP } from './_browser.mjs';
 import { loadConfig, makeServer, StoreError } from '../onboard/server.mjs';
 import * as I from '../onboard/intent.mjs';
 import * as sq from '../chains/solana/vault/squads.mjs';
 import { compile, instructionsOf, RULES } from '../chains/solana/vault/policy.mjs';
 import { ata } from '../onboard/decode_sol.mjs';
+import { ownerSetupPlan, packSteps } from '../chains/solana/vault/admin.mjs';
 import SOLANA from '../chains/solana/solana.json' with { type: 'json' };
 
 const require = createRequire(import.meta.url);
@@ -29,6 +30,7 @@ const PAYER = Keypair.generate(), POLICY = Keypair.generate(), OWNER = Keypair.g
 const VENUE = 'raydium-clmm', POOL = SOLANA.sol_usdc_pools[VENUE];
 const USDC = new PublicKey(SOLANA.usdc_mint), WSOL = new PublicKey(SOLANA.native_mint);
 const OPERATOR = SOLANA.operator_profit_wallet;
+const TREASURY = Keypair.generate().publicKey;
 
 const unsigned = (ixs, payer) => {
   const tx = new Transaction().add(...ixs);
@@ -39,12 +41,28 @@ const unsigned = (ixs, payer) => {
 // The chain, in memory: one vault, its balances, policies and positions.
 class Chain {
   constructor() {
-    this.settings = Keypair.generate().publicKey; this.vault = sq.vaultPda(this.settings);
+    // the owner's own vault at a seed of the program's: its settings, vault and policies are those addresses
+    this.seed = 700_000n + BigInt(Math.floor(Math.random() * 1e6));
+    this.settings = sq.settingsPda(this.seed); this.vault = sq.vaultPda(this.settings);
     this.payouts = [OWNER.publicKey.toBase58(), OPERATOR];
     this.compiled = compile(VENUE, { vault: this.vault, payer: PAYER.publicKey, pools: [new PublicKey(POOL)],
       payouts: this.payouts.map(w => new PublicKey(ata(w, USDC))) }).policies;
-    this.policies = this.compiled.map(() => Keypair.generate().publicKey.toBase58());
+    this.policies = this.compiled.map((_, i) => sq.policyPda(this.settings, i + 1).toBase58());
     this.sol = 0n; this.usdc = 0n; this.positions = 0; this.signer = POLICY.publicKey.toBase58(); this.sent = []; this.tamper = null;
+    this.funded = null;                                    // the set-up's transaction that paid the bot's gas
+  }
+
+  // the owner's set-up, as solana.mjs setupTxs builds it: the vault, its policies, then the deposit and the gas with the last
+  setup(a) {
+    const o = new PublicKey(a.owner);
+    const compiled = compile(VENUE, { vault: this.vault, payer: PAYER.publicKey, pools: [new PublicKey(POOL)],
+      payouts: [a.profitWallet, ...(a.feeWallet ? [a.feeWallet] : [])].map(w => new PublicKey(ata(w, USDC))) });
+    const plan = ownerSetupPlan({ owner: o, treasury: TREASURY, seed: this.seed, policyKey: POLICY.publicKey, venues: [compiled] });
+    const gasTo = this.tamper === 'setup' ? Keypair.generate().publicKey : PAYER.publicKey;
+    const fund = [SystemProgram.transfer({ fromPubkey: o, toPubkey: this.vault, lamports: I.toRaw(a.deposit, 9) }),
+      SystemProgram.transfer({ fromPubkey: o, toPubkey: gasTo, lamports: I.toRaw(a.gas, 9) })];
+    const steps = plan.steps;
+    return packSteps([...steps.slice(0, -1), [steps.at(-1), ...fund]], o).map(ixs => unsigned(ixs, o));
   }
 
   row() { return { settings: this.settings.toBase58(), venues: { [VENUE]: { policies: this.policies, pools: [POOL], payouts: [] } } }; }
@@ -55,6 +73,7 @@ class Chain {
     this.sent.push(tx);
     for (const ix of tx.instructions) {
       const d = Buffer.from(ix.data);
+      if (ix.programId.equals(SystemProgram.programId) && ix.keys[1].pubkey.equals(PAYER.publicKey)) this.funded = sig;
       if (ix.programId.equals(SystemProgram.programId) && ix.keys[1].pubkey.equals(this.vault)) this.sol += d.readBigUInt64LE(4);
       if (ix.programId.equals(spl.TOKEN_PROGRAM_ID) && d[0] === 12) this.usdc += d.readBigUInt64LE(1);
       if (ix.programId.equals(sq.PROGRAM_ID)) this.squads(ix);
@@ -63,6 +82,9 @@ class Chain {
   }
 
   squads(ix) {
+    // the vault's creation and its policies' (the owner's set-up): the bot named on them
+    if (ix.keys.length === 6 && ix.keys[5].pubkey.equals(this.settings)) return;
+    if (ix.keys[0].pubkey.equals(this.settings) && Buffer.from(ix.data)[13] === 7) return;
     if (ix.keys[0].pubkey.equals(this.settings) && ix.keys.length > 5 && ix.keys[1].pubkey.equals(OWNER.publicKey) && ix.keys[4]?.pubkey.equals(OWNER.publicKey)) {
       // a policy update: its signer is the key after the address, as the page decoded it
       const a = Buffer.from(ix.data);
@@ -85,10 +107,13 @@ class Chain {
     const exec = (ixs) => sq.ownerExecuteIx({ settings: this.settings, signers: [o], vault: v, ixs });
     if (action === 'revoke' || action === 'approve') {
       const signer = action === 'revoke' ? o : POLICY.publicKey;
-      return this.policies.map((address, i) => unsigned([sq.settingsSyncIx({ settings: this.settings, signers: [o], rentPayer: o,
+      const rules = this.policies.map((address, i) => unsigned([sq.settingsSyncIx({ settings: this.settings, signers: [o], rentPayer: o,
         extra: [new PublicKey(address)], actions: [{ kind: 'policyUpdate', address: new PublicKey(address),
           policy: this.tamper === 'policy' ? this.compiled[(i + 1) % this.compiled.length].policy : this.compiled[i].policy,
           signers: [{ key: signer }] }] })], o));
+      // a re-grant with more capital: the deposit after the rules, in the last transaction
+      if (action === 'approve' && token) rules.push(unsigned([SystemProgram.transfer({ fromPubkey: o, toPubkey: v, lamports: I.toRaw(amount, 9) })], o));
+      return rules;
     }
     if (action === 'withdraw') {
       const lamports = amount === 'all' || token === 'ALL' ? this.sol : I.toRaw(amount, 9);
@@ -129,9 +154,10 @@ function memoryStore(chain) {
     if (cmd === 'taken') return { taken: rows.some(x => x.name === r.name) };
     if (cmd === 'owned') return { count: rows.filter(x => x.owner === r.owner).length };
     if (cmd === 'sign') { rows.push({ ...r, id: ++id, state: 'signed', created_at: Date.now() / 1000, vault_row: null }); return { id }; }
+    if (cmd === 'planned') { Object.assign(rows.find(x => x.id === r.id), { connected: r.connected, gas: r.gas, deposit: r.deposit }); return { planned: true }; }
     if (cmd === 'paid') { Object.assign(rows.find(x => x.id === r.id), { state: 'connecting', payment: r.payment }); return { paid: true }; }
     if (cmd === 'resume') { rows.find(x => x.id === r.id).state = 'connecting'; return {}; }
-    if (cmd === 'connected') return {};
+    if (cmd === 'connected') { Object.assign(rows.find(x => x.id === r.id), { connected: r.connected }); return {}; }
     if (cmd === 'stuck') { Object.assign(rows.find(x => x.id === r.id), { state: 'stuck', error: r.error }); return {}; }
     if (cmd === 'register') {
       Object.assign(rows.find(x => x.id === r.id), { state: 'registered', vault: chain.vault.toBase58(), vault_row: chain.row() });
@@ -173,10 +199,11 @@ async function rig({ chain = new Chain(), wc = { projectId: '', relayUrl: 'wss:/
     keys: { public: [PAYER.publicKey.toBase58(), POLICY.publicKey.toBase58()], payee: PAYER.publicKey.toBase58(), secretEnv: 'P', policyKeyEnv: 'Q' },
     expires: true, venueReady: () => true,
     gas: async () => ({ ok: true }),
-    payment: async (a) => ({ summary: 'pay the gas', transactions: [unsigned([SystemProgram.transfer({ fromPubkey: new PublicKey(a.owner),
-      toPubkey: chain.tamper === 'payment' ? Keypair.generate().publicKey : new PublicKey(a.payer), lamports: I.toRaw(a.gas, 9) })], new PublicKey(a.owner))] }),
-    checkPayment: async () => ({ state: 'ok' }),
-    connect: async (f) => ({ vault: chain.vault.toBase58(), settings: chain.settings.toBase58(), sent: true, owners: [f.owner],
+    setup: async (a) => ({ planned: { seed: String(chain.seed), settings: chain.settings.toBase58(), vault: chain.vault.toBase58() },
+      done: Boolean(chain.funded), transactions: chain.funded ? [] : chain.setup(a), report: { venues: { [VENUE]: { policies: chain.policies, pools: [POOL] } } } }),
+    setupState: async () => (chain.funded ? { state: 'done' } : { state: 'pending', missing: 1 }),
+    funding: async () => (chain.funded ? { state: 'ok', payment: chain.funded, deposit: chain.funded } : { state: 'pending', reason: 'not on chain' }),
+    finish: async (r) => ({ vault: chain.vault.toBase58(), settings: chain.settings.toBase58(), sent: true, owners: [r.owner], lookup: 'LUT',
       venues: { [VENUE]: { policies: chain.policies, pools: [POOL] } } }),
     record: async () => ({ token_a: { symbol: 'SOL' }, token_b: { symbol: 'USDC' } }),
     deposit: async (a) => ({ summary: 'deposit', transactions: [a.token === 'SOL'
@@ -223,7 +250,7 @@ for (const device of [PHONE, DESKTOP]) {
 
   test(`page (${dev}): connect, create, the bot's book, add capital, withdraw part, revoke, add capital again, withdraw all`, { skip, timeout: 300_000 }, async () => {
     const r = await rig();
-    const { page, errors } = await openPage(B, r.base, INVITE, { device, setup: (ctx) => solanaWallet(ctx, OWNER, async (tx) => r.chain.land(tx)) });
+    const { page, errors, wallet } = await openPage(B, r.base, INVITE, { device, setup: (ctx) => solanaWallet(ctx, OWNER, async (tx) => r.chain.land(tx)) });
     try {
       // connect: the browser's wallet; no WalletConnect project on this server
       assert.equal(await page.isVisible('#w-wc'), false, 'no project id: no WalletConnect button');
@@ -237,8 +264,15 @@ for (const device of [PHONE, DESKTOP]) {
       await shot(page, '02-create');
       await click(page, '#c-go');
       let f = await flowDone(page);
-      assert.deepEqual(f.steps.map(s => s.state), Array(6).fill('done'), JSON.stringify(f));
-      assert.match(f.review.join('\n'), /Send 1\.855 SOL from your wallet .* to your vault/);
+      assert.deepEqual(f.steps.map(s => s.state), Array(5).fill('done'), JSON.stringify(f));
+      const review = f.review.join('\n');
+      assert.match(review, /Create your vault .*you its only owner, threshold 1/);
+      assert.match(review, /exactly the rules in git/);
+      assert.match(review, /Funding: Send 1\.8814 SOL from your wallet .* to your vault/);
+      assert.match(review, /Funding: Send 0\.1186 SOL from your wallet .* to the bot's gas key/);
+      assert.deepEqual(wallet.map(x => x.kind), ['signAll'], 'one approval in the wallet: the whole set-up, no message');
+      assert.equal(wallet[0].txs.length, 2);
+      assert.equal(r.chain.sol, 1_881_400_000n);
       await shot(page, '03-created');
 
       // the bot runs: its book, as Telegram renders it
@@ -302,7 +336,9 @@ for (const device of [PHONE, DESKTOP]) {
       await shot(page, '10-regrant-sheet');
       await click(page, '#sh-go');
       f = await flowDone(page);
-      assert.deepEqual(f.steps.map(s => s.state), ['done', 'done', 'done'], JSON.stringify(f));
+      assert.deepEqual(f.steps.map(s => [s.label, s.state]), [['Approve the bot\'s rules and deposit 1 SOL', 'done'], ['Start the bot', 'done']], JSON.stringify(f));
+      assert.match(f.review.join('\n'), /Deposit: Send 1 SOL from your wallet .* to your vault/);
+      assert.equal(wallet.at(-1).kind, 'signAll', 'the rules and the deposit: one approval');
       assert.equal(r.chain.signer, POLICY.publicKey.toBase58(), 'the bot\'s key is back');
       assert.equal(r.chain.sol, 1_300_000_000n);
       await click(page, '#f-done');
@@ -390,10 +426,10 @@ for (const device of [PHONE, DESKTOP]) {
   });
 }
 
-test('page: a declined signature, a stopped setup that resumes, a Ledger\'s off-chain message, the keys check', { skip, timeout: 300_000 }, async () => {
+test('page: a declined set-up, a tampered one, a stopped setup that resumes, a wallet that signs one at a time', { skip, timeout: 300_000 }, async () => {
   const r = await rig();
   let reject = true;
-  const mode = { offchain: true, get reject() { return reject; } };
+  const mode = { get reject() { return reject; } };
   const { page } = await openPage(B, r.base, INVITE, { device: PHONE, setup: (ctx) => solanaWallet(ctx, OWNER, async (tx) => r.chain.land(tx), mode) });
   try {
     await connect(page);
@@ -404,28 +440,54 @@ test('page: a declined signature, a stopped setup that resumes, a Ledger\'s off-
     assert.equal(f.steps[0].state, 'failed');
     assert.match(f.alert, /You declined in your wallet\. Nothing was sent\./);
     await shot(page, '15-declined');
+    // the server builds a set-up that pays someone else: refused before the wallet sees it
     reject = false;
+    r.chain.tamper = 'setup';
     await click(page, '#f-retry');
     f = await flowDone(page);
-    assert.deepEqual(f.steps.map(s => s.state), Array(6).fill('done'), JSON.stringify(f));
+    assert.equal(f.steps[0].state, 'failed');
+    assert.match(f.alert, /The page refused this transaction: .*0 payments to the bot's gas key/);
+    assert.equal(r.chain.sent.length, 0, 'nothing sent');
+    r.chain.tamper = null;
+    await click(page, '#f-retry');
+    f = await flowDone(page);
+    assert.deepEqual(f.steps.map(s => s.state), Array(5).fill('done'), JSON.stringify(f));
     const row = r.store.rows.find(x => x.name === 'led-pool');
-    assert.equal(row.state, 'started', 'the off-chain message (a Ledger\'s) was accepted');
+    assert.equal(row.state, 'started');
+    assert.equal(row.signature, '', 'no message signed');
   } finally { await page.context().close(); r.server.close(); }
+
+  // a wallet that only signs and sends one transaction at a time: asked once per transaction, in order
+  const r3 = await rig();
+  const { page: p3, wallet: w3 } = await openPage(B, r3.base, INVITE, { device: PHONE,
+    setup: (ctx) => solanaWallet(ctx, OWNER, async (tx) => r3.chain.land(tx), { noSignAll: true }) });
+  try {
+    await connect(p3);
+    await p3.fill('#c-amount', '2');
+    await p3.fill('#c-name', 'one-by-one');
+    await click(p3, '#c-go');
+    const f = await flowDone(p3);
+    assert.deepEqual(f.steps.map(s => s.state), Array(5).fill('done'), JSON.stringify(f));
+    assert.deepEqual(w3.map(x => x.kind), ['tx', 'tx']);
+    assert.equal(r3.chain.funded, bs58.encode(w3[1].tx.signature), 'the funding came last');
+  } finally { await p3.context().close(); r3.server.close(); }
 
   // a stopped setup: the page offers Continue, which pays nothing again
   const r2 = await rig();
   const { page: p2 } = await openPage(B, r2.base, INVITE, { device: PHONE, setup: (ctx) => solanaWallet(ctx, OWNER, async (tx) => r2.chain.land(tx)) });
   try {
+    r2.chain.funded = 'x'; r2.chain.sol = 1_000_000_000n;
     r2.store.rows.push({ id: 5, name: 'stuck-pool', owner: OWNER.publicKey.toBase58(), chain: 'solana', state: 'stuck', error: 'pool read timed out',
-      payment: 'x', created_at: Date.now() / 1000, vault_row: null, token: 'SOL', deposit: '1', gas: '0.145' });
+      payment: 'x', created_at: Date.now() / 1000, vault_row: null, token: 'SOL', deposit: '1', gas: '0.1186',
+      connected: { planned: { seed: String(r2.chain.seed) }, deposit: 'x' } });
     await connect(p2);
     await visible(p2, 'v-setup');
-    assert.match(await p2.textContent('#s-text'), /The setup stopped: pool read timed out\. Your gas payment is kept\./);
+    assert.match(await p2.textContent('#s-text'), /The bot's finish stopped: pool read timed out\. Your vault and your money are yours; nothing is paid twice\./);
     await shot(p2, '16-setup-stuck');
     await click(p2, '#s-go');
     const f = await flowDone(p2);
-    assert.deepEqual(f.steps.map(s => s.state), Array(6).fill('done'), JSON.stringify(f));
-    assert.equal(r2.chain.sent.filter(t => t.instructions.some(ix => ix.keys[1]?.pubkey.equals(PAYER.publicKey))).length, 0, 'no second gas payment');
+    assert.deepEqual(f.steps.map(s => s.state), Array(5).fill('done'), JSON.stringify(f));
+    assert.equal(r2.chain.sent.length, 0, 'no second set-up, no second gas payment');
   } finally { await p2.context().close(); r2.server.close(); }
 });
 
@@ -468,28 +530,39 @@ test('page: the CSP is strict; WalletConnect\'s relay only with a project id; no
   } finally { r.server.close(); }
 });
 
-test('page: WalletConnect (a phone wallet that only signs): pair by the code, create, revoke; the server sends what it signed', { skip, timeout: 300_000 }, async () => {
-  const { relay, wallet } = await import('./_wc_relay.mjs');
-  const { edSign } = await import('./_browser.mjs');
+// A phone wallet behind the mock relay. `signAll`: it offers solana_signAllTransactions.
+async function wcWallet(rl, { signAll = false, redirect, onRequest = async () => {} } = {}) {
+  const { wallet } = await import('./_wc_relay.mjs');
+  const addr = OWNER.publicKey.toBase58();
+  const signed = (b64) => { const tx = Transaction.from(Buffer.from(b64, 'base64')); tx.partialSign(OWNER); return tx; };
+  return wallet(rl.url, {
+    redirect,
+    accounts: { solana: [`solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp:${addr}`] },
+    methods: { solana: ['solana_signMessage', 'solana_signTransaction', ...(signAll ? ['solana_signAllTransactions'] : [])] },
+    handle: async (method, p) => {
+      await onRequest(method);
+      if (method === 'solana_signMessage') return { signature: bs58.encode(edSign(OWNER, bs58.decode(p.message))) };
+      if (method === 'solana_signTransaction') return { signature: bs58.encode(signed(p.transaction).signature) };   // a signature only: the page attaches it, the server sends
+      if (method === 'solana_signAllTransactions') return { transactions: p.transactions.map(t => signed(t).serialize({ requireAllSignatures: false }).toString('base64')) };
+      throw new Error(`no ${method}`);
+    } });
+}
+
+test('page: WalletConnect (a phone wallet that only signs): pair by the code, create one by one, the wallet brought forward, revoke', { skip, timeout: 300_000 }, async () => {
+  const { relay } = await import('./_wc_relay.mjs');
   const rl = await relay();
   const r = await rig({ wc: { projectId: 'a'.repeat(32), relayUrl: rl.url, verify: [] } });
   const addr = OWNER.publicKey.toBase58();
-  const w = await wallet(rl.url, {
-    accounts: { solana: [`solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp:${addr}`] },
-    methods: { solana: ['solana_signMessage', 'solana_signTransaction'] },
-    handle: async (method, p) => {
-      if (method === 'solana_signMessage') {
-        assert.equal(p.pubkey, addr);
-        return { signature: bs58.encode(edSign(OWNER, bs58.decode(p.message))) };
-      }
-      if (method === 'solana_signTransaction') {
-        const tx = Transaction.from(Buffer.from(p.transaction, 'base64'));
-        tx.partialSign(OWNER);
-        return { signature: bs58.encode(tx.signature) };       // a signature only: the page attaches it, the server sends
-      }
-      throw new Error(`no ${method}`);
-    } });
-  const { page, errors } = await openPage(B, r.base, INVITE, { device: PHONE });
+  let page;
+  // each request: the page shows the big button to its wallet (the session's own deep link) while it waits
+  const seen = [];
+  const w = await wcWallet(rl, { redirect: { native: 'tangemtest://wc' }, onRequest: async () => {
+    seen.push(await page.evaluate(() => ({ shown: !document.getElementById('f-wallet').hidden, text: document.getElementById('f-wallet-text').textContent,
+      href: document.getElementById('f-open').getAttribute('href'), open: !document.getElementById('f-open').hidden })));
+  } });
+  ({ page } = await openPage(B, r.base, INVITE, { device: PHONE }));
+  const errors = [];
+  page.on('pageerror', e => errors.push(String(e)));
   try {
     assert.equal(await page.isVisible('#w-injected'), false, 'no wallet in this browser');
     await click(page, '#w-wc');
@@ -505,9 +578,15 @@ test('page: WalletConnect (a phone wallet that only signs): pair by the code, cr
     await page.fill('#c-name', 'wc-pool');
     await click(page, '#c-go');
     let f = await flowDone(page);
-    assert.deepEqual(f.steps.map(s => s.state), Array(6).fill('done'), JSON.stringify(f));
-    assert.deepEqual(w.requests.map(q => q.method), ['solana_signMessage', 'solana_signTransaction', 'solana_signTransaction']);
-    assert.equal(r.chain.sol, 1_855_000_000n, 'the deposit the server sent for the wallet');
+    assert.deepEqual(f.steps.map(s => s.state), Array(5).fill('done'), JSON.stringify(f));
+    assert.deepEqual(w.requests.map(q => q.method), ['solana_signTransaction', 'solana_signTransaction'], 'one request per transaction, no message');
+    assert.equal(r.chain.sol, 1_881_400_000n, 'the deposit the server sent for the wallet');
+    assert.equal(seen.length, 2);
+    for (const x of seen) {
+      assert.deepEqual([x.shown, x.open, x.href], [true, true, 'tangemtest://wc'], JSON.stringify(x));
+      assert.match(x.text, /Tangem asks you to sign/);
+    }
+    assert.equal(await page.isVisible('#f-wallet'), false, 'gone once the wallet answered');
     await click(page, '#f-done');
     await visible(page, 'v-active');
     r.store.onExit = () => setTimeout(() => { r.chain.positions = 0; r.store.finishExit(); r.setService('inactive'); }, 300);
@@ -518,5 +597,45 @@ test('page: WalletConnect (a phone wallet that only signs): pair by the code, cr
     assert.equal(r.chain.signer, addr);
     assert.deepEqual(errors.filter(e => !/favicon/.test(e)), []);
     assert.ok(rl.log.includes('wc_proposeSession') && rl.log.includes('wc_approveSession'), rl.log.join(','));
+  } finally { await page.context().close(); r.server.close(); await w.close(); await rl.close(); }
+});
+
+test('page: WalletConnect with signAll: the set-up in ONE request; the page\'s socket dropped while away comes back without a reload', { skip, timeout: 300_000 }, async () => {
+  const { relay } = await import('./_wc_relay.mjs');
+  const rl = await relay();
+  const r = await rig({ wc: { projectId: 'a'.repeat(32), relayUrl: rl.url, verify: [] } });
+  let page, dropped = false;
+  const w = await wcWallet(rl, { signAll: true, onRequest: async (method) => {
+    if (dropped || method !== 'solana_signAllTransactions') return;
+    // the owner is in the wallet app: the phone closes the page's socket; then the page is in front again
+    dropped = true;
+    rl.dropBrowser();
+    await page.evaluate(() => {
+      Object.defineProperty(document, 'visibilityState', { value: 'hidden', configurable: true });
+      document.dispatchEvent(new Event('visibilitychange'));
+      Object.defineProperty(document, 'visibilityState', { value: 'visible', configurable: true });
+      document.dispatchEvent(new Event('visibilitychange'));
+    });
+  } });
+  ({ page } = await openPage(B, r.base, INVITE, { device: DESKTOP }));
+  try {
+    await click(page, '#w-wc');
+    await visible(page, 'v-wc');
+    await w.pair(await page.getAttribute('#wc-open', 'href'));
+    await page.waitForFunction(() => document.body.dataset.view === 'v-create', null, { timeout: 60_000 });
+    await page.fill('#c-amount', '2');
+    await page.fill('#c-name', 'wc-all');
+    await click(page, '#c-go');
+    // a computer: the person is told to look at the phone, no button
+    await page.waitForFunction(() => !document.getElementById('f-wallet').hidden, null, { timeout: 60_000 });
+    assert.match(await page.textContent('#f-wallet-text'), /^Check your phone: Tangem asks you to sign\.$/);
+    assert.equal(await page.isVisible('#f-open'), false);
+    const f = await flowDone(page, 120_000);
+    assert.deepEqual(f.steps.map(s => s.state), Array(5).fill('done'), JSON.stringify(f));
+    assert.deepEqual(w.requests.map(q => q.method), ['solana_signAllTransactions'], 'one approval for the whole set-up');
+    assert.equal(w.requests[0].params.transactions.length, 2);
+    assert.ok(dropped);
+    assert.ok(rl.connections().filter(u => /browser/.test(decodeURIComponent(u))).length >= 1, 'the page is connected again');
+    assert.equal(r.chain.sol, 1_881_400_000n);
   } finally { await page.context().close(); r.server.close(); await w.close(); await rl.close(); }
 });

@@ -4,8 +4,10 @@ per call, JSON in on stdin, one JSON line out on stdout. A refusal is
 
     taken     {name, wallet_id}          is the name or wallet id in use?
     owned     {owner}                    how many vaults this owner has or is creating
-    sign      {chain, owner, name, ...}  record a signed request (state signed)
-    paid      {id, payment}              its gas payment was verified on chain (state connecting)
+    sign      {chain, owner, name, ...}  record a request whose set-up the owner signs (state signed)
+    planned   {id, connected, gas, deposit, expires}
+                                         its set-up planned again, the name held longer
+    paid      {id, payment}              its set-up and gas payment are on chain (state connecting)
     resume    {id}                       a stuck request goes again, with the payment it has
     connected {id, connected}            the vault exists: what its connect printed
     stuck     {id, error, connected?}    a step after the payment failed; resumable
@@ -70,19 +72,40 @@ def owned(cur, owner):
 
 
 def sign(cur, r):
-    """A signed request, before its payment. A signed request for the same
-    name that expired unpaid gives the name up first."""
+    """A request, before its owner's set-up lands (state signed: the owner
+    signs the set-up's transactions themselves). `connected` holds the planned
+    vault ({planned: {seed, settings, vault}}), so a resume finishes this one.
+    A signed request for the same name that expired unpaid gives the name up
+    first."""
     cur.execute("update onboard set state = 'failed', error = 'expired unpaid', updated_at = now() "
                 "where name = %s and state = 'signed' and expires_at < now()", (r['name'],))
     if taken(cur, r['name'], r['wallet_id']):
         raise Refused(f'the name {r["name"]} is taken')
     cur.execute('insert into onboard (chain, owner, name, wallet_id, token, amount, deposit, gas, payer, profit_wallet, '
-                'special, fee_bps, fee_wallet, intent, signature, nonce, expires_at) values (%s, %s, %s, %s, %s, %s, %s, %s, '
-                '%s, %s, %s, %s, %s, %s, %s, %s, to_timestamp(%s)) returning id',
+                'special, fee_bps, fee_wallet, intent, signature, nonce, expires_at, connected) values (%s, %s, %s, %s, %s, %s, %s, %s, '
+                '%s, %s, %s, %s, %s, %s, %s, %s, to_timestamp(%s), %s) returning id',
                 (r['chain'], r['owner'], r['name'], r['wallet_id'], r['token'], r['amount'], r['deposit'], r['gas'], r['payer'],
                  r['profit_wallet'], r['special'], r['fee_bps'], r['fee_wallet'], r['intent'], r['signature'], r['nonce'],
-                 r['expires'] / 1000))
+                 r['expires'] / 1000, json.dumps(r['connected']) if r.get('connected') else None))
     return {'id': cur.fetchone()['id']}
+
+
+def planned(cur, r):
+    """A request still waiting for its owner's set-up, planned again (its
+    owner came back, or another account took the seed): its plan, the gas and
+    deposit the set-up now carries, and the name held another `expires` from
+    now. Only a signed request; one that expired takes its name back only
+    when no other request or profile holds it."""
+    cur.execute("select * from onboard where id = %s and state = 'signed' for update", (r['id'],))
+    row = cur.fetchone()
+    if not row:
+        raise Refused(f'request {r["id"]} is not waiting for its set-up')
+    cur.execute('select expires_at < now() as expired from onboard where id = %s', (r['id'],))
+    if cur.fetchone()['expired'] and taken(cur, row['name'], row['wallet_id']):
+        raise Refused(f'the name {row["name"]} was taken while this request waited; start a new one')
+    cur.execute("update onboard set connected = %s, gas = %s, deposit = %s, expires_at = to_timestamp(%s), updated_at = now() "
+                "where id = %s", (json.dumps(r['connected']), r['gas'], r['deposit'], r['expires'] / 1000, r['id']))
+    return {'planned': True}
 
 
 def paid(cur, r):
@@ -348,10 +371,10 @@ COMMANDS = {
     'taken': lambda cur, r: {'taken': taken(cur, r['name'], r['wallet_id'])},
     'owned': lambda cur, r: {'count': owned(cur, r['owner'])},
     'sign': sign, 'paid': paid, 'resume': resume, 'connected': connected, 'stuck': stuck, 'register': register,
-    'started': started, 'list': listing, 'get': get, 'deposited': deposited, 'exit': exit_request, 'exits': exits,
+    'started': started, 'list': listing, 'get': get, 'deposited': deposited, 'planned': planned, 'exit': exit_request, 'exits': exits,
     'feed': feed,
 }
-WRITES = {'sign', 'paid', 'resume', 'connected', 'stuck', 'register', 'started', 'deposited', 'exit'}
+WRITES = {'sign', 'paid', 'resume', 'connected', 'stuck', 'register', 'started', 'deposited', 'exit', 'planned'}
 
 
 def run(command, request):

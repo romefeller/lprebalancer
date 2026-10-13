@@ -8,8 +8,11 @@
 // them or derived from them.
 //
 //   decodeSol(base64 wire transaction, expect, pins) -> {ok, lines, problems}
+//   decodeSolSet([base64, ...], expect, pins) -> {ok, lines, problems}
+//       transactions the wallet signs in one approval, sent in this order
 //
-// expect.kind: payment | deposit | withdraw | revoke | approve | close.
+// expect.kind: setup (a set) | deposit | withdraw | revoke | approve (a set
+// when it carries a deposit) | close.
 // pins: {payer, policyKey (the bot's keys), operator, pools {venue: [pool]},
 //   rules (rules.json), solana (solana.json)}. Pure, no network.
 import { createRequire } from 'module';
@@ -124,7 +127,7 @@ function readSettingsActions(data, settings) {
       const threshold = r.u16(), timeLock = r.u32();
       noTime(r, 'a start');
       noTime(r, 'an expiry');
-      return { kind: 'policyCreate', address: sq.policyPda(new PublicKey(settings), seed).toBase58(), signers: policySigners, threshold, timeLock,
+      return { kind: 'policyCreate', seed, address: sq.policyPda(new PublicKey(settings), seed).toBase58(), signers: policySigners, threshold, timeLock,
         policy, bytes };
     }
     throw new Error(`a change other than a policy update (settings action ${kind})`);
@@ -308,8 +311,8 @@ export function decodeSol(base64, expect, pins) {
   if (priority > MAX_PRIORITY_LAMPORTS) no(`a priority fee of ${fromRaw(priority, 9)} SOL`);
   if (priority > 0n) lines.push(`Priority fee: at most ${fromRaw(priority, 9)} SOL`);
 
-  const check = CHECKS[expect.kind];
-  if (!check) return { ok: false, lines, problems: [`nothing to check a ${expect.kind} against`] };
+  const check = expect.part ? SET_CHECKS[expect.kind] : CHECKS[expect.kind];
+  if (!check) return { ok: false, lines, problems: [`nothing to check a ${expect.kind} against${expect.part ? ' in a set' : ''}`] };
   try { check(outer, expect, pins, ctx, lines, no); } catch (e) { no(`the transaction cannot be read: ${e.message}`); }
   return { ok: problems.length === 0, lines, problems };
 }
@@ -331,7 +334,9 @@ function sqDisc(name) {
     // the instruction builders' own bytes: build one and read its first 8
     const ix = name === 'execute'
       ? sq.ownerExecuteIx({ settings: PublicKey.default, signers: [], vault: PublicKey.default, ixs: [] })
-      : sq.settingsSyncIx({ settings: PublicKey.default, signers: [], rentPayer: PublicKey.default, actions: [] });
+      : name === 'create'
+        ? sq.createSmartAccountIx({ creator: PublicKey.default, treasury: PublicKey.default, seed: 1n, signers: [], threshold: 1 }).ix
+        : sq.settingsSyncIx({ settings: PublicKey.default, signers: [], rentPayer: PublicKey.default, actions: [] });
     DISC[name] = Buffer.from(ix.data.subarray(0, 8));
   }
   return DISC[name];
@@ -344,18 +349,6 @@ function innerLines(inner, ctx, lines) {
     lines.push(`  · ${d.text}`);
     return d;
   });
-}
-
-// the gas payment: one transfer from the wallet to the bot's gas key, the signed amount
-function payment(outer, expect, pins, ctx, lines, no) {
-  if (outer.length !== 1) return no(`${outer.length} instructions; a gas payment is one transfer`);
-  const d = describe(outer[0], ctx);
-  lines.push(d.text);
-  const m = d.move;
-  if (m.kind !== 'sol') return no('it is not a SOL transfer');
-  if (m.from !== expect.owner) no('the SOL does not come from your wallet');
-  if (m.to !== pins.payer) no(`the SOL goes to ${short(m.to)}, not the bot's gas key ${short(pins.payer)}`);
-  if (m.raw !== BigInt(expect.raw)) no(`it pays ${fromRaw(m.raw, 9)} SOL, not the ${fromRaw(BigInt(expect.raw), 9)} SOL you signed for`);
 }
 
 // a deposit: SOL to the vault, or a token from your account to the vault's
@@ -444,7 +437,189 @@ function close(outer, expect, pins, ctx, lines, no) {
   if (!venueIxs) no('it closes no position');
 }
 
-const CHECKS = { payment, deposit, withdraw, revoke, approve, close };
+const CHECKS = { deposit, withdraw, revoke, approve, close };
+
+// --- sets: transactions signed in one approval ---------------------------------------
+
+// Every transaction of the set checked as a part of it (expect.part: its
+// index, the count and the state the parts share), then the set as a whole.
+export function decodeSolSet(list, expect, pins) {
+  const lines = [], problems = [];
+  if (!Array.isArray(list) || !list.length) return { ok: false, lines, problems: ['no transaction to check'] };
+  const state = { policies: [], funding: [], opens: [], created: false, fundedIn: null, policyIn: [] };
+  list.forEach((b64, index) => {
+    const r = decodeSol(b64, { ...expect, part: { index, count: list.length, state } }, pins);
+    lines.push(`Transaction ${index + 1} of ${list.length}:`, ...r.lines.map(l => `  ${l}`));
+    problems.push(...r.problems.map(p => `transaction ${index + 1}: ${p}`));
+  });
+  const whole = SET_FINALS[expect.kind];
+  if (whole) {
+    try { whole(state, expect, pins, lines, (m) => problems.push(m)); } catch (e) { problems.push(`the set cannot be read: ${e.message}`); }
+  }
+  return { ok: problems.length === 0, lines, problems };
+}
+
+// The policies a vault gets, in seed order: each venue's compiled rules
+// (expectedPolicies) at the seeds 1, 2, ... in the order of expect.venues.
+// [{venue, seed, address, policy}].
+export function setupPolicies(expect, pins) {
+  const out = [];
+  for (const venue of expect.venues ?? []) {
+    for (const p of expectedPolicies(venue, expect, pins)) {
+      const seed = out.length + 1;
+      out.push({ venue, seed, address: sq.policyPda(new PublicKey(expect.settings), seed).toBase58(), policy: p.policy });
+    }
+  }
+  return out;
+}
+
+// The creation of the owner's smart account: the owner its creator and only
+// signer (every permission), threshold 1, no settings authority, no time
+// lock, no rent collector, at the settings of the planned seed.
+function readCreate(ix, expect, no, lines) {
+  const r = new Reader(ix.data);
+  r.bytes(8);
+  const authority = r.option(r => r.key());
+  const threshold = r.u16();
+  const signers = r.vec(r => ({ key: r.key(), permissions: r.u8() }));
+  const timeLock = r.u32();
+  const collector = r.option(r => r.key());
+  const memo = r.option(r => r.bytes(r.u32()).toString('utf8'));
+  if (!r.done()) no('bytes after the vault\'s creation');
+  const k = ix.keys.map(x => x.pubkey);
+  lines.push(`Create your vault ${short(expect.vault)}: you its only owner, threshold 1${memo ? ` (memo "${memo}")` : ''}; rent from your wallet`);
+  if (authority) no(`the vault would have a settings authority ${short(authority)} that can change everything`);
+  if (threshold !== 1) no(`threshold ${threshold}, not 1`);
+  if (signers.length !== 1 || signers[0].key !== expect.owner || signers[0].permissions !== sq.PERMISSION.all) {
+    no(`the vault's owners would be ${signers.map(x => short(x.key)).join(', ')}, not your wallet alone`);
+  }
+  if (timeLock !== 0) no(`a time lock of ${timeLock}s`);
+  if (collector) no(`a rent collector ${short(collector)}`);
+  if (k[0] !== sq.programConfigPda().toBase58()) no('another program config than Squads\'');
+  if (k[2] !== expect.owner || !ix.keys[2].isSigner) no('the creator is not your wallet');
+  if (k[3] !== SYSTEM || k[4] !== SQUADS) no('another program than Squads and System');
+  if (k[5] !== expect.settings) no(`it creates the settings ${short(k[5])}, not your vault's`);
+  if (ix.keys.length !== 6) no('accounts a creation does not take');
+}
+
+// One part of an owner's set-up: the vault's creation (first, once), the
+// bot's policies one by one in seed order, then the funding (the deposit and
+// the bot's gas), in the last transaction only.
+function setupPart(outer, expect, pins, ctx, lines, no) {
+  const { index, count, state } = expect.part;
+  if (sq.settingsPda(BigInt(expect.seed)).toBase58() !== expect.settings) no('the vault settings are not those of the planned seed');
+  if (sq.vaultPda(new PublicKey(expect.settings)).toBase58() !== expect.vault) no('the vault is not the account of these settings');
+  if (!expect.venues?.length) no('no venue for the bot');
+  for (const v of expect.venues ?? []) {
+    if (!pins.rules.venues?.[v]) no(`${v} has no rules in git`);
+    for (const p of expect.pools?.[v] ?? []) if (!(pins.pools[v] ?? []).includes(p)) no(`the pool ${short(p)} is not the ${v} pool the rules approve`);
+    if (!(expect.pools?.[v] ?? []).length) no(`no pool for ${v}`);
+  }
+  if ((expect.payoutWallets ?? []).slice(1).some(w => w !== pins.operator)) no('a payout wallet beside yours that is not the operator\'s');
+  const all = setupPolicies(expect, pins);
+  for (const ix of outer) {
+    const disc = Buffer.from(ix.data).subarray(0, 8);
+    if (ix.programId === SQUADS && disc.equals(sqDisc('create'))) {
+      if (state.created || state.policies.length || state.funding.length) no('the vault\'s creation is not the first step');
+      state.created = true;
+      readCreate(ix, expect, no, lines);
+      continue;
+    }
+    if (ix.programId === SQUADS && disc.equals(sqDisc('settings'))) {
+      if (state.funding.length) no('a policy after the deposit: money would reach the vault before its rules');
+      if (ix.keys[0]?.pubkey !== expect.settings) no('it changes another vault');
+      if (ix.keys[1]?.pubkey !== expect.owner) no('the rent is paid by someone else than you');
+      const s = readSettingsActions(ix.data, expect.settings);
+      if (s.signers !== 1 || ix.keys[4]?.pubkey !== expect.owner) no('it is not signed by your wallet alone');
+      for (const a of s.actions) {
+        if (a.kind !== 'policyCreate') { no('a set-up only creates policies'); continue; }
+        const w = all[Number(a.seed) - 1];
+        const prev = state.policies.at(-1);
+        if (!w) { no(`policy seed ${a.seed}: the rules make ${all.length} policies`); continue; }
+        if (prev ? Number(a.seed) !== prev + 1 : state.created && Number(a.seed) !== 1) no(`policy seed ${a.seed} out of order`);
+        if (!ix.keys.slice(5).some(x => x.pubkey === w.address)) no(`policy ${short(w.address)}: its account is not in the instruction`);
+        state.policies.push(Number(a.seed));
+        state.policyIn.push(index);
+        if (a.signers.length !== 1 || a.signers[0].key !== pins.policyKey || a.signers[0].permissions !== sq.PERMISSION.all) {
+          no(`policy ${short(w.address)} would name ${a.signers.map(x => short(x.key)).join(', ')}, not the bot's rules key alone`);
+        }
+        if (a.threshold !== 1 || a.timeLock !== 0) no('a threshold or time lock other than the rules\'');
+        if (a.policy.hooks || a.policy.spendingLimits || a.policy.accountIndex !== 0) no('hooks, spending limits or another vault account');
+        const same = Buffer.from(a.bytes).equals(sq.encodeProgramInteraction(w.policy));
+        lines.push(`New policy ${short(w.address)} (${w.venue}): signer the bot's rules key ${short(pins.policyKey)}; `
+          + `${a.policy.constraints.length} allowed instructions${same ? ', exactly the rules in git' : ''}:`);
+        for (const c of a.policy.constraints) lines.push(`  · ${describeConstraint(c, ctx)}`);
+        if (!same) no(`policy ${short(w.address)} differs from the rules in git (rules.json) for your vault`);
+      }
+      continue;
+    }
+    // the vault's token account may open earlier (rent only, no money): read with the deposit
+    const m = describe(ix, ctx).move;
+    if (m.kind === 'ata') { state.opens.push(ix); continue; }
+    if (index !== count - 1) no('money moves before the last transaction: it would reach the vault before all its rules');
+    state.funding.push(ix);
+    state.fundedIn = index;
+  }
+}
+
+// The set-up as a whole: every policy the rules make exists after it (the
+// set creates the missing ones, the last of them in the funding's
+// transaction), the vault created with them when the set creates it, and
+// the funding exactly the deposit you chose and the bot's gas.
+function setupWhole(state, expect, pins, lines, no) {
+  const all = setupPolicies(expect, pins);
+  // without the creation (a resume), a vault that does not exist fails on chain with the whole last transaction
+  if (expect.created === false && state.created) no('it creates a vault that exists');
+  if (expect.created === true && !state.created) no('the vault is not created');
+  if (state.created && state.policies[0] !== 1) no('the vault is created without its first policy');
+  if (all.length && state.policies.at(-1) !== all.length) no(`the set ends at policy ${state.policies.at(-1) ?? 'none'}, not ${all.length}: rules would be missing`);
+  if (state.policies.length && state.policyIn.at(-1) !== state.fundedIn) no('the deposit is not in the same transaction as the last policy');
+  const ctx = { rules: ruleIndex(pins.rules), names: namesOf(expect, pins), symbols: symbolsOf(pins), vault: expect.vault,
+    venueNames: {} };
+  const gas = state.funding.filter(ix => {
+    const m = describe(ix, ctx).move;
+    return m.kind === 'sol' && m.to === pins.payer;
+  });
+  if (gas.length !== 1) return no(`${gas.length} payments to the bot's gas key; the set-up pays it once`);
+  const g = describe(gas[0], ctx);
+  lines.push(`Funding: ${g.text}`);
+  if (g.move.from !== expect.owner) no('the gas does not come from your wallet');
+  if (g.move.raw !== BigInt(expect.gasRaw)) no(`it pays the bot ${fromRaw(g.move.raw, 9)} SOL, not the ${fromRaw(BigInt(expect.gasRaw), 9)} SOL gas shown`);
+  const rest = [...state.opens, ...state.funding.filter(ix => ix !== gas[0])];
+  const dl = [];
+  deposit(rest, expect, pins, ctx, dl, no);
+  lines.push(...dl.map(l => `Funding: ${l}`));
+}
+
+// approve with a deposit (a re-grant with more capital): the policy updates
+// (or creations) first, the deposit after them in the last transaction.
+function approvePart(outer, expect, pins, ctx, lines, no) {
+  const { index, count, state } = expect.part;
+  const rules = outer.filter(ix => ix.programId === SQUADS);
+  const rest = outer.slice(rules.length);
+  if (outer.slice(0, rules.length).some(ix => ix.programId !== SQUADS)) no('money moves before the rules are approved');
+  if (rules.length) {
+    if (state.funding.length) no('a rule after the deposit');
+    policyUpdates(rules, expect, pins, ctx, lines, no, pins.policyKey);
+  }
+  if (rest.length) {
+    if (index !== count - 1) no('money moves before the last transaction');
+    state.funding.push(...rest);
+  }
+}
+
+function approveWhole(state, expect, pins, lines, no) {
+  if (!expect.deposit) { if (state.funding.length) no('it moves money; an approval moves none'); return; }
+  const ctx = { rules: ruleIndex(pins.rules), names: namesOf(expect, pins), symbols: symbolsOf(pins), vault: expect.vault, venueNames: {} };
+  if (!state.funding.length) return no('the deposit is missing');
+  const dl = [];
+  deposit(state.funding, { ...expect, ...expect.deposit }, pins, ctx, dl, no);
+  lines.push(...dl.map(l => `Deposit: ${l}`));
+}
+
+// revoke: every policy of the set names you alone (revoke above), in one approval
+const SET_CHECKS = { setup: setupPart, approve: approvePart, revoke };
+const SET_FINALS = { setup: setupWhole, approve: approveWhole };
 
 // A venue instruction of an owner's close: one the venue's exit list names
 // (a venue rule: the shared rules are read as transfers, accounts and closes

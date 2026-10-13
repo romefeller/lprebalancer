@@ -5,9 +5,11 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import fc from 'fast-check';
-import { concat, encodeFunctionData, getAddress, maxUint128, maxUint256, parseAbi, toHex } from 'viem';
+import { concat, encodeFunctionData, encodePacked, getAddress, maxUint128, maxUint256, parseAbi, size, slice, toHex } from 'viem';
 import * as U from '../chains/evm/polygon.mjs';
-import { SAFE_ABI, SENTINEL, preValidated as safePreValidated } from '../chains/evm/vault/safe.mjs';
+import { MODULE_FACTORY_ABI, SAFE_ABI, SAFE_ABI as SAFE_FULL, SAFE_FACTORY_ABI, SENTINEL, preValidated as safePreValidated } from '../chains/evm/vault/safe.mjs';
+import { compile, RULES } from '../chains/evm/vault/roles.mjs';
+import { configureCalls, fundCalls, ownerSetupCalls, predictSafe } from '../chains/evm/vault/owner_setup.mjs';
 import { closeData, ownerExec, regrantCall } from '../chains/evm/vault/exit.mjs';
 import { decodeEvm, formatRaw, preValidated } from '../onboard/decode_evm.mjs';
 import { fromRaw } from '../onboard/intent.mjs';
@@ -191,7 +193,7 @@ test('revoke and approve: the vault disables or enables exactly the bot\'s Roles
   ok(decodeEvm(revokeTx({ data: safeData('disableModule', [A(0x77), ROLES]) }), REVOKE, PINS));
   refused(decodeEvm(revokeTx({ data: safeData('disableModule', [SENTINEL, STRANGER]) }), REVOKE, PINS), /not the bot's Roles module/);
   refused(decodeEvm(revokeTx({ to: STRANGER }), REVOKE, PINS), /not itself/);
-  refused(decodeEvm(revokeTx({ operation: 1 }), REVOKE, PINS), /delegatecall/);
+  refused(decodeEvm(revokeTx({ operation: 1 }), REVOKE, PINS), /is a delegatecall \(operation 1\): it could run any code as the vault/);
   refused(decodeEvm(revokeTx({ value: 1n }), REVOKE, PINS), /sends coin/);
   refused(decodeEvm(revokeTx({ data: safeData('enableModule', [ROLES]) }), REVOKE, PINS), /calls enableModule, not disableModule/);
   refused(decodeEvm(revokeTx({ data: erc20('transfer', [OWNER, 1n]) }), REVOKE, PINS), /unknown function/);
@@ -258,4 +260,171 @@ test('a Safe call the decoder does not know is an unknown function', () => {
   const other = encodeFunctionData({ abi: parseAbi(['function addOwnerWithThreshold(address owner, uint256 threshold)']), functionName: 'addOwnerWithThreshold', args: [STRANGER, 1n] });
   refused(decodeEvm(exec({ to: SAFE, data: other }), REVOKE, PINS), /the module change: an unknown function/);
   refused(decodeEvm({ to: SAFE, value: '0x0', data: other }, REVOKE, PINS), /the vault transaction: an unknown function/);
+});
+
+// --- the owner's own vault: createVault (the Safe, then its set-up) and fund ------------------
+
+const VAULT_PINS = { ...PINS, vault: { ...U.VAULT }, router: U.V3.router, stables: [...U.STABLES], venue: U.DEX,
+  pool: { token0: U.WPOL, token1: U.USDT0, fee: 500 } };
+const PROFIT = A(0x9), FEE = A(0x8), SALT = 7n;
+const COMPILED = compile(U.DEX, { npm: U.V3.npm, router: U.V3.router, stables: U.STABLES, pools: [VAULT_PINS.pool], payouts: [PROFIT, FEE] });
+const SETUP = ownerSetupCalls({ U, owner: OWNER, bot: BOT, compiled: COMPILED, saltNonce: SALT });
+const CREATE = { kind: 'createVault', owner: OWNER, safe: SETUP.safe, saltNonce: String(SALT), profitWallet: PROFIT, feeWallet: FEE };
+const MULTI = parseAbi(['function multiSend(bytes transactions) payable']);
+const packedOf = (list) => concat(list.map(c => encodePacked(['uint8', 'address', 'uint256', 'uint256', 'bytes'], [c.operation, c.to, c.value, BigInt(size(c.data)), c.data])));
+const BASE = configureCalls({ U, safe: SETUP.safe, roles: SETUP.roles, compiled: COMPILED, bot: BOT, saltNonce: SALT }).map(c => ({ operation: 0, value: 0n, ...c }));
+// The set-up transaction with any part changed: its calls (each {operation, to, value, data}) or the outer Safe fields.
+function configure({ calls = BASE, safe = SETUP.safe, operation = 1, to = U.VAULT.multiSendCallOnly, signer = OWNER, gasPrice = 0n, value = 0n, outer = 0n, packed } = {}) {
+  const data = encodeFunctionData({ abi: MULTI, functionName: 'multiSend', args: [packed ?? packedOf(calls)] });
+  return { to: safe, value: toHex(outer), data: safeData('execTransaction', [to, value, data, operation, 0n, 0n, gasPrice, ZERO, ZERO, safePreValidated(signer)]) };
+}
+const setupData = (o = {}) => encodeFunctionData({ abi: SAFE_FULL, functionName: 'setup',
+  args: [o.owners ?? [OWNER], o.threshold ?? 1n, o.to ?? ZERO, o.data ?? '0x', o.handler ?? U.VAULT.fallbackHandler, o.token ?? ZERO, o.payment ?? 0n, o.receiver ?? ZERO] });
+const createTx = (o = {}) => ({ to: o.factory ?? U.VAULT.safeFactory, value: toHex(o.value ?? 0n), data: o.raw ?? encodeFunctionData({ abi: SAFE_FACTORY_ABI,
+  functionName: 'createProxyWithNonce', args: [o.singleton ?? U.VAULT.safeSingleton, o.initializer ?? setupData(o), o.salt ?? SALT] }) });
+
+test('createVault: the owner\'s two transactions as built pass, with what they do in plain words', () => {
+  assert.deepEqual(createTx(), SETUP.txs[0], 'the helpers build what ownerSetupCalls builds');
+  assert.deepEqual(configure().data, SETUP.txs[1].data);
+  const r = ok(decodeEvm(SETUP.txs, CREATE, VAULT_PINS));
+  assert.deepEqual(r.lines.slice(0, 2), [`Create your vault ${SETUP.safe}: a Safe 1.4.1 with your wallet ${OWNER} its only owner`,
+    `Set your vault up: create and enable the bot's Roles module ${SETUP.roles}`]);
+  assert.match(r.lines[2], new RegExp(`^Give the bot's key ${BOT} only these calls: approve the position manager or the router; `));
+  assert.equal(r.lines[3], `Pay-outs only to ${PROFIT} and ${FEE}`);
+  ok(decodeEvm(SETUP.txs.map(t => ({ ...t, chainId: 137, from: OWNER.toLowerCase() })), { ...CREATE, safe: SETUP.safe.toLowerCase() }, VAULT_PINS));
+  // a resume: the Safe exists (the set-up alone), the module exists too (without its deployment)
+  assert.equal(ok(decodeEvm([SETUP.txs[1]], CREATE, VAULT_PINS)).lines.length, 3);
+  const later = ownerSetupCalls({ U, owner: OWNER, bot: BOT, compiled: COMPILED, saltNonce: SALT, rolesDeployed: true });
+  assert.equal(ok(decodeEvm(later.txs, CREATE, VAULT_PINS)).lines[1], `Set your vault up: enable the bot's Roles module ${SETUP.roles}`);
+  // the operator's own vault: one payout wallet
+  const solo = ownerSetupCalls({ U, owner: OWNER, bot: BOT, saltNonce: SALT,
+    compiled: compile(U.DEX, { npm: U.V3.npm, router: U.V3.router, stables: U.STABLES, pools: [VAULT_PINS.pool], payouts: [PROFIT] }) });
+  assert.equal(ok(decodeEvm(solo.txs, { ...CREATE, feeWallet: undefined }, VAULT_PINS)).lines[3], `Pay-outs only to ${PROFIT}`);
+  refused(decodeEvm(solo.txs, CREATE, VAULT_PINS), /is not what the pinned rules give/);
+  // the rules the page passes, when it passes its own
+  refused(decodeEvm(SETUP.txs, CREATE, { ...VAULT_PINS, rules: { ...RULES, payout: [] } }), /makes \d+ calls, not \d+/);
+});
+
+test('createVault: another owner, threshold, handler, salt, factory or copy of the Safe is refused', () => {
+  const two = (create) => decodeEvm([create, SETUP.txs[1]], CREATE, VAULT_PINS);
+  refused(two(createTx({ owners: [OWNER, STRANGER] })), /owners are .*, not your wallet alone/);
+  refused(two(createTx({ owners: [STRANGER] })), /not your wallet alone/);
+  refused(two(createTx({ owners: [] })), /owners are none/);
+  refused(two(createTx({ threshold: 2n })), /needs 2 signatures, not 1/);
+  refused(two(createTx({ to: STRANGER })), /set-up runs a call/);
+  refused(two(createTx({ data: '0x12' })), /set-up runs a call/);
+  refused(two(createTx({ handler: STRANGER })), /fallback handler is .*, not/);
+  refused(two(createTx({ token: STRANGER })), /pays someone/);
+  refused(two(createTx({ payment: 1n })), /pays someone/);
+  refused(two(createTx({ receiver: STRANGER })), /pays someone/);
+  refused(two(createTx({ salt: SALT + 1n })), /salt is 8, not 7/);
+  refused(two(createTx({ singleton: STRANGER })), /a copy of .*, not Safe 1.4.1/);
+  refused(two(createTx({ factory: STRANGER })), /not the Safe factory/);
+  refused(two(createTx({ value: 1n })), /creation sends coin/);
+  refused(two({ ...createTx(), data: `${createTx().data}00` }), /the vault creation: the calldata carries extra/);
+  refused(two(createTx({ initializer: safeData('enableModule', [STRANGER]) })), /set-up calls enableModule, not setup/);
+  refused(two(createTx({ initializer: '0xdeadbeef' })), /the vault's set-up: an unknown function/);
+  refused(two(createTx({ raw: erc20('transfer', [OWNER, 1n]) })), /the vault creation: an unknown function/);
+  // a changed initializer is another vault: the address the page shows is the one it checked
+  for (const o of [{ owners: [STRANGER] }, { threshold: 2n }, { handler: STRANGER }]) {
+    assert.notEqual(predictSafe({ U, initializer: setupData(o), saltNonce: SALT }), SETUP.safe);
+    assert.match(two(createTx(o)).problems.join(), /the vault created is not your vault/);
+  }
+  refused(decodeEvm(SETUP.txs, { ...CREATE, safe: STRANGER }, VAULT_PINS), /your vault would be .*, not 0x0+bad/i);
+  refused(decodeEvm(SETUP.txs, { ...CREATE, saltNonce: undefined }, VAULT_PINS), /knows no salt/);
+  refused(decodeEvm(SETUP.txs, { ...CREATE, saltNonce: '-1' }, VAULT_PINS), /knows no salt/);
+  refused(decodeEvm(SETUP.txs, { ...CREATE, saltNonce: '8' }, VAULT_PINS), /your vault would be/);
+  refused(decodeEvm([...SETUP.txs, SETUP.txs[1]], CREATE, VAULT_PINS), /3 transactions, not 2/);
+  for (const k of ['safeSingleton', 'safeFactory', 'fallbackHandler', 'multiSendCallOnly', 'rolesMastercopy', 'moduleFactory']) {
+    refused(decodeEvm(SETUP.txs, CREATE, { ...VAULT_PINS, vault: { ...U.VAULT, [k]: undefined } }), new RegExp(`no ${k} pinned`));
+  }
+  refused(decodeEvm(SETUP.txs, CREATE, { ...VAULT_PINS, vault: undefined }), /no safeSingleton pinned/);
+});
+
+test('createVault: the set-up is exactly the module, its enabling and the role for this bot and these payout wallets', () => {
+  const conf = (o) => decodeEvm([SETUP.txs[0], configure(o)], CREATE, VAULT_PINS);
+  ok(conf({}));
+  refused(conf({ calls: [...BASE, { operation: 0, value: 0n, to: U.USDT0, data: erc20('transfer', [STRANGER, 1n]) }] }), /makes \d+ calls, not \d+.*call \d+ \(0xa9059cbb on 0x/);
+  refused(conf({ calls: BASE.slice(0, -1) }), /makes \d+ calls, not \d+/);
+  refused(conf({ calls: [BASE[0], ...BASE.slice(2)] }), /call 2 \(assignRoles on .*\) is not what the pinned rules give/);
+  const stranger = configureCalls({ U, safe: SETUP.safe, roles: SETUP.roles, compiled: COMPILED, bot: STRANGER, saltNonce: SALT }).map(c => ({ operation: 0, value: 0n, ...c }));
+  refused(conf({ calls: stranger }), /call 3 \(assignRoles on .*\) is not what the pinned rules give/);
+  refused(conf({ calls: BASE.map((c, i) => (i === 2 ? { ...c, operation: 1 } : c)) }), /call 3 is a delegatecall/);
+  refused(conf({ calls: BASE.map((c, i) => (i === 2 ? { ...c, value: 1n } : c)) }), /call 3 sends coin/);
+  refused(conf({ calls: BASE.map((c, i) => (i === 1 ? { ...c, to: STRANGER } : c)) }), /call 2 \(enableModule on 0x0+bad\) is not/i);
+  refused(conf({ calls: BASE.map((c, i) => (i === 1 ? { ...c, data: safeData('enableModule', [STRANGER]) } : c)) }), /call 2 \(enableModule/);
+  refused(conf({ calls: BASE.map((c, i) => (i === 0 ? { ...c, data: encodeFunctionData({ abi: MODULE_FACTORY_ABI, functionName: 'deployModule', args: [STRANGER, '0x', SALT] }) } : c)) }),
+    /call 1 \(deployModule on .*\) is not/);
+  refused(conf({ operation: 0 }), /operation 0, not a delegatecall of MultiSendCallOnly/);
+  refused(conf({ operation: 2 }), /operation 2/);
+  refused(conf({ to: STRANGER }), /runs 0x0+bad, not MultiSendCallOnly/i);
+  refused(conf({ signer: STRANGER }), /not signed as your wallet/);
+  refused(conf({ gasPrice: 1n }), /gas refund/);
+  refused(conf({ value: 1n }), /set-up sends coin from the vault/);
+  refused(conf({ outer: 1n }), /sends 0.000000000000000001 of your coin/);
+  refused(conf({ safe: STRANGER }), /not your vault/);
+  refused(conf({ packed: '0x00' }), /cut short/);
+  refused(conf({ packed: '0x' }), /makes 0 calls/);
+  const full = packedOf(BASE);
+  refused(conf({ packed: slice(full, 0, size(full) - 1) }), /cut short/);
+  refused(conf({ packed: concat([full, '0x00']) }), /cut short/);
+  refused(conf({ packed: concat([full, slice(full, 0, 85)]) }), /cut short/);
+  refused(conf({ calls: [{ operation: 0, value: 0n, to: SETUP.safe, data: '0x' }] }), /makes 1 calls.*call 1 \(0x on/);
+  refused(conf({ calls: [...BASE, { operation: 0, value: 0n, to: SETUP.safe, data: '0x' }] }), /makes \d+ calls/);
+  refused(decodeEvm(SETUP.txs, { ...CREATE, profitWallet: STRANGER }, VAULT_PINS), /is not what the pinned rules give/);
+  refused(decodeEvm(SETUP.txs, { ...CREATE, profitWallet: 'nobody' }, VAULT_PINS), /knows no payout wallet/);
+  refused(decodeEvm(SETUP.txs, { ...CREATE, profitWallet: undefined }, VAULT_PINS), /knows no payout wallet/);
+  refused(decodeEvm(SETUP.txs, CREATE, { ...VAULT_PINS, botKey: STRANGER }), /is not what the pinned rules give/);
+  refused(decodeEvm(SETUP.txs, CREATE, { ...VAULT_PINS, pool: { ...VAULT_PINS.pool, fee: 3000 } }), /is not what the pinned rules give/);
+  refused(decodeEvm(SETUP.txs, CREATE, { ...VAULT_PINS, router: STRANGER }), /is not what the pinned rules give/);
+  refused(decodeEvm(SETUP.txs, CREATE, { ...VAULT_PINS, stables: [] }), /is not what the pinned rules give/);
+  refused(decodeEvm(SETUP.txs, CREATE, { ...VAULT_PINS, stables: undefined }), /is not what the pinned rules give/);
+  refused(decodeEvm(SETUP.txs, CREATE, { ...VAULT_PINS, npm: STRANGER }), /is not what the pinned rules give/);
+  // any change to a byte of either transaction is refused
+  for (const at of [0, 1]) {
+    const good = SETUP.txs[at];
+    fc.assert(fc.property(fc.integer({ min: 2, max: good.data.length - 1 }), fc.constantFrom(...'0123456789abcdef'), (i, h) => {
+      fc.pre(good.data[i].toLowerCase() !== h.toLowerCase());
+      const txs = [...SETUP.txs];
+      txs[at] = { ...good, data: good.data.slice(0, i) + h + good.data.slice(i + 1) };
+      assert.equal(decodeEvm(txs, CREATE, VAULT_PINS).ok, false, `tx ${at} byte ${i}`);
+    }), { numRuns: 150 });
+  }
+});
+
+test('fund: the deposit (a wrap first for POL), then the bot\'s gas; nothing else, in this order', () => {
+  const FUND = { kind: 'fund', owner: OWNER, safe: SAFE, token: 'POL', raw: String(26n * E18), gasWei: String(4n * E18) };
+  const pol = fundCalls({ U, safe: SAFE, token: 'POL', amountRaw: 26n * E18, gasWei: 4n * E18, botKey: BOT });
+  assert.deepEqual(ok(decodeEvm(pol, FUND, PINS)).lines, [`Wrap 26 POL into WPOL in your wallet ${OWNER}`,
+    `Deposit 26 WPOL from your wallet ${OWNER} into your vault ${SAFE}`, `Pay 4 POL from your wallet ${OWNER} to the bot's key ${BOT}`]);
+  const usdt = fundCalls({ U, safe: SAFE, token: 'USDT0', amountRaw: 25_000_000n, gasWei: 4n * E18, botKey: BOT });
+  const FUSD = { ...FUND, token: 'USDT0', raw: '25000000' };
+  assert.deepEqual(ok(decodeEvm(usdt, FUSD, PINS)).lines, [`Deposit 25 USDT0 from your wallet ${OWNER} into your vault ${SAFE}`,
+    `Pay 4 POL from your wallet ${OWNER} to the bot's key ${BOT}`]);
+  refused(decodeEvm([usdt[1], usdt[0]], FUSD, PINS), /not the USDT0 token/);
+  refused(decodeEvm([pol[0], pol[2], pol[1]], FUND, PINS), /not the WPOL token/);
+  refused(decodeEvm(usdt.slice(0, 1), FUSD, PINS), /the funding is 1 transactions, not 2/);
+  refused(decodeEvm([...usdt, usdt[1]], FUSD, PINS), /the funding is 3 transactions, not 2/);
+  refused(decodeEvm(pol.slice(1), FUND, PINS), /the funding is 2 transactions, not 3/);
+  refused(decodeEvm([usdt[0], { ...usdt[1], to: STRANGER }], FUSD, PINS), /not the bot's key/);
+  refused(decodeEvm([usdt[0], { ...usdt[1], value: toHex(4n * E18 + 1n) }], FUSD, PINS), /payment is 4.000000000000000001 POL, not 4 POL/);
+  refused(decodeEvm(usdt, { ...FUSD, gasWei: undefined }, PINS), /payment is 4 POL, not 0 POL/);
+  refused(decodeEvm([{ ...usdt[0], data: erc20('transfer', [STRANGER, 25_000_000n]) }, usdt[1]], FUSD, PINS), /not your vault/);
+  refused(decodeEvm([pol[0], { ...pol[1], data: erc20('transfer', [SAFE, 26n * E18 - 1n]) }, pol[2]], FUND, PINS), /is 25.999999999999999999 WPOL, not 26/);
+  refused(decodeEvm([{ ...pol[0], value: toHex(1n) }, pol[1], pol[2]], FUND, PINS), /the wrap is 0.000000000000000001 POL, not 26/);
+  refused(decodeEvm(usdt, { ...FUSD, token: 'DAI' }, PINS), /DAI is not one the vault takes/);
+  refused(decodeEvm(usdt, { ...FUSD, token: 'constructor' }, PINS), /not one the vault takes/);
+  refused(decodeEvm(usdt.map(t => ({ ...t, chainId: 1 })), FUSD, PINS), /for chain 1, not 137/);
+  refused(decodeEvm([usdt[0], { ...usdt[1], from: STRANGER }], FUSD, PINS), /sent by 0x0+bad/i);
+});
+
+test('a list kind takes a list, the others one transaction', () => {
+  refused(decodeEvm(SETUP.txs[0], CREATE, VAULT_PINS), /a createVault is a list of transactions/);
+  refused(decodeEvm([withdrawTx()], WITHDRAW, PINS), /one transaction, not a list/);
+  refused(decodeEvm([], CREATE, VAULT_PINS), /no transaction/);
+  refused(decodeEvm([null], CREATE, VAULT_PINS), /no transaction/);
+  refused(decodeEvm([{ ...SETUP.txs[0], to: 'x' }, SETUP.txs[1]], CREATE, VAULT_PINS), /goes to x, not an address/);
+  refused(decodeEvm(SETUP.txs, { ...CREATE, owner: undefined }, VAULT_PINS), /knows no wallet/);
+  refused(decodeEvm(SETUP.txs, { ...CREATE, kind: 'toString' }, VAULT_PINS), /no transaction of kind toString/);
+  refused(decodeEvm(SETUP.txs, { ...CREATE, kind: undefined }, VAULT_PINS), /no transaction of kind undefined/);
 });

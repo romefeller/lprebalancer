@@ -1,14 +1,19 @@
 // Solana for the onboarding server: which venue a new vault gets, the bot's
-// keys and gas, the connect, and the owner's transactions (deposit, withdraw,
-// close, revoke, approve) built unsigned for the owner's wallet to sign and
-// send; deposits read back from the chain; signed transactions sent.
+// keys and gas, the owner's own set-up of its vault (creation, the bot's
+// policies, the deposit and the bot's gas, signed by the owner alone) and
+// the bot's finish of it (its lookup table), and the owner's transactions
+// (deposit, withdraw, close, revoke, approve) built unsigned for the owner's
+// wallet to sign and send; deposits read back from the chain; signed
+// transactions sent.
 import { createRequire } from 'module';
 import * as sq from '../chains/solana/vault/squads.mjs';
 import { RULES, compile } from '../chains/solana/vault/policy.mjs';
 import { VENUES } from '../chains/solana/vault/venues.mjs';
 import { readKeypair } from '../chains/solana/vault/account.mjs';
-import { connect, request as buildRequest, rulesRequest as buildRules } from '../chains/solana/vault/cli.mjs';
+import { finishSetup, request as buildRequest, rulesRequest as buildRules, setupRequest } from '../chains/solana/vault/cli.mjs';
+import { packSteps } from '../chains/solana/vault/admin.mjs';
 import { vaultPositions } from '../chains/solana/vault/exit.mjs';
+import { signerError } from '../shared/signer_errors.mjs';
 import SOLANA from '../chains/solana/solana.json' with { type: 'json' };
 import { Invalid, fromRaw, nativeOf, own, toRaw } from './intent.mjs';
 
@@ -52,24 +57,6 @@ export async function gas(connection, keys, c) {
   const lamports = BigInt(await connection.getBalance(keys.payer.publicKey, 'confirmed'));
   const need = toRaw(c.gas.setup, 9) + toRaw(c.gas.margin, 9);
   return { ok: lamports >= need, have: fromRaw(lamports, 9), need: fromRaw(need, 9), symbol: 'SOL', key: keys.payer.publicKey.toBase58() };
-}
-
-// The owner's gas payment, unsigned: one SOL transfer to the bot's payer key.
-// It refuses when the wallet cannot also cover the deposit that follows.
-export async function paymentTxs(connection, c, { owner, payer, gas: amount, token, deposit }) {
-  const from = new PublicKey(owner), lamports = toRaw(amount, 9), t = own(c.tokens, token);
-  const sol = BigInt(await connection.getBalance(from, 'confirmed'));
-  const needSol = lamports + (t.native ? toRaw(deposit, 9) : 0n) + 20_000n;          // and two fees
-  if (sol < needSol) throw new Invalid(`your wallet holds ${fromRaw(sol, 9)} SOL; the gas and the deposit need ${fromRaw(needSol, 9)}`);
-  if (!t.native) {
-    const have = await tokenBalance(connection, t, from, false);
-    if (have < toRaw(deposit, t.decimals)) throw new Invalid(`your wallet holds ${fromRaw(have, t.decimals)} ${token}; the deposit is ${deposit}`);
-  }
-  const tx = new Transaction().add(SystemProgram.transfer({ fromPubkey: from, toPubkey: new PublicKey(payer), lamports }));
-  const { blockhash } = await connection.getLatestBlockhash('confirmed');
-  tx.feePayer = from;
-  tx.recentBlockhash = blockhash;
-  return { summary: `pay the bot ${amount} SOL for the setup and the running gas, to ${payer}`, transactions: [asWire(tx)] };
 }
 
 async function tokenBalance(connection, t, owner, offCurve) {
@@ -135,45 +122,173 @@ export async function poolRecord(connection, venue, pool, c) {
   return { token_a: side(mints[0]), token_b: side(mints[1]) };
 }
 
-// Connect: the bot creates the vault (owner = the signer, threshold 1) with
-// the policies of the venues it approves (vaultVenues); the payouts approved
-// are the profit wallet's and, for an instance that pays a fee share, the
-// operator's.
-export async function connectVault(connection, keys, c, f, log) {
+// The request's vault set-up as cli.mjs setupRequest reads it: the venues
+// it approves (vaultVenues), their pools, and the payouts (the profit
+// wallet's and, for an instance that pays a fee share, the operator's).
+function setupFlags(c, { owner, profitWallet, feeWallet }, seed) {
   const venues = vaultVenues(c);
   if (!venues.length) throw new Error(`no venue of ${c.venues.join(', ')} has vault support yet`);
-  const wallets = [f.profitWallet, ...(f.feeWallet ? [f.feeWallet] : [])];
-  return connect({ owners: f.owner, venue: venues.join(','), pools: venues.map(v => c.pools[v]).join(','), payout: wallets.join(','),
-    'payout-mint': c.payoutMint, execute: true, seed: f.planned?.seed },
-  { connection, payer: keys.payer, policyKey: keys.policyKey, log, onPlan: f.onPlan });
+  return { owner, venue: venues.join(','), pools: venues.map(v => c.pools[v]).join(','),
+    payout: [profitWallet, ...(feeWallet ? [feeWallet] : [])].join(','), 'payout-mint': c.payoutMint, ...(seed != null ? { seed: String(seed) } : {}) };
+}
+
+// Bounds of what the owner's set-up creates, over the program's allocations
+// (measured on the fork 2026-10-13: a settings account of one signer is 168
+// bytes; policies, POLICY_ACCOUNT_BYTES below).
+export const SETTINGS_ACCOUNT_BYTES = 256;
+export const TOKEN_ACCOUNT_BYTES = 165;
+
+// The owner's set-up, unsigned, in as few transactions as fit (one wallet
+// approval signs them all): the smart account (the owner its creator, rent
+// payer and only signer, threshold 1), each policy for the bot's key, and,
+// in the SAME transaction as the last policy, the deposit into the vault and
+// the bot's gas to its payer key: money reaches the vault only with every
+// policy, and the bot is paid only for a vault that is whole. The bot signs
+// and pays nothing. `a.planned` ({seed}) resumes a set-up: only what the
+// chain lacks is built; a seed another account took is planned again.
+// Refuses a wallet that cannot pay it all. {planned: {seed, settings,
+// vault}, done, transactions, report, cost}; done (the set-up is on chain):
+// no transactions. The last argument (tests): the set-up reader.
+export async function setupTxs(connection, keys, c, a, { request = setupRequest } = {}) {
+  const owner = new PublicKey(a.owner);
+  const setup = await request(setupFlags(c, a, a.planned?.seed), { connection, payer: keys.payer.publicKey, policyKey: keys.policyKey.publicKey });
+  const planned = { seed: setup.seed, settings: setup.settings, vault: setup.vault };
+  if (!setup.steps.length) return { planned, done: true, transactions: [], report: setup.report };
+  const gas = toRaw(a.gas, 9);
+  // a token's vault account opens first (rent only, no money; Raydium's last
+  // policy with the account's opening, the transfer and the gas is 13 bytes
+  // over a transaction); the money moves with the last policy
+  const dep = await depositIxs(connection, c, { owner, vault: new PublicKey(setup.vault), token: a.token, amount: a.deposit });
+  const opens = dep.slice(0, -1);
+  const fund = [dep.at(-1), SystemProgram.transfer({ fromPubkey: owner, toPubkey: keys.payer.publicKey, lamports: gas })];
+  const groups = packSteps([...setup.steps.slice(0, -1), ...opens, [setup.steps.at(-1), ...fund]], owner);
+  const created = setup.done.includes(0) ? 0 : 1;
+  const cost = await setupCost(connection, c, { owner, created, policies: setup.steps.length - created, txs: groups.length, gas,
+    token: a.token, deposit: a.deposit });
+  const { blockhash } = await connection.getLatestBlockhash('confirmed');
+  return { planned, done: false, report: setup.report, cost: fromRaw(cost, 9), transactions: groups.map(ixs => {
+    const tx = new Transaction().add(...ixs);
+    tx.feePayer = owner;
+    tx.recentBlockhash = blockhash;
+    return asWire(tx);
+  }) };
+}
+
+// The SOL the owner's set-up takes from its wallet, or Invalid when the wallet
+// holds less: the account's creation fee (the program's config), the rent of
+// the settings and of each policy (bounds), a fee per transaction, the bot's
+// gas, a SOL deposit (a token: its amount in the wallet, and the vault's token
+// account's rent), and the wallet's own rent-exempt floor. Raw lamports.
+export async function setupCost(connection, c, { owner, created, policies, txs, gas, token, deposit }) {
+  const t = own(c.tokens, token);
+  const rentOf = async (n) => BigInt(await connection.getMinimumBalanceForRentExemption(n));
+  const fee = created ? sq.decodeProgramConfig((await connection.getAccountInfo(sq.programConfigPda(), 'confirmed')).data).creationFee : 0n;
+  const need = BigInt(fee) + (created ? await rentOf(SETTINGS_ACCOUNT_BYTES) : 0n) + BigInt(policies) * await rentOf(POLICY_ACCOUNT_BYTES)
+    + BigInt(txs) * 10_000n + gas + (t.native ? toRaw(deposit, 9) : await rentOf(TOKEN_ACCOUNT_BYTES)) + await rentOf(0);
+  const have = BigInt(await connection.getBalance(new PublicKey(owner), 'confirmed'));
+  if (have < need) {
+    throw new Invalid(`your wallet holds ${fromRaw(have, 9)} SOL; the set-up needs ${fromRaw(need, 9)} `
+      + `(the vault's and its rules' rent, the bot's gas ${fromRaw(gas, 9)}${t.native ? `, the deposit ${deposit}` : ''}, fees, and the wallet's own minimum)`);
+  }
+  return need;
+}
+
+// The bot's side once the owner's set-up is on chain (cli.mjs finishSetup):
+// the vault checked, then its lookup table. `r` is the request row; its
+// planned seed is the vault. `onLookup` saves the table before it is sent.
+export async function finishVault(connection, keys, c, r, { onLookup, log } = {}) {
+  const planned = r.connected?.planned;
+  if (!planned?.seed) throw new Error('the request has no planned vault');
+  const setup = await setupRequest(setupFlags(c, { owner: r.owner, profitWallet: r.profit_wallet, feeWallet: r.fee_wallet }, planned.seed),
+    { connection, payer: keys.payer.publicKey, policyKey: keys.policyKey.publicKey });
+  if (setup.settings !== planned.settings) throw new Error(`the planned vault ${planned.vault} is not this owner's`);
+  return finishSetup(setup, { connection, payer: keys.payer, policyKey: keys.policyKey.publicKey, lookup: r.connected?.lookup ?? null,
+    onLookup, log });
+}
+
+// Where the owner's set-up stands on chain: {state: 'done'} (every step
+// landed), {state: 'pending', missing} (steps to come), or {state: 'replan'}
+// (another account took the planned seed: the owner signs a new set-up).
+export async function setupState(connection, keys, c, r, { request = setupRequest } = {}) {
+  const planned = r.connected?.planned;
+  if (!planned?.seed) return { state: 'replan' };
+  const setup = await request(setupFlags(c, { owner: r.owner, profitWallet: r.profit_wallet, feeWallet: r.fee_wallet }, planned.seed),
+    { connection, payer: keys.payer.publicKey, policyKey: keys.policyKey.publicKey });
+  if (setup.settings !== planned.settings) return { state: 'replan' };
+  return setup.steps.length ? { state: 'pending', missing: setup.steps.length } : { state: 'done' };
+}
+
+// The transaction of a set-up that paid the bot's gas, read from the chain:
+// `payment`, the page's word for it, or else the vault's recent
+// transactions searched (findFunding); and the set-up's deposit (in the same
+// transaction, setupTxs; else the vault's newest deposit from the owner, as
+// when the owner paid the gas apart). {state: 'ok', payment, deposit (null:
+// none yet)} | {state: 'pending' | 'bad', reason}.
+export async function funding(connection, c, r, { payment, notBefore }, { find = findFunding, deposited = findDeposit } = {}) {
+  const expect = { owner: r.owner, payer: r.payer, amount: r.gas, notBefore };
+  const vault = r.connected?.planned?.vault ?? null;
+  const told = payment ? await checkPayment(connection, payment, expect) : null;
+  const paid = told?.state === 'ok' ? payment : vault ? await find(connection, vault, expect) : null;
+  if (!paid) {
+    if (told?.state === 'bad') return told;
+    return { state: 'pending', reason: told?.reason ?? 'the set-up\'s gas payment is not readable yet' };
+  }
+  return { state: 'ok', payment: paid, deposit: vault ? await deposited(connection, c, vault, r.owner) : null };
+}
+
+// The newest of the vault's recent transactions that moves the owner's money
+// into it (checkDeposit), or null.
+export async function findDeposit(connection, c, vault, owner, limit = 20) {
+  const sigs = await connection.getSignaturesForAddress(new PublicKey(vault), { limit }, 'confirmed');
+  for (const s of sigs) {
+    if (s.err) continue;
+    if ((await checkDeposit(connection, c, s.signature, { owner, vault })).state === 'ok') return s.signature;
+  }
+  return null;
+}
+
+// The transaction that funded a set-up, when the page lost it: the newest
+// of the vault's recent transactions that pays the bot's key the gas from the
+// owner (paymentVerdict). Null when there is none.
+export async function findFunding(connection, vault, expect, limit = 20) {
+  const sigs = await connection.getSignaturesForAddress(new PublicKey(vault), { limit }, 'confirmed');
+  for (const s of sigs) {
+    if (s.err) continue;
+    if ((await checkPayment(connection, s.signature, expect)).state === 'ok') return s.signature;
+  }
+  return null;
 }
 
 const asWire = (tx) => tx.serialize({ requireAllSignatures: false, verifySignatures: false }).toString('base64');
 
-// The deposit the owner signs: SOL straight to the vault, or a token to the
-// vault's token account (created if missing, paid by the owner).
-export async function depositTxs(connection, c, { owner, vault, token, amount }) {
+// The deposit's instructions: SOL straight to the vault, or a token to the
+// vault's token account (created if missing, paid by the owner). Refuses a
+// wallet that holds less.
+async function depositIxs(connection, c, { owner, vault, token, amount }) {
   const t = own(c.tokens, token);
   if (!t) throw new Invalid(`token ${token}`);
   const from = new PublicKey(owner), to = new PublicKey(vault), raw = toRaw(amount, t.decimals);
-  const tx = new Transaction();
   if (t.native) {
     const have = BigInt(await connection.getBalance(from, 'confirmed'));
     if (have < raw + 10_000n) throw new Invalid(`your wallet holds ${fromRaw(have, 9)} SOL; the deposit needs ${amount} and a fee`);
-    tx.add(SystemProgram.transfer({ fromPubkey: from, toPubkey: to, lamports: raw }));
-  } else {
-    const mint = new PublicKey(t.mint);
-    const program = (await connection.getAccountInfo(mint)).owner;
-    const src = spl.getAssociatedTokenAddressSync(mint, from, false, program);
-    const dst = spl.getAssociatedTokenAddressSync(mint, to, true, program);
-    const acct = await connection.getAccountInfo(src);
-    const have = acct ? spl.unpackAccount(src, acct, program).amount : 0n;
-    if (have < raw) throw new Invalid(`your wallet holds ${fromRaw(have, t.decimals)} ${token}; the deposit is ${amount}`);
-    tx.add(spl.createAssociatedTokenAccountIdempotentInstruction(from, dst, to, mint, program),
-      spl.createTransferCheckedInstruction(src, mint, dst, from, raw, t.decimals, [], program));
+    return [SystemProgram.transfer({ fromPubkey: from, toPubkey: to, lamports: raw })];
   }
+  const mint = new PublicKey(t.mint);
+  const program = (await connection.getAccountInfo(mint)).owner;
+  const src = spl.getAssociatedTokenAddressSync(mint, from, false, program);
+  const dst = spl.getAssociatedTokenAddressSync(mint, to, true, program);
+  const acct = await connection.getAccountInfo(src);
+  const have = acct ? spl.unpackAccount(src, acct, program).amount : 0n;
+  if (have < raw) throw new Invalid(`your wallet holds ${fromRaw(have, t.decimals)} ${token}; the deposit is ${amount}`);
+  return [spl.createAssociatedTokenAccountIdempotentInstruction(from, dst, to, mint, program),
+    spl.createTransferCheckedInstruction(src, mint, dst, from, raw, t.decimals, [], program)];
+}
+
+// The deposit the owner signs (depositIxs), one transaction.
+export async function depositTxs(connection, c, { owner, vault, token, amount }) {
+  const tx = new Transaction().add(...await depositIxs(connection, c, { owner, vault, token, amount }));
   const { blockhash } = await connection.getLatestBlockhash('confirmed');
-  tx.feePayer = from;
+  tx.feePayer = new PublicKey(owner);
   tx.recentBlockhash = blockhash;
   return { summary: `deposit ${amount} ${token} into your vault ${vault}`, transactions: [asWire(tx)] };
 }
@@ -189,8 +304,11 @@ export function requestEnv(row, venue, keys) {
 // Withdraw (to the owner's own wallet; token ALL: everything, its accounts
 // closed), close (every venue's positions, into the vault), revoke or
 // approve (every venue's policies), as cli.mjs request builds them, each
-// with a fresh blockhash. A close of a vault without positions is no
-// transaction. The last argument (tests): the request builders and the position reader.
+// with a fresh blockhash. An approve with `token` and `amount` (a re-grant
+// with more capital) carries the deposit too, after every policy, in as few
+// transactions as fit: one wallet approval for both. A close of a vault
+// without positions is no transaction. The last argument (tests): the
+// request builders and the position reader.
 export async function ownerTxs(connection, c, row, keys, { action, owner, token, amount }, { request = buildRequest, rulesRequest = buildRules, positions = vaultPositions } = {}) {
   const venues = Object.keys(row.venues);
   let parts;
@@ -218,9 +336,14 @@ export async function ownerTxs(connection, c, row, keys, { action, owner, token,
     // request, new policies first (cli.mjs rulesRequest)
     const r = await rulesRequest(action, { connection, settings: row.settings, owner: new PublicKey(owner), payer: keys.payer.publicKey,
       policyKey: keys.policyKey.publicKey, venues: venues.map(venue => ({ venue, ...row.venues[venue] })) });
-    if (action === 'approve') await affordsRules(connection, owner, r.steps);
+    const t = action === 'approve' && token ? own(c.tokens, token) : null;
+    if (action === 'approve' && token && !t) throw new Invalid(`token ${token}`);
+    const deposit = t ? await depositIxs(connection, c, { owner, vault: sq.vaultPda(new PublicKey(row.settings)), token, amount }) : [];
+    const groups = packSteps([...r.groups, ...(deposit.length ? [deposit] : [])], new PublicKey(owner));
+    if (action === 'approve') await affordsRules(connection, owner, r.steps, t?.native ? toRaw(amount, 9) : 0n);
     const { blockhash } = await connection.getLatestBlockhash('confirmed');
-    return { summary: r.summary, transactions: r.groups.map(ixs => {
+    const summary = r.summary + (t ? `; then deposit ${amount} ${token} into your vault` : '');
+    return { summary, transactions: groups.map(ixs => {
       const tx = new Transaction().add(...ixs);
       tx.feePayer = new PublicKey(owner);
       tx.recentBlockhash = blockhash;
@@ -247,13 +370,13 @@ export async function ownerTxs(connection, c, row, keys, { action, owner, token,
 // checks both bounds and that the owner spends less than asked for.
 export const POLICY_ACCOUNT_BYTES = 1536;
 export const POLICY_GROWTH_BYTES = 256;
-export async function affordsRules(connection, owner, steps) {
+export async function affordsRules(connection, owner, steps, extra = 0n) {
   const created = steps.filter(s => s.kind === 'create').length;
   const rentOf = async (n) => BigInt(await connection.getMinimumBalanceForRentExemption(n));
   const floor = await rentOf(0);
   const grow = (await rentOf(POLICY_GROWTH_BYTES)) - floor;
   const need = BigInt(created) * await rentOf(POLICY_ACCOUNT_BYTES) + BigInt(steps.length - created) * grow
-    + BigInt(steps.length) * 10_000n + floor;
+    + BigInt(steps.length) * 10_000n + floor + extra;
   const have = BigInt(await connection.getBalance(new PublicKey(owner), 'confirmed'));
   if (have < need) {
     throw new Invalid(`your wallet holds ${fromRaw(have, 9)} SOL; approving needs ${fromRaw(need, 9)} `
@@ -353,7 +476,8 @@ export async function broadcast(connection, base64) {
   try {
     return await connection.sendRawTransaction(raw, { maxRetries: 5 });
   } catch (e) {
-    throw new Invalid(`the network refused the transaction: ${String(e.message).split('\n')[0].slice(0, 200)}`);
+    // the program's own error, decoded, and its last log lines (a simulation refusal names nothing else)
+    throw new Invalid(`the network refused the transaction: ${signerError(e).slice(0, 400)}`);
   }
 }
 

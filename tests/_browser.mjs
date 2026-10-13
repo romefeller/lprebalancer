@@ -51,12 +51,22 @@ export function edSign(key, bytes) {
 }
 
 // A Solana wallet in the page: `owner` signs; `send(tx)` lands a signed
-// transaction (the fork) and returns its signature. `mode`: {offchain: sign
-// messages as a Ledger does (the off-chain message), reject: decline}.
+// transaction (the fork) and returns its signature. It signs a set of
+// transactions in one request (Wallet Standard signTransaction with several
+// inputs, as Phantom does: one approval, logged once as 'signAll'), which the
+// page then sends. `mode`: {offchain: sign messages as a Ledger does (the
+// off-chain message), reject: decline, noSignAll: a wallet that only signs and
+// sends one at a time}.
 export async function solanaWallet(context, owner, send, mode = {}) {
   const log = [];
   await context.exposeFunction('__testWallet', async (kind, b64) => {
     if (mode.reject) return { error: 'User rejected the request.' };
+    if (kind === 'signAll') {
+      const txs = JSON.parse(b64).map(t => Transaction.from(Buffer.from(t, 'base64')));
+      for (const tx of txs) tx.partialSign(owner);
+      log.push({ kind, txs });
+      return { signed: JSON.stringify(txs.map(tx => tx.serialize({ requireAllSignatures: false }).toString('base64'))) };
+    }
     const bytes = Buffer.from(b64, 'base64');
     if (kind === 'message') {
       const { offchainShort } = await import('../onboard/intent.mjs');
@@ -70,7 +80,7 @@ export async function solanaWallet(context, owner, send, mode = {}) {
     // `send` answers the base58 signature, as a node does; the wallet hands the page its bytes
     try { return { signature: Buffer.from(bs58.decode(await send(tx))).toString('base64') }; } catch (e) { return { error: String(e.message).split('\n')[0] }; }
   });
-  await context.addInitScript(({ address }) => {
+  await context.addInitScript(({ address, signAll }) => {
     const b64 = (u) => btoa(String.fromCharCode(...u));
     const unb64 = (s) => Uint8Array.from(atob(s), c => c.charCodeAt(0));
     const call = async (kind, bytes) => {
@@ -91,9 +101,14 @@ export async function solanaWallet(context, owner, send, mode = {}) {
           const r = await call('tx', transaction);
           return [{ signature: unb64(r.signature) }];
         } },
+        ...(signAll ? { 'solana:signTransaction': { version: '1.0.0', supportedTransactionVersions: ['legacy', 0], signTransaction: async (...inputs) => {
+          const r = await window.__testWallet('signAll', JSON.stringify(inputs.map(i => b64(i.transaction))));
+          if (r.error) throw Object.assign(new Error(r.error), /reject/i.test(r.error) ? { code: 4001 } : {});
+          return JSON.parse(r.signed).map(s => ({ signedTransaction: unb64(s) }));
+        } } } : {}),
       } };
     window.addEventListener('wallet-standard:app-ready', (e) => e.detail.register(wallet));
-  }, { address: owner.publicKey.toBase58() });
+  }, { address: owner.publicKey.toBase58(), signAll: !mode.noSignAll });
   return log;
 }
 

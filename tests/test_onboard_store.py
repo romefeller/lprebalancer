@@ -210,7 +210,7 @@ class Store(unittest.TestCase):
     def test_nothing_is_written_when_any_part_is_refused(self):
         cases = [({'conn': connected(owners=[PROFIT])}, 'not the signer'),
                  ({'conn': connected(owners=[OWNER, PROFIT])}, 'not the signer'),
-                 ({'conn': connected(sent=False)}, 'dry run'),
+                 ({'conn': connected(sent=False)}, 'not a finished vault'),
                  ({'template': 'nope'}, 'template profile nope not found'),
                  ({'wallet_id': 'ob-two-vault'}, 'differs from the signed request'),
                  ({'profile': {'name': 'ob-two'}}, 'differs from the signed request'),
@@ -289,6 +289,50 @@ class Store(unittest.TestCase):
             store.run('resume', {'id': i})
         self.assertEqual(store.run('connected', {'id': i, 'connected': connected(vault=LOOKUP)}), {'saved': False},
                          'a registered request keeps its vault')
+
+    def test_a_request_keeps_its_planned_vault_and_is_planned_again_while_it_waits(self):
+        plan = {'planned': {'seed': '42', 'settings': SETTINGS, 'vault': VAULT}}
+        i = begin(pay=False, signature='', connected=plan)
+        o = row('select signature, connected, state from onboard where id = %s', i)
+        self.assertEqual((o['signature'], o['connected'], o['state']), ('', plan, 'signed'), 'no message signature: the set-up is the owner\'s')
+        self.assertIsNone(row('select connected from onboard where id = %s', begin('ob-two', nonce='n2', pay=False))['connected'])
+        # planned again: a fresh seed, today's gas and deposit, the name held longer
+        later = (time.time() + 900) * 1000
+        new = {'planned': {'seed': '43', 'settings': LOOKUP, 'vault': PROFIT}}
+        self.assertEqual(store.run('planned', {'id': i, 'connected': new, 'gas': '0.1186', 'deposit': '1.3814', 'expires': later}), {'planned': True})
+        o = row('select connected, gas, deposit, extract(epoch from expires_at) e from onboard where id = %s', i)
+        self.assertEqual((o['connected'], str(o['gas']), str(o['deposit'])), (new, '0.1186', '1.3814'))
+        self.assertAlmostEqual(float(o['e']), later / 1000, places=2)
+        # only while it waits for its set-up
+        store.run('paid', {'id': i, 'payment': 'P1'})
+        with self.assertRaisesRegex(store.Refused, 'not waiting for its set-up'):
+            store.run('planned', {'id': i, 'connected': new, 'gas': '1', 'deposit': '1', 'expires': later})
+        with self.assertRaisesRegex(store.Refused, 'not waiting for its set-up'):
+            store.run('planned', {'id': 999999, 'connected': new, 'gas': '1', 'deposit': '1', 'expires': later})
+
+    def test_an_expired_request_takes_its_name_back_only_when_it_is_free(self):
+        # tang0 (2026-10-13): a request signed under the old flow, expired, its owner back days later
+        old = begin(pay=False, expires_in=-60)
+        plan = {'planned': {'seed': '7', 'settings': SETTINGS, 'vault': VAULT}}
+        later = (time.time() + 600) * 1000
+        self.assertEqual(store.run('planned', {'id': old, 'connected': plan, 'gas': '0.1186', 'deposit': '1.3814', 'expires': later}), {'planned': True})
+        self.assertTrue(store.run('taken', {'name': 'ob-one', 'wallet_id': 'x'})['taken'], 'held again')
+        self.assertEqual(row('select state from onboard where id = %s', old)['state'], 'signed')
+        # another took the name while it was free: refused, nothing written
+        clean(), templates()
+        old = begin(pay=False, expires_in=-60)
+        other = begin(nonce='other', owner=PROFIT, pay=False)          # the expired one gave its name up
+        self.assertEqual(row('select state from onboard where id = %s', old)['state'], 'failed')
+        with self.assertRaisesRegex(store.Refused, 'not waiting for its set-up'):
+            store.run('planned', {'id': old, 'connected': plan, 'gas': '1', 'deposit': '1', 'expires': later})
+        # one expired, not yet given up, whose wallet id another request took meanwhile
+        clean(), templates()
+        old = begin(pay=False, expires_in=-60)
+        begin('ob-two', nonce='n2', wallet_id='ob-one-vault', owner=PROFIT, pay=False)
+        with self.assertRaisesRegex(store.Refused, 'was taken while this request waited'):
+            store.run('planned', {'id': old, 'connected': plan, 'gas': '1', 'deposit': '1', 'expires': later})
+        self.assertIsNone(row('select connected from onboard where id = %s', old)['connected'])
+        self.assertTrue(other)
 
     def test_vaults_per_owner(self):
         self.assertEqual(store.run('owned', {'owner': OWNER}), {'count': 0})

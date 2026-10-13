@@ -20,21 +20,23 @@
     "  tokens          what an owner can deposit. Solana: mintKey names a solana.json key. EVM:",
     "                  the chain module's export of that name; native: the chain's coin, which",
     "                  the page wraps first (wrapsTo) because a vault never wraps",
-    "  gas             what the owner pays the bot's key, in the native coin, before the bot spends",
-    "                  anything: setup (one connect, measured on a fork: Solana 2026-10-11 0.03282 SOL",
-    "                  for create, 3 policies (Meteora), leave, lookup table with 2 payout wallets;",
-    "                  2026-10-12 Raydium 0.02745, see approveVenues; Polygon",
-    "                  1,872,109 gas = 0.347 POL at 185 gwei), a margin over it (fees and gas prices",
-    "                  move), and the instance's running gas (Solana: gas_reserve_sol 0.05 + the DLMM",
-    "                  open headroom 0.05). confirmations (EVM): blocks a payment needs on top",
+    "  gas             what the owner pays the bot's key, in the native coin, in the same approval as",
+    "                  the set-up: setup (what the bot spends to finish it. Solana: the vault's lookup",
+    "                  table, measured on a fork 2026-10-13: Raydium 0.00641 SOL, Meteora 0.00574,",
+    "                  Orca 0.00574, Byreal 0.00596; the owner's wallet pays the vault's and the",
+    "                  policies' rent itself, Raydium 0.0207 SOL. Polygon: the owner deploys the Safe",
+    "                  itself and pays its gas, about 1.84M gas = 0.34 POL at 185 gwei, so the bot's",
+    "                  setup is 0), a margin over it (fees and gas prices move), and the instance's",
+    "                  running gas (Solana: gas_reserve_sol 0.05 + the DLMM open headroom 0.05).",
+    "                  confirmations (EVM): blocks a payment needs on top",
     "  tokens.min      the least pool capital; a native deposit must also cover the gas",
-    "  tokens.fees     the native coin the page's Max keeps back for the owner's own transactions",
-    "                  with this token: the gas payment and the deposit. Solana: two signatures",
-    "                  (0.00001), the wallet's rent-exempt floor (0.00089088: a System account may",
-    "                  not drop below it unless it is empty) and, for a token, the vault's token",
-    "                  account the deposit creates (0.00203928), with room for a priority fee.",
-    "                  Polygon: the gas of the payment, the wrap and the transfer (a token: the",
-    "                  payment and the transfer) at 500 gwei. Max of a token takes the whole",
+    "  tokens.fees     the native coin the page's Max keeps back for the owner's own set-up with",
+    "                  this token (onboard/solana.mjs setupCost, the bounds it checks): Solana, the",
+    "                  vault's rent (settings 256 bytes and two policies of 1536: 0.02583), two",
+    "                  signatures, the wallet's rent-exempt floor (0.00089088) and, for a token, the",
+    "                  vault's token account (0.00203928): 0.0268 SOL, 0.0289 with a token, with room.",
+    "                  Polygon: the Safe, its Roles set-up, the wrap, the transfer and the gas payment,",
+    "                  about 2.0M gas, at 500 gwei (a token: no wrap). Max of a token takes the whole",
     "                  balance; the native coin must then hold the bot's gas and these fees",
     "",
     "intentTtlS: how long a message to sign is good for; paymentSlackS: how much older than the",
@@ -98,10 +100,10 @@
       "botKeys": ["5qJSPE7LuK1L47wUSo2356gaViZsTcbqQQkywmgDaiFw", "5qz5VvXh6qN2T4kshPMHwHGyuZKLGdrQdMofvq3qxRC8"],
       "payerKeyEnv": "LPBOT_VAULT_SOL_PAYER_PATH",
       "policyKeyEnv": "LPBOT_VAULT_SOL_POLICY_PATH",
-      "gas": { "setup": "0.0329", "margin": "0.0121", "reserve": "0.1" },
+      "gas": { "setup": "0.0065", "margin": "0.0121", "reserve": "0.1" },
       "tokens": {
-        "SOL": { "mintKey": "native_mint", "native": true, "decimals": 9, "min": "0.02", "max": "50", "fees": "0.001" },
-        "USDC": { "mintKey": "usdc_mint", "decimals": 6, "min": "10", "max": "10000", "fees": "0.003" }
+        "SOL": { "mintKey": "native_mint", "native": true, "decimals": 9, "min": "0.02", "max": "50", "fees": "0.03" },
+        "USDC": { "mintKey": "usdc_mint", "decimals": 6, "min": "10", "max": "10000", "fees": "0.032" }
       }
     },
     "polygon": {
@@ -114,11 +116,11 @@
       "payoutToken": "USDT0",
       "botKeys": ["0xd444E30ceD354dBB87d5fF9Df1CdAeFc55DeEBc3"],
       "keyEnv": "LPBOT_VAULT_EVM_KEY_PATH",
-      "gas": { "setup": "0.35", "margin": "0.65", "reserve": "3", "confirmations": 5 },
+      "gas": { "setup": "0", "margin": "0", "reserve": "3", "confirmations": 5 },
       "tokens": {
-        "POL": { "native": true, "wrapsTo": "WPOL", "decimals": 18, "min": "20", "max": "100000", "fees": "0.1" },
-        "WPOL": { "decimals": 18, "min": "20", "max": "100000", "fees": "0.05" },
-        "USDT0": { "decimals": 6, "min": "10", "max": "10000", "fees": "0.05" }
+        "POL": { "native": true, "wrapsTo": "WPOL", "decimals": 18, "min": "20", "max": "100000", "fees": "1" },
+        "WPOL": { "decimals": 18, "min": "20", "max": "100000", "fees": "1" },
+        "USDT0": { "decimals": 6, "min": "10", "max": "10000", "fees": "1" }
       }
     }
   }

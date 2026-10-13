@@ -4,13 +4,15 @@
 //
 //   node onboard/verify.mjs --commit <sha> --paste '<what the page copied>'
 //   node onboard/verify.mjs --commit <sha> --from https://romefeller.app/bot --invite <code>
-//        --name <vault name> --owner <your wallet> --action approve|revoke|close|withdraw
+//        --name <vault name> --owner <your wallet> --action setup|approve|revoke|close|withdraw
 //        [--token SOL|USDC|ALL --amount <n>|all] [--chain solana|polygon]
+//        setup (Solana): the set-up of a request still waiting for it, as one set
 //   --rpc <url>   Solana: also read the vault from the chain (default: the public endpoint;
 //                 --rpc none skips it): your wallet must be its only owner, each policy the
 //                 transaction names must be one of its policies.
 //
-// The page's "Copy the transaction" button copies {chain, tx, expect}. The
+// The page's "Copy the transaction" button copies {chain, tx, expect}, or for
+// what the wallet approves at once {chain, parts: [{tx: [...], expect}]}. The
 // rules (rules.json), the pools (solana.json) and the bot's keys
 // (onboard.json) come from `git show <commit>:<file>`, not from this
 // checkout or the server. Exit status 0 only when every transaction checks.
@@ -19,7 +21,7 @@ import crypto from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'module';
-import { decodeSol } from './decode_sol.mjs';
+import { decodeSol, decodeSolSet } from './decode_sol.mjs';
 import { decodeEvm } from './decode_evm.mjs';
 import { toRaw } from './units.mjs';
 import * as sq from '../chains/solana/vault/squads.mjs';
@@ -54,7 +56,10 @@ export function pinsOf(rulesText, solanaText, onboardText, polygon) {
     solana: { payer: sol.botKeys[0], policyKey: sol.botKeys[1], operator: solana[sol.operatorWallet],
       pools: Object.fromEntries(Object.entries(solana[sol.poolsKey]).map(([v, p]) => [v, [p]])), rules, solana },
     polygon: { chainId: polygon.CHAIN_ID, botKey: poly.botKeys[0], npm: polygon.V3.npm, wrapped: { WPOL: polygon.WPOL },
-      tokens: Object.fromEntries(Object.entries(poly.tokens).map(([s, t]) => [s, { address: t.native ? null : polygon[s], decimals: t.decimals }])) },
+      tokens: Object.fromEntries(Object.entries(poly.tokens).map(([s, t]) => [s, { address: t.native ? null : polygon[s], decimals: t.decimals }])),
+      // the owner's own vault, as the page's bundle pins it (onboard/web/build.mjs)
+      vault: { ...polygon.VAULT }, router: polygon.V3.router, stables: [...polygon.STABLES], venue: polygon.DEX,
+      pool: { token0: polygon.WPOL, token1: polygon.USDT0, fee: 500 } },
   };
 }
 
@@ -63,7 +68,8 @@ export async function chainProblems(connection, expect) {
   const out = [];
   if (!expect.settings) return out;
   const info = await connection.getAccountInfo(new PublicKey(expect.settings), 'confirmed');
-  if (!info) return [`the settings account ${expect.settings} does not exist`];
+  // a set-up creates the vault: none yet is as it should be
+  if (!info) return expect.kind === 'setup' ? [] : [`the settings account ${expect.settings} does not exist`];
   const s = sq.decodeSettings(info.data);
   const owners = s.signers.map(x => x.key.toBase58());
   if (owners.length !== 1 || owners[0] !== expect.owner || s.threshold !== 1) out.push(`the vault's owners are ${owners.join(', ')} (threshold ${s.threshold}), not your wallet alone`);
@@ -71,18 +77,31 @@ export async function chainProblems(connection, expect) {
   const policies = Object.values(expect.policies ?? {}).flat();
   const infos = policies.length ? await connection.getMultipleAccountsInfo(policies.map(p => new PublicKey(p)), 'confirmed') : [];
   infos.forEach((p, i) => {
+    if (!p && expect.kind === 'setup') return;
     if (!p) out.push(`policy ${policies[i]} does not exist`);
     else if (!sq.decodePolicyHead(p.data).settings.equals(new PublicKey(expect.settings))) out.push(`policy ${policies[i]} belongs to another vault`);
   });
   return out;
 }
 
-// Each transaction checked: {lines, problems} per transaction.
+// Each transaction checked: {lines, problems} per transaction. A list (a set
+// the wallet approves at once) is checked as a whole.
 export function check(chain, txs, expectOf, pins) {
-  return txs.map((tx, i) => (chain === 'solana' ? decodeSol(tx, expectOf(i), { ...pins.solana }) : decodeEvm(tx, expectOf(i), pins.polygon)));
+  return txs.map((tx, i) => (chain === 'solana' ? (Array.isArray(tx) ? decodeSolSet : decodeSol)(tx, expectOf(i), { ...pins.solana })
+    : decodeEvm(tx, expectOf(i), pins.polygon)));
 }
 
-async function fromServer(f, pins) {
+// The expectation of a Solana set-up, from the server's answer (terms and
+// planned vault), as the page builds it. Pure.
+export function setupExpectOf(it, owner, pins) {
+  const t = it.terms, ctx = it.context, venues = Object.keys(ctx.report?.venues ?? {});
+  const mint = { SOL: pins.solana.solana.native_mint, USDC: pins.solana.solana.usdc_mint }[t.token];
+  return { kind: 'setup', owner, seed: ctx.seed, settings: ctx.settings, vault: ctx.vault, venues,
+    pools: Object.fromEntries(venues.map(v => [v, ctx.report.venues[v].pools])), payoutWallets: [t.profitWallet, ...(t.feeWallet ? [t.feeWallet] : [])],
+    mint, raw: toRaw(t.deposit, { SOL: 9, USDC: 6 }[t.token]).toString(), gasRaw: toRaw(t.gas, 9).toString() };
+}
+
+export async function fromServer(f, pins) {
   const post = async (p, body) => {
     const r = await fetch(new URL(`api/${p}`, f.from.replace(/\/?$/, '/')), { method: 'POST', headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ invite: f.invite, ...body }) });
@@ -91,6 +110,13 @@ async function fromServer(f, pins) {
     return j;
   };
   const chain = f.chain ?? 'solana';
+  if (f.action === 'setup') {
+    if (chain !== 'solana') throw new Error('--action setup: Solana (a Polygon set-up: paste what the page copied)');
+    const it = await post('setup', { name: f.name });
+    if (it.done) throw new Error('the set-up is on chain already: nothing to sign');
+    const expect = setupExpectOf(it, f.owner, pins);
+    return { chain, txs: [it.transactions], expect: () => expect };
+  }
   const req = { name: f.name, action: f.action, token: f.token, amount: f.amount };
   const txs = [];
   let answer = await post('tx', { ...req, index: 0 });
@@ -117,7 +143,8 @@ export async function main(argv = process.argv.slice(2), { git, connection } = {
   let job;
   if (f.paste) {
     const p = JSON.parse(f.paste);
-    job = { chain: p.chain, txs: [p.tx], expect: () => p.expect };
+    job = p.parts ? { chain: p.chain, txs: p.parts.map(x => x.tx), expect: (i) => p.parts[i].expect }
+      : { chain: p.chain, txs: [p.tx], expect: () => p.expect };
   } else {
     for (const k of ['from', 'invite', 'name', 'owner', 'action']) if (!f[k]) throw new Error(`--${k} is needed with --from`);
     job = await fromServer(f, pins);

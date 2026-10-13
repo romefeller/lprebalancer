@@ -1,13 +1,15 @@
 // The whole Polygon onboarding on an anvil fork of Polygon, on the real Safe,
 // Zodiac Roles and Uniswap v3 contracts: the page in Chromium with an injected
 // EIP-1193 wallet (the owner's key), onboard/server.mjs, and the test
-// database. The owner signs one message (personal_sign) and pays the bot's
-// key the gas in POL; the server checks that payment on chain before the bot
-// spends anything; the bot creates the Safe; the wallet wraps POL and
-// deposits the WPOL; the profile starts. Bad payments are refused; the owner
-// withdraws, revokes, gives the rules back and withdraws all from the page. A
-// second owner presses Max and signs with what it filled: its POL less the
-// fees kept back for its own three transactions. Skipped when anvil or
+// database. The owner's wallet deploys its own Safe, sets up the bot's Roles
+// module and role, wraps POL, deposits the WPOL and pays the bot's key its
+// gas, last: with EIP-5792 (wallet_sendCalls) in one approval, else one by
+// one. No message is signed; the bot sends nothing for the vault. The server
+// checks the vault and the gas payment on chain before it registers; the
+// profile starts. Bad payments are refused; the owner withdraws, revokes,
+// gives the rules back and withdraws all from the page. A second owner, its
+// wallet without wallet_sendCalls, presses Max and goes with what it filled:
+// its POL less the fees kept back for its own set-up. Skipped when anvil or
 // Chromium is missing, or anvil cannot fork.
 //
 // Safety: every client points at the local anvil, and the test checks the
@@ -55,16 +57,37 @@ const mine = (n) => rpc('anvil_mine', [`0x${n.toString(16)}`]);
 
 // The wallet a page sees: EIP-1193 over the owner's key, on the fork. Each
 // send is followed by `blocks` more blocks, as a chain moves on.
-function provider(name, blocks = 5) {
+function provider(name, blocks = 5, { sendCalls = false } = {}) {
   const w = walletOf(name);
+  const batches = new Map();
   return {
-    sent: [],
+    sent: [], approvals: 0,
     async request({ method, params }) {
+      if (method === 'wallet_sendCalls' && !sendCalls) throw Object.assign(new Error('the method wallet_sendCalls does not exist / is not available'), { code: -32601 });
+      if (method === 'wallet_sendCalls') {
+        // one approval, the calls in order, each mined before the next (the set-up needs the Safe the first makes)
+        this.approvals++;
+        const hashes = [];
+        for (const t of params[0].calls) {
+          const hash = await w.sendTransaction({ to: t.to, data: t.data, value: BigInt(t.value ?? 0) });
+          await pub.waitForTransactionReceipt({ hash });
+          hashes.push(hash);
+        }
+        await mine(blocks);
+        this.sent.push(...hashes);
+        const id = `0x${crypto.randomBytes(32).toString('hex')}`;
+        batches.set(id, hashes);
+        return { id };
+      }
+      if (method === 'wallet_getCallsStatus') {
+        return { version: '2.0.0', status: 200, atomic: false, receipts: batches.get(params[0]).map(h => ({ transactionHash: h, status: '0x1' })) };
+      }
       if (method === 'eth_requestAccounts') return [acct[name].address];
       if (method === 'eth_chainId') return '0x89';
       if (method === 'wallet_switchEthereumChain') return null;
       if (method === 'personal_sign') return acct[name].signMessage({ message: { raw: params[0] } });
       if (method === 'eth_sendTransaction') {
+        this.approvals++;
         const [t] = params;
         const hash = await w.sendTransaction({ to: t.to, data: t.data, value: BigInt(t.value ?? 0) });
         await pub.waitForTransactionReceipt({ hash });
@@ -99,7 +122,7 @@ test.after(() => { anvil?.kill(); return B?.close(); });
 
 const B = await browser();
 
-test('fork (Polygon): pay the gas in POL, sign once, Safe and profile, wrap and deposit, start; bad payments; the page: add, withdraw, revoke, add again, withdraw all', { timeout: 900_000 }, async (t) => {
+test('fork (Polygon): the owner\'s own Safe and the bot\'s role, the deposit and the gas, one approval; bad payments; the page: add, withdraw, revoke, add again, withdraw all', { timeout: 900_000 }, async (t) => {
   if (!anvilPath) return t.skip('anvil not installed');
   if (!B) return t.skip('Chromium is not installed');
   if (!anvil) return t.skip('anvil could not fork Polygon');
@@ -129,66 +152,82 @@ test('fork (Polygon): pay the gas in POL, sign once, Safe and profile, wrap and 
   };
   let page, page3;
   try {
-    // --- 1. bad payments first: a request signed over the API (owner2), then refused payments ---
-    const it = (await post('intent', { chain: 'polygon', owner: acct.owner2.address, token: 'USDT0', amount: '10',
-      profitWallet: acct.owner2.address, name: NAME2 })).json;
-    assert.match(it.message, new RegExp(`Gas to the bot: 4 POL, paid now to the bot's key ${acct.bot.address}`));
-    assert.equal((await post('sign', { nonce: it.nonce, message: it.message, signature: await acct.owner2.signMessage({ message: it.message }) })).status, 400,
-      'the owner holds no USDT0 for the deposit: no name is held, nothing is spent');
+    // --- 1. over the API (owner2): a set-up the owner sends itself, then refused payments ---
+    const short = await post('intent', { chain: 'polygon', owner: acct.owner2.address, token: 'USDT0', amount: '10',
+      profitWallet: acct.owner2.address, name: NAME2 });
+    assert.equal(short.status, 400, 'the owner holds no USDT0 for the deposit: no name is held, nothing is built');
+    assert.equal(json(`select to_json(count(*)) from rebalancer.onboard where name = '${NAME2}'`), 0);
     const it2 = (await post('intent', { chain: 'polygon', owner: acct.owner2.address, token: 'POL', amount: '30',
       profitWallet: acct.owner2.address, name: NAME2 })).json;
-    const sg = await post('sign', { nonce: it2.nonce, message: it2.message, signature: await acct.owner2.signMessage({ message: it2.message }) });
-    assert.equal(sg.status, 200, JSON.stringify(sg.json));
-    assert.deepEqual(sg.json.transactions, [{ to: acct.bot.address, data: '0x', value: `0x${(4n * E18).toString(16)}` }]);
-    const send = async (from, to, value, blocks = 5) => {
-      const hash = await walletOf(from).sendTransaction({ to, value });
+    assert.deepEqual([it2.terms.gas, it2.terms.deposit, it2.chainId], ['3', '27', 137]);
+    assert.equal(it2.calls.setup.length, 2, 'the Safe, then its Roles set-up');
+    assert.equal(it2.calls.fund.length, 3, 'the wrap, the deposit, the bot\'s gas last');
+    assert.equal(it2.calls.fund[2].to, acct.bot.address);
+    const sendTx = async (from, t, blocks = 5) => {
+      const hash = await walletOf(from).sendTransaction({ to: t.to, data: t.data ?? '0x', value: BigInt(t.value ?? 0) });
       await pub.waitForTransactionReceipt({ hash });
       if (blocks) await mine(blocks);
       return hash;
     };
+    const send = (from, to, value, blocks = 5) => sendTx(from, { to, value }, blocks);
     const botBefore = await pub.getBalance({ address: acct.bot.address });
-    const pay = (payment) => post('pay', { name: NAME2, payment });
-    const fresh = await send('owner2', acct.bot.address, 4n * E18, 0);
-    assert.equal((await pay(fresh)).status, 409, 'one block: not confirmed yet');
-    assert.equal((await pay(`0x${'ab'.repeat(32)}`)).status, 409, 'not on chain');
-    for (const [hash, re] of [[await send('owner2', acct.bot.address, 4n * E18 - 1n), /less than 4/],
-      [await send('stranger', acct.bot.address, 4n * E18), /not from the owner/],
-      [await send('owner2', acct.stranger.address, 4n * E18), /does not go to the bot's key/],
+    const botNonce = await pub.getTransactionCount({ address: acct.bot.address });
+    const pay = (payment, deposit) => post('pay', { name: NAME2, payment, deposit });
+    const none = await pay(null);
+    assert.equal(none.status, 409, 'nothing on chain yet');
+    await sendTx('owner2', it2.calls.setup[0]);
+    const half = await pay(null);
+    assert.equal(half.status, 409, 'the Safe without its Roles set-up');
+    assert.match(half.json.error, /not all on chain yet/);
+    await sendTx('owner2', it2.calls.setup[1]);
+    assert.equal((await pay(null)).status, 409, 'the vault is whole; its gas is not paid');
+    await sendTx('owner2', it2.calls.fund[0]);
+    const deposit2 = await sendTx('owner2', it2.calls.fund[1]);
+    const fresh = await sendTx('owner2', it2.calls.fund[2], 0);
+    assert.equal((await pay(fresh, deposit2)).status, 409, 'one block: not confirmed yet');
+    assert.equal((await pay(`0x${'ab'.repeat(32)}`)).status, 409, `not on chain ${JSON.stringify(logs.filter(l => l.event === 'error'))}`);
+    for (const [hash, re] of [[await send('owner2', acct.bot.address, 3n * E18 - 1n), /less than 3/],
+      [await send('stranger', acct.bot.address, 3n * E18), /not from the owner/],
+      [await send('owner2', acct.stranger.address, 3n * E18), /does not go to the bot's key/],
       ['0x1234', /not a transaction hash/]]) {
       const r = await pay(hash);
       assert.equal(r.status, 400, `${hash} ${JSON.stringify(r.json)}`);
       assert.match(r.json.error, re);
     }
     await mine(5);
-    assert.equal((await pay(fresh)).status, 200, 'confirmed now: the setup runs');
-    // received: the fresh payment, the short one and the stranger's; spent: one setup
-    const spent = botBefore + 12n * E18 - 1n - await pub.getBalance({ address: acct.bot.address });
-    t.diagnostic(`one Polygon setup cost ${Number(spent) / 1e18} POL at the fork's gas price`);
-    assert.ok(spent > 0n && spent <= 10n ** 18n, 'within the setup and its margin (1 POL)');
-    assert.equal(json(`select to_json(state) from rebalancer.onboard where name = '${NAME2}'`), 'registered');
+    const paid = await pay(fresh, deposit2);
+    assert.equal(paid.status, 200, JSON.stringify(paid.json));
+    // the bot only received (the payment, the short one and the stranger's) and sent nothing
+    assert.equal(await pub.getBalance({ address: acct.bot.address }), botBefore + 9n * E18 - 1n, 'the bot spent nothing');
+    assert.equal(await pub.getTransactionCount({ address: acct.bot.address }), botNonce, 'the bot sent no transaction');
+    const o2 = json(`select row_to_json(o) from rebalancer.onboard o where name = '${NAME2}'`);
+    assert.deepEqual([o2.state, o2.signature, o2.payment], ['registered', '', fresh]);
+    assert.deepEqual(await pub.readContract({ address: o2.vault, abi: SAFE_ABI, functionName: 'getOwners' }), [acct.owner2.address]);
+    const dep2 = json(`select coalesce(json_agg(d), '[]') from rebalancer.onboard_deposits d where onboard_id = ${o2.id}`);
+    assert.deepEqual(dep2.map(d => [d.token, Number(d.amount)]), [['WPOL', 27]], 'the deposit read back from the chain');
 
     // --- 2. the page, end to end, in Chromium ------------------------------------------------
-    // one pool per wallet: owner2 has the vault from part 1 and signs for no second
+    // one pool per wallet: owner2 has the vault from part 1 and gets no second
     const second = await post('intent', { chain: 'polygon', owner: acct.owner2.address, token: 'POL', amount: '30',
       profitWallet: acct.owner2.address, name: 'ob-tgp-three' });
     assert.deepEqual([second.status, second.json.error], [403, 'this wallet has its vault already: put more capital in with Add capital under Your vaults']);
     // owner2's payment, replayed for another wallet's request, pays for nothing
     const it3 = (await post('intent', { chain: 'polygon', owner: acct.owner.address, token: 'POL', amount: '30',
       profitWallet: acct.owner.address, name: 'ob-tgp-three' })).json;
-    await post('sign', { nonce: it3.nonce, message: it3.message, signature: await acct.owner.signMessage({ message: it3.message }) });
+    for (const t of it3.calls.setup) await sendTx('owner', t);
     const replay = await post('pay', { name: 'ob-tgp-three', payment: fresh });
     assert.equal(replay.status, 400);
     assert.equal(replay.json.error, `the payment is not from the owner ${acct.owner.address}`);
     clean('ob-tgp-three', 'none');
 
-    const wallet = provider('owner');
+    const wallet = provider('owner', 5, { sendCalls: true });
     ({ page } = await openPage(B, origin, INVITE, { device: PHONE, setup: (ctx) => evmWallet(ctx, wallet) }));
     const click = (sel) => page.locator(sel).click();
     const view = (id) => page.waitForSelector(`#${id}:not([hidden])`, { timeout: 120_000 });
     await page.locator('#chains .tab', { hasText: 'Polygon' }).click();
     await click('#w-injected');
     await view('v-create');
-    assert.match(await page.textContent('#c-bounds'), /From 24 to 100000 POL; 4 POL of it pays the bot's gas/);
+    assert.match(await page.textContent('#c-bounds'), /From 23 to 100000 POL; 3 POL of it pays the bot's gas/);
     await page.selectOption('#c-token', 'POL');
     await page.fill('#c-amount', '30');
     await page.fill('#c-profit', C.operatorWallet.toLowerCase());
@@ -197,21 +236,24 @@ test('fork (Polygon): pay the gas in POL, sign once, Safe and profile, wrap and 
     await click('#c-go');
     let f = await flowDone(page, 600_000);
     // the bot opens nothing here (no loop runs): the last step says so, it does not fail
-    assert.deepEqual(f.steps.map(s => s.state), Array(6).fill('done'), JSON.stringify(f) + JSON.stringify(logs.filter(l => l.event !== 'connect_report').slice(-5)));
+    assert.deepEqual(f.steps.map(s => s.state), Array(5).fill('done'), JSON.stringify(f) + JSON.stringify(logs.filter(l => l.event !== 'connect_report').slice(-5)));
     await shot(page, 'poly-01-created');
-    assert.equal(wallet.sent.length, 3, 'the gas payment, the wrap, the deposit');
+    assert.equal(wallet.approvals, 1, 'ONE approval: wallet_sendCalls');
+    assert.equal(wallet.sent.length, 5, 'the Safe, its Roles set-up, the wrap, the deposit, the gas');
+    assert.match(f.review.join('\n'), /Create your vault .*its only owner/);
+    assert.match(f.review.join('\n'), /Pay 3 POL from your wallet .* to the bot's key/);
     const o = json(`select row_to_json(o) from rebalancer.onboard o where name = '${NAME}'`);
-    assert.deepEqual([o.state, o.payment, o.gas, o.deposit], ['started', wallet.sent[0], 4, 26]);
+    assert.deepEqual([o.state, o.payment, o.gas, o.deposit, o.signature], ['started', wallet.sent[4], 3, 27, '']);
     const safe = o.vault;
     assert.deepEqual(await pub.readContract({ address: safe, abi: SAFE_ABI, functionName: 'getOwners' }), [acct.owner.address]);
-    assert.equal(await balanceOf(U.WPOL, safe), 26n * E18);
+    assert.equal(await balanceOf(U.WPOL, safe), 27n * E18);
     assert.ok(ownerBefore - await pub.getBalance({ address: acct.owner.address }) >= 30n * E18);
     assert.deepEqual(started.at(-1), ['sudo', '-n', '/usr/bin/systemctl', 'enable', '--now', `lp-bot@${NAME}.service`]);
     const c = json(`select row_to_json(c) from rebalancer.config c where name = '${NAME}'`);
     assert.deepEqual([c.dex, c.pool, c.payout_mint, c.deposit_mint], ['uniswap-v3-polygon', C.pool, U.USDT0.toLowerCase(), U.WPOL.toLowerCase()]);
     assert.deepEqual([c.special, c.fee_bps, c.fee_wallet, c.profit_wallet], [true, 0, null, C.operatorWallet], 'the operator\'s own wallet');
     const deposits = json(`select coalesce(json_agg(d), '[]') from rebalancer.onboard_deposits d join rebalancer.onboard o on o.id = d.onboard_id where o.name = '${NAME}'`);
-    assert.deepEqual(deposits.map(d => [d.token, Number(d.amount)]), [['WPOL', 26]], 'the deposit read back from the chain, once');
+    assert.deepEqual(deposits.map(d => [d.token, Number(d.amount)]), [['WPOL', 27]], 'the deposit read back from the chain, once');
 
     // --- 3. add capital, withdraw part, revoke, add capital again, withdraw all ----------------
     await click('#f-done');
@@ -222,8 +264,8 @@ test('fork (Polygon): pay the gas in POL, sign once, Safe and profile, wrap and 
     await click('#sh-go');
     f = await flowDone(page, 600_000);
     assert.ok(f.steps.every(s => s.state === 'done'), JSON.stringify(f));
-    assert.equal(await balanceOf(U.WPOL, safe), 28n * E18, 'into the same vault');
-    assert.equal(wallet.sent.length, 5, 'the wrap and the transfer, no message');
+    assert.equal(await balanceOf(U.WPOL, safe), 29n * E18, 'into the same vault');
+    assert.equal(wallet.sent.length, 7, 'the wrap and the transfer, no message');
     await click('#f-done');
     await view('v-active');
     const owned = await balanceOf(U.WPOL, acct.owner.address);
@@ -234,7 +276,7 @@ test('fork (Polygon): pay the gas in POL, sign once, Safe and profile, wrap and 
     f = await flowDone(page, 600_000);
     assert.deepEqual(f.steps.map(s => [s.label, s.state]), [['Withdraw 7 WPOL', 'done']], JSON.stringify(f));
     assert.match(f.review.join('\n'), /Withdraw 7 WPOL from your vault .* to your wallet/);
-    assert.equal(await balanceOf(U.WPOL, safe), 21n * E18);
+    assert.equal(await balanceOf(U.WPOL, safe), 22n * E18);
     assert.equal(await balanceOf(U.WPOL, acct.owner.address) - owned, 7n * E18);
     await click('#f-done');
     await view('v-active');
@@ -252,11 +294,13 @@ test('fork (Polygon): pay the gas in POL, sign once, Safe and profile, wrap and 
     await page.selectOption('#sh-body select', 'WPOL');
     await page.fill('#sh-body input', '1');
     await rpc('anvil_setBalance', [acct.owner.address, '0x56BC75E2D63100000']);
+    const approvalsBefore = wallet.approvals;
     await click('#sh-go');
     f = await flowDone(page, 600_000);
-    assert.deepEqual(f.steps.map(s => s.state), ['done', 'done', 'done'], JSON.stringify(f));
+    assert.deepEqual(f.steps.map(s => s.state), ['done', 'done'], JSON.stringify(f));
+    assert.equal(wallet.approvals, approvalsBefore + 1, 'the module back and the deposit: one approval');
     assert.equal((await modules()).length, 1, 'the Roles module is back');
-    assert.equal(await balanceOf(U.WPOL, safe), 22n * E18);
+    assert.equal(await balanceOf(U.WPOL, safe), 23n * E18);
     await click('#f-done');
     await view('v-active');
     await click('#a-withdraw');
@@ -281,18 +325,18 @@ test('fork (Polygon): pay the gas in POL, sign once, Safe and profile, wrap and 
     await page3.selectOption('#c-token', 'POL');
     await page3.locator('#c-max').click();
     await page3.waitForFunction(() => document.getElementById('c-amount').value);
-    assert.equal(await page3.inputValue('#c-amount'), '29.9', '30 POL less 0.1 kept back for the fees');
+    assert.equal(await page3.inputValue('#c-amount'), '29', '30 POL less 1 kept back for the fees');
     await page3.fill('#c-name', NAME3);
     await page3.locator('#c-go').click();
     f = await flowDone(page3, 600_000);
-    assert.deepEqual(f.steps.map(s => s.state), Array(6).fill('done'), JSON.stringify(f));
-    assert.equal(w3.sent.length, 3, 'the gas payment, the wrap, the deposit');
+    assert.deepEqual(f.steps.map(s => s.state), Array(5).fill('done'), JSON.stringify(f));
+    assert.equal(w3.approvals, 5, 'no wallet_sendCalls: the Safe, the set-up, the wrap, the deposit, the gas, one by one');
     const o3 = json(`select row_to_json(o) from rebalancer.onboard o where name = '${NAME3}'`);
-    assert.deepEqual([o3.state, o3.amount, o3.deposit], ['started', 29.9, 25.9]);
-    assert.equal(await balanceOf(U.WPOL, o3.vault), 259n * E18 / 10n);
+    assert.deepEqual([o3.state, o3.amount, o3.deposit], ['started', 29, 26]);
+    assert.equal(await balanceOf(U.WPOL, o3.vault), 26n * E18);
     const left = await pub.getBalance({ address: acct.maxer.address });
-    t.diagnostic(`after Max: ${Number(left) / 1e18} POL left of the 0.1 kept back for the three transactions`);
-    assert.ok(left > 0n && left < E18 / 10n, 'the fees came out of what Max kept back');
+    t.diagnostic(`after Max: ${Number(left) / 1e18} POL left of the 1 kept back for the owner's set-up`);
+    assert.ok(left > 0n && left < E18, 'the fees came out of what Max kept back');
   } finally {
     await page?.context().close().catch(() => {});
     await page3?.context().close().catch(() => {});

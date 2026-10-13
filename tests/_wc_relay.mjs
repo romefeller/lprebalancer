@@ -39,7 +39,8 @@ export async function relay() {
     setTimeout(() => { for (const d of history.get(topic) ?? []) deliver(ws, sub, d); }, 20);
     return sub;
   };
-  wss.on('connection', (ws) => {
+  wss.on('connection', (ws, req) => {
+    ws.ua = String(req?.url ?? '');
     ws.on('message', (raw) => {
       let m;
       try { m = JSON.parse(String(raw)); } catch { return; }
@@ -66,7 +67,10 @@ export async function relay() {
     });
     ws.on('close', () => { for (const l of listeners.values()) l.delete(ws); });
   });
-  return { url: `ws://127.0.0.1:${wss.address().port}`, log, close: () => new Promise(r => { for (const c of wss.clients) c.terminate(); wss.close(r); }) };
+  return { url: `ws://127.0.0.1:${wss.address().port}`, log, connections: () => [...wss.clients].map(c => c.ua),
+    // the page's socket dropped, as a phone drops it while its wallet app is in front (a browser's ua names it)
+    dropBrowser: () => { for (const c of wss.clients) if (/browser/.test(decodeURIComponent(c.ua))) c.terminate(); },
+    close: () => new Promise(r => { for (const c of wss.clients) c.terminate(); wss.close(r); }) };
 }
 
 // Storage in memory, the shape @walletconnect/keyvaluestorage has.
@@ -78,10 +82,11 @@ function memory() {
 
 // A wallet on the relay: it pairs with a URI, approves with `accounts` for
 // `methods`, and answers each request with `handle(method, params)`.
-export async function wallet(relayUrl, { accounts, methods, handle, name = 'Tangem' }) {
+export async function wallet(relayUrl, { accounts, methods, handle, name = 'Tangem', redirect = undefined }) {
   const { SignClient } = webRequire('@walletconnect/sign-client');
-  const client = await SignClient.init({ projectId: 'f'.repeat(32), relayUrl, storage: memory(), telemetryEnabled: false, logger: 'silent',
-    metadata: { name, description: 'a test wallet', url: 'https://wallet.test', icons: [] } });
+  // a storage prefix of its own: sign-client keeps one core per prefix in the process, bound to its first relay
+  const client = await SignClient.init({ projectId: 'f'.repeat(32), customStoragePrefix: crypto.randomBytes(8).toString('hex'), relayUrl, storage: memory(), telemetryEnabled: false, logger: 'silent',
+    metadata: { name, description: 'a test wallet', url: 'https://wallet.test', icons: [], ...(redirect ? { redirect } : {}) } });
   const requests = [];
   client.on('session_proposal', async ({ id, params }) => {
     const ns = {};

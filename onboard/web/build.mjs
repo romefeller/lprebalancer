@@ -41,6 +41,10 @@ export async function pins(over = {}) {
     polygon: {
       chainId: P.CHAIN_ID, botKey: poly.botKeys[0], operator: poly.operatorWallet, npm: P.V3.positionManager ?? P.V3.npm ?? P.V3.nonfungiblePositionManager,
       wrapped: { WPOL: P.WPOL },
+      // the owner's own vault (decode_evm.mjs createVault): the Safe and Zodiac contracts, the router
+      // and stables the rules name, and the one pool (onboard.json's, WPOL/USDT0 at 0.05%)
+      vault: { ...P.VAULT }, router: P.V3.router, stables: [...P.STABLES], venue: P.DEX,
+      pool: { token0: P.WPOL, token1: P.USDT0, fee: 500 },
       tokens: Object.fromEntries(Object.entries(poly.tokens).map(([s, t]) => [s, { address: t.native ? null : P[s], decimals: t.decimals, native: Boolean(t.native) }])),
     },
   };

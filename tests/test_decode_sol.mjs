@@ -9,7 +9,8 @@ import { createRequire } from 'module';
 import fc from 'fast-check';
 import * as sq from '../chains/solana/vault/squads.mjs';
 import { RULES, compile, instructionsOf } from '../chains/solana/vault/policy.mjs';
-import { ata, decodeSol, expectedPolicies, MAX_PRIORITY_LAMPORTS } from '../onboard/decode_sol.mjs';
+import { ata, decodeSol, decodeSolSet, expectedPolicies, MAX_PRIORITY_LAMPORTS } from '../onboard/decode_sol.mjs';
+import { ownerSetupPlan, packSteps } from '../chains/solana/vault/admin.mjs';
 import SOLANA from '../chains/solana/solana.json' with { type: 'json' };
 
 const require = createRequire(import.meta.url);
@@ -48,20 +49,136 @@ const policyTx = (signer, i = 0, over = {}) => {
     actions: [{ kind: 'policyUpdate', address, policy: over.policy ?? policies[i].policy, signers: [{ key: signer, permissions: over.permissions }] }] })];
 };
 
-test('payment: the signed amount to the bot\'s gas key, from the wallet only', () => {
-  const e = { ...base, kind: 'payment', raw: '145000000' };
-  const r = decodeSol(wire([transfer(OWNER, PAYER, 145_000_000)]), e, PINS);
+// --- the owner's set-up: one approval, a set of transactions ----------------------
+
+const SEED = 4242n, SETUP_SETTINGS = sq.settingsPda(SEED), SETUP_VAULT = sq.vaultPda(SETUP_SETTINGS);
+const TREASURY = key(), GAS = 118_600_000n;
+const setupCompiled = (over = {}) => [compile(VENUE, { vault: SETUP_VAULT, payer: PAYER, pools: POOLS[VENUE].map(p => new PublicKey(p)),
+  payouts: payoutWallets.map(w => new PublicKey(ata(w, USDC))), ...over })];
+const setupExpect = (over = {}) => ({ kind: 'setup', owner: OWNER.toBase58(), seed: SEED.toString(), settings: SETUP_SETTINGS.toBase58(),
+  vault: SETUP_VAULT.toBase58(), venues: [VENUE], pools: { [VENUE]: POOLS[VENUE] }, payoutWallets, mint: SOLANA.native_mint,
+  raw: '500000000', gasRaw: GAS.toString(), ...over });
+const solDeposit = (raw = 500_000_000n, to = SETUP_VAULT) => [transfer(OWNER, to, raw)];
+const usdcDeposit = (raw = 25_000_000n) => {
+  const dst = spl.getAssociatedTokenAddressSync(USDC, SETUP_VAULT, true);
+  return [spl.createAssociatedTokenAccountIdempotentInstruction(OWNER, dst, SETUP_VAULT, USDC),
+    tokenSend(spl.getAssociatedTokenAddressSync(USDC, OWNER), dst, OWNER, raw)];
+};
+// The set as the server builds it: packSteps of the plan, the funding with the last policy.
+function setupSet({ plan = ownerSetupPlan({ owner: OWNER, treasury: TREASURY, seed: SEED, policyKey: POLICY_KEY, venues: setupCompiled() }),
+  from = 0, fund = [...solDeposit(), transfer(OWNER, PAYER, GAS)], groups = null } = {}) {
+  const steps = plan.steps.slice(from);
+  const packed = groups ?? packSteps([...steps.slice(0, -1), [steps.at(-1), ...fund]], OWNER);
+  return packed.map(ixs => wire(ixs));
+}
+
+test('setup: the owner creates its vault, the bot\'s policies exactly as in git, then deposits and pays the gas, one approval', () => {
+  const p0 = ownerSetupPlan({ owner: OWNER, treasury: TREASURY, seed: SEED, policyKey: POLICY_KEY, venues: setupCompiled() });
+  const set = setupSet();
+  assert.equal(set.length, 2, 'Raydium: two transactions');
+  const r = decodeSolSet(set, setupExpect(), PINS);
   ok(r);
-  assert.match(r.lines[0], /Send 0\.145 SOL from your wallet .* to the bot's gas key/);
-  refused(decodeSol(wire([transfer(OWNER, STRANGER, 145_000_000)]), e, PINS), /not the bot's gas key/, 'another recipient');
-  refused(decodeSol(wire([transfer(OWNER, PAYER, 145_000_001)]), e, PINS), /you signed for/, 'another amount');
-  refused(decodeSol(wire([transfer(OWNER, PAYER, 145_000_000), transfer(OWNER, STRANGER, 1)]), e, PINS), /one transfer/, 'a second transfer');
-  refused(decodeSol(wire([transfer(STRANGER, PAYER, 145_000_000)]), e, PINS), /signatures of/, 'another signer');
-  refused(decodeSol(wire([transfer(OWNER, PAYER, 145_000_000)], STRANGER), e, PINS), /fee payer/, 'another fee payer');
-  fc.assert(fc.property(fc.bigInt({ min: 1n, max: 10n ** 12n }), (lamports) => {
-    const r2 = decodeSol(wire([transfer(OWNER, PAYER, lamports)]), e, PINS);
-    assert.equal(r2.ok, lamports === 145_000_000n);
-  }), { numRuns: 200 });
+  const text = r.lines.join('\n');
+  assert.match(text, /Transaction 1 of 2:\n  Create your vault .*you its only owner, threshold 1/);
+  assert.equal(text.match(/exactly the rules in git/g).length, setupCompiled()[0].policies.length);
+  assert.match(text, /Funding: Send 0\.1186 SOL from your wallet .* to the bot's gas key/);
+  assert.match(text, /Funding: Send 0\.5 SOL from your wallet .* to your vault/);
+  // a USDC deposit: the vault's account opened, the tokens from the wallet's
+  const [open, send] = usdcDeposit();
+  const usdc = setupSet({ groups: packSteps([...p0.steps.slice(0, -1), open, [p0.steps.at(-1), send, transfer(OWNER, PAYER, GAS)]], OWNER) });
+  assert.equal(usdc.length, 3, 'Raydium with USDC: the vault\'s account opened in a transaction of its own');
+  ok(decodeSolSet(usdc, setupExpect({ mint: SOLANA.usdc_mint, raw: '25000000' }), PINS));
+  // the account opened for another wallet or mint, or paid by another, is refused
+  const strangerOpen = spl.createAssociatedTokenAccountIdempotentInstruction(OWNER, spl.getAssociatedTokenAddressSync(USDC, STRANGER), STRANGER, USDC);
+  refused(decodeSolSet(setupSet({ groups: packSteps([...p0.steps.slice(0, -1), strangerOpen, [p0.steps.at(-1), send, transfer(OWNER, PAYER, GAS)]], OWNER) }),
+    setupExpect({ mint: SOLANA.usdc_mint, raw: '25000000' }), PINS), /not your vault's/);
+  // a resume: the vault and the first policy exist; the rest and the funding
+  ok(decodeSolSet(setupSet({ from: 2 }), setupExpect(), PINS));
+  ok(decodeSolSet(setupSet({ from: 2 }), setupExpect({ created: false }), PINS));
+  refused(decodeSolSet(setupSet({ from: 2 }), setupExpect({ created: true }), PINS), /not created/);
+  refused(decodeSolSet(setupSet(), setupExpect({ created: false }), PINS), /creates a vault that exists/);
+  // each venue: its policies at the seeds after the vault's creation
+  for (const venue of Object.keys(POOLS).filter(v => RULES.venues[v])) {
+    const compiled = [compile(venue, { vault: SETUP_VAULT, payer: PAYER, pools: POOLS[venue].map(p => new PublicKey(p)),
+      payouts: payoutWallets.map(w => new PublicKey(ata(w, USDC))) })];
+    const plan = ownerSetupPlan({ owner: OWNER, treasury: TREASURY, seed: SEED, policyKey: POLICY_KEY, venues: compiled });
+    ok(decodeSolSet(setupSet({ plan }), setupExpect({ venues: [venue], pools: { [venue]: POOLS[venue] } }), PINS));
+  }
+});
+
+test('setup: every tampered set is refused (owners, threshold, rules, order, funding, gas, the vault)', () => {
+  const e = setupExpect();
+  const plan = (over = {}) => ownerSetupPlan({ owner: OWNER, treasury: TREASURY, seed: SEED, policyKey: POLICY_KEY, venues: setupCompiled(), ...over });
+  const p = plan();
+  const steps = p.steps, fund = [...solDeposit(), transfer(OWNER, PAYER, GAS)];
+  // the creation: another owner beside you, threshold 2, a settings authority, a time lock
+  const create = (o) => sq.createSmartAccountIx({ creator: OWNER, treasury: TREASURY, seed: SEED, threshold: 1, signers: [{ key: OWNER }], ...o }).ix;
+  const withCreate = (ix) => setupSet({ groups: [[ix], [steps[1]], [steps[2], ...fund]] });
+  refused(decodeSolSet(withCreate(create({ signers: [{ key: OWNER }, { key: STRANGER }] })), e, PINS), /not your wallet alone/, 'a second owner');
+  refused(decodeSolSet(withCreate(create({ signers: [{ key: STRANGER }] })), e, PINS), /not your wallet alone/, 'another owner');
+  refused(decodeSolSet(withCreate(create({ threshold: 2 })), e, PINS), /threshold 2/);
+  refused(decodeSolSet(withCreate(create({ seed: SEED + 1n })), e, PINS), /not your vault's/, 'another seed\'s settings');
+  refused(decodeSolSet(withCreate(create({ signers: [{ key: OWNER, permissions: 1 }] })), e, PINS), /not your wallet alone/, 'fewer permissions');
+  {
+    const ix = create();
+    const auth = Buffer.concat([ix.data.subarray(0, 8), Buffer.from([1]), STRANGER.toBuffer(), ix.data.subarray(9)]);
+    refused(decodeSolSet(withCreate(new TransactionInstruction({ programId: ix.programId, keys: ix.keys, data: auth })), e, PINS), /settings authority/);
+    const lock = Buffer.from(ix.data); lock.writeUInt32LE(60, 8 + 1 + 2 + 4 + 33);
+    refused(decodeSolSet(withCreate(new TransactionInstruction({ programId: ix.programId, keys: ix.keys, data: lock })), e, PINS), /time lock/);
+    const keys = ix.keys.map((k, i) => (i === 2 ? { ...k, pubkey: STRANGER } : k));
+    refused(decodeSolSet(withCreate(new TransactionInstruction({ programId: ix.programId, keys, data: ix.data })), e, PINS), /creator is not your wallet|signatures of/);
+  }
+  // a planned seed whose settings are not those the page shows
+  refused(decodeSolSet(setupSet(), setupExpect({ seed: '7' }), PINS), /planned seed/);
+  // policies: another key, other rules, out of order, one missing, after the money
+  refused(decodeSolSet(setupSet({ plan: plan({ policyKey: STRANGER }) }), e, PINS), /not the bot's rules key/);
+  const wrongRules = plan({ venues: setupCompiled({ payouts: [new PublicKey(ata(STRANGER.toBase58(), USDC))] }) });
+  refused(decodeSolSet(setupSet({ plan: wrongRules }), e, PINS), /differs from the rules in git/);
+  refused(decodeSolSet(setupSet({ groups: [[steps[0]], [steps[2]], [steps[1], ...fund]] }), e, PINS), /out of order/);
+  refused(decodeSolSet(setupSet({ groups: [[steps[0], steps[1]], [...fund]] }), e, PINS), /rules would be missing/);
+  refused(decodeSolSet(setupSet({ groups: [[steps[0], steps[1]], [...fund, steps[2]]] }), e, PINS), /after the deposit/);
+  refused(decodeSolSet(setupSet({ groups: [[steps[0], ...fund], [steps[1]], [steps[2]]] }), e, PINS), /before the last transaction/);
+  refused(decodeSolSet(setupSet({ groups: [[steps[0], steps[1]], [steps[2]], fund] }), e, PINS), /same transaction as the last policy/);
+  refused(decodeSolSet(setupSet({ groups: [[steps[1]], [steps[0]], [steps[2], ...fund]] }), e, PINS), /not the first step/);
+  refused(decodeSolSet(setupSet({ groups: [[steps[0]], [steps[2], ...fund]] }), e, PINS), /without its first policy|out of order/);
+  // the funding: the gas to another key, another amount, twice; the deposit elsewhere or another amount; one more transfer
+  refused(decodeSolSet(setupSet({ fund: [...solDeposit(), transfer(OWNER, STRANGER, GAS)] }), e, PINS), /0 payments to the bot's gas key/);
+  refused(decodeSolSet(setupSet({ fund: [...solDeposit(), transfer(OWNER, PAYER, GAS + 1n)] }), e, PINS), /not the 0\.1186 SOL gas shown/);
+  refused(decodeSolSet(setupSet({ fund: [...solDeposit(), transfer(OWNER, PAYER, GAS), transfer(OWNER, PAYER, 1n)] }), e, PINS), /2 payments/);
+  refused(decodeSolSet(setupSet({ fund: [...solDeposit(500_000_000n, STRANGER), transfer(OWNER, PAYER, GAS)] }), e, PINS), /not go from your wallet to your vault/);
+  refused(decodeSolSet(setupSet({ fund: [...solDeposit(1n), transfer(OWNER, PAYER, GAS)] }), e, PINS), /deposits 0\.000000001 SOL/);
+  refused(decodeSolSet(setupSet({ fund: [...solDeposit(), transfer(OWNER, STRANGER, 1n), transfer(OWNER, PAYER, GAS)] }), e, PINS), /one transfer/);
+  refused(decodeSolSet(setupSet({ fund: [transfer(OWNER, PAYER, GAS)] }), e, PINS), /one transfer/, 'no deposit');
+  // the gas from another wallet: it would need that wallet's signature
+  refused(decodeSolSet(setupSet({ fund: [...solDeposit(), transfer(STRANGER, PAYER, GAS)] }), e, PINS), /signatures of|not come from your wallet/);
+  refused(decodeSolSet([], e, PINS), /no transaction/);
+  refused(decodeSolSet(setupSet(), { ...e, kind: 'teleport' }, PINS), /nothing to check/);
+  // the gas: exactly the amount shown, any other refused
+  fc.assert(fc.property(fc.bigInt({ min: 1n, max: 10n ** 11n }), (lamports) => {
+    const r = decodeSolSet(setupSet({ fund: [...solDeposit(), transfer(OWNER, PAYER, lamports)] }), e, PINS);
+    assert.equal(r.ok, lamports === GAS);
+  }), { numRuns: 60 });
+});
+
+test('approve with a deposit (a re-grant with more capital): the rules first, the deposit last, one approval', () => {
+  const dep = { mint: SOLANA.native_mint, raw: '700000000' };
+  const e = vaultExpect('approve', { deposit: dep });
+  const rules = POLICIES.map((_, i) => policyTx(POLICY_KEY, i)[0]);
+  const money = [transfer(OWNER, VAULT, 700_000_000n)];
+  const groups = packSteps([...rules.map(ix => [ix]), money], OWNER);
+  const r = decodeSolSet(groups.map(g => wire(g)), e, PINS);
+  ok(r);
+  assert.match(r.lines.join('\n'), /Deposit: Send 0\.7 SOL from your wallet .* to your vault/);
+  // without a deposit asked for, money is refused; a set of policies alone passes
+  ok(decodeSolSet(rules.map(ix => wire([ix])), vaultExpect('approve'), PINS));
+  refused(decodeSolSet(groups.map(g => wire(g)), vaultExpect('approve'), PINS), /an approval moves none/);
+  refused(decodeSolSet(rules.map(ix => wire([ix])), e, PINS), /deposit is missing/);
+  refused(decodeSolSet([wire(money), ...rules.map(ix => wire([ix]))], e, PINS), /before the last transaction|after the deposit/);
+  refused(decodeSolSet(packSteps([...rules.map(ix => [ix]), [transfer(OWNER, STRANGER, 700_000_000n)]], OWNER).map(g => wire(g)), e, PINS), /your vault/);
+  refused(decodeSolSet(packSteps([...rules.map(ix => [ix]), [transfer(OWNER, VAULT, 1n)]], OWNER).map(g => wire(g)), e, PINS), /deposits 0\.000000001 SOL/);
+  refused(decodeSolSet([wire([...money, rules[0]])], vaultExpect('approve', { deposit: dep, policies: { [VENUE]: [POLICIES[0]] } }), PINS),
+    /money moves before the rules/);
+  refused(decodeSolSet(rules.map(ix => wire([ix])).map((w, i) => (i === 0 ? wire(policyTx(STRANGER, 0)) : w)), vaultExpect('approve'), PINS), /not the bot's rules key/);
 });
 
 test('deposit: SOL to the vault, or USDC from the wallet\'s account to the vault\'s', () => {
@@ -144,19 +261,20 @@ test('approve: exactly the rules in git, the bot\'s rules key the only signer; r
 });
 
 test('transactions the page cannot read, or that cost the owner, are refused', () => {
-  const e = { ...base, kind: 'payment', raw: '1' };
+  const e = { ...base, kind: 'deposit', mint: SOLANA.native_mint, raw: '1' };
   refused(decodeSol('not base64 at all', e, PINS), /cannot be read/);
   const v0 = new VersionedTransaction(new TransactionMessage({ payerKey: OWNER, recentBlockhash: PublicKey.default.toBase58(),
-    instructions: [transfer(OWNER, PAYER, 1)] }).compileToV0Message()).serialize();
+    instructions: [transfer(OWNER, VAULT, 1)] }).compileToV0Message()).serialize();
   refused(decodeSol(Buffer.from(v0).toString('base64'), e, PINS), /cannot be read|version 0/);
-  const pricey = [ComputeBudgetProgram.setComputeUnitLimit({ units: 1_400_000 }), ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 10_000_000 }), transfer(OWNER, PAYER, 1)];
+  const pricey = [ComputeBudgetProgram.setComputeUnitLimit({ units: 1_400_000 }), ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 10_000_000 }), transfer(OWNER, VAULT, 1)];
   refused(decodeSol(wire(pricey), e, PINS), /priority fee/);
-  const cheap = [ComputeBudgetProgram.setComputeUnitLimit({ units: 200_000 }), ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 1000 }), transfer(OWNER, PAYER, 1)];
+  const cheap = [ComputeBudgetProgram.setComputeUnitLimit({ units: 200_000 }), ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 1000 }), transfer(OWNER, VAULT, 1)];
   ok(decodeSol(wire(cheap), e, PINS));
   assert.ok(MAX_PRIORITY_LAMPORTS <= 1_000_000n);
   const unknown = new TransactionInstruction({ programId: STRANGER, keys: [], data: Buffer.from([1, 2, 3]) });
   refused(decodeSol(wire([unknown]), e, PINS), /transfer/);
-  refused(decodeSol(wire([transfer(OWNER, PAYER, 1)]), { ...base, kind: 'teleport' }, PINS), /nothing to check/);
+  refused(decodeSol(wire([transfer(OWNER, VAULT, 1)]), { ...base, kind: 'teleport' }, PINS), /nothing to check/);
+  refused(decodeSol(wire([transfer(OWNER, PAYER, 1)]), { ...base, kind: 'payment', raw: '1' }, PINS), /nothing to check/, 'a gas payment alone is no kind any more');
 });
 
 test('close: the venue\'s exit instructions only, pinned to the vault and the approved pool', () => {
@@ -231,17 +349,17 @@ test('edges: only exact transfers, closes and account opens are read as such', (
 });
 
 test('edges: sizes, the priority fee at its limit, inner accounts out of range, policy calls, other signers', () => {
-  const e = { ...base, kind: 'payment', raw: '1' };
+  const e = { ...base, kind: 'deposit', mint: SOLANA.native_mint, raw: '1' };
   refused(decodeSol(Buffer.alloc(1233, 1).toString('base64'), e, PINS), /1233 bytes, over the 1232/);
   const at = decodeSol(Buffer.alloc(1232, 1).toString('base64'), e, PINS);
   refused(at, /cannot be read/, '1232 bytes is a size a transaction may have: read, not too long');
   // the fee: limit x price, at most MAX_PRIORITY_LAMPORTS
   const fee = (units, micro) => decodeSol(wire([ComputeBudgetProgram.setComputeUnitLimit({ units }), ComputeBudgetProgram.setComputeUnitPrice({ microLamports: micro }),
-    transfer(OWNER, PAYER, 1)]), e, PINS);
+    transfer(OWNER, VAULT, 1)]), e, PINS);
   ok(fee(1_000_000, 1_000_000));
   assert.match(fee(1_000_000, 1_000_000).lines[0], /Priority fee: at most 0\.001 SOL/);
   refused(fee(1_000_000, 1_000_001), /priority fee/);
-  refused(decodeSol(wire([raw(ComputeBudgetProgram.programId, [9]), transfer(OWNER, PAYER, 1)]), e, PINS), /unknown compute budget/);
+  refused(decodeSol(wire([raw(ComputeBudgetProgram.programId, [9]), transfer(OWNER, VAULT, 1)]), e, PINS), /unknown compute budget/);
   // an inner account index past the accounts the call names
   const call = ownerExec([transfer(VAULT, OWNER, 5)]);
   const data = Buffer.from(call.data);
@@ -383,4 +501,49 @@ test('approve: a venue staged on the vault: its new policies at the vault\'s nex
   const p = compiled[last].policy;
   const wider = { ...p, constraints: [...p.constraints, p.constraints[0]] };
   refused(decodeSol(wire(create(last, POLICY_KEY, wider)), e('approve'), PINS), /differs from the rules in git/);
+});
+
+test('setup edges: the creator, its programs and memo; a policy\'s signers, threshold, time lock, hooks, limits, vault account; look-alikes', () => {
+  const e = setupExpect();
+  const p = ownerSetupPlan({ owner: OWNER, treasury: TREASURY, seed: SEED, policyKey: POLICY_KEY, venues: setupCompiled(), memo: 'lp-bot vault' });
+  const steps = p.steps, fund = [...solDeposit(), transfer(OWNER, PAYER, GAS)];
+  const sets = (first, mid = steps[1], last = steps[2]) => setupSet({ groups: [[first], [mid], [last, ...fund]] });
+  const lines = decodeSolSet(sets(steps[0]), e, PINS);
+  ok(lines);
+  assert.match(lines.lines.join('\n'), /Create your vault .*threshold 1 \(memo "lp-bot vault"\); rent from your wallet/);
+  assert.doesNotMatch(decodeSolSet(setupSet(), e, PINS).lines.join('\n'), /\(memo/, 'no memo, none shown');
+  // the creator: another key that does not sign is still not your wallet
+  const other = (i, k) => new TransactionInstruction({ programId: steps[0].programId, data: steps[0].data,
+    keys: steps[0].keys.map((x, j) => (j === i ? { ...x, ...k } : x)) });
+  refused(decodeSolSet(sets(other(2, { pubkey: STRANGER, isSigner: false })), e, PINS), /the creator is not your wallet/);
+  refused(decodeSolSet(sets(other(2, { pubkey: STRANGER, isSigner: true })), e, PINS), /the creator is not your wallet/, 'another key that signs');
+  refused(decodeSolSet(sets(other(3, { pubkey: STRANGER })), e, PINS), /another program than Squads and System/);
+  refused(decodeSolSet(sets(other(4, { pubkey: STRANGER })), e, PINS), /another program than Squads and System/);
+  // a policy: a second signer of the change, the threshold, the time lock, hooks, limits, another vault account
+  const twoSigners = sq.settingsSyncIx({ settings: SETUP_SETTINGS, signers: [OWNER, STRANGER], rentPayer: OWNER, extra: [sq.policyPda(SETUP_SETTINGS, 1)],
+    actions: [{ kind: 'policyCreate', seed: 1, policy: setupCompiled()[0].policies[0].policy, signers: [{ key: POLICY_KEY }] }] });
+  refused(decodeSolSet(sets(steps[0], twoSigners), e, PINS), /not signed by your wallet alone/);
+  const patched = (at, value) => {
+    const d = Buffer.from(steps[1].data);
+    d[at < 0 ? d.length + at : at] = value;
+    return new TransactionInstruction({ programId: steps[1].programId, keys: steps[1].keys, data: d });
+  };
+  refused(decodeSolSet(sets(steps[0], patched(-9, 2)), e, PINS), /a threshold or time lock other than the rules'/, 'threshold 2');
+  refused(decodeSolSet(sets(steps[0], patched(-7, 60)), e, PINS), /a threshold or time lock other than the rules'/, 'a time lock');
+  refused(decodeSolSet(sets(steps[0], patched(-50, 1)), e, PINS), /hooks, spending limits or another vault account/, 'a spending limit');
+  refused(decodeSolSet(sets(steps[0], patched(23, 1)), e, PINS), /hooks, spending limits or another vault account/, 'another vault account');
+  // a look-alike of the last policy from another program goes with the money: never read as a policy
+  const alike = new TransactionInstruction({ programId: STRANGER, keys: steps[2].keys, data: steps[2].data });
+  const r = decodeSolSet(setupSet({ groups: [[steps[0]], [steps[1]], [steps[2]], [alike, ...fund]] }), e, PINS);
+  refused(r, /one transfer/);
+  assert.doesNotMatch(r.problems.join(' | '), /out of order/);
+  // no policy at all: the set ends at none
+  refused(decodeSolSet(setupSet({ groups: [[steps[0], ...fund]] }), e, PINS), /the set ends at policy none, not 2/);
+  // a payout wallet beside yours that is not the operator's; a venue or pool the rules do not approve
+  refused(decodeSolSet(setupSet(), setupExpect({ payoutWallets: [OWNER.toBase58(), STRANGER.toBase58()] }), PINS), /not the operator's/);
+  refused(decodeSolSet(setupSet(), setupExpect({ pools: { [VENUE]: [STRANGER.toBase58()] } }), PINS), /not the raydium-clmm pool/);
+  refused(decodeSolSet(setupSet(), setupExpect({ pools: { [VENUE]: [] } }), PINS), /no pool for raydium-clmm/);
+  refused(decodeSolSet(setupSet(), setupExpect({ venues: [] }), PINS), /no venue for the bot/);
+  refused(decodeSolSet(setupSet(), setupExpect({ venues: ['nowhere'] }), PINS), /nowhere has no rules in git/);
+  refused(decodeSolSet(setupSet(), setupExpect({ vault: VAULT.toBase58() }), PINS), /not the account of these settings/);
 });

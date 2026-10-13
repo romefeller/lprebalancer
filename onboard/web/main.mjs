@@ -7,9 +7,10 @@
 // owner asked for is refused before the wallet sees it.
 //
 // One vault per wallet per chain. The page shows, after the wallet connects:
-//   create   no vault yet: amount, profit wallet, name -> sign, pay the gas,
-//            the bot creates the vault, deposit, the bot starts
-//   setup    a setup that stopped: it resumes, nothing is paid twice
+//   create   no vault yet: amount, profit wallet, name -> the wallet approves
+//            ONE set-up (its own vault, the bot's rules, the deposit, the
+//            bot's gas), the bot finishes the vault and starts
+//   setup    a set-up that stopped: it resumes, nothing is paid twice
 //   active   the bot runs: its book as Telegram shows it; Add capital,
 //            Withdraw, Revoke
 //   revoked  only Add capital, which gives the bot its rules back
@@ -19,7 +20,8 @@ import bs58 from 'bs58';
 import { Transaction, VersionedTransaction, PublicKey } from '@solana/web3.js';
 import RULES from '../../chains/solana/vault/rules.json' with { type: 'json' };
 import SOLANA from '../../chains/solana/solana.json' with { type: 'json' };
-import { decodeSol } from '../decode_sol.mjs';
+import { decodeSol, decodeSolSet } from '../decode_sol.mjs';
+import { walletLink } from './wallet_link.mjs';
 import { decodeEvm } from '../decode_evm.mjs';
 import { fromRaw, toRaw } from '../units.mjs';
 
@@ -30,7 +32,8 @@ const EVM_CHAIN = `eip155:${PINS.polygon.chainId}`;
 const SOL_PINS = { payer: PINS.solana.payer, policyKey: PINS.solana.policyKey, operator: PINS.solana.operator, pools: PINS.solana.pools,
   rules: RULES, solana: SOLANA };
 const EVM_PINS = { chainId: PINS.polygon.chainId, wrapped: PINS.polygon.wrapped, tokens: PINS.polygon.tokens, botKey: PINS.polygon.botKey,
-  npm: PINS.polygon.npm };
+  npm: PINS.polygon.npm, vault: PINS.polygon.vault, router: PINS.polygon.router, stables: PINS.polygon.stables, venue: PINS.polygon.venue,
+  pool: PINS.polygon.pool };
 
 // --- small helpers ------------------------------------------------------------------------
 
@@ -101,8 +104,9 @@ async function post(p, body) {
 
 // --- wallets ------------------------------------------------------------------------------
 // A wallet: {chain, kind, name, address, signMessage(text) -> {signature, signedMessage?},
-// send(tx) -> signature or hash}. Injected wallets (Wallet Standard, Phantom's
-// provider, EIP-1193) and WalletConnect.
+// send(tx) -> signature or hash, signAll?(txs) -> signed txs (Solana: every
+// transaction of a set in one approval, base64)}. Injected wallets (Wallet
+// Standard, Phantom's provider, EIP-1193) and WalletConnect.
 
 const standard = [];
 const register = (...ws) => { for (const w of ws) standard.push(w); return () => {}; };
@@ -139,6 +143,11 @@ async function solanaInjected() {
         const [out] = await w.features['solana:signTransaction'].signTransaction({ account, transaction: unb64(tx), chain: 'solana:mainnet' });
         return broadcastSigned(out.signedTransaction);
       },
+      // every input in one call: the wallet asks once
+      signAll: w.features['solana:signTransaction'] ? async (txs) => {
+        const outs = await w.features['solana:signTransaction'].signTransaction(...txs.map(t => ({ account, transaction: unb64(t), chain: 'solana:mainnet' })));
+        return outs.map(o => b64(o.signedTransaction));
+      } : null,
       async disconnect() { await w.features['standard:disconnect']?.disconnect?.(); } };
   }
   const p = window.phantom?.solana ?? window.solana;
@@ -151,6 +160,8 @@ async function solanaInjected() {
       const message = bytes.slice(1 + 64 * bytes[0]);
       return (await p.request({ method: 'signAndSendTransaction', params: { message: bs58.encode(message) } })).signature;
     },
+    signAll: p.signAllTransactions ? async (txs) => (await p.signAllTransactions(txs.map(t => Transaction.from(unb64(t)))))
+      .map(t => b64(t.serialize({ requireAllSignatures: false, verifySignatures: false }))) : null,
     async disconnect() { await p.disconnect?.(); } };
 }
 
@@ -168,6 +179,8 @@ async function polygonInjected() {
       }
       return p.request({ method: 'eth_sendTransaction', params: [{ from: address, to: tx.to, data: tx.data, value: tx.value }] });
     },
+    // EIP-5792: every call in one approval; null when the wallet has no such method
+    sendCalls: (calls, chainId) => sendCalls((method, params) => p.request({ method, params }), address, calls, chainId),
     async disconnect() {} };
 }
 
@@ -185,8 +198,9 @@ async function wcInit() {
 }
 
 const namespaces = (chain) => (chain === 'solana'
-  ? { solana: { chains: SOL_CHAINS, methods: ['solana_signMessage', 'solana_signTransaction', 'solana_signAndSendTransaction'], events: [] } }
-  : { eip155: { chains: [EVM_CHAIN], methods: ['personal_sign', 'eth_sendTransaction'], events: ['chainChanged', 'accountsChanged'] } });
+  ? { solana: { chains: SOL_CHAINS, methods: ['solana_signMessage', 'solana_signTransaction', 'solana_signAllTransactions', 'solana_signAndSendTransaction'], events: [] } }
+  : { eip155: { chains: [EVM_CHAIN], methods: ['personal_sign', 'eth_sendTransaction', 'wallet_sendCalls', 'wallet_getCallsStatus'],
+    events: ['chainChanged', 'accountsChanged'] } });
 
 // The session's account on `chain`: [chainId, address] or null.
 function sessionAccount(session, chain) {
@@ -203,7 +217,12 @@ function wcWallet(client, session, chain) {
     : 'The wallet shared no Polygon account. Add Polygon in the wallet app and connect again.');
   const [chainId, address] = acct;
   const methods = session.namespaces[chain === 'solana' ? 'solana' : 'eip155'].methods ?? [];
-  const request = (method, params) => client.request({ topic: session.topic, chainId, request: { method, params } });
+  // every request brings the wallet forward (walletCall): a phone's wallet app does not by itself
+  const request = async (method, params) => {
+    const call = client.request({ topic: session.topic, chainId, request: { method, params } });
+    walletCall(session.peer?.metadata);
+    try { return await call; } finally { walletCall(null); }
+  };
   const name = session.peer?.metadata?.name || 'WalletConnect';
   if (chain === 'solana') {
     return { chain, kind: 'walletconnect', name, address, topic: session.topic,
@@ -222,12 +241,47 @@ function wcWallet(client, session, chain) {
         t.addSignature(new PublicKey(address), Buffer.from(bs58.decode(out.signature)));
         return broadcastSigned(t.serialize());
       },
+      // one request for the whole set, when the wallet offers it (else send() one by one)
+      signAll: methods.includes('solana_signAllTransactions') ? async (txs) => {
+        const out = await request('solana_signAllTransactions', { transactions: txs });
+        const list = Array.isArray(out) ? out : out?.transactions;
+        if (!Array.isArray(list) || list.length !== txs.length) throw new Error('the wallet did not return every transaction signed');
+        return list;
+      } : null,
       async disconnect() { await client.disconnect({ topic: session.topic, reason: { code: 6000, message: 'disconnected' } }).catch(() => {}); } };
   }
   return { chain, kind: 'walletconnect', name, address, topic: session.topic,
     async signMessage(text) { return { signature: await request('personal_sign', [hexUtf8(text), address]) }; },
     async send(tx) { return request('eth_sendTransaction', [{ from: address, to: tx.to, data: tx.data, value: tx.value }]); },
+    sendCalls: methods.includes('wallet_sendCalls') ? (calls, chainId) => sendCalls(request, address, calls, chainId) : null,
     async disconnect() { await client.disconnect({ topic: session.topic, reason: { code: 6000, message: 'disconnected' } }).catch(() => {}); } };
+}
+
+// EIP-5792: the calls in order, one approval; the transaction hashes once all
+// landed, or null when the wallet does not offer it (the page then asks one
+// by one). The set-up's second call needs the Safe its first makes: the
+// wallet must run them in order, as one batch.
+async function sendCalls(request, from, calls, chainId) {
+  let id;
+  try {
+    const out = await request('wallet_sendCalls', [{ version: '2.0.0', chainId: `0x${chainId.toString(16)}`, from, atomicRequired: false,
+      calls: calls.map(c => ({ to: c.to, data: c.data, value: c.value })) }]);
+    id = typeof out === 'string' ? out : out?.id;
+  } catch (e) {
+    if ([4200, -32601, -32602].includes(e?.code) || /not supported|unsupported|does not exist|not available/i.test(String(e?.message))) return null;
+    throw e;
+  }
+  for (let i = 0; i < 150; i++) {
+    const st = await request('wallet_getCallsStatus', [id]);
+    const code = Number(st?.status);
+    if (code >= 400 || st?.status === 'FAILURE') throw new Error('The wallet reports the calls failed on chain.');
+    if ((code === 200 || st?.status === 'CONFIRMED') && st.receipts?.length) {
+      if (st.receipts.some(r => r.status === '0x0' || r.status === 'reverted')) throw new Error('A call failed on chain.');
+      return st.receipts.map(r => r.transactionHash);
+    }
+    await sleep(2000);
+  }
+  throw new Error('The wallet has not confirmed the calls after 5 minutes. Check its activity, then try again.');
 }
 
 // A WalletConnect session for `chain`: an earlier one this browser keeps, or
@@ -252,6 +306,40 @@ async function walletConnect(chain) {
   const session = await Promise.race([approval(), cancelled]);
   return wcWallet(client, session, chain);
 }
+
+// The wallet is asked: on a phone, its app is brought forward (its deep link
+// from the session, walletLink) and a big button opens it in case the browser
+// did not; on a computer, the person is told to look at the phone. `null`:
+// the answer came.
+let calls = 0;
+function walletCall(metadata) {
+  const box = $('f-wallet');
+  if (!box) return;
+  if (!metadata) { if (--calls <= 0) { calls = 0; box.hidden = true; } return; }
+  calls++;
+  const link = walletLink(metadata);
+  if (mobile()) {
+    $('f-wallet-text').textContent = `${link.name} asks you to sign. If it did not open by itself, tap below, sign there, then come back here.`;
+    $('f-open').href = link.href;
+    $('f-open').textContent = `Open ${link.name} to sign`;
+    $('f-open').hidden = false;
+    // after the request left for the relay; a bare wc: link is only offered, never opened
+    if (link.kind !== 'wc') setTimeout(() => { if (calls > 0) { try { window.location.href = link.href; } catch { /* the button stays */ } } }, 800);
+  } else {
+    $('f-wallet-text').textContent = `Check your phone: ${link.name} asks you to sign.`;
+    $('f-open').hidden = true;
+  }
+  box.hidden = false;
+}
+
+// Back from the wallet app: the phone may have closed the relay's socket while
+// the page was away. It reopens it, and the wallet's answer (the relay keeps it)
+// comes in without a reload.
+document.addEventListener('visibilitychange', () => {
+  const r = wcClient?.core?.relayer;
+  if (document.visibilityState !== 'visible' || !r || r.connected || r.connecting) return;
+  r.restartTransport().catch(() => {});
+});
 
 // --- state and the flow runner -------------------------------------------------------------
 
@@ -290,7 +378,7 @@ class Flow {
   async run(from = 0) {
     view('v-flow');
     alertBox('');
-    show('f-retry', false); show('f-alt', false); show('f-done', false); show('f-review', false);
+    show('f-retry', false); show('f-alt', false); show('f-done', false); show('f-review', false); show('f-wallet', false);
     $('f-alt').className = '';
     // a resumed flow starts past what is already done
     for (const s of this.steps.slice(0, from)) if (!s.state || s.state === 'todo') s.state = 'done';
@@ -305,6 +393,7 @@ class Flow {
         this.set(s, 'done', s.doneText ?? s.detail);
       } catch (e) {
         this.set(s, 'failed', human(e));
+        calls = 0; show('f-wallet', false);
         alertBox(e instanceof Refusal ? `The page refused this transaction: ${human(e)}` : human(e));
         $('f-retry').onclick = () => this.run(this.steps.indexOf(s));
         show('f-retry', true);
@@ -321,12 +410,14 @@ class Flow {
   }
 }
 
-// The decoded transaction, shown while the wallet asks.
-function review(result, tx, expect) {
+// The decoded transaction, shown while the wallet asks. `parts`: what the
+// wallet approves at once, [{tx: [...], expect}], copied as such for the verifier.
+function review(result, tx, expect, parts = null) {
   $('f-lines').replaceChildren(...result.lines.map(l => (l.startsWith('  · ') ? el('li', { class: 'inner', text: l.slice(4) }) : el('li', { text: l }))));
   $('f-check').textContent = result.ok ? `Checked in this page against the rules it was built with (rules ${PINS.rulesSha256.slice(0, 12)}).` : '';
   $('f-check').className = result.ok ? 'ok small' : 'bad small';
-  $('f-copy').onclick = async () => { try { await navigator.clipboard.writeText(JSON.stringify({ chain: state.chain, tx, expect })); $('f-copy').textContent = 'Copied: node onboard/verify.mjs --commit <id> --paste \'…\''; } catch { /* no clipboard */ } };
+  const copied = parts ? { chain: state.chain, parts } : { chain: state.chain, tx, expect };
+  $('f-copy').onclick = async () => { try { await navigator.clipboard.writeText(JSON.stringify(copied)); $('f-copy').textContent = 'Copied: node onboard/verify.mjs --commit <id> --paste \'…\''; } catch { /* no clipboard */ } };
   $('f-copy').textContent = 'Copy the transaction (for the verifier)';
   show('f-review', true);
 }
@@ -352,6 +443,35 @@ async function signOne(tx, expect, chainId, step, flow) {
   const sig = await state.wallet.send(tx, chainId);
   flow.set(step, 'active', 'Sent. Waiting for the network…');
   return landed(sig, step, flow);
+}
+
+// A set of Solana transactions, decoded and checked as a whole, signed in ONE
+// approval when the wallet can (signAll), then sent in order, each after the
+// one before it landed. A wallet that signs one at a time is asked once per
+// transaction. What the wallet returns is checked again: a wallet that
+// changed a transaction (a priority fee of its own) is held to the same rules.
+async function sendSet(txs, expect, step, flow) {
+  const w = state.wallet;
+  const r = decodeSolSet(txs, expect, SOL_PINS);
+  review(r, txs, expect, [{ tx: txs, expect }]);
+  if (!r.ok) throw new Refusal(r.problems.join('; '));
+  const sigs = [];
+  if (w.signAll) {
+    flow.set(step, 'active', txs.length > 1 ? `Approve in ${w.name}: ${txs.length} transactions, one approval…` : `Confirm in ${w.name}…`);
+    const signed = await w.signAll(txs);
+    const again = decodeSolSet(signed, expect, SOL_PINS);
+    if (!again.ok) throw new Refusal(`the wallet returned other transactions: ${again.problems.join('; ')}`);
+    for (const [i, t] of signed.entries()) {
+      flow.set(step, 'active', txs.length > 1 ? `Sending ${i + 1} of ${txs.length}…` : 'Sending…');
+      sigs.push(await landed(await post('broadcast', { chain: 'solana', transaction: t }).then(x => x.signature), step, flow));
+    }
+    return sigs;
+  }
+  for (const [i, t] of txs.entries()) {
+    flow.set(step, 'active', `${i + 1} of ${txs.length}: confirm in ${w.name}…`);
+    sigs.push(await landed(await w.send(t), step, flow));
+  }
+  return sigs;
 }
 
 // Every transaction of an owner's action, one at a time (a Solana answer holds
@@ -524,16 +644,16 @@ function showRevoked(v) {
 
 function showSetup(v) {
   view('v-setup');
-  const what = v.state === 'signed' ? 'Your request is signed. Next: pay the bot\'s gas.'
-    : v.state === 'connecting' ? 'The bot is creating your vault.'
-      : v.state === 'stuck' ? `The setup stopped: ${v.error ?? 'unknown reason'}. Your gas payment is kept.`
-        : 'Your vault is ready. Next: the deposit.';
+  const what = v.state === 'signed' ? 'Your set-up is not all on chain yet. Continue: your wallet approves what is missing, once.'
+    : v.state === 'connecting' ? 'Your vault is on chain. The bot is finishing it.'
+      : v.state === 'stuck' ? `The bot's finish stopped: ${v.error ?? 'unknown reason'}. Your vault and your money are yours; nothing is paid twice.`
+        : 'Your vault is ready. Next: the bot starts.';
   $('s-text').textContent = what;
   $('s-name').textContent = v.name;
   $('s-go').onclick = () => createFlow({ resume: v }).run(resumeIndex(v));
 }
 
-const resumeIndex = (v) => (v.state === 'signed' ? 1 : ['connecting', 'stuck'].includes(v.state) ? 2 : 3);
+const resumeIndex = (v) => (v.state === 'signed' ? 0 : ['connecting', 'stuck'].includes(v.state) ? 1 : 2);
 
 // --- create ----------------------------------------------------------------------------------
 
@@ -563,58 +683,87 @@ async function maxInto(input, token, add, button) {
   button.disabled = false;
 }
 
-// Create: sign the request, pay the gas, the bot makes the vault, deposit,
-// the bot starts and opens. `resume`: a request that exists (Continue setup).
+// What the page expects of a Solana set-up: the vault the server planned
+// (its seed, settings and vault, which the decoder derives again), the venues
+// and pools (each one the bundle pins), the payouts (the profit wallet, and
+// the operator's fee share), the deposit and the bot's gas. The terms must be
+// those the owner typed and the page shows: a server that changed them is
+// refused here.
+function setupExpect(it, typed) {
+  const c = state.cfg.chains[state.chain], t = it.terms, ctx = it.context;
+  if (t.gas !== c.gas) throw new Refusal(`the server asks ${t.gas} ${c.gasToken} of gas, not the ${c.gas} this page shows`);
+  if (typed) {
+    if (t.token !== typed.token || t.amount !== typed.amount || t.profitWallet !== typed.profitWallet) throw new Refusal('the request differs from what you typed');
+  }
+  const tok = solToken(t.token);
+  if (!tok) throw new Refusal(`the token ${t.token} is not one this page knows`);
+  const total = toRaw(t.amount, tok.decimals), gas = toRaw(t.gas, 9), dep = toRaw(t.deposit, tok.decimals);
+  if (dep !== (c.tokens[t.token].native ? total - gas : total)) throw new Refusal('the deposit is not your amount less the bot\'s gas');
+  if (t.feeWallet && t.feeWallet !== PINS.solana.operator) throw new Refusal('the fee share goes to a wallet that is not the operator\'s');
+  const venues = Object.keys(ctx.report?.venues ?? {});
+  return { kind: 'setup', owner: state.wallet.address, seed: ctx.seed, settings: ctx.settings, vault: ctx.vault, venues,
+    pools: Object.fromEntries(venues.map(v => [v, ctx.report.venues[v].pools])), payoutWallets: [t.profitWallet, ...(t.feeWallet ? [t.feeWallet] : [])],
+    mint: tok.mint, raw: dep.toString(), gasRaw: gas.toString() };
+}
+
+// Create: the wallet approves the set-up (its own vault, the bot's rules,
+// the deposit, the bot's gas: one approval), the bot finishes the vault, the
+// bot starts and opens. `resume`: a request that exists (Continue setup).
 function createFlow({ resume = null } = {}) {
   const w = state.wallet, chain = state.chain;
   const f = new Flow(resume ? `Finish ${resume.name}` : 'Create your position', [
-    { label: 'Sign your request', busy: 'Check the message in your wallet: it moves nothing.', async run(fl) {
-      const body = { chain, owner: w.address, token: $('c-token').value, amount: $('c-amount').value.trim(), profitWallet: $('c-profit').value.trim(),
-        name: $('c-name').value.trim() };
-      const it = await post('intent', body);
-      fl.data.intent = it;
-      fl.set(this, 'active', 'Confirm the message in your wallet…');
-      const s = await w.signMessage(it.message);
-      const pay = await post('sign', { nonce: it.nonce, message: it.message, signature: s.signature, signedMessage: s.signedMessage });
-      fl.data.name = pay.name; fl.data.pay = pay;
-      this.doneText = `Signed: ${pay.name}`;
-    } },
-    { label: 'Pay the bot\'s gas', async run(fl) {
-      const name = fl.data.name ?? resume.name, key = `aperture-payment-${name}`;
-      let sig = recall(key);
-      if (!sig) {
-        const pay = fl.data.pay ?? await post('payment', { name });
-        const gas = fl.data.intent?.gas ?? pay.gas;
-        const expect = chain === 'solana' ? { kind: 'payment', owner: w.address, raw: toRaw(gas, 9).toString() }
-          : { kind: 'payment', owner: w.address, lamports: toRaw(gas, 18).toString() };
-        const r = chain === 'solana' ? decodeSol(pay.transactions[0], expect, SOL_PINS) : decodeEvm(pay.transactions[0], expect, EVM_PINS);
-        review(r, pay.transactions[0], expect);
-        if (!r.ok) throw new Refusal(r.problems.join('; '));
-        fl.set(this, 'active', `Confirm the payment in ${w.name}…`);
-        sig = await w.send(pay.transactions[0], pay.chainId);
-        remember(key, sig);
+    { label: 'Approve your set-up', busy: 'Building it…', async run(fl) {
+      const name = fl.data.name ?? resume?.name;
+      let it, typed = null;
+      if (!name) {
+        typed = { token: $('c-token').value, amount: $('c-amount').value.trim(), profitWallet: $('c-profit').value.trim() };
+        it = await post('intent', { chain, owner: w.address, ...typed, name: $('c-name').value.trim() });
+        // the server's amount is the typed one, normalised
+        typed.amount = it.terms.amount;
+      } else {
+        // a Polygon set-up whose funding this browser sent already: the bot finishes it, nothing is paid twice
+        const sent = recall(`aperture-payment-${name}`);
+        if (chain === 'polygon' && sent) {
+          fl.data.name = name; fl.data.payment = sent; fl.data.deposit = recall(`aperture-deposit-${name}`) || null;
+          this.doneText = 'Sent from this browser before';
+          return;
+        }
+        it = await post('setup', { name });
       }
-      fl.data.payment = sig;
-      await landed(sig, this, fl);
-      this.doneText = 'Paid';
+      fl.data.name = it.name;
+      if (it.done) { this.doneText = 'Already on chain'; return; }
+      if (chain === 'solana') {
+        const sigs = await sendSet(it.transactions, setupExpect(it, typed), this, fl);
+        fl.data.payment = sigs.at(-1);
+        remember(`aperture-payment-${it.name}`, sigs.at(-1));
+      } else {
+        fl.data.payment = await polygonSetup(it, typed, this, fl);
+        remember(`aperture-payment-${it.name}`, fl.data.payment);
+        if (fl.data.deposit) remember(`aperture-deposit-${it.name}`, fl.data.deposit);
+      }
+      this.doneText = `Your vault ${short(it.context.vault ?? it.context.safe)}: yours alone, the bot's rules on it, funded`;
     } },
-    { label: 'The bot creates your vault', busy: 'About a minute…', async run(fl) {
+    { label: 'The bot finishes your vault', busy: 'Under a minute…', async run(fl) {
       const name = fl.data.name ?? resume.name;
       for (let i = 0; i < 80; i++) {
         try {
-          const made = await post('pay', { name, payment: fl.data.payment ?? recall(`aperture-payment-${name}`) });
+          const made = await post('pay', { name, payment: fl.data.payment ?? (recall(`aperture-payment-${name}`) || null),
+            deposit: fl.data.deposit ?? null });
           fl.data.vault = made.vault;
-          this.doneText = `Vault ${short(made.vault)}`;
+          this.doneText = `Vault ${short(made.vault)} ready`;
           return;
-        } catch (e) { if (e.status !== 409) throw e; }
+        } catch (e) {
+          if (e.status !== 409) throw e;
+          if (/sign the set-up again/.test(e.message)) throw e;
+        }
         await sleep(3000);
       }
-      throw new Error('The payment is not confirmed after 4 minutes. Try again later: nothing is paid twice.');
+      throw new Error('Your set-up is not confirmed after 4 minutes. Try again later: nothing is paid twice.');
     } },
     { label: 'Deposit into your vault', async run(fl) {
       const name = fl.data.name ?? resume.name;
       const st = (await post('vaults', { chain, owner: w.address })).vaults.find(x => x.name === name);
-      if (st && (Object.values(st.balances ?? {}).some(x => Number(x) > 0) || st.positions > 0)) { this.doneText = 'Already in the vault'; return; }
+      if (st && (Object.values(st.balances ?? {}).some(x => Number(x) > 0) || st.positions > 0)) { this.doneText = 'In your vault'; return; }
       const token = st?.token ?? $('c-token').value, amount = st?.deposit;
       const { sigs } = await signAll({ name, action: 'deposit' }, (ctx, i) => depositExpect(ctx, token, amount, i), this, fl);
       for (const s of sigs) await recordDeposit(name, s, this, fl);
@@ -631,6 +780,51 @@ function createFlow({ resume = null } = {}) {
   return f;
 }
 
+// Polygon: the owner's own Safe, then the bot's Roles module and role (two
+// transactions: a CREATE2 address cannot name the other in one), then the
+// deposit and the bot's gas, last. Each list decoded against the pins;
+// EIP-5792 sends all of it in one approval, else the wallet is asked one by
+// one, each after the one before landed. Returns the gas payment's hash; the
+// deposit's goes in fl.data.deposit.
+async function polygonSetup(it, typed, step, fl) {
+  const c = state.cfg.chains.polygon, t = it.terms, ctx = it.context, w = state.wallet;
+  if (t.gas !== c.gas) throw new Refusal(`the server asks ${t.gas} ${c.gasToken} of gas, not the ${c.gas} this page shows`);
+  if (typed && (t.token !== typed.token || t.amount !== typed.amount || t.profitWallet.toLowerCase() !== typed.profitWallet.toLowerCase())) {
+    throw new Refusal('the request differs from what you typed');
+  }
+  if (t.feeWallet && t.feeWallet.toLowerCase() !== PINS.polygon.operator.toLowerCase()) throw new Refusal('the fee share goes to a wallet that is not the operator\'s');
+  const tok = PINS.polygon.tokens[t.token];
+  if (!tok) throw new Refusal(`the token ${t.token} is not one this page knows`);
+  const owner = w.address;
+  const create = { kind: 'createVault', owner, safe: ctx.safe, saltNonce: ctx.saltNonce, profitWallet: t.profitWallet, feeWallet: t.feeWallet ?? undefined };
+  const fund = { kind: 'fund', owner, safe: ctx.safe, token: t.token, raw: toRaw(t.deposit, tok.decimals).toString(), gasWei: toRaw(t.gas, 18).toString() };
+  const lines = [], problems = [];
+  for (const [txs, expect] of [[it.calls.setup, create], [it.calls.fund, fund]]) {
+    if (!txs.length) continue;
+    const r = decodeEvm(txs, expect, EVM_PINS);
+    lines.push(...r.lines); problems.push(...r.problems);
+  }
+  review({ ok: !problems.length, lines, problems }, null, null,
+    [[it.calls.setup, create], [it.calls.fund, fund]].filter(([txs]) => txs.length).map(([tx, expect]) => ({ tx, expect })));
+  if (problems.length) throw new Refusal(problems.join('; '));
+  const all = [...it.calls.setup, ...it.calls.fund];
+  if (w.sendCalls) {
+    fl.set(step, 'active', `Approve in ${w.name}: ${all.length} calls, one approval…`);
+    const hashes = await w.sendCalls(all, it.chainId);
+    if (hashes) {
+      fl.data.deposit = hashes.at(-2);
+      return hashes.at(-1);
+    }
+  }
+  let last = null;
+  for (const [i, tx] of all.entries()) {
+    fl.set(step, 'active', `${i + 1} of ${all.length}: confirm in ${w.name}…`);
+    const h = await landed(await w.send(tx, it.chainId), step, fl);
+    if (i === all.length - 2) fl.data.deposit = h;
+    last = h;
+  }
+  return last;
+}
 // --- vault actions ------------------------------------------------------------------------------
 
 // The server reads the deposit back from the chain and sets the bot's cap
@@ -690,11 +884,13 @@ function amountRow(tokens, { add, allOption = false } = {}) {
 
 function addSheet(v, revoked) {
   const { row, amount, token } = amountRow(Object.keys(state.cfg.chains[state.chain].tokens), { add: true });
-  const policies = state.chain === 'solana' ? 'one approval per rule set' : 'one approval';
+  const policies = 'one approval';
   sheet(revoked ? 'Add capital and give the bot its rules back' : 'Add capital', [
     el('label', { text: 'Amount' }), row,
     el('p', { class: 'muted small', text: revoked
-      ? `Your wallet first signs ${policies} that puts the bot's key back on your vault's rules (each checked here against the rules this page was built with), then the deposit. The bot then starts again.`
+      ? (state.chain === 'solana'
+        ? 'Your wallet approves, at once, the bot\'s key back on your vault\'s rules (each checked here against the rules this page was built with) and the deposit after them. The bot then starts again.'
+        : 'Your wallet approves the bot\'s key back on your vault\'s rules (checked here against the rules this page was built with) and the deposit after it: at once when it can (EIP-5792), else one by one. The bot then starts again.')
       : 'Your wallet signs the deposit into your vault. The bot puts it in the pool at its next check.' }),
   ], () => {
     const a = amount.value.trim().replace(',', '.'), t = token.value;
@@ -703,25 +899,71 @@ function addSheet(v, revoked) {
   }, revoked ? 'Approve and deposit' : 'Deposit');
 }
 
-function approveSteps(v) {
-  return [{ label: 'Approve the bot\'s rules', async run(fl) {
-    await signAll({ name: v.name, action: 'approve' }, vaultExpect('approve'), this, fl);
-    this.doneText = 'The bot\'s key is back on your vault\'s rules';
+// The bot's rules approved (after a revoke, or new rules), and with `deposit`
+// ({token, amount}) more capital after them: on Solana one set, one approval.
+function approveSteps(v, deposit = null) {
+  return [{ label: deposit ? `Approve the bot's rules and deposit ${deposit.amount} ${deposit.token}` : 'Approve the bot\'s rules', async run(fl) {
+    if (fl.data.approved) return;
+    if (state.chain === 'solana') {
+      const a = await post('tx', { name: v.name, action: 'approve', all: true, ...(deposit ?? {}) });
+      const t = deposit && solToken(deposit.token);
+      const expect = { ...vaultExpect('approve')(a.context), ...(t ? { deposit: { mint: t.mint, raw: toRaw(deposit.amount, t.decimals).toString() } } : {}) };
+      const sigs = await sendSet(a.transactions, expect, this, fl);
+      fl.data.approved = true;
+      if (deposit) { fl.data.deposited = true; await recordDeposit(v.name, sigs.at(-1), this, fl); }
+    } else if (deposit) {
+      // Polygon: the module back and the deposit, decoded each, in one wallet_sendCalls approval (else one by one)
+      const a = await post('tx', { name: v.name, action: 'approve' });
+      const d = await post('tx', { name: v.name, action: 'add', token: deposit.token, amount: deposit.amount });
+      const lines = [], problems = [];
+      for (const tx of a.transactions) { const r = decodeEvm(tx, vaultExpect('approve')(a.context), EVM_PINS); lines.push(...r.lines); problems.push(...r.problems); }
+      for (const [i, tx] of d.transactions.entries()) {
+        const r = decodeEvm(tx, depositExpect(d.context, deposit.token, deposit.amount, i), EVM_PINS);
+        lines.push(...r.lines); problems.push(...r.problems);
+      }
+      const all = [...a.transactions, ...d.transactions];
+      review({ ok: !problems.length, lines, problems }, null, null, [...a.transactions.map(tx => ({ tx, expect: vaultExpect('approve')(a.context) })),
+        ...d.transactions.map((tx, i) => ({ tx, expect: depositExpect(d.context, deposit.token, deposit.amount, i) }))]);
+      if (problems.length) throw new Refusal(problems.join('; '));
+      const w = state.wallet;
+      let hashes = null;
+      if (w.sendCalls) {
+        this.detail = `Approve in ${w.name}: ${all.length} calls, one approval…`;
+        fl.set(this, 'active', this.detail);
+        hashes = await w.sendCalls(all, a.chainId ?? PINS.polygon.chainId);
+      }
+      if (!hashes) {
+        hashes = [];
+        for (const [i, tx] of all.entries()) {
+          fl.set(this, 'active', `${i + 1} of ${all.length}: confirm in ${w.name}…`);
+          hashes.push(await landed(await w.send(tx, a.chainId ?? PINS.polygon.chainId), this, fl));
+        }
+      }
+      fl.data.approved = true; fl.data.deposited = true;
+      await recordDeposit(v.name, hashes.at(-1), this, fl);
+    } else {
+      await signAll({ name: v.name, action: 'approve' }, vaultExpect('approve'), this, fl);
+      fl.data.approved = true;
+    }
+    this.doneText = deposit ? `The bot's key is back on your vault's rules; ${deposit.amount} ${deposit.token} deposited`
+      : 'The bot\'s key is back on your vault\'s rules';
   } }];
 }
 
 function approveFlow(v) { return new Flow('Approve the updated rules', [...approveSteps(v), { label: 'Start the bot', async run(fl) { await startBot(v.name, this, fl); } }]); }
 
 function addFlow(v, token, amount, revoked) {
+  // the rules and the deposit in one approval (Solana: one set; Polygon: wallet_sendCalls where the wallet has it)
+  const together = revoked;
   return new Flow(revoked ? 'Give the bot its rules back' : 'Add capital', [
-    ...(revoked ? approveSteps(v) : []),
-    { label: `Deposit ${amount} ${token}`, async run(fl) {
+    ...(revoked ? approveSteps(v, together ? { token, amount } : null) : []),
+    ...(together ? [] : [{ label: `Deposit ${amount} ${token}`, async run(fl) {
       if (fl.data.deposited) return;
       const { sigs } = await signAll({ name: v.name, action: 'add', token, amount }, (ctx, i) => depositExpect(ctx, token, amount, i), this, fl);
       fl.data.deposited = true;
       for (const s of sigs) await recordDeposit(v.name, s, this, fl);
       this.doneText = `Deposited ${amount} ${token}`;
-    } },
+    } }]),
     { label: 'Start the bot', async run(fl) { await startBot(v.name, this, fl); } },
   ]);
 }
@@ -789,7 +1031,7 @@ function revokeSheet(v) {
     el('p', { text: 'Revoke takes every right from the bot. Your money stays in your vault, under your wallet alone.' }),
     el('ol', { class: 'plain' },
       v.positions ? el('li', { text: v.botReachable ? 'The bot closes its position into your vault (you sign a request that moves nothing).' : 'You close the position into your vault from here.' }) : null,
-      el('li', { text: `Your wallet signs ${n === 1 ? 'one update' : 'one update per rule set'} that removes the bot's key from your vault.` }),
+      el('li', { text: `Your wallet approves ${n === 1 ? 'one update' : `${n} updates at once`} that remove${n === 1 ? 's' : ''} the bot's key from your vault.` }),
       el('li', { text: 'Then you can withdraw everything to your wallet, or keep it in the vault. Add capital later gives the bot its rules back.' })),
   ], () => revokeFlow(v).run(), 'Revoke', 'danger');
 }
@@ -797,7 +1039,10 @@ function revokeSheet(v) {
 function revokeFlow(v) {
   const revoke = { label: 'Remove the bot\'s key from your vault', async run(fl) {
     if (fl.data.revoked) return;
-    await signAll({ name: v.name, action: 'revoke' }, vaultExpect('revoke'), this, fl);
+    if (state.chain === 'solana') {
+      const a = await post('tx', { name: v.name, action: 'revoke', all: true });
+      await sendSet(a.transactions, vaultExpect('revoke')(a.context), this, fl);
+    } else await signAll({ name: v.name, action: 'revoke' }, vaultExpect('revoke'), this, fl);
     fl.data.revoked = true;
     this.doneText = 'The bot can no longer act on your vault';
   } };

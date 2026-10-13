@@ -80,7 +80,7 @@
     <input id="c-profit" autocomplete="off" spellcheck="false">
     <label for="c-name">Pool name (a-z, 0-9, dashes)</label>
     <input id="c-name" autocomplete="off" spellcheck="false" maxlength="32" placeholder="my-pool">
-    <p class="muted small">Next: your wallet signs a message (it moves nothing), pays the bot's gas, and deposits. Each transaction is shown and checked here before your wallet asks.</p>
+    <p class="muted small">Next: your wallet approves ONE set-up. It creates your own vault (you its only owner), gives the bot's key its rules, deposits, and pays the bot's gas. Every transaction is shown and checked here before your wallet asks. The bot spends nothing before all of it is on chain.</p>
     <div class="actions"><button id="c-go" class="primary" type="button">Create position</button></div>
   </section>
 
@@ -130,6 +130,10 @@
       <ul id="f-lines"></ul>
       <p id="f-check" class="ok small"></p>
       <button id="f-copy" class="link" type="button">Copy the transaction (for the verifier)</button>
+    </div>
+    <div id="f-wallet" class="walletcall" hidden>
+      <p id="f-wallet-text"></p>
+      <a id="f-open" class="button primary wide" hidden>Open your wallet to sign</a>
     </div>
     <div class="actions">
       <button id="f-retry" class="primary" type="button" hidden>Try again</button>

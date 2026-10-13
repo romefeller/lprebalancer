@@ -127,3 +127,129 @@ test('the command: the chain is read for a Solana vault, never for an EVM one; w
   assert.equal(PINS.polygon.tokens.POL.address, null, 'the native coin has no token address');
   assert.equal(PINS.polygon.tokens.WPOL.address, POLYGON.WPOL);
 });
+
+test('a set-up the wallet approves at once: pasted as parts, or read from the server (--action setup), checked as a whole', async () => {
+  const { ownerSetupPlan, packSteps } = await import('../chains/solana/vault/admin.mjs');
+  const { setupExpectOf } = await import('../onboard/verify.mjs');
+  const http = await import('node:http');
+  const { SystemProgram } = require('@solana/web3.js');
+  const seed = 4321n, settings = sq.settingsPda(seed), vault = sq.vaultPda(settings);
+  const policyKey = new PublicKey(ONBOARD.chains.solana.botKeys[1]);
+  const venueCompiled = compile(VENUE, { vault, payer: PAYER, pools: [new PublicKey(POOL)], payouts: payoutWallets.map(w => new PublicKey(ata(w, USDC))) });
+  const plan = ownerSetupPlan({ owner: OWNER, treasury: Keypair.generate().publicKey, seed, policyKey, venues: [venueCompiled] });
+  const build = (gasTo = PAYER) => packSteps([...plan.steps.slice(0, -1), [plan.steps.at(-1), SystemProgram.transfer({ fromPubkey: OWNER, toPubkey: vault, lamports: 400_000_000 }),
+    SystemProgram.transfer({ fromPubkey: OWNER, toPubkey: gasTo, lamports: 118_600_000 })]], OWNER).map(ixs => {
+    const tx = new Transaction().add(...ixs); tx.feePayer = OWNER; tx.recentBlockhash = PublicKey.default.toBase58();
+    return tx.serialize({ requireAllSignatures: false, verifySignatures: false }).toString('base64');
+  });
+  const it = { name: 'my-pool', done: false, transactions: build(), terms: { token: 'SOL', amount: '0.5186', deposit: '0.4', gas: '0.1186',
+    profitWallet: OWNER.toBase58(), feeWallet: SOLANA.operator_profit_wallet },
+  context: { seed: String(seed), settings: settings.toBase58(), vault: vault.toBase58(), report: { venues: { [VENUE]: { pools: [POOL] } } } } };
+  const e = setupExpectOf(it, OWNER.toBase58(), PINS);
+  assert.deepEqual([e.kind, e.venues, e.raw, e.gasRaw, e.payoutWallets], ['setup', [VENUE], '400000000', '118600000', payoutWallets]);
+  const show = (args) => read(args[1].split(':')[1]);
+  const log = console.log, out = [];
+  console.log = (x) => out.push(String(x));
+  let srv;
+  try {
+    const paste = (txs) => JSON.stringify({ chain: 'solana', parts: [{ tx: txs, expect: e }] });
+    assert.equal(await main(['--commit', 'abcdef1', '--rpc', 'none', '--paste', paste(build())], { git: show }), 0, out.join('\n'));
+    assert.match(out.join('\n'), /transaction 1 of 1: OK[\s\S]*Transaction 1 of 2:[\s\S]*Create your vault/);
+    out.length = 0;
+    assert.equal(await main(['--commit', 'abcdef1', '--rpc', 'none', '--paste', paste(build(Keypair.generate().publicKey))], { git: show }), 1);
+    assert.match(out.join('\n'), /0 payments to the bot's gas key[\s\S]*do not sign/);
+    // the vault not created yet is no chain problem for a set-up
+    assert.deepEqual(await chainProblems({ getAccountInfo: async () => null }, e), []);
+    // from the server: its set-up of the request
+    let tamper = false;
+    srv = http.createServer((req, res) => {
+      let body = '';
+      req.on('data', (d) => { body += d; });
+      req.on('end', () => {
+        assert.equal(req.url, '/bot/api/setup');
+        assert.equal(JSON.parse(body).name, 'my-pool');
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify(tamper ? { ...it, transactions: build(Keypair.generate().publicKey) } : it));
+      });
+    });
+    await new Promise(r => srv.listen(0, '127.0.0.1', r));
+    const from = ['--commit', 'abcdef1', '--rpc', 'none', '--from', `http://127.0.0.1:${srv.address().port}/bot`, '--invite', 'i', '--name', 'my-pool',
+      '--owner', OWNER.toBase58(), '--action', 'setup'];
+    out.length = 0;
+    assert.equal(await main(from, { git: show }), 0, out.join('\n'));
+    tamper = true;
+    assert.equal(await main(from, { git: show }), 1);
+    await assert.rejects(main([...from, '--chain', 'polygon'], { git: show }), /a Polygon set-up: paste what the page copied/);
+  } finally { console.log = log; srv?.close(); }
+});
+
+test('the server\'s answer, read as the page reads it: every transaction of an action, one at a time or at once, and what each must be', async () => {
+  const { fromServer } = await import('../onboard/verify.mjs');
+  const http = await import('node:http');
+  let answer = () => ({}), status = 200, asked = [];
+  const srv = http.createServer((req, res) => {
+    let body = '';
+    req.on('data', (d) => { body += d; });
+    req.on('end', () => {
+      const b = JSON.parse(body);
+      asked.push(b);
+      res.writeHead(status, { 'content-type': 'application/json' });
+      res.end(status === 599 ? 'not json' : JSON.stringify(answer(b)));
+    });
+  });
+  await new Promise(r => srv.listen(0, '127.0.0.1', r));
+  const from = `http://127.0.0.1:${srv.address().port}/bot`;
+  const f = (o) => ({ from, invite: 'i', name: 'my-pool', owner: OWNER.toBase58(), ...o });
+  try {
+    // Solana: one at a time (a blockhash each), every index asked for, in order
+    const ctx = { settings: SETTINGS.toBase58(), vault: VAULT.toBase58(), policies: { [VENUE]: POLICIES } };
+    answer = (b) => ({ count: 3, index: b.index, transactions: [`tx${b.index}`], context: ctx });
+    let job = await fromServer(f({ action: 'approve' }), PINS);
+    assert.deepEqual([job.chain, job.txs], ['solana', ['tx0', 'tx1', 'tx2']]);
+    assert.deepEqual(asked.map(b => [b.index, b.action, b.name, b.invite]), [[0, 'approve', 'my-pool', 'i'], [1, 'approve', 'my-pool', 'i'], [2, 'approve', 'my-pool', 'i']]);
+    assert.deepEqual(job.expect(0), { kind: 'approve', owner: OWNER.toBase58(), ...ctx, mint: null, raw: 'all' });
+    asked = [];
+    job = await fromServer(f({ action: 'withdraw', token: 'SOL', amount: '0.5' }), PINS);
+    assert.deepEqual([job.expect(1).mint, job.expect(1).raw], [SOLANA.native_mint, '500000000']);
+    job = await fromServer(f({ action: 'withdraw', token: 'USDC', amount: '2.5' }), PINS);
+    assert.deepEqual([job.expect(0).mint, job.expect(0).raw], [SOLANA.usdc_mint, '2500000']);
+    job = await fromServer(f({ action: 'withdraw', token: 'USDC', amount: 'all' }), PINS);
+    assert.equal(job.expect(0).raw, 'all');
+    job = await fromServer(f({ action: 'withdraw', token: 'ALL', amount: 'all' }), PINS);
+    assert.deepEqual([job.expect(0).mint, job.expect(0).raw], [null, 'all']);
+    // Polygon: every transaction at once (no index), the Safe and its module from the context
+    answer = () => ({ count: 2, transactions: ['a', 'b'], context: { safe: '0xSafe', roles: '0xRoles' } });
+    job = await fromServer(f({ action: 'withdraw', token: 'WPOL', amount: '1.5', chain: 'polygon' }), PINS);
+    assert.deepEqual([job.chain, job.txs], ['polygon', ['a', 'b']]);
+    assert.deepEqual(job.expect(0), { kind: 'withdraw', owner: OWNER.toBase58(), safe: '0xSafe', roles: '0xRoles', token: 'WPOL', raw: '1500000000000000000' });
+    // no context: nothing named
+    answer = () => ({ count: 1, transactions: ['a'] });
+    job = await fromServer(f({ action: 'revoke' }), PINS);
+    assert.deepEqual(job.expect(0), { kind: 'revoke', owner: OWNER.toBase58(), mint: null, raw: 'all' });
+    // the server's refusal, said as it says it; a body that is no answer
+    status = 409;
+    answer = () => ({ error: 'the request is signed, not set up' });
+    await assert.rejects(fromServer(f({ action: 'approve' }), PINS), /^Error: the request is signed, not set up$/);
+    answer = () => ({});
+    await assert.rejects(fromServer(f({ action: 'approve' }), PINS), /^Error: the server answered 409$/);
+  } finally { srv.close(); }
+});
+
+test('the chain for a set-up: a vault not made yet, or policies not made yet, are no problem; for anything else they are', async () => {
+  const settingsData = (owners) => {
+    const w = [Buffer.from(require('node:crypto').createHash('sha256').update('account:Settings').digest().subarray(0, 8)), Buffer.alloc(16), PublicKey.default.toBuffer()];
+    const t = Buffer.alloc(2); t.writeUInt16LE(1);
+    const n = Buffer.alloc(4); n.writeUInt32LE(owners.length);
+    w.push(t, Buffer.alloc(4), Buffer.alloc(8), Buffer.alloc(8), Buffer.from([0]), Buffer.alloc(8), Buffer.from([255]), n,
+      ...owners.map(o => Buffer.concat([o.toBuffer(), Buffer.from([7])])), Buffer.from([0]), Buffer.from([0]));
+    return Buffer.concat(w);
+  };
+  const head = (s) => Buffer.concat([Buffer.from(require('node:crypto').createHash('sha256').update('account:Policy').digest().subarray(0, 8)), s.toBuffer(),
+    Buffer.alloc(8), Buffer.from([255]), Buffer.alloc(16), Buffer.from([0, 0, 0, 0]), Buffer.alloc(6)]);
+  const conn = (policies) => ({ getAccountInfo: async () => ({ data: settingsData([OWNER]) }), getMultipleAccountsInfo: async () => policies });
+  const setup = { ...expect, kind: 'setup' };
+  assert.deepEqual(await chainProblems(conn([null, null]), setup), [], 'the set-up makes them');
+  assert.deepEqual((await chainProblems(conn([null, null]), expect)).length, 2, 'an approval needs them');
+  assert.match((await chainProblems(conn([{ data: head(Keypair.generate().publicKey) }, null]), setup)).join(), /belongs to another vault/,
+    'one that exists must be this vault\'s');
+});
