@@ -1,74 +1,88 @@
 // The transactions that set a vault up and change it. Pure builders: they
-// return instruction groups, one group per transaction, and sign nothing.
-// vault.mjs sends the bot's; the owners' go to the signing page.
+// return instructions or instruction groups, one group per transaction, and
+// sign nothing. The owners' go to the signing page; the bot sends only its
+// own (the lookup table).
 import { createRequire } from 'module';
 import * as sq from './squads.mjs';
 import SOLANA from '../solana.json' with { type: 'json' };
 
 const require = createRequire(import.meta.url);
-const { PublicKey, AddressLookupTableProgram, SystemProgram } = require('@solana/web3.js');
+const { PublicKey, AddressLookupTableProgram, SystemProgram, TransactionMessage } = require('@solana/web3.js');
 const { getAssociatedTokenAddressSync, TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID, ASSOCIATED_TOKEN_PROGRAM_ID } = require('@solana/spl-token');
 
 const MEMO_PROGRAM = new PublicKey(SOLANA.programs.memo);
 // Addresses one extend instruction carries and still fits a transaction.
 const EXTEND_CHUNK = 24;
 
-// Connect: a new smart account owned by `owners`, with each venue's policies
-// for `policyKey`, and the bot nowhere among the owners at the end.
-// `venues` = [compile(...)], one per venue the owners approve.
-//
-// The bot creates the account as a temporary owner (so the owners sign
-// nothing), adds one policy per transaction (a policy fills most of one), and
-// removes itself in the last. Until then the vault is empty: owners deposit
-// only after `vault.mjs status` shows the bot gone. Policy seeds run on
-// across venues in the order given; `byVenue` names each venue's policies.
-export function connectPlan({ creator, treasury, seed, owners, threshold, policyKey, venues, memo = null }) {
-  if (!owners.length) throw new Error('a vault needs at least one owner');
-  if (threshold < 1 || threshold > owners.length) throw new Error(`threshold ${threshold} with ${owners.length} owners`);
-  if (owners.some(o => new PublicKey(o).equals(creator))) throw new Error('the bot\'s key cannot be an owner');
-  if (owners.some(o => new PublicKey(o).equals(policyKey))) throw new Error('the policy key cannot be an owner');
+// Set-up: the owner's own smart account, the owner its creator, rent payer
+// and only signer (threshold 1, no settings authority, no time lock), and
+// each venue's policies for the bot's `policyKey`, created by the owner in
+// owner-signed settings transactions. The bot signs nothing and pays
+// nothing: it is never a signer of the vault (owner order, 2026-10-13).
+// `venues` = [compile(...)], one per venue the owner approves. `steps` are
+// the instructions in order: the creation, then one policy each; a policy
+// seed runs on across venues in the order given (the account's first policy
+// seed is 1), and `byVenue` names each venue's policies. The caller packs
+// the steps into transactions (packSteps) and adds the deposit after them:
+// a deposit only ever reaches a vault whose policies exist. Pure.
+export function ownerSetupPlan({ owner, treasury, seed, policyKey, venues, memo = null }) {
+  owner = new PublicKey(owner);
+  if (owner.equals(new PublicKey(policyKey))) throw new Error('the bot\'s policy key cannot own the vault');
   if (!venues.length) throw new Error('a vault needs at least one venue');
   if (new Set(venues.map(v => v.venue)).size !== venues.length) throw new Error('a venue is listed twice');
-  // The bot alone reaches the threshold while it sets up; the real threshold
-  // is set in the last transaction, after the bot has left.
-  const { settings, ix: create } = sq.createSmartAccountIx({ creator, treasury, seed, threshold: 1, memo,
-    signers: [...owners.map(k => ({ key: new PublicKey(k) })), { key: creator }] });
+  const { settings, ix: create } = sq.createSmartAccountIx({ creator: owner, treasury, seed, threshold: 1, memo, signers: [{ key: owner }] });
   const all = venues.flatMap(v => v.policies);
   const policies = all.map((_, i) => sq.policyPda(settings, i + 1));
   const byVenue = {};
   let n = 0;
   for (const v of venues) { byVenue[v.venue] = policies.slice(n, n + v.policies.length); n += v.policies.length; }
-  const sync = (actions, extra) => sq.settingsSyncIx({ settings, signers: [creator], rentPayer: creator, actions, extra });
-  const txs = [[create]];
-  all.forEach((p, i) => txs.push([sync(
-    [{ kind: 'policyCreate', seed: i + 1, policy: p.policy, signers: [{ key: policyKey }] }], [policies[i]])]));
-  const leave = [{ kind: 'removeSigner', key: creator }];
-  if (threshold > 1) leave.push({ kind: 'changeThreshold', threshold });
-  txs.push([sync(leave, [])]);
-  return { settings, vault: sq.vaultPda(settings), policies, byVenue, txs };
+  const steps = [create, ...all.map((p, i) => sq.settingsSyncIx({ settings, signers: [owner], rentPayer: owner, extra: [policies[i]],
+    actions: [{ kind: 'policyCreate', seed: i + 1, policy: p.policy, signers: [{ key: policyKey }] }] }))];
+  return { settings, vault: sq.vaultPda(settings), policies, byVenue, steps };
 }
 
-// Which steps of a connectPlan already landed (their indexes in plan.txs),
-// read from the chain: the vault's settings data (null when not created) and
-// whether each policy account exists. A resumed connect sends only the rest
-// (2026-10-11: the first connect's create landed but its confirmation failed,
-// and a second try would have made another vault). Pure.
-export function connectDone(settingsData, policyExists, { owners, creator }) {
+// Which steps of an ownerSetupPlan already landed (their indexes), read from
+// the chain: the settings data (null when not created) and whether each
+// policy exists. A settings account at the seed that is not this owner's
+// alone means another account took the seed: null, plan again with a fresh
+// one. Pure.
+export function setupDone(settingsData, policyExists, { owner }) {
   if (!settingsData) {
     if (policyExists.some(Boolean)) throw new Error('policies exist for a vault that does not');
     return new Set();
   }
   const s = sq.decodeSettings(settingsData);
-  const have = new Set(s.signers.map(x => x.key.toBase58()));
-  const missing = owners.map(k => new PublicKey(k).toBase58()).filter(k => !have.has(k));
-  if (missing.length) throw new Error(`the vault at this seed is not this request's: ${missing.join(', ')} is not an owner`);
+  if (s.signers.length !== 1 || !s.signers[0].key.equals(new PublicKey(owner))) return null;
   const done = new Set([0]);
   policyExists.forEach((e, i) => { if (e) done.add(i + 1); });
-  if (!have.has(new PublicKey(creator).toBase58())) {
-    if (policyExists.some(e => !e)) throw new Error('the bot left the vault before every policy was created; only the owners can add them');
-    done.add(policyExists.length + 1);
-  }
   return done;
+}
+
+// `steps` packed into as few legacy transactions as fit `limit` bytes each
+// when `payer` signs alone, order kept: a step that does not fit the
+// transaction being filled starts the next. A step is an instruction, or an
+// array of instructions that must land together (one transaction). Returns
+// the instruction groups. Pure.
+export function packSteps(steps, payer, limit = 1232) {
+  const fits = (ixs) => {
+    try {
+      const msg = new TransactionMessage({ payerKey: new PublicKey(payer), recentBlockhash: PublicKey.default.toBase58(), instructions: ixs })
+        .compileToLegacyMessage();
+      return 1 + 64 * msg.header.numRequiredSignatures + msg.serialize().length <= limit;
+    } catch { return false; }
+  };
+  const groups = [];
+  for (const step of steps) {
+    const unit = Array.isArray(step) ? step : [step];
+    if (!unit.length) continue;
+    const last = groups.at(-1);
+    if (last && fits([...last, ...unit])) last.push(...unit);
+    else {
+      if (!fits(unit)) throw new Error('a step alone is over a transaction\'s size');
+      groups.push([...unit]);
+    }
+  }
+  return groups;
 }
 
 // What a connected vault must look like before anyone deposits: these owners

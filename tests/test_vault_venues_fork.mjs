@@ -9,7 +9,7 @@ import { Fork } from './_svm.mjs';
 import { connectedVault, POOL as DLMM_POOL } from './_vault.mjs';
 import { actingAccount } from '../chains/solana/vault/account.mjs';
 import { compile } from '../chains/solana/vault/policy.mjs';
-import { poolsByVenue, connect } from '../chains/solana/vault/cli.mjs';
+import { poolsByVenue, setupRequest } from '../chains/solana/vault/cli.mjs';
 import { venue } from '../chains/solana/vault/venues.mjs';
 import SOLANA from '../chains/solana/solana.json' with { type: 'json' };
 
@@ -25,7 +25,7 @@ const POOLS = {
   byreal: '9GTj99g9tbz9U6UYDsX6YeRTgUnkYG6GTnHv3qLa5aXq',
 };
 
-test('one connect approves all four venues; each signs only through its own policies', { timeout: 600_000 }, async () => {
+test('one owner set-up approves all four venues; each signs only through its own policies', { timeout: 600_000 }, async () => {
   const venues = Object.keys(POOLS);
   // the pools in another order than the venues: each is placed by its program
   const { fork, connection, out, envFor, payer } = await connectedVault({ venues, pools: Object.values(POOLS).reverse() });
@@ -46,19 +46,18 @@ test('one connect approves all four venues; each signs only through its own poli
   for (const v of venues) assert.ok(table.addresses.some(a => a.toBase58() === POOLS[v]), `${v}'s pool in the lookup table`);
 });
 
-test('connect: no venue or no pool, or an empty threshold, is refused before anything is sent', { timeout: 300_000 }, async () => {
-  const { connection, owner } = await connectedVault();
-  const owners = owner.publicKey.toBase58();
-  await assert.rejects(connect({ owners, venue: 'orca' }, { connection }), /connect needs --venue and --pools/);
-  await assert.rejects(connect({ owners, pools: POOLS.orca }, { connection }), /connect needs --venue and --pools/);
-  await assert.rejects(connect({ owners, venue: ' , ', pools: POOLS.orca }, { connection }), /connect needs --venue and --pools/);
-  await assert.rejects(connect({ owners, venue: 'orca', pools: POOLS.orca, threshold: '' }, { connection }), /threshold 0 with 1 owners/);
-  // a dry run, with an empty --payout-mint: USDC, as with none
-  const log = console.log; console.log = () => {};
-  let dry;
-  try { dry = await connect({ owners, venue: 'orca', pools: POOLS.orca, payout: owners, 'payout-mint': '' }, { connection }); } finally { console.log = log; }
-  assert.equal(dry.sent, undefined);
-  assert.deepEqual(dry.payouts, [String(getAssociatedTokenAddressSync(new PublicKey(SOLANA.usdc_mint), owner.publicKey, true))]);
+test('set-up: no owner, no venue or no pool is refused before anything is built', { timeout: 300_000 }, async () => {
+  const { connection, owner, payer, policyKey } = await connectedVault();
+  const me = owner.publicKey.toBase58(), keys = { connection, payer: payer.publicKey, policyKey: policyKey.publicKey };
+  await assert.rejects(setupRequest({ owner: me, venue: 'orca' }, keys), /setup needs --venue and --pools/);
+  await assert.rejects(setupRequest({ owner: me, pools: POOLS.orca }, keys), /setup needs --venue and --pools/);
+  await assert.rejects(setupRequest({ owner: me, venue: ' , ', pools: POOLS.orca }, keys), /setup needs --venue and --pools/);
+  await assert.rejects(setupRequest({ venue: 'orca', pools: POOLS.orca }, keys), /^Error: setup needs --owner <the wallet that owns the vault>$/);
+  await assert.rejects(setupRequest({ owner: policyKey.publicKey.toBase58(), venue: 'orca', pools: POOLS.orca }, keys), /cannot own the vault/);
+  // an empty --payout-mint: USDC, as with none
+  const plan = await setupRequest({ owner: me, venue: 'orca', pools: POOLS.orca, payout: me, 'payout-mint': '' }, keys);
+  assert.deepEqual(plan.report.payouts, [String(getAssociatedTokenAddressSync(new PublicKey(SOLANA.usdc_mint), owner.publicKey, true))]);
+  assert.deepEqual(plan.report.owners, [me]);
 });
 
 test('a pool no listed venue owns, or a venue without a pool, is refused', { timeout: 300_000 }, async () => {

@@ -82,7 +82,7 @@ class RegisterRows(unittest.TestCase):
         self.assertEqual(add_vault.addresses(None, 'x'), [])
 
     def test_what_it_refuses(self):
-        for over, msg in (({'sent': False}, 'dry run'), ({'venues': {'nowhere': venue()}}, 'no vault rules'),
+        for over, msg in (({'sent': False}, 'not a finished vault'), ({'venues': {'nowhere': venue()}}, 'no vault rules'),
                           ({'venues': {}}, 'no venues'),
                           ({'owners': [OWNER, PAYER]}, 'bot key'), ({'threshold': 2}, 'threshold'),
                           ({'owners': ['not-an-address']}, 'not addresses'),
@@ -194,7 +194,7 @@ class Register(unittest.TestCase):
         v = db.vault_row('v-add')
         self.assertEqual((v['kind'], v['settings'], v['lookup']), ('safe', SAFE, None))
         self.assertEqual(db.wallet_row('v-add')['chain'], 'polygon')
-        with self.assertRaisesRegex(add_vault.Refused, 'new connect'):
+        with self.assertRaisesRegex(add_vault.Refused, 'new owner set-up'):
             add_vault.payouts(argparse.Namespace(wallet='v-add', venue='uniswap-v3-polygon', payout=EVM_PROFIT, mints=None, apply=True))
 
     def test_payouts_for_a_venue_never_approved_are_refused(self):

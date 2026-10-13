@@ -13,7 +13,7 @@ import { keyDir } from './_vault.mjs';
 import * as sq from '../chains/solana/vault/squads.mjs';
 import { compile, NotAllowed } from '../chains/solana/vault/policy.mjs';
 import { actingAccount, PolicyMismatch } from '../chains/solana/vault/account.mjs';
-import { connectPlan, connectProblems, lookupPlan, staticAccounts } from '../chains/solana/vault/admin.mjs';
+import { connectProblems, lookupPlan, ownerSetupPlan, packSteps, staticAccounts } from '../chains/solana/vault/admin.mjs';
 import { venue } from '../chains/solana/vault/venues.mjs';
 
 const require = createRequire(import.meta.url);
@@ -40,9 +40,9 @@ async function vaultOnFork({ usdc = 200_000_000n, payoutWallets = [] } = {}) {
   const seed = config.smartAccountIndex + 1n, vault = sq.vaultPda(sq.settingsPda(seed));
   const payouts = payoutWallets.map(w => getAssociatedTokenAddressSync(USDC, w, true));
   const compiled = compile('meteora-dlmm', { vault, payer: payer.publicKey, pools: [POOL], payouts });
-  const plan = connectPlan({ creator: payer.publicKey, treasury: config.treasury, seed, owners: [owner.publicKey],
-    threshold: 1, policyKey: policyKey.publicKey, venues: [compiled] });
-  for (const ixs of plan.txs) { const r = await fork.send(ixs, payer); assert.ok(r.ok, r.logs.join('\n')); assert.ok(r.size <= 1232); }
+  // the owner's own set-up: its vault and the bot's policies, signed and paid by the owner alone
+  const plan = ownerSetupPlan({ owner: owner.publicKey, treasury: config.treasury, seed, policyKey: policyKey.publicKey, venues: [compiled] });
+  for (const ixs of packSteps(plan.steps, owner.publicKey)) { const r = await fork.send(ixs, owner); assert.ok(r.ok, r.logs.join('\n')); assert.ok(r.size <= 1232); }
   assert.deepEqual(connectProblems(fork.get(plan.settings).data,
     { owners: [owner.publicKey], threshold: 1, botKeys: [payer.publicKey, policyKey.publicKey] }), []);
   const { settings, policies } = plan;

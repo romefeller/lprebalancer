@@ -1,6 +1,7 @@
 // The operator's vault tool (chains/solana/vault/cli.mjs) on a fork of
-// mainnet: connect a vault for an owner, then every owner request signed the
-// way owner/index.html signs it (a fresh blockhash, the wallet's signature).
+// mainnet: the owner's own set-up of a vault and the bot's finish, then every
+// owner request signed the way the page signs it (a fresh blockhash, the
+// wallet's signature).
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'module';
@@ -30,7 +31,7 @@ async function ownerSigns(fork, req, owner) {
 
 const setup = connectedVault;
 
-test('connect: the owner alone controls the vault; the bot can act through its policies', { timeout: 300_000 }, async () => {
+test('set-up: the owner alone controls the vault; the bot can act through its policies', { timeout: 300_000 }, async () => {
   const { fork, connection, out, env, owner, payer } = await setup();
   assert.equal(out.sent, true);
   const s = sq.decodeSettings(fork.get(out.settings).data);
@@ -103,53 +104,93 @@ test('a request takes the whole balance or less, never nothing or more, and says
   assert.ok(approve.summary.endsWith(`payouts ${out.payouts.join(', ')}`), approve.summary);
 });
 
-test('connect resumes its own vault: a try cut off after its create finishes that vault, never a second one', { timeout: 300_000 }, async () => {
+test('the owner\'s set-up resumes: cut after its first transaction, the rest finishes the same vault; the bot only after all of it', { timeout: 300_000 }, async () => {
   const { Fork } = await import('./_svm.mjs');
-  const { connect } = await import('../chains/solana/vault/cli.mjs');
-  const { connectDone, connectProblems } = await import('../chains/solana/vault/admin.mjs');
-  const { DLMM_PROGRAM, POOL } = await import('./_vault.mjs');
+  const { finishSetup, setupRequest } = await import('../chains/solana/vault/cli.mjs');
+  const { packSteps, lookupPlan } = await import('../chains/solana/vault/admin.mjs');
+  const { DLMM_PROGRAM, POOL, freeSeeds } = await import('./_vault.mjs');
   const fork = new Fork();
   await Promise.all([fork.program(sq.PROGRAM_ID), fork.program(DLMM_PROGRAM)]);
   await fork.syncClock();
   await fork.clone([sq.programConfigPda()]);
   const index0 = sq.decodeProgramConfig(fork.get(sq.programConfigPda()).data).smartAccountIndex;
   await fork.clone([sq.decodeProgramConfig(fork.get(sq.programConfigPda()).data).treasury]);
+  freeSeeds(fork);
   const payer = Keypair.generate(), policyKey = Keypair.generate(), owner = fork.wallet(1), profit = Keypair.generate();
-  fork.fund(payer.publicKey, 1);
   const connection = fork.connection();
-  const f = { owners: owner.publicKey.toBase58(), venue: 'meteora-dlmm', pools: POOL, payout: profit.publicKey.toBase58(), execute: true };
-  const quiet = { payer, policyKey, log: () => {} };
-  // the first try: the create lands, then the network drops
-  let sends = 0, planned = null;
-  const flaky = Object.create(connection, { sendRawTransaction: { value: async (raw, o) => {
-    if (++sends > 1) throw new Error('fetch failed');
-    return connection.sendRawTransaction(raw, o);
-  } } });
-  await assert.rejects(connect(f, { ...quiet, connection: flaky, onPlan: (p) => { planned = p; } }), /fetch failed/);
-  assert.ok(planned && fork.get(planned.settings), 'the plan was heard before the send, and its create landed');
-  const settings = new PublicKey(planned.settings);
-  const policies = [1, 2, 3].map(i => sq.policyPda(settings, i));
-  const exists = () => policies.map(p => Boolean(fork.get(p)));
-  const half = fork.get(settings).data;
-  assert.deepEqual([...connectDone(half, exists(), { owners: [owner.publicKey], creator: payer.publicKey })], [0]);
-  assert.throws(() => connectDone(half, exists(), { owners: [Keypair.generate().publicKey], creator: payer.publicKey }), /not this request's/);
-  assert.throws(() => connectDone(null, [true], { owners: [owner.publicKey], creator: payer.publicKey }), /policies exist/);
-  assert.deepEqual([...connectDone(null, [false], { owners: [owner.publicKey], creator: payer.publicKey })], []);
-
-  // the resume: the same seed, only the missing steps
-  const said = [];
-  const out = await connect({ ...f, seed: planned.seed }, { ...quiet, connection, log: (l) => said.push(String(l)) });
-  assert.equal(out.settings, planned.settings);
-  assert.ok(said.some(l => /resuming: 1 of \d+ setup transactions already landed/.test(l)), said.join('\n'));
-  assert.deepEqual(connectProblems(fork.get(settings).data, { owners: [owner.publicKey], threshold: 1,
-    botKeys: [payer.publicKey, policyKey.publicKey] }), []);
+  const f = { owner: owner.publicKey.toBase58(), venue: 'meteora-dlmm', pools: POOL, payout: profit.publicKey.toBase58() };
+  const keys = { connection, payer: payer.publicKey, policyKey: policyKey.publicKey };
+  const first = await setupRequest(f, keys);
+  assert.equal(first.seed, String(index0 + 1n));
+  assert.deepEqual(first.done, []);
+  const groups = packSteps(first.steps, owner.publicKey);
+  assert.ok(groups.length >= 2);
+  // the first transaction lands; the owner's wallet is closed before the rest
+  const r0 = await fork.send(groups[0], owner);
+  assert.ok(r0.ok, r0.logs.join('\n'));
+  const half = await setupRequest({ ...f, seed: first.seed }, keys);
+  assert.equal(half.settings, first.settings, 'the same vault');
+  assert.equal(half.steps.length, first.steps.length - groups[0].length, 'only what is missing');
+  assert.deepEqual(half.steps.map(ix => ix.data), first.steps.slice(groups[0].length).map(ix => ix.data));
+  // the bot spends nothing while any of it is missing
+  await assert.rejects(finishSetup(half, { connection, payer, policyKey: policyKey.publicKey, log: () => {} }), /not on chain yet/);
+  assert.equal(fork.balance(payer.publicKey), 0, 'the bot holds nothing and paid nothing');
+  for (const ixs of packSteps(half.steps, owner.publicKey)) {
+    const r = await fork.send(ixs, owner);
+    assert.ok(r.ok, r.logs.join('\n'));
+  }
+  const whole = await setupRequest({ ...f, seed: first.seed }, keys);
+  assert.deepEqual(whole.steps, []);
   assert.equal(sq.decodeProgramConfig(fork.get(sq.programConfigPda()).data).smartAccountIndex, index0 + 1n, 'one vault, not two');
-  const full = fork.get(settings).data;
-  const all = [...connectDone(full, exists(), { owners: [owner.publicKey], creator: payer.publicKey })].sort();
-  assert.deepEqual(all, [0, 1, 2, 3, 4].slice(0, policies.length + 2));
-  assert.throws(() => connectDone(full, [true, false, true], { owners: [owner.publicKey], creator: payer.publicKey }), /before every policy/);
-  // a third call finds nothing to do and sends no setup transaction
-  sends = 0;
-  const again = await connect({ ...f, seed: planned.seed }, { ...quiet, connection: flaky });
-  assert.equal(again.settings, planned.settings);
+  // the owner's gas reaches the bot. A first try cut short after its table's create: 3 addresses of 20
+  fork.fund(payer.publicKey, 0.05);
+  const partial = lookupPlan({ payer: payer.publicKey, recentSlot: fork.recentSlot(), addresses: whole.lookupAddresses.slice(0, 3) });
+  for (const ixs of partial.txs) assert.ok((await fork.send(ixs, payer)).ok);
+  fork.nextSlot();
+  // the retry with the saved table: only its missing addresses, the table saved again before anything is sent
+  let saved = null;
+  const out = await finishSetup(whole, { connection, payer, policyKey: policyKey.publicKey, lookup: partial.table.toBase58(), log: () => {},
+    onLookup: (t) => { saved = t; } });
+  assert.equal(out.lookup, partial.table.toBase58());
+  assert.equal(saved, out.lookup);
+  assert.deepEqual(out.owners, [owner.publicKey.toBase58()]);
+  assert.equal(out.threshold, 1);
+  assert.ok(out.signatures.length >= 1);
+  fork.nextSlot();
+  const { AddressLookupTableAccount } = require('@solana/web3.js');
+  const table = AddressLookupTableAccount.deserialize(fork.get(partial.table).data);
+  assert.equal(table.addresses.length, whole.lookupAddresses.length, 'each address once');
+  // a retry with the whole table sends nothing more
+  const again = await finishSetup(whole, { connection, payer, policyKey: policyKey.publicKey, lookup: out.lookup, log: () => {} });
+  assert.equal(again.lookup, out.lookup);
+  assert.deepEqual(again.signatures, []);
+});
+
+test('a seed another account took is planned again at the next free one', { timeout: 300_000 }, async () => {
+  const { Fork } = await import('./_svm.mjs');
+  const { setupRequest } = await import('../chains/solana/vault/cli.mjs');
+  const { DLMM_PROGRAM, POOL, freeSeeds } = await import('./_vault.mjs');
+  const fork = new Fork();
+  await Promise.all([fork.program(sq.PROGRAM_ID), fork.program(DLMM_PROGRAM)]);
+  await fork.syncClock();
+  await fork.clone([sq.programConfigPda()]);
+  const cfg = sq.decodeProgramConfig(fork.get(sq.programConfigPda()).data);
+  await fork.clone([cfg.treasury]);
+  freeSeeds(fork);
+  const owner = fork.wallet(1), stranger = fork.wallet(2);
+  const connection = fork.connection();
+  const f = { owner: owner.publicKey.toBase58(), venue: 'meteora-dlmm', pools: POOL, payout: owner.publicKey.toBase58() };
+  const keys = { connection, payer: Keypair.generate().publicKey, policyKey: Keypair.generate().publicKey };
+  const planned = await setupRequest(f, keys);
+  // another account is created first, at the planned seed
+  const { ix } = sq.createSmartAccountIx({ creator: stranger.publicKey, treasury: cfg.treasury, seed: BigInt(planned.seed), threshold: 1,
+    signers: [{ key: stranger.publicKey }] });
+  assert.ok((await fork.send([ix], stranger)).ok);
+  const again = await setupRequest({ ...f, seed: planned.seed }, keys);
+  assert.equal(again.seed, String(BigInt(planned.seed) + 1n));
+  assert.notEqual(again.settings, planned.settings);
+  assert.deepEqual(again.done, []);
+  // the owner's stale set-up fails on chain, whole: its creation names the taken settings
+  const stale = await fork.send(planned.steps.slice(0, 1), owner);
+  assert.equal(stale.ok, false);
 });

@@ -1,15 +1,20 @@
-// The operator's tool for vaults: create the bot's keys, connect an owner's
-// wallet, read a vault, and build the transactions only owners can sign.
+// The operator's tool for vaults: create the bot's keys, build the owner's
+// own set-up of a vault, finish it on the bot's side, read a vault, and build
+// the transactions only owners can sign.
 //
 //   node chains/solana/vault/cli.mjs keys <dir>
 //       two new keys (0600): payer.json pays fees and rent, policy.json signs
 //       the policies. Prints both public keys; the owner sends gas to the payer.
-//   node chains/solana/vault/cli.mjs connect --owners <k>[,<k>] [--threshold 1] --venue <venue>[,<venue>]
-//       --pools <pool>[,<pool>] [--payout <wallet>[,<wallet>]] [--payout-mint <mint>] [--execute]
-//       a new vault the owners control, each venue's policies for the bot, the
-//       bot gone from the owners, the lookup table. Each pool belongs to the
-//       venue whose program owns it; every venue needs one. Prints the vault's
-//       config (ops/add_vault.py stores it). Dry run by default.
+//   node chains/solana/vault/cli.mjs setup --owner <k> --venue <venue>[,<venue>] --pools <pool>[,<pool>]
+//       [--payout <wallet>[,<wallet>]] [--payout-mint <mint>] [--seed <n>]
+//       the owner's transactions that create its vault (the owner the only
+//       signer, threshold 1) and each venue's policies for the bot, as one JSON
+//       line: the owner signs and sends them, in order. The bot signs nothing.
+//       Each pool belongs to the venue whose program owns it.
+//   node chains/solana/vault/cli.mjs finish --owner <k> --venue .. --pools .. [--payout ..] --seed <n>
+//       once the owner's set-up landed: checks the vault and every policy, makes
+//       the vault's lookup table with the bot's key, prints the vault's config
+//       (ops/add_vault.py stores it).
 //   node chains/solana/vault/cli.mjs accounts --wallets <w>[,<w>] [--mints <m>[,<m>]]
 //       the payout token accounts of these wallets (default mint: USDC), as JSON
 //   node chains/solana/vault/cli.mjs status
@@ -38,7 +43,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import * as sq from './squads.mjs';
 import { compile } from './policy.mjs';
-import { approvePlan, connectDone, connectPlan, connectProblems, lookupPlan, stagedPolicies, staticAccounts } from './admin.mjs';
+import { approvePlan, connectProblems, lookupPlan, ownerSetupPlan, packSteps, setupDone, stagedPolicies, staticAccounts } from './admin.mjs';
 import { readKeypair, vaultConfig, verifyPolicy } from './account.mjs';
 import { venue as venueOf } from './venues.mjs';
 import { ownerCloseMessages, packMessages } from './exit.mjs';
@@ -130,57 +135,80 @@ export async function poolsByVenue(connection, venues, pools) {
   return out;
 }
 
-// `payer` and `policyKey` default to the keys the environment names; `log`
-// gets the report (onboard/server.mjs passes its own).
-// `f.seed` resumes the vault an earlier try planned (`onPlan` hears each plan
-// before anything is sent): only the steps the chain lacks are sent.
-export async function connect(f, { connection = new Connection(RPC, 'confirmed'), payer = null, policyKey = null, log = console.log,
-  onPlan = null } = {}) {
-  const owners = keysOf(f.owners, '--owners');
-  const threshold = Number(f.threshold ?? 1);
+// The owner's set-up of a new vault, unsigned: the owner creates the smart
+// account (its only signer, threshold 1) and the bot's policies for `venues`
+// and `pools`, paying the rent itself; the bot signs nothing and pays
+// nothing (admin.mjs ownerSetupPlan). `f.seed` resumes a set-up planned
+// before: only the steps the chain lacks are returned, and a seed another
+// account took is planned again at the next free one. The pools are read
+// before anything is built: one that does not fit its venue's rules stops
+// it. {seed, settings, vault, report, steps (instructions to send in order),
+// lookupAddresses}. `payer` and `policyKey` are the bot's public keys.
+export async function setupRequest(f, { connection = new Connection(RPC, 'confirmed'), payer, policyKey }) {
+  const owner = keysOf(f.owner, '--owner')[0];
   const venues = (f.venue ?? '').split(',').map(v => v.trim()).filter(Boolean);
   const pools = keysOf(f.pools, '--pools');
   const payoutWallets = keysOf(f.payout, '--payout');
   const payoutMints = keysOf(f['payout-mint'] || SOLANA.usdc_mint, '--payout-mint');
-  if (!venues.length || !pools.length) throw new Error('connect needs --venue and --pools');
-  payer ??= await readKeypair(process.env.WALLET_SECRET_PATH ?? '');
-  policyKey ??= await readKeypair(process.env.LPBOT_VAULT_POLICY_KEY ?? '');
-  const config = sq.decodeProgramConfig((await connection.getAccountInfo(sq.programConfigPda())).data);
-  if (config.creationFee > 0n) log(`note: the program charges ${Number(config.creationFee) / 1e9} SOL per account`);
-  const seed = f.seed != null ? BigInt(f.seed) : config.smartAccountIndex + 1n;
-  const vault = sq.vaultPda(sq.settingsPda(seed));
-  const payouts = payoutAccounts(payoutWallets, payoutMints);
+  if (!owner) throw new Error('setup needs --owner <the wallet that owns the vault>');
+  if (!venues.length || !pools.length) throw new Error('setup needs --venue and --pools');
+  payer = new PublicKey(payer); policyKey = new PublicKey(policyKey);
+  const config = sq.decodeProgramConfig((await connection.getAccountInfo(sq.programConfigPda(), 'confirmed')).data);
   const approved = await poolsByVenue(connection, venues, pools);
-  // the pools are read before anything is signed: one that does not fit its venue's rules stops the connect
   const poolInfo = await Promise.all(venues.flatMap(v => approved[v].map(p => venueOf(v).poolAccounts(connection, p))));
-  const compiled = venues.map(v => compile(v, { vault, payer: payer.publicKey, pools: approved[v], payouts }));
-  const plan = connectPlan({ creator: payer.publicKey, treasury: config.treasury, seed, owners, threshold,
-    policyKey: policyKey.publicKey, venues: compiled, memo: 'lp-bot vault' });
-  const lookupAddresses = staticAccounts({ vault: plan.vault, policies: plan.policies, venues: venues.map(venueOf), pools: poolInfo });
-  const report = {
-    vault: plan.vault.toBase58(), settings: plan.settings.toBase58(), owners: owners.map(String), threshold,
-    venues: Object.fromEntries(venues.map(v => [v, { policies: plan.byVenue[v].map(String), pools: approved[v].map(String) }])),
-    payouts: payouts.map(String),
-    payoutWallets: payoutWallets.map(String), payer: payer.publicKey.toBase58(), policyKey: policyKey.publicKey.toBase58(),
-    transactions: plan.txs.length, lookupAddresses: lookupAddresses.length,
+  const payouts = payoutAccounts(payoutWallets, payoutMints);
+  const planAt = (seed) => {
+    const vault = sq.vaultPda(sq.settingsPda(seed));
+    const compiled = venues.map(v => compile(v, { vault, payer, pools: approved[v], payouts }));
+    return ownerSetupPlan({ owner, treasury: config.treasury, seed, policyKey, venues: compiled, memo: 'lp-bot vault' });
   };
-  if (!f.execute) {
-    log(JSON.stringify({ ...report, sent: false }, null, 1));
-    log('DRY RUN — pass --execute to create the vault. Nothing is deposited by this.');
-    return report;
+  let seed = f.seed != null ? BigInt(f.seed) : config.smartAccountIndex + 1n;
+  let plan = planAt(seed), done;
+  for (;;) {
+    const [settingsInfo, ...policyInfos] = await connection.getMultipleAccountsInfo([plan.settings, ...plan.policies], 'confirmed');
+    done = setupDone(settingsInfo?.data ?? null, policyInfos.map(Boolean), { owner });
+    if (done) break;
+    // another account took this seed: the next free one
+    seed = (seed > config.smartAccountIndex ? seed : config.smartAccountIndex) + 1n;
+    plan = planAt(seed);
   }
-  await onPlan?.({ seed: seed.toString(), settings: report.settings, vault: report.vault });
-  const [settingsInfo, ...policyInfos] = await connection.getMultipleAccountsInfo([plan.settings, ...plan.policies], 'confirmed');
-  const landed = connectDone(settingsInfo?.data ?? null, policyInfos.map(Boolean), { owners, creator: payer.publicKey });
-  if (landed.size) log(`resuming: ${landed.size} of ${plan.txs.length} setup transactions already landed`);
-  const sigs = await sendAll(connection, payer, plan.txs.filter((_, i) => !landed.has(i)));
-  const problems = connectProblems((await connection.getAccountInfo(plan.settings, 'confirmed')).data,
-    { owners, threshold, botKeys: [payer.publicKey, policyKey.publicKey] });
-  if (problems.length) throw new Error(`the vault is not as planned; do not deposit: ${problems.join('; ')}`);
-  const lookup = lookupPlan({ payer: payer.publicKey, recentSlot: await connection.getSlot('finalized'), addresses: lookupAddresses });
-  sigs.push(...await sendAll(connection, payer, lookup.txs));
-  const done = { ...report, lookup: lookup.table.toBase58(), signatures: sigs, sent: true,
-    deposit: `owners deposit to ${report.vault} (the vault), never to ${report.settings}` };
+  const report = {
+    vault: plan.vault.toBase58(), settings: plan.settings.toBase58(), owners: [owner.toBase58()], threshold: 1,
+    venues: Object.fromEntries(venues.map(v => [v, { policies: plan.byVenue[v].map(String), pools: approved[v].map(String) }])),
+    payouts: payouts.map(String), payoutWallets: payoutWallets.map(String), payer: payer.toBase58(), policyKey: policyKey.toBase58(),
+  };
+  return { seed: seed.toString(), settings: report.settings, vault: report.vault, report, done: [...done].sort((x, y) => x - y),
+    steps: plan.steps.filter((_, i) => !done.has(i)),
+    lookupAddresses: staticAccounts({ vault: plan.vault, policies: plan.policies, venues: venues.map(venueOf), pools: poolInfo }) };
+}
+
+// After the owner's set-up landed: the vault is the owner's alone and every
+// policy is the one the rules compile, or nothing is done; then the bot makes
+// the vault's lookup table with its own key (its first spend: the owner's
+// gas is in by then). `lookup`, the table an earlier try planned, is reused:
+// created if it is missing, its missing addresses added. `onLookup(table)`
+// runs before anything is sent, so a retry finds the table. Returns the
+// connect report ops/add_vault.py and onboard/store.py register.
+export async function finishSetup(setup, { connection = new Connection(RPC, 'confirmed'), payer, policyKey, lookup = null,
+  onLookup = async () => {}, log = console.log }) {
+  const { report } = setup;
+  if (setup.steps.length) throw new Error(`the owner's set-up is not on chain yet: ${setup.steps.length} steps missing`);
+  const settings = new PublicKey(report.settings);
+  const problems = connectProblems((await connection.getAccountInfo(settings, 'confirmed')).data,
+    { owners: report.owners, threshold: 1, botKeys: [payer.publicKey, policyKey] });
+  if (problems.length) throw new Error(`the vault is not as planned: ${problems.join('; ')}`);
+  for (const [venue, v] of Object.entries(report.venues)) {
+    const cfg = { settings, vault: new PublicKey(report.vault), policies: v.policies.map(k => new PublicKey(k)) };
+    const compiled = compile(venue, { vault: cfg.vault, payer: payer.publicKey, pools: v.pools.map(k => new PublicKey(k)),
+      payouts: report.payouts.map(k => new PublicKey(k)) });
+    await verifyPolicy(connection, cfg, policyKey, compiled);
+  }
+  const table = lookup ? (await connection.getAddressLookupTable(new PublicKey(lookup))).value : null;
+  const plan = lookupPlan({ payer: payer.publicKey, recentSlot: await connection.getSlot('finalized'), table: table ? lookup : null,
+    have: table?.state.addresses ?? [], addresses: setup.lookupAddresses });
+  await onLookup(plan.table.toBase58());
+  const sigs = plan.txs.length ? await sendAll(connection, payer, plan.txs) : [];
+  const done = { ...report, lookup: plan.table.toBase58(), lookupAddresses: setup.lookupAddresses.length, signatures: sigs, sent: true };
   log(JSON.stringify(done, null, 1));
   return done;
 }
@@ -420,14 +448,24 @@ export async function main(argv = process.argv.slice(2)) {
   const [cmd, ...rest] = argv;
   const f = parseFlags(rest);
   if (cmd === 'keys') return keys(f._[0]);
-  if (cmd === 'connect') return connect(f);
+  if (cmd === 'setup' || cmd === 'finish') {
+    const payer = await readKeypair(process.env.WALLET_SECRET_PATH ?? '');
+    const policyKey = (await readKeypair(process.env.LPBOT_VAULT_POLICY_KEY ?? '')).publicKey;
+    const setup = await setupRequest(f, { payer: payer.publicKey, policyKey });
+    if (cmd === 'finish') return finishSetup(setup, { payer, policyKey });
+    const owner = new PublicKey(setup.report.owners[0]);
+    const messages = packSteps(setup.steps, owner).map(ixs => Buffer.from(new TransactionMessage({ payerKey: owner,
+      recentBlockhash: PublicKey.default.toBase58(), instructions: ixs }).compileToLegacyMessage().serialize()).toString('base64'));
+    return console.log(JSON.stringify({ kind: 'lp-bot vault request', network: 'solana:mainnet', action: 'setup', seed: setup.seed,
+      vault: setup.vault, settings: setup.settings, owner: owner.toBase58(), messages }));
+  }
   if (cmd === 'status') return status();
   if (cmd === 'accounts') {
     return console.log(JSON.stringify(payoutAccounts(keysOf(f.wallets, '--wallets'), keysOf(f.mints ?? SOLANA.usdc_mint, '--mints')).map(String)));
   }
   if (cmd === 'request') return console.log(JSON.stringify(await request(f._[0], f)));
   if (cmd === 'add-venue') return stageVenue(f);
-  console.log('commands: keys <dir> | connect --owners .. --venue <v>[,<v>] --pools .. [--payout ..] [--execute] | status '
+  console.log('commands: keys <dir> | setup|finish --owner <k> --venue <v>[,<v>] --pools .. [--payout ..] [--seed n] | status '
     + '| request <withdraw|close|revoke|approve> --owner <k> [...] | add-venue --venue <v> --pools .. [--execute]');
 }
 

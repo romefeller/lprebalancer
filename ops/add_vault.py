@@ -1,4 +1,4 @@
-"""Register a connected vault (chains/solana/vault/cli.mjs connect), or change
+"""Register a vault its owner set up (chains/solana/vault/cli.mjs setup, then finish), or change
 the payout wallets an existing one approves.
 
 A vault wallet's row names the vault as its address (where the money is) and
@@ -7,7 +7,7 @@ owners and the policy key; the policy row names, per venue, the policies and
 what the owners approved. A dry run by default: it prints every row and
 writes nothing.
 
-    # after `cli.mjs connect ... --execute > vault.json` (--json - reads it from stdin)
+    # after the owner sent `cli.mjs setup ...`'s transactions: `cli.mjs finish ... > vault.json` (--json - reads it from stdin)
     LPBOT_DSN=dbname=rebalancer python3 ops/add_vault.py register --wallet tangem-vault \\
         --json vault.json --secret-env LPBOT_TANGEM_PAYER_KEY --policy-key-env LPBOT_TANGEM_POLICY_KEY [--apply]
 
@@ -19,9 +19,10 @@ writes nothing.
     node chains/solana/vault/cli.mjs add-venue --venue raydium-clmm --pools <pool> --execute > staged.json
     LPBOT_DSN=dbname=rebalancer python3 ops/add_vault.py venue --wallet tangem-vault --json staged.json [--apply]
 
-A Safe vault (chains/evm/vault/cli.mjs connect --execute > vault.json) registers the
-same way. It has one key: its --policy-key-env is its --secret-env. Its payout wallets
-are in the bot's role, so a new payout wallet is a new connect.
+A Safe vault registers the same way: its owner sends the transactions of
+`chains/evm/vault/cli.mjs request create`, then `cli.mjs check ... > vault.json` writes
+the JSON. It has one key: its --policy-key-env is its --secret-env. Its payout wallets
+are in the bot's role, so a new payout wallet is a new owner set-up.
 
 Then the profile: ops/add_profile.py --wallet <id> --profit-wallet <w> ..., and for
 an instance that is not the operator's own: --no-special --fee-wallet <w> --fee-bps 1000.
@@ -43,7 +44,7 @@ CLI = ROOT / 'chains/solana/vault/cli.mjs'
 WALLET_ID = re.compile(r'^[a-z0-9][a-z0-9-]{1,40}$')
 ENV_NAME = re.compile(r'^[A-Z][A-Z0-9_]{2,63}$')
 # kind: the venues with vault rules. A 'squads' vault is on Solana; a 'safe' one names its
-# EVM chain in the connect JSON (chains/evm/vault/cli.mjs).
+# EVM chain in its JSON (chains/evm/vault/cli.mjs check).
 VENUES = {'squads': set(json.loads((ROOT / 'chains/solana/vault/rules.json').read_text())['venues']),
           'safe': set(json.loads((ROOT / 'chains/evm/vault/rules.json').read_text())['venues'])}
 
@@ -62,7 +63,7 @@ def addresses(xs, what, chain='solana'):
 
 def register_rows(args, connected):
     """(wallet row, vault row, [policy row per venue]) for `connected`, the
-    JSON that `cli.mjs connect --execute` printed: a Solana vault names each
+    JSON that `cli.mjs finish` printed: a Solana vault names each
     venue's policies and pools under `venues`, a Safe its one venue. Pure."""
     if not WALLET_ID.match(args.wallet):
         raise Refused(f'wallet id {args.wallet!r}')
@@ -70,7 +71,7 @@ def register_rows(args, connected):
         if not ENV_NAME.match(v or ''):
             raise Refused(f'{name} {v!r} is not an environment variable name')
     if connected.get('sent') is not True:
-        raise Refused('the JSON is a dry run: connect with --execute first')
+        raise Refused('the JSON is not a finished vault: run cli.mjs finish once the owner\'s set-up is on chain')
     kind = connected.get('kind') or 'squads'
     if kind not in VENUES:
         raise Refused(f'vault kind {kind!r}')
@@ -149,8 +150,8 @@ def payouts(args):
         raise Refused(f'wallet {args.wallet} has no vault policy for {args.venue}')
     if v['kind'] == 'safe':
         # The payout wallets are in the role's transfer scope: the owners change them on the
-        # Safe, so a new list is a new connect, not a row edit.
-        raise Refused('a Safe vault changes its payout wallets by a new connect (chains/evm/vault/cli.mjs)')
+        # Safe, so a new list is a new owner set-up, not a row edit.
+        raise Refused('a Safe vault changes its payout wallets by a new owner set-up (chains/evm/vault/cli.mjs request create)')
     wallets = addresses([w for w in args.payout.split(',') if w], '--payout')
     mints = addresses([m for m in (args.mints or '').split(',') if m], '--mints')
     accounts = payout_accounts(wallets, mints)

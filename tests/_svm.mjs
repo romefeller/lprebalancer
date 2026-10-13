@@ -296,7 +296,9 @@ export class Fork {
     for (const k of keys) this.seen.add(k.toBase58());
     const legacy = tx instanceof Transaction || tx.version === 'legacy';
     const r = legacy ? this.svm.sendLegacyTransaction(tx.serialize()) : this.svm.sendVersionedTransaction(tx.serialize());
-    this.svm.expireBlockhash();
+    // a new blockhash after each send, unless the test sends sets a wallet signed at once: those
+    // share one, as mainnet allows for about 150 blocks (keepBlockhash)
+    if (!this.keepBlockhash) this.svm.expireBlockhash();
     const failed = typeof r.err === 'function';
     const meta = failed ? r.meta() : r;
     return { ok: !failed, logs: meta.logs(), units: Number(meta.computeUnitsConsumed()), size: tx.serialize().length };

@@ -18,7 +18,7 @@ import { keyDir } from './_vault.mjs';
 import * as sq from '../chains/solana/vault/squads.mjs';
 import { RULES, compile, vaultWsolAccount } from '../chains/solana/vault/policy.mjs';
 import { actingAccount, AWAITS_OWNERS, PolicyMismatch } from '../chains/solana/vault/account.mjs';
-import { connectPlan, lookupPlan, stagedPolicies, staticAccounts } from '../chains/solana/vault/admin.mjs';
+import { lookupPlan, ownerSetupPlan, packSteps, stagedPolicies, staticAccounts } from '../chains/solana/vault/admin.mjs';
 import { request, rulesRequest, stageVenue } from '../chains/solana/vault/cli.mjs';
 import { venue as venueOf } from '../chains/solana/vault/venues.mjs';
 import * as S from '../onboard/solana.mjs';
@@ -120,16 +120,21 @@ test('a Meteora-only vault adds Raydium: owner approves once, the bot closes on 
   await fork.clone([sq.programConfigPda()]);
   const config = sq.decodeProgramConfig(fork.get(sq.programConfigPda()).data);
   await fork.clone([config.treasury]);
-  const owner = fork.wallet(0.002), payer = fork.wallet(1), policyKey = Keypair.generate(), profit = Keypair.generate();
+  const owner = fork.wallet(1), payer = fork.wallet(1), policyKey = Keypair.generate(), profit = Keypair.generate();
   const seed = config.smartAccountIndex + 1n, settings = sq.settingsPda(seed), vault = sq.vaultPda(settings);
   const payouts = [spl.getAssociatedTokenAddressSync(USDC, profit.publicKey, true)];
   const connection = fork.connection();
 
   // --- the vault an older release connected: Meteora only, the old WSOL pin -----------------------
   const older = olderRelease(compile('meteora-dlmm', { vault, payer: payer.publicKey, pools: [DLMM_POOL], payouts }), vault);
-  const plan = connectPlan({ creator: payer.publicKey, treasury: config.treasury, seed, owners: [owner.publicKey], threshold: 1,
-    policyKey: policyKey.publicKey, venues: [older] });
-  for (const ixs of plan.txs) { const r = await fork.send(ixs, payer); assert.ok(r.ok, r.logs.join('\n')); }
+  const plan = ownerSetupPlan({ owner: owner.publicKey, treasury: config.treasury, seed, policyKey: policyKey.publicKey, venues: [older] });
+  for (const ixs of packSteps(plan.steps, owner.publicKey)) { const r = await fork.send(ixs, owner); assert.ok(r.ok, r.logs.join('\n')); }
+  // the owner's wallet keeps 0.002 SOL: too little for two new policies' rent (below)
+  const sink = Keypair.generate().publicKey;
+  const drain = await fork.send([SystemProgram.transfer({ fromPubkey: owner.publicKey, toPubkey: sink,
+    lamports: fork.balance(owner.publicKey) - 2_000_000 - 5000 })], owner);
+  assert.ok(drain.ok, drain.logs.join('\n'));
+  assert.equal(fork.balance(owner.publicKey), 2_000_000);
   const dlmmVenue = venueOf('meteora-dlmm');
   const lookup = lookupPlan({ payer: payer.publicKey, recentSlot: fork.recentSlot(),
     addresses: staticAccounts({ vault, policies: plan.policies, venues: [dlmmVenue], pools: [await dlmmVenue.poolAccounts(connection, DLMM_POOL)] }) });
@@ -202,20 +207,22 @@ test('a Meteora-only vault adds Raydium: owner approves once, the bot closes on 
     payer: payer.publicKey, policyKey: policyKey.publicKey, venues: Object.entries(row.venues).map(([venue, v]) => ({ venue, ...v })) })).steps;
   assert.deepEqual(steps.map(s => `${s.kind} ${s.seed}`), ['update 1', 'update 2', 'update 3', 'create 4', 'create 5']);
   const need = await S.affordsRules(connection, owner.publicKey.toBase58(), steps);
-  assert.equal(first.transactions.length, 5);
+  // packed: as few transactions as fit, one wallet approval
+  assert.equal(first.transactions.length, packSteps(steps.map(s => s.ixs), owner.publicKey).length);
+  assert.ok(first.transactions.length <= 5);
   assert.match(first.summary, /meteora-dlmm .* and raydium-clmm .*2 new policies, their rent paid by you/);
   const ownerBefore = fork.balance(owner.publicKey);
-  for (let i = 0; i < first.transactions.length; i++) {
-    const answer = await ask('approve');                 // the page asks for each one when its turn comes
-    assert.equal(answer.transactions.length, first.transactions.length, 'the list does not shift as the owner signs');
-    const r = await ownerSends(fork, answer.transactions[i], owner);
+  // the page asks for the whole set (all: true), the wallet approves it once, it is sent in order (one blockhash)
+  fork.keepBlockhash = true;
+  for (const [i, t] of first.transactions.entries()) {
+    const r = await ownerSends(fork, t, owner);
     assert.ok(r.ok && r.size <= 1232, r.logs.join('\n'));
-    if (i === 2) {
-      // the Meteora policies are this release's; Raydium is not approved yet: the move waits
-      await actingAccount({ connection, payer, venue: 'meteora-dlmm', env: envM });
+    if (i === 0 && first.transactions.length > 1) {
+      // the Meteora policies (first) may be this release's while Raydium is not approved yet: the move waits
       await assert.rejects(actingAccount({ connection, payer, venue: 'raydium-clmm', env: envR }), awaiting);
     }
   }
+  fork.keepBlockhash = false;
   const ownerSpent = ownerBefore - fork.balance(owner.publicKey);
   const rents = staged.policies.map(p => fork.get(p));
   console.log(`approve: owner spent ${ownerSpent / 1e9} SOL; new policies ${rents.map(a => `${a.data.length} bytes ${Number(a.lamports) / 1e9} SOL`).join(', ')}`);
@@ -280,11 +287,13 @@ test('a Meteora-only vault adds Raydium: owner approves once, the bot closes on 
   }
   assert.equal(fork.tokenAmount(spl.getAssociatedTokenAddressSync(USDC, owner.publicKey)), 10_000_000n);
   const revoke = await ask('revoke');
-  assert.equal(revoke.transactions.length, 5);
-  for (let i = 0; i < revoke.transactions.length; i++) {
-    const r = await ownerSends(fork, (await ask('revoke')).transactions[i], owner);     // a fresh blockhash each, as the page asks
+  assert.ok(revoke.transactions.length >= 1 && revoke.transactions.length <= 5);
+  fork.keepBlockhash = true;
+  for (const t of revoke.transactions) {
+    const r = await ownerSends(fork, t, owner);         // one set, one approval, sent in order
     assert.ok(r.ok, r.logs.join('\n'));
   }
+  fork.keepBlockhash = false;
   for (const [venue, env] of [['meteora-dlmm', envM], ['raydium-clmm', envR]]) {
     await assert.rejects(actingAccount({ connection, payer, venue, env }), (e) => awaiting(e) && /revoked the bot/.test(e.message));
   }

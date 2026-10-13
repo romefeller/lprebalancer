@@ -9,7 +9,7 @@ import fc from 'fast-check';
 import * as sq from '../chains/solana/vault/squads.mjs';
 import { RULES, compile, match, plan, needsVault, NotAllowed, POLICY_BYTES, instructionsOf, poolPda } from '../chains/solana/vault/policy.mjs';
 import { vaultConfig, wrap, vaultFundsItsAccounts, withVaultBudget, VAULT_CALL_UNITS } from '../chains/solana/vault/account.mjs';
-import { connectPlan, connectProblems, lookupPlan, staticAccounts } from '../chains/solana/vault/admin.mjs';
+import { connectProblems, lookupPlan, ownerSetupPlan, packSteps, setupDone, staticAccounts } from '../chains/solana/vault/admin.mjs';
 import { actingAccount } from '../chains/solana/vault/account.mjs';
 
 const require = createRequire(import.meta.url);
@@ -93,36 +93,70 @@ test('policies: a venue without rules, a role without accounts, are refused', ()
   assert.throws(() => compile('meteora-dlmm', { ...worst(), pools: [] }), /approved pool/);
 });
 
-test('onboarding of every venue at once: every transaction fits, seeds run on, each venue names its own', () => {
-  const creator = Keypair.generate(), ctx = worst();
+test('owner set-up of every venue at once: packed transactions fit, seeds run on, each venue names its own, the owner alone signs', () => {
+  const owner = Keypair.generate(), ctx = worst(), policyKey = key();
   const venues = VENUES.map(v => compile(v, ctx));
-  const p = connectPlan({ creator: creator.publicKey, treasury: key(), seed: 9n, owners: [key(), key()], threshold: 2, policyKey: key(), venues });
+  const p = ownerSetupPlan({ owner: owner.publicKey, treasury: key(), seed: 9n, policyKey, venues });
   const n = venues.reduce((k, v) => k + v.policies.length, 0);
-  assert.equal(p.txs.length, 1 + n + 1);
-  for (const ixs of p.txs) assert.ok(txSize(ixs, [creator]) <= 1232, `${txSize(ixs, [creator])} bytes`);
+  assert.equal(p.steps.length, 1 + n);
+  const groups = packSteps(p.steps, owner.publicKey);
+  assert.deepEqual(groups.flat().map(ix => ix.data), p.steps.map(ix => ix.data), 'every step once, in order');
+  assert.ok(groups.length <= p.steps.length);
+  for (const ixs of groups) assert.ok(txSize(ixs, [owner]) <= 1232, `${txSize(ixs, [owner])} bytes`);
+  for (const ix of p.steps) {
+    assert.deepEqual([...new Set(ix.keys.filter(k => k.isSigner).map(k => String(k.pubkey)))], [String(owner.publicKey)], 'the owner signs alone');
+  }
   assert.deepEqual(p.policies.map(String), Array.from({ length: n }, (_, i) => String(sq.policyPda(p.settings, i + 1))));
   assert.deepEqual(VENUES.flatMap(v => p.byVenue[v]).map(String), p.policies.map(String));
   VENUES.forEach((v, i) => assert.equal(p.byVenue[v].length, venues[i].policies.length));
-  assert.throws(() => connectPlan({ creator: creator.publicKey, treasury: key(), seed: 9n, owners: [key()], threshold: 1, policyKey: key(),
-    venues: [venues[0], venues[0]] }), /listed twice/);
-  assert.throws(() => connectPlan({ creator: creator.publicKey, treasury: key(), seed: 9n, owners: [key()], threshold: 1, policyKey: key(),
-    venues: [] }), /at least one venue/);
+  assert.ok(p.vault.equals(sq.vaultPda(p.settings)));
+  assert.ok(p.settings.equals(sq.settingsPda(9n)));
+  assert.throws(() => ownerSetupPlan({ owner: owner.publicKey, treasury: key(), seed: 9n, policyKey, venues: [venues[0], venues[0]] }), /listed twice/);
+  assert.throws(() => ownerSetupPlan({ owner: owner.publicKey, treasury: key(), seed: 9n, policyKey, venues: [] }), /at least one venue/);
+  assert.throws(() => ownerSetupPlan({ owner: policyKey, treasury: key(), seed: 9n, policyKey, venues }), /cannot own the vault/);
 });
 
-test('onboarding: every transaction fits, the bot leaves, the threshold is set last', () => {
-  const creator = Keypair.generate(), owners = [key(), key(), key()];
-  const compiled = compile('meteora-dlmm', worst());
-  const p = connectPlan({ creator: creator.publicKey, treasury: key(), seed: 672_335n, owners, threshold: 2, policyKey: key(), venues: [compiled] });
-  assert.equal(p.txs.length, 1 + compiled.policies.length + 1);
-  for (const ixs of p.txs) assert.ok(txSize(ixs, [creator]) <= 1232);
-  assert.ok(p.vault.equals(sq.vaultPda(p.settings)));
-  assert.deepEqual(p.policies.map(String), compiled.policies.map((_, i) => String(sq.policyPda(p.settings, i + 1))));
-  // threshold 1: the bot only leaves; the program keeps the threshold the vault was created with
-  const one = connectPlan({ creator: creator.publicKey, treasury: key(), seed: 1n, owners, threshold: 1, policyKey: key(), venues: [compiled] });
-  const leaveOnly = sq.settingsSyncIx({ settings: one.settings, signers: [creator.publicKey], rentPayer: creator.publicKey,
-    actions: [{ kind: 'removeSigner', key: creator.publicKey }], extra: [] });
-  assert.deepEqual(one.txs.at(-1)[0].data, leaveOnly.data);
-  assert.ok(p.txs.at(-1)[0].data.length > leaveOnly.data.length);
+test('owner set-up: the creation names the owner alone at threshold 1; each policy names the bot\'s key; the owner pays the rent', () => {
+  const owner = key(), policyKey = key(), treasury = key(), compiled = compile('meteora-dlmm', worst());
+  const p = ownerSetupPlan({ owner, treasury, seed: 5n, policyKey, venues: [compiled], memo: 'm' });
+  const want = sq.createSmartAccountIx({ creator: owner, treasury, seed: 5n, threshold: 1, memo: 'm', signers: [{ key: owner }] }).ix;
+  assert.deepEqual(p.steps[0].data, want.data);
+  assert.deepEqual(p.steps[0].keys.map(k => String(k.pubkey)), want.keys.map(k => String(k.pubkey)));
+  compiled.policies.forEach((pol, i) => {
+    const ix = sq.settingsSyncIx({ settings: p.settings, signers: [owner], rentPayer: owner, extra: [p.policies[i]],
+      actions: [{ kind: 'policyCreate', seed: i + 1, policy: pol.policy, signers: [{ key: policyKey }] }] });
+    assert.deepEqual(p.steps[i + 1].data, ix.data, `policy ${i + 1}`);
+    assert.equal(String(p.steps[i + 1].keys[1].pubkey), String(owner), 'rent from the owner');
+  });
+});
+
+test('packSteps: order kept, a unit stays in one transaction, a step too big alone is refused', () => {
+  const owner = key(), big = (n) => new TransactionInstruction({ programId: sq.PROGRAM_ID, keys: [], data: Buffer.alloc(n, 1) });
+  const g = packSteps([big(500), big(500), [big(300), big(300)], big(100)], owner);
+  assert.deepEqual(g.map(x => x.map(ix => ix.data.length)), [[500, 500], [300, 300, 100]]);
+  const tight = packSteps([big(600), [big(400), big(400)]], owner);
+  assert.deepEqual(tight.map(x => x.map(ix => ix.data.length)), [[600], [400, 400]], 'the unit is not split to fill the first');
+  assert.throws(() => packSteps([[big(700), big(700)]], owner), /over a transaction's size/);
+  assert.throws(() => packSteps([big(1300)], owner), /over a transaction's size/);
+  assert.deepEqual(packSteps([[], big(10)], owner).map(x => x.length), [1], 'an empty unit is nothing');
+  // the limit is exact: the largest data that fits, and one byte more
+  const fit = (n) => { try { packSteps([big(n)], owner); return true; } catch { return false; } };
+  let lo = 1, hi = 1300;
+  while (lo < hi) { const m = (lo + hi + 1) >> 1; if (fit(m)) lo = m; else hi = m - 1; }
+  assert.equal(txSize([big(lo)], [Keypair.generate()]), 1232);
+  assert.ok(!fit(lo + 1));
+});
+
+test('setupDone: what of an owner\'s set-up landed; a seed another account took is null', () => {
+  const owner = key();
+  assert.deepEqual([...setupDone(null, [false, false], { owner })], []);
+  assert.throws(() => setupDone(null, [true, false], { owner }), /policies exist for a vault that does not/);
+  const mine = settingsData({ signers: [owner], threshold: 1 });
+  assert.deepEqual([...setupDone(mine, [false, false], { owner })], [0]);
+  assert.deepEqual([...setupDone(mine, [true, false], { owner })].sort(), [0, 1]);
+  assert.deepEqual([...setupDone(mine, [true, true], { owner })].sort(), [0, 1, 2]);
+  assert.equal(setupDone(settingsData({ signers: [key()], threshold: 1 }), [false], { owner }), null, 'another owner');
+  assert.equal(setupDone(settingsData({ signers: [owner, key()], threshold: 1 }), [false], { owner }), null, 'a second owner');
 });
 
 test('lookup table addresses: each once, all of them, every venue\'s', () => {
@@ -132,16 +166,6 @@ test('lookup table addresses: each once, all of them, every venue\'s', () => {
   const out = staticAccounts({ vault, policies: [key()], venues, pools }).map(String);
   assert.equal(new Set(out).size, out.length);
   for (const k of [vault, shared, other, pool, sq.PROGRAM_ID]) assert.ok(out.includes(String(k)));
-});
-
-test('onboarding: the bot\'s keys cannot be owners; a threshold must be reachable', () => {
-  const creator = key(), policyKey = key(), compiled = compile('meteora-dlmm', worst());
-  const plan = (o) => connectPlan({ creator, treasury: key(), seed: 1n, owners: [key()], threshold: 1, policyKey, venues: [compiled], ...o });
-  assert.throws(() => plan({ owners: [creator] }), /cannot be an owner/);
-  assert.throws(() => plan({ owners: [policyKey] }), /cannot be an owner/);
-  assert.throws(() => plan({ owners: [] }), /at least one owner/);
-  assert.throws(() => plan({ threshold: 2 }), /threshold/);
-  assert.throws(() => plan({ threshold: 0 }), /threshold/);
 });
 
 // A Settings account with these owners, encoded as the program stores it.
