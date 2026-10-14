@@ -339,6 +339,21 @@ def one_side_short(usd_a, usd_b, frac_a, frac_b, capital_usd):
     return (frac_a > 0 and usd_a < floor) or (frac_b > 0 and usd_b < floor)
 
 
+MIN_SWAP_PIECE = 1 / 8          # the smallest piece of a swap refused for its price impact
+
+
+def impact_refused(out, err):
+    """Whether the swap signer refused for price impact and sent nothing."""
+    return bool(err) and not (out or {}).get('signature') and not (out or {}).get('partial') \
+        and re.search(r'price impact [0-9.]+% exceeds', str(err)) is not None
+
+
+def piece_targets(usd_a, usd_b, target_a, target_b, piece):
+    """The rebalance targets (dollars of each side) that make `piece` of the
+    move from (usd_a, usd_b) to (target_a, target_b). Pure."""
+    return (f'{usd_a + piece * (target_a - usd_a):.2f}', f'{usd_b + piece * (target_b - usd_b):.2f}')
+
+
 def balance_wallet(state, bal, rec, share_a=None):
     """Swap the wallet to about 50/50 through Jupiter before an open, when
     either side holds less than half the capital, which is what a centred
@@ -433,6 +448,22 @@ def balance_wallet(state, bal, rec, share_a=None):
         time.sleep(pause)
         out, err = signers.chain('rebalance', mint_a, mint_b, target_a, target_b, '--execute', dex=swap_dex, extra_env=env,
                                  record=False)
+    # A swap refused for its price impact (one pool, no router: a vault swaps
+    # in its approved pool only) goes in pieces: half the move, then a
+    # quarter, then an eighth, in this poll. Arbitrage refills the pool
+    # between polls; the open takes what the wallet holds and the idle
+    # redeploy moves the rest (2026-10-14: tang0's $725 swap moved its
+    # Raydium pool 1.02%, over the 1% limit, and $1,449 sat idle).
+    piece = 1.0
+    while (impact_refused(out, err) and piece > MIN_SWAP_PIECE):
+        piece /= 2
+        part_a, part_b = piece_targets(usd_a, usd_b, float(target_a), float(target_b), piece)
+        books.notify('swap_piece', reason=f'price impact over the limit: swapping {piece:.0%} of the move',
+                     piece=piece, target_a=part_a, target_b=part_b)
+        out, err = signers.chain('rebalance', mint_a, mint_b, part_a, part_b, '--execute', dex=swap_dex, extra_env=env,
+                                 record=False)
+        if not impact_refused(out, err) and not err and (out or {}).get('sent'):
+            state['open_unbalanced'] = True; paths.save(state)   # the rest is idle: deploy_idle moves it
     # The chain's receipts outrank the error that came with them (EVM signers):
     # a swap that landed is a swap, never a failure for the breaker; an exact
     # approval that landed before the swap was sent is a swap not sent

@@ -383,6 +383,54 @@ class BalanceWalletEdges(BalanceWallet):
             self.assertIsNone(out, ans); self.assertEqual(state['failures'], 1, ans); self.assertIn('swap_failed', seen)
 
 
+class PieceSwaps(BalanceWallet):
+    """A swap refused for its price impact goes in pieces in the same poll
+    (2026-10-14, tang0: $725 in one Raydium pool moved it 1.02%, over the 1%
+    limit, and $1,449 sat idle)."""
+    REFUSED = (None, 'ERROR: price impact 1.0234% exceeds the 1% limit; refusing')
+    DONE = ({'sent': True, 'signature': 'P1', 'swapUsdValue': 50.0, 'sold': {}, 'bought': {}}, None)
+
+    def targets(self, call):
+        return float(call[0][3]), float(call[0][4])
+
+    def test_half_the_move_when_the_whole_is_refused(self):
+        out, calls, seen, _, state, halted, _ = self.go(self.LOP, answers=(self.REFUSED, self.DONE))
+        self.assertEqual(len(calls), 2)
+        (a0, b0), (a1, b1) = self.targets(calls[0]), self.targets(calls[1])
+        # half of each side's move; token A's start is its sleeve above the gas reserve
+        self.assertAlmostEqual(b1, 200.0 + (b0 - 200.0) / 2, places=1)
+        self.assertLess(a1, a0)
+        self.assertIn('swap_piece', seen); self.assertIn('SWAP', seen); self.assertNotIn('swap_failed', seen)
+        self.assertTrue(state['open_unbalanced'], 'the rest is idle: deploy_idle moves it')
+        self.assertEqual(state['failures'], 0); self.assertEqual(halted, [])
+        self.assertIsNotNone(out)
+
+    def test_down_to_an_eighth_then_hold_without_a_failure(self):
+        out, calls, seen, _, state, halted, _ = self.go(self.LOP, answers=(self.REFUSED,) * 4)
+        self.assertEqual(len(calls), 4, 'whole, half, quarter, eighth: no smaller piece')
+        pieces = [kw['piece'] for e, kw in self.go(self.LOP, answers=(self.REFUSED,) * 4)[6] if e == 'swap_piece']
+        self.assertEqual(pieces, [0.5, 0.25, 0.125])
+        self.assertEqual(out, self.LOP, 'nothing sent, no side short: opens with the wallet as it is')
+        self.assertEqual(state['failures'], 0); self.assertIn('swap_skipped', seen)
+        self.assertNotIn('SWAP', seen); self.assertNotIn('swap_failed', seen); self.assertEqual(halted, [])
+
+    def test_another_refusal_is_not_cut_in_pieces(self):
+        for err in ('ERROR: slippage exceeded', 'price impact unknown'):
+            _, calls, seen, *_ = self.go(self.LOP, answers=((None, err),))
+            self.assertEqual(len(calls), 1, err); self.assertNotIn('swap_piece', seen)
+
+    def test_a_sent_swap_is_never_cut_again(self):
+        sent = ({'sent': True, 'signature': 'X', 'partial': True}, 'price impact 1.5% exceeds the 1% limit')
+        self.assertFalse(lp.swaps.impact_refused(*sent))
+        self.assertFalse(lp.swaps.impact_refused({'signature': 'X'}, 'price impact 1.5% exceeds the 1% limit'))
+        self.assertTrue(lp.swaps.impact_refused(None, 'ERROR: price impact 2% exceeds the 1% limit; refusing'))
+
+    def test_piece_targets_are_the_fraction_of_the_move(self):
+        self.assertEqual(lp.swaps.piece_targets(1449.46, 0.0, 724.73, 724.73, 0.5), ('1087.10', '362.37'))
+        self.assertEqual(lp.swaps.piece_targets(10.0, 90.0, 50.0, 50.0, 1.0), ('50.00', '50.00'))
+        self.assertEqual(lp.swaps.piece_targets(10.0, 90.0, 50.0, 50.0, 0.0), ('10.00', '90.00'))
+
+
 class LandedSwaps(BalanceWallet):
     """A swap the chain's receipts show landed is never a failure (2026-10-13,
     poly-wpol-usdt: three landed swaps reported failed by the signer, HALT)."""

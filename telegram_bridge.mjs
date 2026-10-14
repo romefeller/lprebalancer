@@ -395,6 +395,8 @@ export function render(row) {
       return `swap fallback · ${row.reason}`;
     case 'swap_skipped':
       return `swap skipped · ${row.reason}`;
+    case 'swap_piece':
+      return `swap in pieces · ${row.reason}`;
     case 'swap_failed':
       return `SWAP FAILED · ${row.reason}\nfailures ${row.failures} · nothing opened`;
     case 'PAYOUT': {
