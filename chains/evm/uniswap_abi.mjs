@@ -71,7 +71,9 @@ export const PERMIT2_ABI = parseAbi([
 // WETH9-style wrapped native token (WPOL on Polygon): deposit() wraps msg.value.
 export const WRAPPED_ABI = parseAbi([
   'function deposit() payable',
+  'function withdraw(uint256 wad)',
   'event Deposit(address indexed dst, uint256 wad)',
+  'event Withdrawal(address indexed src, uint256 wad)',
 ]);
 
 export const ERC20_ABI = parseAbi([

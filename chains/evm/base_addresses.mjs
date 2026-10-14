@@ -75,7 +75,11 @@ export const ERC20_ABI = parseAbi([
   'event Transfer(address indexed from, address indexed to, uint256 value)',
 ]);
 
-export const WETH_ABI = parseAbi(['function deposit() payable']);
+export const WETH_ABI = parseAbi([
+  'function deposit() payable',
+  'function withdraw(uint256 wad)',
+  'event Withdrawal(address indexed src, uint256 wad)',
+]);
 
 export const NPM_ABI = parseAbi([
   'function factory() view returns (address)',

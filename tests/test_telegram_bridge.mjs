@@ -674,6 +674,17 @@ test('the wrap of native POL says what was wrapped and what stays for gas', () =
   assert.ok(message({ event: 'wrap_failed', amount: 1, symbol: 'POL', reason: 'r' }).includes('WRAP FAILED · 1 POL stays native · r'));
 });
 
+test('the gas refill says what was unwrapped, from what, and what bought it', () => {
+  const row = { event: 'GAS_REFILL', pair: 'WPOL/USDT0', unwrapped: 1.3534, symbol: 'POL', usd: 0.13534, native_before: 1.6466,
+    target: 3, signature: '0xabc' };
+  assert.strictEqual(message(row),
+    '[WPOL/USDT0] ⛽ GAS REFILL · 1.3534 POL ($0.1353) unwrapped for gas · 1.6466 → target 3 POL\n0xabc');
+  assert.strictEqual(message({ ...row, sold: { amount: 0.23, symbol: 'USDT0' }, signature: undefined }),
+    '[WPOL/USDT0] ⛽ GAS REFILL · 1.3534 POL ($0.1353) unwrapped for gas · 1.6466 → target 3 POL · bought with 0.23 USDT0\n');
+  assert.strictEqual(message({ event: 'gas_refill_failed', pair: 'WPOL/USDT0', native: 0.5, symbol: 'POL', target: 3, reason: 'r' }),
+    '[WPOL/USDT0] ❌ GAS REFILL FAILED · 0.5 POL, target 3 · r');
+});
+
 // 2026-10-12: a failed write's program log lines come under its message,
 // bounded and redacted, and never twice (the default render skips them).
 test('a failed write shows the program logs, at most 10 lines of 160 characters, secrets masked', () => {

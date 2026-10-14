@@ -180,11 +180,15 @@ class Added(unittest.TestCase):
 
 
 class Routing(Hook):
-    def go_dex(self, dex):
+    # A Polygon wallet as the Uniswap signer reads it: no native side, the gas POL apart.
+    POLY_WALLET = dict(bal(0.246, 0.75, price=119.5, native=None), sol=10.0, walletUsd=0.246 * 119.5 + 0.75)
+
+    def go_dex(self, dex, wallet=None):
         added = []
+        wallet = wallet or (self.POLY_WALLET if dex == 'uniswap-v3-polygon' else self.WALLET)
         with mock.patch.object(config, 'DEX', dex), \
              mock.patch.object(lp.swaps, 'add_idle', lambda *a: (added.append(a) or 'added')):
-            out, moves, books, events = self.go(self.WALLET, rv={'choice': 1.03})
+            out, moves, books, events = self.go(wallet, rv={'choice': 1.03})
         return out, moves, added
 
     def test_raydium_adds_instead_of_recentring(self):
@@ -208,7 +212,7 @@ class Routing(Hook):
     def test_a_squads_vault_adds_as_a_key_does(self):
         # its rule pins the position to the vault's own NFT account (rules.json)
         with mock.patch.object(config, 'VAULT', {'kind': 'squads'}):
-            out, moves, added = self.go_dex('raydium-clmm')
+            out, moves, added = self.go_dex('raydium-clmm', dict(self.WALLET, gasSol=0.2))   # the payer key's gas
         self.assertEqual(out, 'added'); self.assertEqual(moves, [])
 
     def test_other_venues_keep_the_recentre(self):

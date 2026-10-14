@@ -43,8 +43,12 @@ CHAINS = {
         'native_symbol': 'ETH', 'native_decimals': 18, 'gecko_network': 'base',
         # native ETH counts as WETH (SIGNER_CONTRACT additions, EVM signer)
         'native_mint': '0x4200000000000000000000000000000000000006',
+        # WETH: the gas refill unwraps it into ETH (capital.refill_gas, the signer's `refill`)
+        'wrapped_native': '0x4200000000000000000000000000000000000006',
         'stable_mints': ('0x833589fcd6edb6e08f4c7c32d4f71b54bda02913',),        # USDC (lower case)
         'sweep': False, 'janitor': False, 'audit': False,
+        # the signer refills its gas from the pool's wrapped native (sql/041)
+        'gas_refill': True,
         'scanner': False,
         'payout': True,
         'swap_via': 'venue', 'payout_via': 'venue',
@@ -63,8 +67,10 @@ CHAINS = {
         'native_symbol': 'ETH', 'native_decimals': 18, 'gecko_network': 'unichain',
         # native ETH counts as WETH, as on Base (the EVM signers report it so)
         'native_mint': '0x4200000000000000000000000000000000000006',
+        'wrapped_native': '0x4200000000000000000000000000000000000006',         # WETH
         'stable_mints': ('0x078d782b760474a361dda0af3839290b0ef57ad6',),        # USDC (lower case)
         'sweep': False, 'janitor': False, 'audit': False,
+        'gas_refill': True,
         'scanner': False,
         'payout': True,
         'swap_via': 'venue', 'payout_via': 'venue',
@@ -84,11 +90,13 @@ CHAINS = {
         # outside the pool, as ETH does on Unichain.
         'native_mint': '0x0000000000000000000000000000000000001010',
         # the wrapped native token, a pool token here: native POL above the
-        # profile's native_keep is wrapped into it (rebalancer.wrap_native)
+        # profile's native_keep is wrapped into it (capital.wrap_native), and the
+        # gas is refilled from it (capital.refill_gas)
         'wrapped_native': '0x0d500b1d8e8ef31e21c99d1db9a6444d3adf1270',
         'stable_mints': ('0xc2132d05d31c914a87c6611c10748aeb04b58e8f',          # USDT0 (lower case)
                          '0x3c499c542cef5e3811e1192ce70d8cc03d5c3359'),         # USDC (lower case)
         'sweep': False, 'janitor': False, 'audit': False,
+        'gas_refill': True,
         'scanner': False,
         'payout': True,
         'swap_via': 'venue', 'payout_via': 'venue',

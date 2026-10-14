@@ -36,6 +36,7 @@
 //   node venues/aerodrome/signer.mjs close <tokenId> [--execute]
 //   node venues/aerodrome/signer.mjs rebalance <mintA> <mintB> <targetUsdA> <targetUsdB> [--execute]
 //   node venues/aerodrome/signer.mjs send <token> <amount> <to> [--execute]
+//   node venues/aerodrome/signer.mjs refill [--execute]          (ETH up to LPBOT_GAS_REFILL_TO from the wallet's WETH)
 import fs from 'node:fs';
 import path from 'node:path';
 import { assertNotHalted } from '../../shared/halt_guard.mjs';
@@ -50,6 +51,7 @@ import { baseEndpoints, overBase, evmErrorKind } from '../../chains/evm/rpc.mjs'
 import { sendSteps, receiptsOf } from '../../chains/evm/landing.mjs';
 import * as A from '../../chains/evm/base_addresses.mjs';
 import * as M from '../../chains/evm/clmath.mjs';
+import * as G from '../../chains/evm/gas_refill.mjs';
 
 const DEX = 'aerodrome-slipstream';
 const DEADLINE_S = 300;                 // past the latest block's timestamp
@@ -69,6 +71,7 @@ export function settings(env = process.env) {
     maxUsd: num('LPBOT_MAX_USD', 260),
     slippageBps: num('LPBOT_SLIPPAGE_BPS', 100),
     gasReserve: M.toRaw(num('LPBOT_GAS_RESERVE_NATIVE', 0.002), 18),
+    refillTo: M.toRaw(num('LPBOT_GAS_REFILL_TO', 0), 18),   // refill: the ETH to reach (0: none)
     maxImpact: num('LPBOT_MAX_IMPACT', 0.01),
     maxOracleDev: num('LPBOT_MAX_ORACLE_DEV', 0.02),
     maxFeeWei: M.toRaw(num('LPBOT_EVM_MAX_GWEI', 2), 9),
@@ -656,6 +659,16 @@ async function close(tokenArg, execute) {
 }
 
 // --- rebalance: one swap through the pool's own router --------------------------------
+// A swap is the first step of an open, which the signer refuses under the gas reserve:
+// under it the swap is refused too, so a refused open never leaves a swap paid for behind
+// it (venues/uniswap_v3/signer.mjs, 2026-10-14). `lacks`: the wallet-short refusal, or
+// null. Pure.
+export function planSwapRefusals(h, cfg, lacks) {
+  const out = lacks ? [lacks] : [];
+  if (h.eth < cfg.gasReserve) out.push(`ETH ${Number(h.eth) / 1e18} is below the ${Number(cfg.gasReserve) / 1e18} gas reserve`);
+  return out;
+}
+
 async function rebalance(mintA, mintB, targetA, targetB, execute) {
   guard();
   const pool = poolArg();
@@ -733,7 +746,7 @@ async function rebalance(mintA, mintB, targetA, targetB, execute) {
       swapUsdValue: Number(sellUsd.toFixed(4)), wrapEth: Number(wrap.wrap) / 1e18,
       transaction: { steps: steps.map(s => s.label) },
     };
-    const swapRefusals = wrap.ok ? [] : [`wallet lacks ${amountIn} ${symIn} to sell`];
+    const swapRefusals = planSwapRefusals(h, cfg, wrap.ok ? null : `wallet lacks ${amountIn} ${symIn} to sell`);
     const simulation = await simulateSequence(pub, me, steps);
     if (!execute || swapRefusals.length) {
       return reportUnsent(report, swapRefusals, simulation, 'DRY RUN — quote taken and swap built and simulated. Pass --execute to sign and send.');
@@ -834,6 +847,103 @@ async function send(token, amountArg, toArg, execute) {
   });
 }
 
+// --- refill: the gas from the wallet's own WETH -----------------------------------------
+// Native ETH counts as WETH, but the pool pays its fees in WETH and every transaction is
+// paid in ETH: the ETH runs down to the reserve and every open stops. `refill` brings the
+// ETH up to LPBOT_GAS_REFILL_TO and no further: it unwraps the wallet's WETH and, when that
+// is short, first buys the shortfall with the pool's other token through the pool's own
+// router (chains/evm/gas_refill.mjs). Only on a pool that holds WETH. It is the one write
+// allowed under the gas reserve: it is what lifts the gas over it. Refused, before anything
+// is signed: a target not above the reserve, nothing to unwrap, a refill worth less than
+// WORTH_FACTOR times its own gas, and for the swap leg the oracle check and the impact cap.
+async function refill(execute) {
+  guard();
+  const pool = poolArg();
+  const cfg = settings();
+  const sleeve = M.parseSleeve(cfg.sleeve);
+  return withRpc(async (ctx) => {
+    const { pub, me } = ctx;
+    const info = await describe(pub, pool);
+    const side = info.nativeSide;
+    if (!side) throw new Error(`refused: WETH is not a token of pool ${pool}`);
+    const h = await holdings(pub, me, info);
+    const weth = M.capped(side === 'A' ? h.rawA : h.rawB, M.sleeveCap(sleeve, A.WETH, 18));
+    const plan = G.planRefill({ native: h.eth, wrapped: weth }, cfg.refillTo, cfg.gasReserve);
+    if (plan.refusals.length) throw new Error(`refused: ${plan.refusals.join('; ')}`);
+    const base = {
+      chain: 'base', symbol: 'ETH', wrapped: A.WETH, pool, nativeBefore: M.toHuman(h.eth, 18),
+      target: M.toHuman(cfg.refillTo, 18), reserve: M.toHuman(cfg.gasReserve, 18),
+      need: M.toHuman(plan.need, 18), fromWrapped: M.toHuman(plan.fromWrapped, 18),
+    };
+    if (plan.noop) {
+      const out = { noop: true, reason: 'ETH is at or above the refill target', ...base };
+      console.log(JSON.stringify(out, null, 1));
+      return out;
+    }
+    const refusals = [], steps = [];
+    let leg = { minOut: 0n, ok: true, unwrap: plan.fromWrapped }, sold = null, bought = null, gasUnits = G.UNWRAP_GAS;
+    const [tokOther, decOther, symOther] = side === 'A' ? [info.mintB, info.decimalsB, info.symbolB] : [info.mintA, info.decimalsA, info.symbolA];
+    const wrappedUsd = side === 'A' ? info.price * info.quoteUsd : info.quoteUsd;
+    const otherUsd = side === 'A' ? info.quoteUsd : info.price * info.quoteUsd;
+    if (plan.short > 0n) {
+      const held = M.capped(side === 'A' ? h.rawB : h.rawA, M.sleeveCap(sleeve, tokOther, decOther));
+      const { sell, capped } = G.sellFor(plan.short, wrappedUsd / otherUsd, info.feePips, cfg.slippageBps, decOther, held);
+      if (sell > 0n) {
+        refusals.push(...marketRefusals(info, cfg));
+        const { result: q } = await pub.simulateContract({ account: me, address: info.quoter, abi: A.QUOTER_ABI, functionName: 'quoteExactInputSingle',
+          args: [{ tokenIn: tokOther, tokenOut: A.WETH, amountIn: sell, tickSpacing: info.tickSpacing, sqrtPriceLimitX96: 0n }] });
+        leg = G.swapLeg(plan, q[0], capped, cfg.slippageBps);
+        const sellUsd = M.toHuman(sell, decOther) * otherUsd;
+        const impact = 1 - (M.toHuman(q[0], 18) * wrappedUsd) / sellUsd;
+        if (!leg.ok) refusals.push(`the swap quotes ${M.toHuman(q[0], 18)} WETH, less than the ${M.toHuman(plan.short, 18)} short`);
+        if (impact > cfg.maxImpact) refusals.push(`price impact ${(impact * 100).toFixed(3)}% exceeds ${(cfg.maxImpact * 100).toFixed(2)}%`);
+        if (sellUsd > cfg.maxUsd) refusals.push(`swap of $${sellUsd.toFixed(2)} exceeds cap $${cfg.maxUsd}`);
+        steps.push(...await fundSteps(pub, me, tokOther, sell, info.router, { wrap: 0n }));
+        steps.push({ label: 'swap', to: info.router, data: encodeFunctionData({ abi: A.ROUTER_ABI, functionName: 'exactInputSingle', args: [{
+          tokenIn: tokOther, tokenOut: A.WETH, tickSpacing: info.tickSpacing, recipient: me,
+          deadline: await deadline(pub), amountIn: sell, amountOutMinimum: leg.minOut, sqrtPriceLimitX96: 0n,
+        }] }) });
+        gasUnits += G.SWAP_GAS;
+        sold = { mint: tokOther, symbol: symOther, amount: M.toHuman(sell, decOther), usd: Number(sellUsd.toFixed(4)) };
+        bought = { mint: A.WETH, amountMin: M.toHuman(leg.minOut, 18), quoted: M.toHuman(q[0], 18), route: DEX };
+      }
+    }
+    if (leg.unwrap <= 0n) refusals.push(`nothing to unwrap: the wallet holds no WETH and no ${symOther} to buy it`);
+    const fees = await pub.estimateFeesPerGas();
+    if (leg.unwrap > 0n && !G.worthIt(leg.unwrap, gasUnits, fees.maxFeePerGas)) {
+      refusals.push(`a refill of ${M.toHuman(leg.unwrap, 18)} ETH is worth less than ${G.WORTH_FACTOR}x its own gas (${gasUnits} gas at ${fees.maxFeePerGas} wei)`);
+    }
+    if (leg.unwrap > 0n) {
+      steps.push({ label: 'unwrap', to: A.WETH, data: encodeFunctionData({ abi: A.WETH_ABI, functionName: 'withdraw', args: [leg.unwrap] }) });
+    }
+    const report = { ...base, unwrapPlanned: M.toHuman(leg.unwrap, 18), wrappedUsd, sold, bought,
+      transactions: steps.length, plannedSteps: steps.map(st => st.label) };
+    const simulation = steps.length ? await simulateSequence(pub, me, steps) : [];
+    if (!execute || refusals.length) {
+      return reportUnsent(report, refusals, simulation, 'DRY RUN — refill built and simulated. Pass --execute to sign and send.');
+    }
+    const bad = simulation.find(st => !st.ok);
+    if (bad) throw new Error(`refused: simulation of ${bad.label} reverts: ${bad.revert}`);
+    ctx.nonce = await nonceFor(pub, me);
+    const r = await runSteps(ctx, steps, cfg);
+    const extra = {};
+    const done = r.sent.find(st => st.label === 'unwrap' && st.receipt);
+    if (done) {
+      let wad = 0n;
+      for (const log of done.receipt.logs) {
+        if (!same(log.address, A.WETH)) continue;
+        try {
+          const ev = decodeEventLog({ abi: A.WETH_ABI, data: log.data, topics: log.topics });
+          if (ev.eventName === 'Withdrawal' && same(ev.args.src, me)) wad += ev.args.wad;
+        } catch { /* another event */ }
+      }
+      extra.unwrapped = M.toHuman(wad, 18);
+      extra.unwrappedUsd = Number((extra.unwrapped * wrappedUsd).toFixed(6));
+    }
+    return reportSent(report, r, extra);
+  });
+}
+
 // `balance <token>` in payout.mjs's shape. Read-only.
 async function tokenBalance(token) {
   return withRpc(async ({ pub, me }) => {
@@ -895,9 +1005,10 @@ async function main() {
     if (r.length < 3) throw new Error('usage: send <token> <amount> <to> [--execute]');
     return send(r[0], r[1], r[2], execute);
   }
+  if (cmd === 'refill') return refill(execute);
   console.log('commands: balance [pool|token] | positions | status [tokenId] | pool [pool] | '
     + 'open <pool> <lo> <hi> <maxA> <maxB> [--execute] | harvest <tokenId> [--execute] | close <tokenId> [--execute] | '
-    + 'rebalance <mintA> <mintB> <usdA> <usdB> [--execute] | send <token> <amount> <to> [--execute]   (pool via --pool or LPBOT_POOL)');
+    + 'rebalance <mintA> <mintB> <usdA> <usdB> [--execute] | send <token> <amount> <to> [--execute] | refill [--execute]   (pool via --pool or LPBOT_POOL)');
 }
 
 if (isEntry(import.meta.url)) {

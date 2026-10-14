@@ -10,7 +10,8 @@
 // getPool() agree), and the NPM, router and quoter must each name that factory.
 //
 // Neither pool token is native: ETH (POL on Polygon) pays gas only and never goes below
-// LPBOT_GAS_RESERVE_NATIVE. Approvals are exact (the amount the next call pulls).
+// LPBOT_GAS_RESERVE_NATIVE; no write but `refill` starts under it. Approvals are exact (the
+// amount the next call pulls).
 //
 // A swap takes the better of two quotes: the held v3 pool through SwapRouter02, or a
 // hookless v4 pool of the same pair (the chain module's V4_POOLS; none on Polygon) through the Universal
@@ -43,6 +44,7 @@
 //   node venues/uniswap_v3/signer.mjs rebalance <mintA> <mintB> <targetUsdA> <targetUsdB> [--execute]
 //   node venues/uniswap_v3/signer.mjs send <token> <amount> <to> [--execute]
 //   node venues/uniswap_v3/signer.mjs wrap <amount> [--execute]                (native coin -> its wrapped token)
+//   node venues/uniswap_v3/signer.mjs refill [--execute]                       (gas up to LPBOT_GAS_REFILL_TO from the wrapped token)
 import path from 'node:path';
 import { assertNotHalted } from '../../shared/halt_guard.mjs';
 import { BOT_ROOT } from '../../bot_root.mjs';
@@ -55,6 +57,7 @@ import { overBase, evmErrorKind } from '../../chains/evm/rpc.mjs';
 import { sendSteps, receiptsOf } from '../../chains/evm/landing.mjs';
 import { chainModule } from '../../chains/evm/chains.mjs';
 import * as M from '../../chains/evm/clmath.mjs';
+import * as G from '../../chains/evm/gas_refill.mjs';
 import { acting, vaultConfig, verifyVault } from '../../chains/evm/vault/account.mjs';
 
 // The chain module: Unichain unless LPBOT_CHAIN names another (chains/evm/chains.mjs).
@@ -83,6 +86,7 @@ export function settings(env = process.env) {
     slippageBps: num('LPBOT_SLIPPAGE_BPS', 100),
     priceSlippageBps: num('LPBOT_PRICE_SLIPPAGE_BPS', 50),   // opens and closes: a price range (clmath.openMinimums)
     gasReserve: M.toRaw(num('LPBOT_GAS_RESERVE_NATIVE', 0.0005), 18),
+    refillTo: M.toRaw(num('LPBOT_GAS_REFILL_TO', 0), 18),   // refill: the native coin to reach (0: none)
     maxImpact: num('LPBOT_MAX_IMPACT', 0.01),
     maxOracleDev: num('LPBOT_MAX_ORACLE_DEV', 0.02),
     maxFeeWei: M.toRaw(num('LPBOT_EVM_MAX_GWEI', U.MAX_GWEI_DEFAULT), 9),
@@ -914,6 +918,16 @@ function received(receipt, tokOut, me) {
 }
 
 // --- rebalance: one swap toward the targets --------------------------------------------
+// A swap is the first step of an open or an add, which the signer refuses under the gas
+// reserve: under it the swap is refused too, so a refused open or add never leaves a swap
+// paid for behind it (2026-10-14: four swaps of ~0.05 POL each before four refused adds).
+// `lacks`: the wallet-short refusal, or null. Pure.
+export function planSwapRefusals(h, cfg, lacks) {
+  const out = lacks ? [lacks] : [];
+  if (h.eth < cfg.gasReserve) out.push(`${U.NATIVE_SYMBOL} ${M.toHuman(h.eth, 18)} is below the ${M.toHuman(cfg.gasReserve, 18)} gas reserve`);
+  return out;
+}
+
 async function rebalance(mintA, mintB, targetA, targetB, execute) {
   guard();
   const pool = poolArg();
@@ -986,7 +1000,7 @@ async function rebalance(mintA, mintB, targetA, targetB, execute) {
       swapUsdValue: Number(sellUsd.toFixed(4)),
       transaction: { steps: steps.map(s => s.label) },
     };
-    const swapRefusals = (sellA ? h.rawA : h.rawB) >= rawIn ? [] : [`wallet lacks ${amountIn} ${symIn} to sell`];
+    const swapRefusals = planSwapRefusals(h, cfg, (sellA ? h.rawA : h.rawB) >= rawIn ? null : `wallet lacks ${amountIn} ${symIn} to sell`);
     const simulation = await simulate(ctx, steps);
     if (!execute || swapRefusals.length) {
       return reportUnsent(report, swapRefusals, simulation, 'DRY RUN — quote taken and swap built and simulated. Pass --execute to sign and send.');
@@ -1135,6 +1149,117 @@ async function wrap(amountArg, execute) {
   });
 }
 
+// --- refill: the gas from the pool's own wrapped native token ------------------------
+// Fees arrive as the wrapped token (WPOL), never as the native coin that pays the gas, so
+// the gas ran down to the reserve and every open stopped (2026-10-14). `refill` brings the
+// native coin up to LPBOT_GAS_REFILL_TO and no further: it unwraps the wallet's wrapped
+// token and, when that is short, first buys the shortfall with the pool's other token
+// (chains/evm/gas_refill.mjs). Only where the wrapped native is one of the pool's tokens.
+// It is the one write allowed under the gas reserve: it is what lifts the gas over it.
+// Refused, before anything is signed: a vault (its key's gas is the owners' to top up), a
+// target not above the reserve, a pool without the wrapped token, a wallet with nothing to
+// unwrap, a refill worth less than WORTH_FACTOR times its own gas, and for the swap leg the
+// price reference check and the impact cap.
+export function refillReport(info, plan, h, cfg, extra = {}) {
+  return {
+    chain: U.CHAIN, symbol: U.NATIVE_SYMBOL, wrapped: U.WRAPPED_NATIVE, pool: info.pool,
+    nativeBefore: M.toHuman(h.eth, 18), target: M.toHuman(cfg.refillTo, 18), reserve: M.toHuman(cfg.gasReserve, 18),
+    need: M.toHuman(plan.need, 18), fromWrapped: M.toHuman(plan.fromWrapped, 18), ...extra,
+  };
+}
+
+async function refill(execute) {
+  guard();
+  if (vaultConfig(process.env)) throw new Error(`refused: a vault's gas is its key's ${U.NATIVE_SYMBOL}; only its owners top it up`);
+  const pool = poolArg();
+  const cfg = settings();
+  const sleeve = M.parseSleeve(cfg.sleeve);
+  if (!U.WRAPPED_NATIVE) throw new Error(`refused: ${U.NAME} has no wrapped native token`);
+  return withRpc(async (ctx) => {
+    const { pub, me } = ctx;
+    const info = await describe(pub, pool);
+    const side = same(info.mintA, U.WRAPPED_NATIVE) ? 'A' : same(info.mintB, U.WRAPPED_NATIVE) ? 'B' : null;
+    if (!side) throw new Error(`refused: the wrapped native ${U.WRAPPED_NATIVE} is not a token of pool ${pool}`);
+    const h = await holdings(pub, me, info, ctx.from);
+    const can = spendable(h, info, sleeve);
+    const plan = G.planRefill({ native: h.eth, wrapped: side === 'A' ? can.a : can.b }, cfg.refillTo, cfg.gasReserve);
+    if (plan.refusals.length) throw new Error(`refused: ${plan.refusals.join('; ')}`);
+    if (plan.noop) {
+      const out = { noop: true, reason: `${U.NATIVE_SYMBOL} is at or above the refill target`, ...refillReport(info, plan, h, cfg) };
+      console.log(JSON.stringify(out, null, 1));
+      return out;
+    }
+    const refusals = [];
+    const steps = [];
+    let leg = { minOut: 0n, ok: true, unwrap: plan.fromWrapped }, sold = null, bought = null, gasUnits = G.UNWRAP_GAS;
+    const [tokOther, decOther, symOther] = side === 'A' ? [info.mintB, info.decimalsB, info.symbolB] : [info.mintA, info.decimalsA, info.symbolA];
+    const wrappedUsd = side === 'A' ? info.price * info.quoteUsd : info.quoteUsd;
+    const otherUsd = side === 'A' ? info.quoteUsd : info.price * info.quoteUsd;
+    if (plan.short > 0n) {
+      const { sell, capped } = G.sellFor(plan.short, wrappedUsd / otherUsd, info.feePips, cfg.slippageBps, decOther, side === 'A' ? can.b : can.a);
+      if (sell > 0n) {
+        refusals.push(...marketRefusals(info, cfg));
+        const routes = await quotes(pub, me, info, tokOther, U.WRAPPED_NATIVE, sell);
+        if (!routes.length) refusals.push('no route quotes the swap to the wrapped token');
+        else {
+          const route = routes[0];
+          leg = G.swapLeg(plan, route.amountOut, capped, cfg.slippageBps);
+          const sellUsd = M.toHuman(sell, decOther) * otherUsd;
+          const impact = 1 - (M.toHuman(route.amountOut, 18) * wrappedUsd) / sellUsd;
+          if (!leg.ok) refusals.push(`the swap quotes ${M.toHuman(route.amountOut, 18)} ${U.NATIVE_SYMBOL}, less than the ${M.toHuman(plan.short, 18)} short`);
+          if (impact > cfg.maxImpact) refusals.push(`price impact ${(impact * 100).toFixed(3)}% exceeds ${(cfg.maxImpact * 100).toFixed(2)}%`);
+          if (sellUsd > cfg.maxUsd) refusals.push(`swap of $${sellUsd.toFixed(2)} exceeds cap $${cfg.maxUsd}`);
+          steps.push(...await swapSteps(pub, me, route, tokOther, U.WRAPPED_NATIVE, sell, leg.minOut));
+          gasUnits += G.SWAP_GAS;
+          sold = { mint: tokOther, symbol: symOther, amount: M.toHuman(sell, decOther), usd: Number(sellUsd.toFixed(4)) };
+          bought = { mint: U.WRAPPED_NATIVE, amountMin: M.toHuman(leg.minOut, 18), quoted: M.toHuman(route.amountOut, 18), route: route.label };
+        }
+      }
+    }
+    if (leg.unwrap <= 0n) refusals.push(`nothing to unwrap: the wallet holds no ${side === 'A' ? info.symbolA : info.symbolB} and no ${symOther} to buy it`);
+    const fees = await pub.estimateFeesPerGas();
+    if (leg.unwrap > 0n && !G.worthIt(leg.unwrap, gasUnits, fees.maxFeePerGas)) {
+      refusals.push(`a refill of ${M.toHuman(leg.unwrap, 18)} ${U.NATIVE_SYMBOL} is worth less than ${G.WORTH_FACTOR}x its own gas (${gasUnits} gas at ${fees.maxFeePerGas} wei)`);
+    }
+    if (leg.unwrap > 0n) {
+      steps.push({ label: 'unwrap', to: U.WRAPPED_NATIVE, data: encodeFunctionData({ abi: U.WRAPPED_ABI, functionName: 'withdraw', args: [leg.unwrap] }) });
+    }
+    const report = refillReport(info, plan, h, cfg, {
+      unwrapPlanned: M.toHuman(leg.unwrap, 18), wrappedUsd, sold, bought, transactions: steps.length, plannedSteps: steps.map(st => st.label),
+    });
+    const simulation = steps.length ? await simulate(ctx, steps) : [];
+    if (!execute || refusals.length) {
+      return reportUnsent(report, refusals, simulation, 'DRY RUN — refill built and simulated. Pass --execute to sign and send.');
+    }
+    const bad = blockingFailure(simulation);
+    if (bad) throw new Error(`refused: simulation of ${bad.label} reverts: ${bad.revert}`);
+    ctx.nonce = await nonceFor(pub, ctx.from);
+    const r = await runSteps(ctx, steps, cfg);
+    // what the unwrap paid out, from its receipt's Withdrawal event: the chain's figure
+    const extra = {};
+    const done = r.sent.find(st => st.label === 'unwrap' && st.receipt);
+    if (done) {
+      const wad = unwrapped(done.receipt, me);
+      extra.unwrapped = M.toHuman(wad, 18);
+      extra.unwrappedUsd = Number((extra.unwrapped * wrappedUsd).toFixed(6));
+    }
+    return reportSent(report, r, extra);
+  });
+}
+
+// The wrapped token's Withdrawal events to `me` in a receipt, in wei.
+export function unwrapped(receipt, me) {
+  let wad = 0n;
+  for (const log of receipt?.logs ?? []) {
+    if (!same(log.address, U.WRAPPED_NATIVE)) continue;
+    try {
+      const ev = decodeEventLog({ abi: U.WRAPPED_ABI, data: log.data, topics: log.topics });
+      if (ev.eventName === 'Withdrawal' && same(ev.args.src, me)) wad += ev.args.wad;
+    } catch { /* another event */ }
+  }
+  return wad;
+}
+
 // `balance <token>` in payout.mjs's shape. Read-only.
 async function tokenBalance(token) {
   return withRpc(async ({ pub, me }) => {
@@ -1204,9 +1329,10 @@ async function main() {
     if (r.length < 3) throw new Error('usage: send <token> <amount> <to> [--execute]');
     return send(r[0], r[1], r[2], execute);
   }
+  if (cmd === 'refill') return refill(execute);
   console.log('commands: balance [pool|token] | positions | status [tokenId] | pool [pool] | '
     + 'open <pool> <lo> <hi> <maxA> <maxB> [--execute] | increase <tokenId> <maxA> <maxB> [--execute] | harvest <tokenId> [--execute] | close <tokenId> [--execute] | '
-    + 'rebalance <mintA> <mintB> <usdA> <usdB> [--execute] | send <token> <amount> <to> [--execute] | wrap <amount> [--execute]   (pool via --pool or LPBOT_POOL)');
+    + 'rebalance <mintA> <mintB> <usdA> <usdB> [--execute] | send <token> <amount> <to> [--execute] | wrap <amount> [--execute] | refill [--execute]   (pool via --pool or LPBOT_POOL)');
 }
 
 if (isEntry(import.meta.url)) {

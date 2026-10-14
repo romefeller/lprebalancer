@@ -145,8 +145,12 @@ def ui_price(rec):
 OPEN_RENT_HEADROOM_SOL = 0.009       # every venue not listed below
 # Aerodrome (Base) and Uniswap v3 (Unichain) keep no rent: an NFT mint costs gas
 # only, inside the gas reserve; 0.009 of ETH there would leave ~$25 never deployed.
+# Uniswap v3 on Polygon keeps no rent either, but the swap before an open or an add
+# (an exact approve and the swap, ~200k gas) costs up to 0.3 POL at the 1500 gwei cap,
+# and the signer refuses the open or add under the reserve: the gas must cover the
+# reserve AFTER that swap (2026-10-14: four paid swaps, four refused adds).
 OPEN_RENT_HEADROOM = {'meteora-dlmm': 0.05, 'aerodrome-slipstream': 0.0, 'uniswap-v3-unichain': 0.0,
-                      'uniswap-v3-polygon': 0.0}
+                      'uniswap-v3-polygon': 0.3}
 
 
 def open_headroom(dex):
@@ -415,6 +419,22 @@ def wallet_book():
             'claims': wallets.claims(config.WALLET_ID)}
 
 
+def gas_need(bal):
+    """(have, need): the native gas the wallet read `bal` holds, and what an
+    open or an add needs before it starts (gas_for_open). Pure on config."""
+    side = bal.get('nativeSide')
+    if config.VAULT:
+        have = float(bal.get('gasSol') or 0.0)
+        need = config.GAS_RESERVE_SOL + open_headroom(config.DEX)
+    else:
+        have = bal.get('sol')
+        if have is None and side is not None:
+            have = bal.get('balanceA' if side == 'A' else 'balanceB')      # the pool's native token is the gas
+        have = float(have or 0.0)
+        need = config.GAS_RESERVE_SOL if side is not None else native_reserve(bal)
+    return have, need
+
+
 def gas_for_open(state, bal):
     """Whether native gas covers this open's rent and the reserve after it.
     A profile whose pool holds no native token pays its open's rent (a new
@@ -426,24 +446,15 @@ def gas_for_open(state, bal):
     toward a halt). Short of it, it holds, says so once, counts no failure.
     A vault's gas is its payer key's (`gasSol`): that key pays the fees and
     every rent, and only the owners top it up."""
-    side = bal.get('nativeSide')
-    if config.VAULT:
-        have = float(bal.get('gasSol') or 0.0)
-        need = config.GAS_RESERVE_SOL + open_headroom(config.DEX)
-    else:
-        have = bal.get('sol')
-        if have is None and side is not None:
-            have = bal.get('balanceA' if side == 'A' else 'balanceB')      # the pool's native token is the gas
-        have = float(have or 0.0)
-        need = config.GAS_RESERVE_SOL if side is not None else native_reserve(bal)
+    have, need = gas_need(bal)
     if have >= need:
         state.pop('gas_short_told', None)
         return True
     if not state.get('gas_short_told'):
         state['gas_short_told'] = time.time(); paths.save(state)
         where = "the bot's fee payer key (the owners top it up)" if config.VAULT else 'the wallet'
-        why = (f'{have:.4f} {config.CAPS["native_symbol"]} in {where}, an open on {config.DEX} needs '
-               f'{need:.4f} (reserve + rent): holding until gas is topped up')
+        why = (f'{have:.4f} {config.CAPS["native_symbol"]} in {where}, an open or add on {config.DEX} needs '
+               f'{need:.4f} (reserve + rent): holding until gas is topped up or refilled')
         books.notify('gas_short', reason=why)
         db.event('gas_short', why)
     return False
@@ -495,23 +506,31 @@ def native_to_wrap(native, keep, reserve, min_wrap=WRAP_MIN):
     return excess if excess >= min_wrap else 0.0
 
 
-def wrap_native(state):
-    """Native coin above native_keep into the pool's wrapped native token
-    (owner, 2026-10-08: "let 10 POL for gas and the rest swap to pool"), so
-    a deposit of native POL is seen like a WPOL deposit: deposit_seen, the
-    swap to 50/50, the open; with a position open, the idle WPOL goes in by
-    `increase`. Only where the chain names a wrapped native that is one of
-    the pool's tokens. Never feeds the venue breaker. True when it wrapped."""
+def wrapped_in_pool():
+    """Whether the chain names a wrapped native token (chains.py
+    'wrapped_native') and it is one of this pool's two tokens. False when the
+    pool's tokens are unknown."""
     wrapped = config.CAPS.get('wrapped_native')
-    if not wrapped or not (config.NATIVE_KEEP > 0):
+    if not wrapped:
         return False
     try:
         (ma, _), (mb, _) = pool_tokens()
     except Exception:
         return False
-    if wallets.norm(wrapped) not in {wallets.norm(ma), wallets.norm(mb)}:
+    return wallets.norm(wrapped) in {wallets.norm(ma), wallets.norm(mb)}
+
+
+def wrap_native(state, bal=None):
+    """Native coin above native_keep into the pool's wrapped native token
+    (owner, 2026-10-08: "let 10 POL for gas and the rest swap to pool"), so
+    a deposit of native POL is seen like a WPOL deposit: deposit_seen, the
+    swap to 50/50, the open; with a position open, the idle WPOL goes in by
+    `increase`. Only where the chain names a wrapped native that is one of
+    the pool's tokens. `bal`: a wallet read of this poll, else one is made.
+    Never feeds the venue breaker. True when it wrapped."""
+    if not (config.NATIVE_KEEP > 0) or not wrapped_in_pool():
         return False
-    bal = wallet(config.POOL)
+    bal = bal if bal is not None else wallet(config.POOL)
     amount = native_to_wrap(bal.get('sol'), config.NATIVE_KEEP, config.GAS_RESERVE_SOL)
     if amount <= 0:
         return False
@@ -529,3 +548,139 @@ def wrap_native(state):
                  native_before=round(float(bal.get('sol') or 0), 6), signature=out['signature'])
     db.event('WRAP', f'{amount:.4f} {sym} wrapped into the pool token, {config.NATIVE_KEEP:g} kept for gas: {out["signature"]}')
     return True
+
+
+# --- gas refill: the native coin from the pool's own wrapped token ------------
+# On an EVM chain the fees arrive as the wrapped native token (WPOL), never as
+# the native coin that pays the gas: the gas ran down under the reserve, every
+# add and open was refused, and $435 sat idle (poly-wpol-usdt, 2026-10-14).
+# The bot now refills its gas from its own wallet, as native SOL fees refill
+# it on Solana (fees.split): the signer's `refill` unwraps the wrapped token
+# (and first buys it with the pool's other token when the wrapped token is
+# short) up to gas_refill_to (sql/041), never further.
+
+REFILL_RETRY_S = 600              # a refill that failed waits this long, unless the wallet changed
+
+
+def refill_target():
+    """The native amount a refill reaches: gas_refill_to, or 0 when this
+    profile does not refill (a chain without `refill`, a vault, a pool
+    without the wrapped native, a target not above the reserve)."""
+    t = config.GAS_REFILL_TO
+    if not t > config.GAS_RESERVE_SOL or not config.CAPS.get('gas_refill') or config.VAULT or not wrapped_in_pool():
+        return 0.0
+    return t
+
+
+def refill_due(native, reserve, target, need=0.0):
+    """Whether to refill the gas now: a target above the reserve, a known
+    native balance, and that balance under the low-water mark halfway between
+    the reserve and the target, or under `need` (what the next open or add
+    needs). Halfway: a refill brings at least half the band, so one
+    transaction pays for several cycles. Pure."""
+    try:
+        native, reserve, target, need = float(native), float(reserve), float(target), float(need or 0.0)
+    except (TypeError, ValueError):
+        return False
+    if not all(math.isfinite(x) for x in (native, reserve, target, need)) or not target > reserve:
+        return False
+    return native < max((reserve + target) / 2, need)
+
+
+def refill_kind(bal):
+    """How a refill is booked in payouts. 'gas' where the native coin is
+    part of the pool's side and of the book (Aerodrome: ETH counts as WETH),
+    as Solana's gas from SOL fees: value moves inside the book. 'gas_refill'
+    where the book does not count the native coin (Uniswap v3: POL is gas
+    only): the value leaves the book, and since_start and the DAILY line add
+    it back as they add payouts, so equity and P&L stay right. Pure."""
+    return 'gas' if bal.get('nativeSide') is not None else 'gas_refill'
+
+
+def refill_gas(state, bal=None, need=0.0, position=None):
+    """Refill the native gas from the wallet's wrapped native token when it is
+    under the low-water mark or under `need` (refill_due). One signer call
+    (`refill --execute`), never fed to the venue breaker. Booked in payouts
+    (refill_kind) from the unwrap's own receipt, said as GAS_REFILL. A
+    failure is said once per reason and waits REFILL_RETRY_S unless the
+    wallet's pool tokens changed. True when native gas arrived."""
+    target = refill_target()
+    if not target:
+        return False
+    bal = bal if bal is not None else wallet(config.POOL)
+    if 'balanceA' not in bal or not refill_due(bal.get('sol'), config.GAS_RESERVE_SOL, target, need):
+        return False
+    held = [round(float(bal.get('balanceA') or 0.0), 9), round(float(bal.get('balanceB') or 0.0), 9)]
+    last = state.get('gas_refill_failed') or {}
+    if last.get('held') == held and time.time() - float(last.get('at') or 0) < REFILL_RETRY_S:
+        return False
+    sym = config.CAPS['native_symbol']
+    env = None
+    if config.WALLET_ID:
+        # the wallet may hold other profiles' tokens: the refill takes from this profile's sleeve only
+        try:
+            (ma, _), (mb, _) = pool_tokens()
+        except Exception:
+            return False
+        env = {'LPBOT_SLEEVE': json.dumps(wallets.sleeve_caps(bal, ma, mb))}
+    out, err = signers.chain('refill', '--execute', record=False, extra_env=env)
+    if signers.held(err):
+        return False
+    got = float((out or {}).get('unwrapped') or 0.0)
+    if (out or {}).get('noop') and not err:
+        state.pop('gas_refill_failed', None); paths.save(state)
+        return False
+    if got <= 0:
+        why = err or 'no unwrap landed'
+        if last.get('why') != why:
+            books.notify('gas_refill_failed', reason=why, native=bal.get('sol'), target=target, symbol=sym,
+                         **({'signatures': out.get('signatures')} if (out or {}).get('signatures') else {}))
+            db.event('gas_refill_failed', f'{bal.get("sol")} {sym}, target {target:g}: {why}')
+        state['gas_refill_failed'] = {'at': time.time(), 'held': held, 'why': why}; paths.save(state)
+        return False
+    state.pop('gas_refill_failed', None); paths.save(state)
+    usd = out.get('unwrappedUsd')
+    kind = refill_kind(bal)
+    sig = out.get('signature')
+    sold = out.get('sold')
+    detail = (f'{got:.6f} {sym} unwrapped for gas from {bal.get("sol")} toward {target:g}'
+              + (f'; bought with {sold["amount"]} {sold["symbol"]}' if sold else ''))
+    db.record_payout(config.PROFILE, position, wallets.norm(config.CAPS['wrapped_native']), sym, got,
+                     float(usd) if usd is not None else None, kind, signature=sig, detail=detail)
+    books.notify('GAS_REFILL', unwrapped=round(got, 6), symbol=sym, usd=usd, native_before=bal.get('sol'),
+                 target=target, reserve=config.GAS_RESERVE_SOL, kind=kind, sold=sold, signature=sig,
+                 **({'error': err} if err else {}))
+    db.event('GAS_REFILL', f'{detail}: {sig}')
+    return True
+
+
+def gas_ready(state, bal, position=None):
+    """`bal`, or the wallet read after a gas refill, when native gas covers
+    the next open or add (gas_for_open); None when it does not, said once.
+    Short of gas, a profile that can refill does so first: gas_short is no
+    stop while the wallet holds the wrapped token or the pool's other token,
+    and the open or add goes on the same poll. Called before the swap that
+    comes first, so a write the signer would refuse is never preceded by a
+    paid swap."""
+    have, need = gas_need(bal)
+    if have < need and refill_gas(state, bal, need=need, position=position):
+        fresh = wallet(config.POOL)
+        if 'balanceA' in fresh:
+            bal = fresh
+    return bal if gas_for_open(state, bal) else None
+
+
+def native_upkeep(state, position=None):
+    """Once a poll, one wallet read for both: the gas refilled when it is
+    under the low-water mark (refill_gas), then native coin above
+    native_keep wrapped into the pool token (wrap_native). Nothing is read
+    on a profile that does neither."""
+    refill = bool(refill_target())
+    wrap = config.NATIVE_KEEP > 0 and wrapped_in_pool()
+    if not (refill or wrap):
+        return
+    bal = wallet(config.POOL)
+    if refill and refill_gas(state, bal, position=position):
+        bal = None                                       # the refill moved it: wrap_native reads again
+    if wrap:
+        wrap_native(state, bal)

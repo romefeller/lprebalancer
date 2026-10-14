@@ -98,8 +98,12 @@ def reopen(state, reason, band=None, recovering=False, exit_side=0):
             if not v['calm'] or v['p_touch_fresh'] >= config.CALM_THRESHOLD:
                 band = None
     k = band or best['band']
-    if not capital.gas_for_open(state, bal):
-        return False                                     # before the swap: no swap for an open that cannot run
+    # Before the swap: no swap for an open that cannot run. Short of gas, the
+    # gas is refilled first where the profile can (capital.gas_ready), and the
+    # open goes on with the wallet as read after it.
+    bal = capital.gas_ready(state, bal)
+    if bal is None:
+        return False
     funded = bal                                         # the sleeve as funded: a first open's baseline
     # After an exit the band may sit off centre, against the exit (sql/026):
     # the swap aims at that band's share of token A, not at one half.

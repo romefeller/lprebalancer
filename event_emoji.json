@@ -13,6 +13,8 @@
  "PAYOUT": "💸",
  "GAS_LOW": "⛽",
  "WRAP": "🪙",
+ "GAS_REFILL": "⛽",
+ "gas_refill_failed": "❌",
  "REWARD_PAYOUT": "🎁",
  "SWAP": "🔁",
  "SWEEP": "🧹",

@@ -67,7 +67,7 @@ TARGETS = {
     'band_profile': ('db.py', ['record_band_profile'], PY_TESTS('test_band_profile')),
     'band_hooks': ('lp/harvest.py', ['band_profile'], PY_TESTS('test_band_profile.Hooks')),
     'daily': ('db.py', ['daily_line', 'daily_lines', '_daily_or_none'],
-              PY_TESTS('test_daily', 'test_stats.TwoSolanaWallets', 'test_unichain_loop')),
+              PY_TESTS('test_daily', 'test_stats.TwoSolanaWallets', 'test_unichain_loop', 'test_gas_refill.Book')),
     'health': ('health.py', ['cooldown', 'after_failure', 'after_success', 'verdict', 'load', 'record_failure',
                              'record_success', 'allowed', 'summary'], PY_TESTS('test_health', 'test_edges_0930')),
     'jupgate': ('jupgate.py', ['_take', 'reserve', 'wait_turn'], PY_TESTS('test_jupiter_gate.Gate')),
@@ -294,7 +294,7 @@ TARGETS = {
                              '_since_start_or_none'], PY_TESTS('test_audit.SinceStart', 'test_audit.Runner', 'test_audit_more.SinceStartEdges',
                                                       'test_db', 'test_multi_loop', 'test_scaled', 'test_since_start_scope',
                                                       'test_stats.TwoSolanaWallets', 'test_shared_wallet_books.Replay',
-                                                      'test_unichain_loop')),
+                                                      'test_unichain_loop', 'test_gas_refill.Book')),
     'deploy_all_capital': ('lp/capital.py', ['deployable_usd', 'capital', 'side_target_fraction', 'deposit_caps'], PY_TESTS('test_reopen_shape', 'test_deploy_all', 'test_audit_more.QuoteFallbacks', 'test_rebalancer.DepositCaps', 'test_payout.SwapGate',
                             'test_payout.SwapRetry', 'test_multi_loop', 'test_scaled', 'test_review_edges', 'test_jupiter_gate', 'test_health',
                             'test_deploy_idle', 'test_hardening.SwapMints')),
@@ -336,7 +336,7 @@ TARGETS = {
     # 2026-10-05: 'vs holding' read '-' for sol-swing (baseline SOL+USDC, pool DJT/USDC now)
     'mixed_hold': ('db.py', ['mixed_hold', 'token_prices', 'since_start'],
                    PY_TESTS('test_stats.MixedHold', 'test_stats.TwoSolanaWallets', 'test_since_start_scope',
-                            'test_audit.SinceStart')),
+                            'test_audit.SinceStart', 'test_gas_refill.Book')),
     'bridge_tail': ('telegram_bridge.mjs', ['feedFiles', 'migrateState', 'readNew', 'tailAll', 'message'],
                     NODE_TESTS('test_telegram_bridge.mjs')),
     'bridge_lines': ('book_format.mjs', ['poolLabel', 'redact', 'portfolioText', 'walletName'],
@@ -360,7 +360,8 @@ TARGETS = {
     'shared_books_loop_capital': ('lp/capital.py', ['note_native_px', 'native_usd', 'rent_usd', 'position_usd', 'record_baseline'], PY_TESTS('test_shared_wallet_books', 'test_claims_units', 'test_multi_loop')),
     'shared_books_db': ('db.py', ['since_start', 'native_price'],
                         PY_TESTS('test_shared_wallet_books', 'test_since_start_scope', 'test_audit.SinceStart',
-                                 'test_audit_more.SinceStartEdges', 'test_db', 'test_scaled', 'test_stats.TwoSolanaWallets')),
+                                 'test_audit_more.SinceStartEdges', 'test_db', 'test_scaled', 'test_stats.TwoSolanaWallets',
+                                 'test_gas_refill.Book')),
     'quiet_pool': ('calm.py', ['quiet_tail_ok', 'quiet_fill'], PY_TESTS('test_quiet_pool')),
     'quiet_overlay': ('lp/tape.py', ['quiet_ref_ts', 'with_surrogate', '_surrogate_ts', '_merge_all', 'tape_source', 'quiet_tolerance'], PY_TESTS('test_quiet_pool', 'test_tape_surrogate')),
     'quiet_db': ('db.py', ['tape_ref_pool'], PY_TESTS('test_quiet_pool')),
@@ -476,13 +477,25 @@ TARGETS = {
                                               'positionView', 'closeCalls', 'v4PoolsFor', 'v4SwapCalldata', 'blockingFailure',
                                               'simulateSequence', 'runSteps', 'checkRecipient', 'describe', 'parseArgs',
                                               'useChain', 'isNative', 'planIncrease', 'planWrap', 'nonceFor', 'atBlock'],
-                       NODE_TESTS('test_uniswap.mjs', 'test_uniswap_polygon.mjs')),
+                       NODE_TESTS('test_uniswap.mjs', 'test_uniswap_polygon.mjs', 'test_gas_refill.mjs')),
     'unichain_registry': ('chains/evm/unichain.mjs', ['unichainEndpoints', 'simulationEndpoints'], NODE_TESTS('test_uniswap.mjs')),
     # Polygon (2026-10-08): the chain module's endpoints and the registry that picks it.
     'polygon_registry': ('chains/evm/polygon.mjs', ['polygonEndpoints', 'simulationEndpoints'], NODE_TESTS('test_uniswap_polygon.mjs')),
     'evm_chains': ('chains/evm/chains.mjs', ['chainModule'], NODE_TESTS('test_uniswap_polygon.mjs', 'test_uniswap.mjs')),
     # native POL above native_keep into WPOL (owner, 2026-10-08)
     'native_wrap': ('lp/capital.py', ['native_to_wrap', 'wrap_native'], PY_TESTS('test_polygon', 'test_polygon_loop')),
+    # 2026-10-14 (poly-wpol-usdt): POL under the reserve, four paid swaps before four refused adds,
+    # then $435 idle. The gas refill from the pool's wrapped native (sql/041), the gas check before
+    # the swap of an open or an add, and every swap refused under the reserve.
+    'gas_refill_py': ('lp/capital.py', ['wrapped_in_pool', 'refill_target', 'refill_due', 'refill_kind', 'refill_gas',
+                                        'gas_ready', 'native_upkeep'], PY_TESTS('test_gas_refill', 'test_polygon')),
+    'gas_need': ('lp/capital.py', ['gas_need', 'gas_for_open'], PY_TESTS('test_gas_refill', 'test_swing.GasForOpen', 'test_vault_config',
+                                                                        'test_scaled', 'test_polygon')),
+    'gas_refill_js': ('chains/evm/gas_refill.mjs', ['planRefill', 'sellFor', 'swapLeg', 'worthIt'], NODE_TESTS('test_gas_refill.mjs')),
+    'gas_refill_helpers': ('venues/uniswap_v3/signer.mjs', ['planSwapRefusals', 'refillReport', 'unwrapped'], NODE_TESTS('test_gas_refill.mjs')),
+    'gas_refill_aero_helpers': ('venues/aerodrome/signer.mjs', ['planSwapRefusals', 'settings'], NODE_TESTS('test_gas_refill.mjs', 'test_aerodrome.mjs')),
+    'refill_uniswap': ('venues/uniswap_v3/signer.mjs', ['refill'], NODE_TESTS('test_gas_refill_fork.mjs')),
+    'refill_aerodrome': ('venues/aerodrome/signer.mjs', ['refill'], NODE_TESTS('test_gas_refill_base_fork.mjs')),
     'book_inverted': ('book_format.mjs', ['pricedView', 'shownPrice', 'shownBand', 'shownMovePct', 'shownSide', 'equityLine', 'sinceStartLine'],
                       NODE_TESTS('test_book_format.mjs', 'test_telegram_bridge.mjs')),
 }
@@ -757,6 +770,18 @@ EQUIVALENT = {
         'the lesser of two equal amounts is either one',
     ('evm_price_range', 'openMinimums', '(?<![<>=!])<(?![<=]) -> <=', 'return { minA: a < now.amountA ? a : now.amountA, minB: b < now.amountB ? b : now.amountB };', 1):
         'the lesser of two equal amounts is either one',
+    ('gas_refill_aero_helpers', 'settings', '\\?\\? -> ||', "pin: env.LPBOT_EVM_PROFIT_WALLET_PIN ?? '',", 0):
+        "the only falsy string || would replace is '' itself",
+    ('gas_refill_aero_helpers', 'settings', '\\?\\? -> ||', "profit: env.LPBOT_PROFIT_WALLET ?? '',", 0):
+        "the only falsy string || would replace is '' itself",
+    ('gas_refill_aero_helpers', 'settings', '\\?\\? -> ||', "sleeve: env.LPBOT_SLEEVE ?? '',", 0):
+        "the only falsy string || would replace is '' itself",
+    ('gas_refill_js', 'planRefill', '(?<![<>=!])<(?![<=]) -> <=', 'const fromWrapped = h.wrapped < need ? h.wrapped : need;', 0):
+        'at h.wrapped == need both branches give the same amount',
+    ('gas_refill_js', 'planRefill', '(?<![<>=!-])>(?![>=]) -> >=', 'const need = target > h.native ? target - h.native : 0n;', 0):
+        'at target == native both branches give 0n',
+    ('gas_refill_helpers', 'unwrapped', '\\?\\? -> ||', 'for (const log of receipt?.logs ?? []) {', 0):
+        "a receipt's logs are an array (truthy) or absent: ?? and || give the same",
     ('uniswap_signer', 'settings', '\\?\\? -> ||', "pin: env.LPBOT_EVM_PROFIT_WALLET_PIN ?? '',", 0):
         "the only falsy string || would replace is '' itself",
     ('uniswap_signer', 'settings', '\\?\\? -> ||', "profit: env.LPBOT_PROFIT_WALLET ?? '',", 0):

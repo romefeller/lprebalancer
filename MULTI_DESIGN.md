@@ -60,6 +60,13 @@ wallet, disabled ones included. Audits reconcile the wallet against the sum of i
   `LPBOT_POOL`, `LPBOT_MAX_USD`, `LPBOT_SLIPPAGE_BPS`, `LPBOT_GAS_RESERVE_NATIVE`, `LPBOT_SLEEVE`,
   `LPBOT_EVM_PROFIT_WALLET_PIN` (send refuses any other recipient). Every signer refuses writes on
   `HALT` in its directory and on `LPBOT_RUN_DIR/HALT` (`halt_guard.mjs`).
+- EVM gas refill (both EVM signers, sql/041): `refill [--execute]` brings the native coin up to
+  `LPBOT_GAS_REFILL_TO` and no further, from the wallet's wrapped native token (WETH9 `withdraw`),
+  first buying the shortfall with the pool's other token when the wrapped token is short
+  (`chains/evm/gas_refill.mjs`). Only on a pool that holds the wrapped native; never for a vault.
+  Answer: `noop`, or the send report plus `unwrapped` and `unwrappedUsd` from the unwrap's
+  `Withdrawal` event. It is the one write allowed under the gas reserve; `rebalance` is refused
+  under it, as `open` and `increase` are, so a refused open never follows a paid swap.
 - EVM deployments: `evm/addresses.mjs` `DEPLOYMENTS` lists each trusted Slipstream deployment
   (factory, NPM, router, quoter). The signer takes the pool's `factory()` and `nft()`, accepts the
   pool only if both match one entry and that factory's `getPool(token0, token1, tickSpacing)` is

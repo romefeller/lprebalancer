@@ -110,6 +110,13 @@ def deploy_idle(state, status, wbal, rv, price):
             books.notify('deploy_idle_deferred', idle_usd=round(idle, 2), reason=why)
             db.event('deploy_idle_deferred', f'${idle:.2f} idle: {why}')
         return False
+    if can_add():
+        # The add's swap goes first and the signer refuses the add under the
+        # gas reserve: gas is checked (and refilled) before any of it, and a
+        # hold spends no deploy (2026-10-14: four paid swaps, four refused adds).
+        wbal = capital.gas_ready(state, wbal, position=status['positionMint'])
+        if wbal is None:
+            return False
     state['idle_deploys'] = [t for t in (state.get('idle_deploys') or []) if now - t < tuning.DAY_S] + [now]; paths.save(state)
     if can_add():
         return add_idle(state, status, wbal, idle, price)

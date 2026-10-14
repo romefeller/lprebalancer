@@ -407,6 +407,11 @@ export function render(row) {
       return `WRAP · ${row.amount} ${row.symbol} into the pool token · ${row.kept} ${row.symbol} kept for gas\n${row.signature ?? ''}`;
     case 'wrap_failed':
       return `WRAP FAILED · ${row.amount} ${row.symbol} stays native · ${row.reason}`;
+    case 'GAS_REFILL':
+      return `GAS REFILL · ${row.unwrapped} ${row.symbol} ($${n(row.usd, 4)}) unwrapped for gas · ${row.native_before} → target ${row.target} ${row.symbol}`
+        + (row.sold ? ` · bought with ${row.sold.amount} ${row.sold.symbol}` : '') + `\n${row.signature ?? ''}`;
+    case 'gas_refill_failed':
+      return `GAS REFILL FAILED · ${row.native} ${row.symbol}, target ${row.target} · ${row.reason}`;
     case 'REWARD_PAYOUT':
       return `REWARDS${row.gas_low ? ' · gas low, swapped to SOL for gas' : ''}\n`
         + (row.rewards ?? []).map(x => `$${n(x.usd, 4)} → ${x.to}${x.signature ? `\n${x.signature}` : ''}`).join('\n');

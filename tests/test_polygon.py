@@ -251,14 +251,17 @@ class WrapNative(unittest.TestCase):
                    {'tokens': ((USDC.lower(), 'USDC'), (USDT0.lower(), 'USDT0'))}, {'sol': 10.5}):
             out, calls, _, _ = self.go(**kw)
             self.assertEqual((out, calls), (False, []), kw)
-        self.assertNotIn('wrapped_native', chains.caps('unichain'))      # Unichain's WETH is no pool token
+        # Unichain and Base name WETH (the gas refill unwraps it); a pool without it wraps nothing
+        self.assertEqual(chains.caps('unichain')['wrapped_native'], chains.caps('base')['wrapped_native'])
 
     def test_other_chains_and_keep_off_read_nothing(self):
         # the cheap exit: every non-Polygon profile runs this each poll
-        for kw in ({'caps': chains.caps('unichain')}, {'caps': chains.caps('solana')}, {'keep': 0.0}, {'keep': -1.0}):
+        for kw in ({'caps': chains.caps('solana')}, {'keep': 0.0}, {'keep': -1.0}):
             out, _, _, _ = self.go(**kw)
             self.assertIs(out, False, kw)
             self.assertEqual(self.reads, [], kw)
+        out, _, _, _ = self.go(caps=chains.caps('unichain'))             # WETH is no token of a WPOL pool
+        self.assertIs(out, False); self.assertEqual(self.reads, ['tokens'])
         out, _, _, _ = self.go(tokens=RuntimeError('rpc down'))
         self.assertIs(out, False); self.assertEqual(self.reads, ['tokens'])   # no wallet read without the pool's tokens
         out, _, _, _ = self.go(tokens=((USDC.lower(), 'USDC'), (USDT0.lower(), 'USDT0')))
@@ -352,7 +355,8 @@ class Loop(unittest.TestCase):
     def test_the_polygon_dex_runs_the_uniswap_signer(self):
         self.assertEqual(lp.signers.SIGNERS[DEX], lp.signers.SIGNERS['uniswap-v3-unichain'])
         self.assertTrue(lp.signers.SIGNERS[DEX].endswith('venues/uniswap_v3/signer.mjs'))
-        self.assertEqual(lp.capital.OPEN_RENT_HEADROOM[DEX], 0.0)
+        # no rent, but the swap before an open or an add: ~200k gas at the 1500 gwei cap (2026-10-14)
+        self.assertEqual(lp.capital.OPEN_RENT_HEADROOM[DEX], 0.3)
 
     def test_the_signer_is_told_its_chain(self):
         seen = {}

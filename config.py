@@ -114,6 +114,12 @@ MAX_USD = _env('LPBOT_MAX_USD', float, float(_CFG['max_usd']))
 # Native SOL never spent, whatever the pool holds. A wallet that cannot pay a
 # fee cannot close its own position.
 GAS_RESERVE_SOL = _env('LPBOT_GAS_RESERVE_SOL', float, float(_CFG['gas_reserve_sol']))
+# Native coin the gas is refilled to from the pool's wrapped native token, on an
+# EVM chain whose wrapped native is a pool token (sql/041, capital.refill_gas).
+# Never above native_keep when that is on: the wrap would take the refill back.
+# 0 or unset: never refill.
+_REFILL_TO = _env('LPBOT_GAS_REFILL_TO', float, float(_CFG.get('gas_refill_to') or 0))
+GAS_REFILL_TO = min(_REFILL_TO, NATIVE_KEEP) if NATIVE_KEEP > 0 else _REFILL_TO
 # Each token's deposit cap as a fraction of capital. A centred band takes about
 # half of each; the margin over 0.5 absorbs price movement between quote and fill.
 SIDE_CAP_FRACTION = _env('LPBOT_SIDE_CAP', float, float(_CFG['side_cap_fraction']))
@@ -403,6 +409,7 @@ def summary():
         'capital_usd': CAPITAL_USD,
         'max_usd': MAX_USD,
         'gas_reserve_sol': GAS_RESERVE_SOL,
+        'gas_refill_to': GAS_REFILL_TO or None,
         'bands': [f'+/-{(b - 1) * 100:.0f}%' for b in BANDS],
         'max_modelled_rebalances_per_day': MAX_REBALANCES_PER_DAY_MODELLED,
         'poll_seconds': POLL_SECONDS,

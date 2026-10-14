@@ -974,7 +974,7 @@ def payout_totals(profile=None, wallet_id=None):
         rows = {r['kind']: r for r in cur.fetchall()}
     g = lambda k, f='usd': round(float(rows[k][f]), 4) if k in rows else 0.0
     return {'paid_usd': g('paid'), 'paid_today_usd': g('paid', 'today'),
-            'reinvested_usd': g('reinvested'), 'gas_usd': g('gas'),
+            'reinvested_usd': g('reinvested'), 'gas_usd': round(g('gas') + g('gas_refill'), 4),
             'payouts': int(rows['paid']['n']) if 'paid' in rows else 0}
 
 
@@ -1298,6 +1298,9 @@ def daily_line(day, profile=None, wallet_id=None):
         cur.execute("select coalesce(sum(usd), 0) u from payouts where kind in ('paid', 'uncertain', 'fee') "
                     f"and ts >= %(s)s and ts < %(e)s and {PAYOUT_IN}", w)
         paid = float(cur.fetchone()['u'])
+        cur.execute("select coalesce(sum(usd), 0) u from payouts where kind = 'gas_refill' "
+                    f"and ts >= %(s)s and ts < %(e)s and {PAYOUT_IN}", w)
+        refill = float(cur.fetchone()['u'])
         cur.execute("select coalesce(sum(case when kind in ('deposit', 'internal_in') then usd else -usd end), 0) n "
                     "from capital_flows where kind in ('deposit', 'withdrawal', 'internal_in', 'internal_out') "
                     f"and ts > %(t0)s and ts <= %(t1)s and {FLOW_IN}", dict(w, t0=a['t0'], t1=a['t1']))
@@ -1309,7 +1312,9 @@ def daily_line(day, profile=None, wallet_id=None):
     # fees_usd is what was harvested in the day (audit 2026-09-30: $0.61 of
     # the 09-30 figure was earned before midnight and harvested after).
     earned = float(fees_between(start, min(end, now()), names[0])['usd'])
-    value = e1 + paid
+    # gas refilled from the book's own wrapped native left the book as a payout does
+    # (capital.refill_kind): it is value, not a loss
+    value = e1 + paid + refill
     # a day across pairs of different base tokens (sol-swing) opens on one
     # token's price and closes on another's: no price and no hold benchmark
     # the hold's volatile half moves with the volatile token's dollar price
@@ -1321,7 +1326,7 @@ def daily_line(day, profile=None, wallet_id=None):
             'fees_per_recentre_usd': round(f / n, 4) if n else None,
             'price_open': None if mixed else round(p0, 4), 'price_close': None if mixed else round(p1, 4),
             'equity_open': round(e0, 4), 'equity_close': round(e1, 4), 'paid_out_usd': round(paid, 4),
-            'net_flows_usd': round(net, 4),
+            'gas_refill_usd': round(refill, 4), 'net_flows_usd': round(net, 4),
             'value_change_usd': round(value - e0 - net, 4),
             'hold_50_50_usd': round(hold, 4) if hold is not None else None,
             'vs_hold_usd': round(value - hold, 4) if hold is not None else None}
@@ -1389,6 +1394,9 @@ def since_start(extra_usd=0.0, profile=None, wallet_id=None):
         cur.execute("select coalesce(sum(usd), 0) u from payouts where kind in ('paid', 'uncertain', 'fee') "
                     f"and ts >= %(since)s and {PAYOUT_IN}", dict(a, since=base['ts']))
         paid = float(cur.fetchone()['u'])
+        cur.execute("select coalesce(sum(usd), 0) u from payouts where kind = 'gas_refill' "
+                    f"and ts >= %(since)s and {PAYOUT_IN}", dict(a, since=base['ts']))
+        refill = float(cur.fetchone()['u'])
         mixed = mixed_sides(_pairs_held(cur, a))['a']
         if mixed:
             cur.execute("select case when kind in ('deposit', 'internal_in') then 1 else -1 end sgn, usd, amounts "
@@ -1398,7 +1406,7 @@ def since_start(extra_usd=0.0, profile=None, wallet_id=None):
     p0, p1 = float(base['price']), float(last['price'])
     v0, v1 = volatile_usd(p0, stable_a), volatile_usd(p1, stable_a)
     start = float(base['usd']) + float(fl['net_usd'])
-    value = float(last['equity_usd']) + float(extra_usd or 0.0) + paid
+    value = float(last['equity_usd']) + float(extra_usd or 0.0) + paid + refill      # refill: see daily_line
     hold = ((float(base['sol']) + float(fl['net_sol'])) * v1 + float(base['usdc']) + float(fl['net_usdc'])
             + float(fl['net_fixed_usd']))
     hold_50 = float(base['usd']) * (0.5 + 0.5 * v1 / v0) + float(fl['net_usd'])
@@ -1407,7 +1415,7 @@ def since_start(extra_usd=0.0, profile=None, wallet_id=None):
            'start_usd': round(start, 4), 'start_sol': round(float(base['sol']) + float(fl['net_sol']), 6),
            'price_start': p0, 'price_now': round(p1, 4),
            'equity_usd': round(float(last['equity_usd']), 4), 'uncounted_usd': round(float(extra_usd or 0.0), 4),
-           'paid_out_usd': round(paid, 4), 'value_usd': round(value, 4),
+           'paid_out_usd': round(paid, 4), 'gas_refill_usd': round(refill, 4), 'value_usd': round(value, 4),
            'profit_usd': round(value - start, 4), 'profit_pct': round((value / start - 1) * 100, 3) if start else None,
            'hold_start_assets_usd': round(hold, 4), 'vs_hold_start_assets_usd': round(value - hold, 4),
            'hold_50_50_usd': round(hold_50, 4), 'vs_hold_50_50_usd': round(value - hold_50, 4)}
@@ -1896,10 +1904,11 @@ BOOK_COUNTS = ('harvests', 'positions_opened', 'positions_open_now', 'rebands', 
 BOOK_TOKENS = {'token_a': ('fees_today_a', 'fees_realised_a', 'fees_unrealised_a', 'fees_total_a'),
                'token_b': ('fees_today_b', 'fees_realised_b', 'fees_unrealised_b', 'fees_total_b')}
 BOOK_SAME = ('pair', 'dex', 'position_dex', 'position_pair', 'position_pool', 'pnl_basis')
-DAY_USD = ('fees_usd', 'fees_earned_usd', 'equity_open', 'equity_close', 'paid_out_usd', 'net_flows_usd',
-           'value_change_usd')
+DAY_USD = ('fees_usd', 'fees_earned_usd', 'equity_open', 'equity_close', 'paid_out_usd', 'gas_refill_usd',
+           'net_flows_usd', 'value_change_usd')
 SINCE_HOLD = ('hold_start_assets_usd', 'vs_hold_start_assets_usd', 'hold_50_50_usd', 'vs_hold_50_50_usd')
-SINCE_USD = ('start_usd', 'equity_usd', 'uncounted_usd', 'paid_out_usd', 'value_usd', 'profit_usd') + SINCE_HOLD
+SINCE_USD = ('start_usd', 'equity_usd', 'uncounted_usd', 'paid_out_usd', 'gas_refill_usd', 'value_usd',
+             'profit_usd') + SINCE_HOLD
 
 
 def _sum_known(values, digits=4):

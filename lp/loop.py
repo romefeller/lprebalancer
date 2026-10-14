@@ -196,7 +196,7 @@ def main():
             continue
         state.pop('disabled_told', None)
         books.portfolio_report(state)
-        capital.wrap_native(state)
+        capital.native_upkeep(state, position=status.get('positionMint'))
 
         if not status.get('positionMint'):
             if paths.MIGRATE.exists():

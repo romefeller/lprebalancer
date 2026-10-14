@@ -6,8 +6,8 @@
 // getPool(WPOL, USDT0, 500) is the held pool 0x9B08288C3Be4F62bbf8d1C20Ac9C5e6f9467d8B7.
 // No v4 pool: a swap uses the held v3 pool (0.05%), the deepest WPOL/USDT pool.
 //
-// Native POL pays gas only. WPOL is an ordinary ERC-20 here: the signer never wraps or
-// unwraps, so the gas POL is never part of the pool's side A.
+// Native POL pays gas only. WPOL is an ordinary ERC-20 here: the gas POL is never part of
+// the pool's side A. The signer wraps POL only on `wrap` and unwraps WPOL only on `refill`.
 import { getAddress } from 'viem';
 import { polygon } from 'viem/chains';
 import { isLoopback, evmEndpoints } from './rpc.mjs';

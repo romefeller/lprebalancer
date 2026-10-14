@@ -4,8 +4,9 @@ Pool: Uniswap v3 WPOL/USDT0 0.05% on Polygon PoS (chain id 137),
 `0x9B08288C3Be4F62bbf8d1C20Ac9C5e6f9467d8B7`. Token A is WPOL
 (`0x0d500B1d8E8eF31E21C99d1Db9A6444d3ADf1270`, 18 decimals), token B is USDT0
 (`0xc2132D05D31c914a87C6611C10748AEb04B58e8F`, 6 decimals). The price is USDT
-per WPOL. Gas is native POL, outside the pool: the signer never wraps or
-unwraps, so gas POL is never counted as WPOL.
+per WPOL. Gas is native POL, outside the pool, never counted as WPOL. The
+signer wraps POL only on the `wrap` command (POL above `native_keep`) and
+unwraps WPOL only on the `refill` command (gas under the refill mark).
 
 The signer is `signer_uniswap.mjs` with `LPBOT_CHAIN=polygon` (the loop sets
 it from the wallet's chain). Swaps use the held pool; Polygon has no v4 route.
@@ -19,9 +20,11 @@ The profile starts dormant: it opens nothing until its wallet holds at least
 
     psql -d rebalancer -v ON_ERROR_STOP=1 -f sql/034_polygon.sql
     psql -d rebalancer -v ON_ERROR_STOP=1 -f sql/035_native_keep.sql
+    psql -d rebalancer -v ON_ERROR_STOP=1 -f sql/041_gas_refill.sql
 
 Additive and idempotent: they let a `wallets` row name chain `polygon`, and
-add `config.native_keep`.
+add `config.native_keep` and `config.gas_refill_to`. sql/041 also sets
+`poly-wpol-usdt` to a 1 POL reserve and a 3 POL refill target.
 
 ## 2. The key (once)
 
@@ -55,8 +58,9 @@ the values that are in POL, are Polygon's, or are the SOL profile's cost cuts
             hot_pause_enabled = true, macro_pause_enabled = true
         where name = 'poly-wpol-usdt'"
 
-- `gas_reserve_sol` is in the chain's native token: 2 POL (about $0.20, about
-  7 re-centres). The template's 0.003 is ETH.
+- `gas_reserve_sol` is in the chain's native token: 2 POL here at first, 1 POL
+  since sql/041 (a harvest and a close at the 1500 gwei cap). The template's
+  0.003 is ETH.
 - `swap_cost_bps` 10, as on SOL/USDC: the pool's 0.05% fee and ~0.2 bp of
   impact on $115 one way, plus the gas of a cycle.
 - `regime_steps` 3 and `regime_threshold` 0.25: SOL/USDC's settings since the
@@ -102,10 +106,16 @@ only, e.g. about $400 of POL:
 `max_usd` is 600 (as on SOL/USDC): an open is at most max_usd / 1.1, so up to
 ~$545 deploys in one position.
 
-The bot spends about 0.9 POL a day on gas. It never buys POL back: once the
-10 POL run under the 2 POL reserve, the USDT0 fees of each harvest are
-reinvested instead of paid (Telegram ⛽ PAYOUT HELD). Send POL again then;
-anything above 10 POL is wrapped into the pool again.
+The bot spends about 0.9 POL a day on gas. It refills the gas itself
+(sql/041, `gas_refill_to` 3): when POL falls under 2 (halfway between the 1 POL
+reserve and the target), it unwraps the wallet's WPOL up to 3 POL, and buys
+the WPOL with USDT0 first when the wallet holds too little WPOL (the signer's
+`refill`, Telegram ⛽ GAS REFILL). An open or an add short of gas refills
+first and goes on in the same poll. The refill is booked in payouts as
+`gas_refill`: the POL leaves the book, and the P&L counts it as it counts a
+payout. Only when the wallet holds neither WPOL nor USDT0 does the gas stay
+short (⛽ PAYOUT HELD, `gas_short`); the next harvest brings the fees to refill
+from. Anything above 10 POL is wrapped into the pool again.
 
 USDT0 fees go to the EVM profit wallet on each harvest (the pin
 `LPBOT_EVM_PROFIT_WALLET_PIN`; the same address serves Base, Unichain and

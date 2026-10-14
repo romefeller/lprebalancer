@@ -490,6 +490,7 @@ def _chain(*args, dex=None, timeout=tuning.SIGNER_TIMEOUT_S, extra_env=None):
                LPBOT_SLIPPAGE_BPS=str(config.SLIPPAGE_BPS),
                LPBOT_GAS_RESERVE_SOL=str(config.GAS_RESERVE_SOL),
                LPBOT_GAS_RESERVE_NATIVE=str(config.GAS_RESERVE_SOL),
+               LPBOT_GAS_REFILL_TO=str(config.GAS_REFILL_TO),
                LPBOT_RUN_DIR=str(paths.RUN),
                LPBOT_CHAIN=config.CHAIN,
                LPBOT_PROFIT_WALLET=config.PROFIT_WALLET, **vault, **fee, **(extra_env or {}))
