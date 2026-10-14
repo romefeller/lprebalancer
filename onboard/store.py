@@ -259,7 +259,11 @@ def cap(cur, onboard_id, headroom, provisional=None):
     if not row:
         raise Refused(f'request {onboard_id} has no profile')
     value = cap_usd(total, float(row['side_cap_fraction']), float(headroom))
-    cur.execute('update config set max_usd = %s where name = %s', (value, row['name']))
+    # A small deposit caps under the template's capital_usd; config_sane wants
+    # max_usd >= capital_usd, and the deployed capital is min(base, max_usd /
+    # (2 * side_cap)) anyway, so the capital comes down with the cap.
+    cur.execute('update config set max_usd = %s, capital_usd = least(capital_usd, %s) where name = %s',
+                (value, value, row['name']))
     return value
 
 

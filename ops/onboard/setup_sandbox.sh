@@ -112,6 +112,10 @@ done
 say "1. user lp-onboard"
 id lp-onboard >/dev/null 2>&1 || useradd --system --user-group --no-create-home --home-dir /nonexistent \
   --shell /usr/sbin/nologin lp-onboard
+# The store's register imports the bot (engine.py: numpy, scipy). ProtectHome
+# hides ~ubuntu/.local, so the sandbox needs them system-wide (2026-10-14).
+dpkg -s python3-numpy python3-scipy >/dev/null 2>&1 \
+  || DEBIAN_FRONTEND=noninteractive apt-get install -y -q python3-numpy python3-scipy
 
 say "2. Postgres role \"lp-onboard\""
 runuser -u postgres -- psql -d rebalancer -v ON_ERROR_STOP=1 -q <<'SQL'

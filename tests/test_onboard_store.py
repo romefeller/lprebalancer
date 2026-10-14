@@ -456,6 +456,24 @@ class OwnerPage(unittest.TestCase):
         t = row("select max_usd from config where name = 'ob-tpl-sol'")['max_usd']
         self.assertEqual(row("select max_usd from config where name = 'ob-two'")['max_usd'], t, 'no cap asked: the template\'s')
 
+    def test_a_deposit_under_the_template_capital_brings_the_capital_down(self):
+        # 2026-10-14, tang0: 0.18 SOL capped max_usd under the template's capital_usd ($216),
+        # and config_sane refused the register
+        original = db.token_prices
+        db.token_prices = lambda mints: {m: 1.0 for m in mints}
+        try:
+            i = begin()
+            register(i, cap={'mint': SOL, 'headroom': 3})
+            r = row("select capital_usd, max_usd from config where name = 'ob-one'")
+            self.assertEqual(float(r['max_usd']), store.cap_usd(1.355, 0.55, 3))
+            self.assertEqual(float(r['capital_usd']), float(r['max_usd']), 'the capital comes down with the cap')
+            store.run('deposited', {'id': i, 'signature': 'sig-big', 'token': 'USDC', 'mint': USDC, 'amount': '1400', 'headroom': 3})
+            r2 = row("select capital_usd, max_usd from config where name = 'ob-one'")
+            self.assertEqual(float(r2['capital_usd']), float(r['capital_usd']), 'a larger cap never raises the capital')
+            self.assertGreater(float(r2['max_usd']), float(r['max_usd']))
+        finally:
+            db.token_prices = original
+
     def test_an_exit_request_once_pending_and_done_by_the_loop_or_a_start(self):
         i = begin()
         register(i)
