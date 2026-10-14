@@ -451,7 +451,8 @@ for (const device of [PHONE, DESKTOP]) {
   test(`page (${dev}): a tampered transaction is refused before the wallet sees it; a declined one says so; retry works`, { skip, timeout: 300_000 }, async () => {
     const r = await rig();
     let asked = 0;
-    const { page } = await openPage(B, r.base, INVITE, { device, setup: (ctx) => solanaWallet(ctx, OWNER, async (tx) => { asked++; return r.chain.land(tx); }) });
+    const { page } = await openPage(B, r.base, INVITE, { device, setup: (ctx) => solanaWallet(ctx, OWNER, async (tx) => { asked++; return r.chain.land(tx); },
+      { onSignAll: () => { asked++; } }) });
     try {
       r.store.rows.push({ id: 9, name: 'my-pool', owner: OWNER.publicKey.toBase58(), chain: 'solana', state: 'started', vault: r.chain.vault.toBase58(),
         vault_row: r.chain.row(), token: 'SOL', deposit: '1', profit_wallet: OWNER.publicKey.toBase58(), fee_wallet: OPERATOR });
@@ -729,6 +730,18 @@ test('page: WalletConnect with signAll: the set-up in ONE request; the page\'s s
     assert.ok(dropped);
     assert.ok(rl.connections().filter(u => /browser/.test(decodeURIComponent(u))).length >= 1, 'the page is connected again');
     assert.equal(r.chain.sol, 1_881_400_000n);
+    // 2026-10-14: Add capital on Tangem showed no sign box for one
+    // solana_signTransaction. One deposit goes as a set of one, the path above.
+    await click(page, '#f-done');
+    await visible(page, 'v-active');
+    await click(page, '#a-add');
+    await page.fill('#sh-body input', '0.1');
+    await click(page, '#sh-go');
+    const g = await flowDone(page, 120_000);
+    assert.ok(g.steps.every(s => s.state === 'done'), JSON.stringify(g));
+    assert.deepEqual(w.requests.map(q => q.method), ['solana_signAllTransactions', 'solana_signAllTransactions'], 'no single-transaction request');
+    assert.equal(w.requests[1].params.transactions.length, 1);
+    assert.equal(r.chain.sol, 1_981_400_000n);
   } finally { await page.context().close(); r.server.close(); await w.close(); await rl.close(); }
 });
 

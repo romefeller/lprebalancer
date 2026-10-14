@@ -471,6 +471,17 @@ async function signOne(tx, expect, chainId, step, flow) {
   if (!r.ok) throw new Refusal(r.problems.join('; '));
   if (state.chain === 'solana') fitsWallet([tx]);
   flow.set(step, 'active', `Confirm in ${state.wallet.name}…`);
+  // A Solana wallet that signs sets signs this one as a set of one, and the
+  // page sends it: the path the setup proved on Tangem, whose app showed no
+  // sign box for solana_signTransaction and failed its own signAndSend
+  // (2026-10-14). What it returns is checked again before it is sent.
+  if (state.chain === 'solana' && state.wallet.signAll) {
+    const [signed] = await state.wallet.signAll([tx]);
+    const again = decodeSol(signed, expect, SOL_PINS);
+    if (!again.ok) throw new Refusal(`the wallet returned another transaction: ${again.problems.join('; ')}`);
+    flow.set(step, 'active', 'Sending…');
+    return landed(await post('broadcast', { chain: 'solana', transaction: signed }).then(x => x.signature), step, flow);
+  }
   const sig = await state.wallet.send(tx, chainId);
   flow.set(step, 'active', 'Sent. Waiting for the network…');
   return landed(sig, step, flow);

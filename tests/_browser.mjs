@@ -66,6 +66,7 @@ export async function solanaWallet(context, owner, send, mode = {}) {
       const txs = JSON.parse(b64).map(t => Transaction.from(Buffer.from(t, 'base64')));
       for (const tx of txs) tx.partialSign(owner);
       log.push({ kind, txs });
+      mode.onSignAll?.(txs);
       return { signed: JSON.stringify(txs.map(tx => tx.serialize({ requireAllSignatures: false }).toString('base64'))) };
     }
     const bytes = Buffer.from(b64, 'base64');
