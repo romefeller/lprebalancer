@@ -1801,10 +1801,11 @@ def worker_setup(i):
     if base.exists():
         shutil.rmtree(base)
     base.mkdir(parents=True)
-    # node_modules, .git and agent worktrees are linked or left out, never copied:
-    # eight full copies filled the disk on 2026-10-10.
-    shutil.copytree(ROOT, base / 'lp_bot', ignore=shutil.ignore_patterns('__pycache__', 'research', '*.jsonl',
-                                                                           'node_modules', '.git', '.claude'))
+    # node_modules and hidden folders (.git, tool worktrees) are linked or left out, never
+    # copied: eight full copies filled the disk on 2026-10-10.
+    skip = shutil.ignore_patterns('__pycache__', 'research', '*.jsonl', 'node_modules')
+    shutil.copytree(ROOT, base / 'lp_bot', ignore=lambda d, names: set(skip(d, names)) | {
+        n for n in names if n.startswith('.') and n != '.github' and os.path.isdir(os.path.join(d, n))})
     if (ROOT / 'node_modules').is_dir():
         (base / 'lp_bot' / 'node_modules').symlink_to(ROOT / 'node_modules')
     # the page's build tools and Chromium (onboard/web), for the browser tests

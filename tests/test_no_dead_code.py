@@ -32,7 +32,7 @@ OWNED = ('rebalancer.py', 'db.py', 'engine.py', 'dexes.py', 'scanner.py', 'calm.
          *sorted(str(p.relative_to(ROOT)) for p in (ROOT / 'lp').glob('*.py')),
          *sorted(str(p.relative_to(ROOT)) for p in (ROOT / 'venues').rglob('*.py')))
 TEXT_SUFFIXES = {'.mjs', '.js', '.sql', '.json', '.md', '.sh', '.service'}
-SKIP_DIRS = {'node_modules', '__pycache__', 'research', '.git', '.claude'}
+SKIP_DIRS = {'node_modules', '__pycache__', 'research'}
 
 # Names that nothing in this tree references, but that are reached from
 # outside it. Each entry needs a reason. Keep this list short.
@@ -44,7 +44,8 @@ TOKEN = re.compile(r'[A-Za-z_][A-Za-z0-9_]*')
 
 def _files():
     for p in ROOT.rglob('*'):
-        if p.is_file() and not (SKIP_DIRS & set(p.relative_to(ROOT).parts)):
+        parts = p.relative_to(ROOT).parts
+        if p.is_file() and not (SKIP_DIRS & set(parts)) and not any(x.startswith('.') for x in parts[:-1]):
             yield p
 
 

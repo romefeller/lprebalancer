@@ -9,7 +9,7 @@ import _fixtures
 
 ROOT = _fixtures.ROOT
 SOLANA = json.loads((ROOT / 'chains/solana/solana.json').read_text())
-NOT_CODE = {'node_modules', '.git', '.claude', 'tests', 'research', 'ops', 'sql'}
+NOT_CODE = {'node_modules', 'tests', 'research', 'ops', 'sql'}
 # The all-zero key is the System program's id and also "no mint" in pool
 # accounts (venue_api.NULL_MINT): too common a value to police.
 UNPOLICED = {SOLANA['programs']['system']}
@@ -17,7 +17,8 @@ UNPOLICED = {SOLANA['programs']['system']}
 
 def code_files():
     for f in ROOT.rglob('*'):
-        if f.suffix in ('.py', '.mjs') and not NOT_CODE & set(f.relative_to(ROOT).parts):
+        parts = f.relative_to(ROOT).parts
+        if f.suffix in ('.py', '.mjs') and not NOT_CODE & set(parts) and not any(p.startswith('.') for p in parts):
             yield f
 
 

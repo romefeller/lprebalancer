@@ -230,9 +230,10 @@ class Gate(unittest.TestCase):
         sw = (ROOT / 'venues/jupiter/swap.mjs').read_text()
         jf = sw[sw.index('async function jfetch'):]
         self.assertLess(jf.index('await waitTurn()'), jf.index('await fetch(url, init)'))
-        not_ours = {'node_modules', '.git', '.claude', 'tests'}    # dependencies, agent worktrees, tests
+        not_ours = {'node_modules', 'tests'}    # dependencies and tests; hidden folders are skipped too
         gate_or_api = {ROOT / 'venues/jupiter/gate.mjs', ROOT / 'venues/jupiter/api.mjs'}
-        for f in (f for f in ROOT.rglob('*.mjs') if not not_ours & set(f.relative_to(ROOT).parts)):
+        for f in (f for f in ROOT.rglob('*.mjs') if not not_ours & set(f.relative_to(ROOT).parts)
+                  and not any(p.startswith('.') for p in f.relative_to(ROOT).parts)):
             src = f.read_text()
             if 'jupiter/api.mjs' in src or "from './api.mjs'" in src:
                 if f not in gate_or_api:
