@@ -37,3 +37,24 @@ export function walletLink(metadata) {
   if (known) return { href: known.href, kind: 'known', name };
   return { href: 'wc:', kind: 'wc', name };
 }
+
+// A wallet's answer as WalletConnect brings it: an object, or the same as
+// JSON text, or loose text that names a signature (Tangem's Android app
+// answers `{ signature: "..." }` as a string, tangem-app-android
+// WcSolanaSignTransactionUseCase, 2026-10-14). Anything else as it came.
+// Pure.
+export function answerOf(out) {
+  if (typeof out !== 'string') return out;
+  try { return JSON.parse(out); } catch { /* loose text */ }
+  const sig = /signature\W+([1-9A-HJ-NP-Za-km-z]{64,88})/.exec(out)?.[1];
+  return sig ? { signature: sig } : out;
+}
+
+// The longest Solana message a wallet signs, by its name, when it is less
+// than a transaction may be (1,232 bytes): a Tangem card's APDU takes 930
+// bytes (tangem-app-android SOLANA_TRANSACTION_SIZE_THRESHOLD_BYTES; iOS
+// 964, firmware before 8). Null: no limit known. Pure.
+export const CARD_LIMITS = [{ match: /tangem/i, bytes: 930 }];
+export function cardLimit(name) {
+  return CARD_LIMITS.find(c => c.match.test(String(name ?? '')))?.bytes ?? null;
+}

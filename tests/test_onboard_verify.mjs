@@ -136,16 +136,25 @@ test('a set-up the wallet approves at once: pasted as parts, or read from the se
   const seed = 4321n, settings = sq.settingsPda(seed), vault = sq.vaultPda(settings);
   const policyKey = new PublicKey(ONBOARD.chains.solana.botKeys[1]);
   const venueCompiled = compile(VENUE, { vault, payer: PAYER, pools: [new PublicKey(POOL)], payouts: payoutWallets.map(w => new PublicKey(ata(w, USDC))) });
-  const plan = ownerSetupPlan({ owner: OWNER, treasury: Keypair.generate().publicKey, seed, policyKey, venues: [venueCompiled] });
-  const build = (gasTo = PAYER) => packSteps([...plan.steps.slice(0, -1), [plan.steps.at(-1), SystemProgram.transfer({ fromPubkey: OWNER, toPubkey: vault, lamports: 400_000_000 }),
-    SystemProgram.transfer({ fromPubkey: OWNER, toPubkey: gasTo, lamports: 118_600_000 })]], OWNER).map(ixs => {
-    const tx = new Transaction().add(...ixs); tx.feePayer = OWNER; tx.recentBlockhash = PublicKey.default.toBase58();
+  // the page's one-time set-up key signs the policies (too long for a hardware wallet); the server builds with the key it is sent
+  const KEY = Keypair.generate().publicKey;
+  let key = KEY;
+  const plan = () => ownerSetupPlan({ owner: OWNER, treasury: Keypair.generate().publicKey, seed, policyKey, venues: [venueCompiled], setupKey: key });
+  const wire = (ixs, payer = OWNER) => {
+    const tx = new Transaction().add(...ixs); tx.feePayer = payer; tx.recentBlockhash = PublicKey.default.toBase58();
     return tx.serialize({ requireAllSignatures: false, verifySignatures: false }).toString('base64');
-  });
-  const it = { name: 'my-pool', done: false, transactions: build(), terms: { token: 'SOL', amount: '0.5186', deposit: '0.4', gas: '0.1186',
+  };
+  const parts = (gasTo = PAYER) => {
+    const p = plan();
+    return { owner: [wire([p.steps[0], SystemProgram.transfer({ fromPubkey: OWNER, toPubkey: key, lamports: 20_000_000 })])],
+      key: p.steps.slice(1).map(ix => wire([ix], key)),
+      fund: [wire([SystemProgram.transfer({ fromPubkey: OWNER, toPubkey: vault, lamports: 400_000_000 }), SystemProgram.transfer({ fromPubkey: OWNER, toPubkey: gasTo, lamports: 118_600_000 })])] };
+  };
+  const build = (gasTo) => { const p = parts(gasTo); return [...p.owner, ...p.key, ...p.fund]; };
+  const it = { name: 'my-pool', done: false, ...parts(), terms: { token: 'SOL', amount: '0.5186', deposit: '0.4', gas: '0.1186',
     profitWallet: OWNER.toBase58(), feeWallet: SOLANA.operator_profit_wallet },
   context: { seed: String(seed), settings: settings.toBase58(), vault: vault.toBase58(), report: { venues: { [VENUE]: { pools: [POOL] } } } } };
-  const e = setupExpectOf(it, OWNER.toBase58(), PINS);
+  const e = { ...setupExpectOf(it, OWNER.toBase58(), PINS), setupKey: KEY.toBase58() };
   assert.deepEqual([e.kind, e.venues, e.raw, e.gasRaw, e.payoutWallets], ['setup', [VENUE], '400000000', '118600000', payoutWallets]);
   const show = (args) => read(args[1].split(':')[1]);
   const log = console.log, out = [];
@@ -154,22 +163,41 @@ test('a set-up the wallet approves at once: pasted as parts, or read from the se
   try {
     const paste = (txs) => JSON.stringify({ chain: 'solana', parts: [{ tx: txs, expect: e }] });
     assert.equal(await main(['--commit', 'abcdef1', '--rpc', 'none', '--paste', paste(build())], { git: show }), 0, out.join('\n'));
-    assert.match(out.join('\n'), /transaction 1 of 1: OK[\s\S]*Transaction 1 of 2:[\s\S]*Create your vault/);
+    assert.match(out.join('\n'), /transaction 1 of 1: OK[\s\S]*Transaction 1 of 4:[\s\S]*Create your vault[\s\S]*signed and paid by the set-up key/);
     out.length = 0;
     assert.equal(await main(['--commit', 'abcdef1', '--rpc', 'none', '--paste', paste(build(Keypair.generate().publicKey))], { git: show }), 1);
     assert.match(out.join('\n'), /0 payments to the bot's gas key[\s\S]*do not sign/);
     // the vault not created yet is no chain problem for a set-up
     assert.deepEqual(await chainProblems({ getAccountInfo: async () => null }, e), []);
+    // created, the page's set-up key beside the owner: a set-up under way; any other beside it is not
+    const settingsOf = (owners) => {
+      const w = [Buffer.from(require('node:crypto').createHash('sha256').update('account:Settings').digest().subarray(0, 8)), Buffer.alloc(16), PublicKey.default.toBuffer()];
+      const t = Buffer.alloc(2); t.writeUInt16LE(1);
+      const n = Buffer.alloc(4); n.writeUInt32LE(owners.length);
+      w.push(t, Buffer.alloc(4), Buffer.alloc(8), Buffer.alloc(8), Buffer.from([0]), Buffer.alloc(8), Buffer.from([255]), n,
+        ...owners.map(o => Buffer.concat([o.toBuffer(), Buffer.from([7])])), Buffer.from([0]), Buffer.from([0]));
+      return Buffer.concat(w);
+    };
+    const at = (owners) => ({ getAccountInfo: async () => ({ data: settingsOf(owners) }), getMultipleAccountsInfo: async () => [] });
+    assert.deepEqual(await chainProblems(at([OWNER, KEY]), e), []);
+    assert.deepEqual(await chainProblems(at([OWNER]), e), []);
+    assert.match((await chainProblems(at([OWNER, Keypair.generate().publicKey]), e)).join(), /not your wallet alone/);
+    assert.match((await chainProblems(at([OWNER, KEY]), { ...e, kind: 'approve' })).join(), /not your wallet alone/, 'outside a set-up: the owner alone');
     // from the server: its set-up of the request
     let tamper = false;
+    const sent = [];
     srv = http.createServer((req, res) => {
       let body = '';
       req.on('data', (d) => { body += d; });
       req.on('end', () => {
         assert.equal(req.url, '/bot/api/setup');
-        assert.equal(JSON.parse(body).name, 'my-pool');
+        const b = JSON.parse(body);
+        assert.equal(b.name, 'my-pool');
+        // the server builds with the key it is sent
+        key = new PublicKey(b.setupKey);
+        sent.push(b.setupKey);
         res.writeHead(200, { 'content-type': 'application/json' });
-        res.end(JSON.stringify(tamper ? { ...it, transactions: build(Keypair.generate().publicKey) } : it));
+        res.end(JSON.stringify({ ...it, ...parts(tamper ? Keypair.generate().publicKey : PAYER) }));
       });
     });
     await new Promise(r => srv.listen(0, '127.0.0.1', r));
@@ -177,6 +205,9 @@ test('a set-up the wallet approves at once: pasted as parts, or read from the se
       '--owner', OWNER.toBase58(), '--action', 'setup'];
     out.length = 0;
     assert.equal(await main(from, { git: show }), 0, out.join('\n'));
+    assert.equal(await main([...from, '--setup-key', KEY.toBase58()], { git: show }), 0, out.join('\n'));
+    assert.equal(sent.at(-1), KEY.toBase58(), 'the page\'s key, when given');
+    assert.notEqual(sent[0], KEY.toBase58(), 'else a throwaway key stands for it');
     tamper = true;
     assert.equal(await main(from, { git: show }), 1);
     await assert.rejects(main([...from, '--chain', 'polygon'], { git: show }), /a Polygon set-up: paste what the page copied/);

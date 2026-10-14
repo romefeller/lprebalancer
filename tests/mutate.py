@@ -117,7 +117,7 @@ TARGETS = {
                                                      'putSettingsAction', 'compileInner', 'policyExecuteIx', 'ownerExecuteIx',
                                                      'decodeSettings', 'policyStateIs'],
                     NODE_TESTS('test_vault_policy.mjs', 'test_vault_fork.mjs')),
-    'vault_admin': ('chains/solana/vault/admin.mjs', ['ownerSetupPlan', 'setupDone', 'packSteps', 'connectProblems', 'staticAccounts', 'lookupPlan'],
+    'vault_admin': ('chains/solana/vault/admin.mjs', ['ownerSetupPlan', 'setupDone', 'otherSigners', 'packSteps', 'connectProblems', 'staticAccounts', 'lookupPlan'],
                     NODE_TESTS('test_vault_policy.mjs', 'test_vault_cli_fork.mjs', 'test_vault_venues_fork.mjs')),
     'vault_account': ('chains/solana/vault/account.mjs', ['vaultConfig', 'actingAccount', 'needed', 'verifyPolicy', 'wrap', 'withVaultBudget'],
                       NODE_TESTS('test_vault_policy.mjs', 'test_vault_dlmm_fork.mjs')),
@@ -197,8 +197,9 @@ TARGETS = {
                                               'maxAmount', 'addAmount', 'feeTerms', 'fields', 'verify', 'decodeSignature', 'inviteOk'], NODE_TESTS('test_onboard.mjs')),
     'onboard_sol_payment': ('onboard/solana.mjs', ['vaultVenues', 'paymentVerdict', 'checkPayment', 'gas', 'holdings', 'funding', 'findFunding', 'findDeposit'],
                             NODE_TESTS('test_onboard.mjs', 'test_onboard_sol.mjs', 'test_onboard_fork.mjs')),
-    # The owner's own set-up (2026-10-13: the bot never a signer, never fronting a cost):
-    # its transactions, what it costs the owner, where it stands, the bot's finish.
+    # The owner's own set-up (2026-10-13: the bot never a signer, never fronting a cost;
+    # 2026-10-14: the page's one-time set-up key signs the policies, too long for a Tangem
+    # card): its transactions, what it costs the owner, where it stands, the bot's finish.
     'onboard_sol_setup': ('onboard/solana.mjs', ['setupFlags', 'setupTxs', 'setupCost', 'finishVault', 'setupState', 'depositIxs', 'depositTxs'],
                           NODE_TESTS('test_onboard_sol.mjs', 'test_onboard_fork.mjs')),
     'onboard_evm_payment': ('onboard/polygon.mjs', ['paymentVerdict', 'checkPayment', 'gas', 'affords', 'holdings'],
@@ -229,10 +230,10 @@ TARGETS = {
                            NODE_TESTS('test_decode_sol.mjs', 'test_onboard_verify.mjs')),
     'onboard_decode_checks': ('onboard/decode_sol.mjs', ['deposit', 'withdraw', 'revoke', 'approve', 'close'],
                               NODE_TESTS('test_decode_sol.mjs')),
-    'onboard_decode_setup': ('onboard/decode_sol.mjs', ['decodeSolSet', 'setupPolicies', 'readCreate', 'setupPart', 'setupWhole', 'approvePart',
+    'onboard_decode_setup': ('onboard/decode_sol.mjs', ['decodeSolSet', 'setupPolicies', 'readCreate', 'phase', 'setupPart', 'setupWhole', 'approvePart',
                                                        'approveWhole'],
                              NODE_TESTS('test_decode_sol.mjs')),
-    'onboard_wallet_link': ('onboard/web/wallet_link.mjs', ['safeLink', 'walletLink'], NODE_TESTS('test_wallet_link.mjs')),
+    'onboard_wallet_link': ('onboard/web/wallet_link.mjs', ['safeLink', 'walletLink', 'answerOf', 'cardLimit'], NODE_TESTS('test_wallet_link.mjs')),
     'onboard_sol_owner': ('onboard/solana.mjs', ['ownerTxs', 'context', 'depositVerdict', 'checkDeposit', 'broadcast', 'confirm', 'status'],
                           NODE_TESTS('test_onboard_sol.mjs', 'test_onboard.mjs', 'test_vault_add_venue.mjs')),
     'onboard_polygon_env': ('onboard/polygon.mjs', ['polygonEnv'], NODE_TESTS('test_onboard.mjs')),
@@ -547,8 +548,43 @@ EQUIVALENT = {
         'a venue\'s pools are a list or absent: ?? and || give the same',
     ('onboard_decode_setup', 'setupPart', '\\?\\? -> ||', "if ((expect.payoutWallets ?? []).slice(1).some(w => w !== pins.operator)) no('a payout wallet beside yours that is not the operator\\'s');", 0):
         'the payout wallets are a list or absent: ?? and || give the same',
-    ('onboard_decode_setup', 'setupWhole', '\\?\\? -> ||', "if (all.length && state.policies.at(-1) !== all.length) no(`the set ends at policy ${state.policies.at(-1) ?? 'none'}, not ${all.length}: rules would be missing`);", 0):
+    ('onboard_decode_setup', 'setupWhole', '\\?\\? -> ||', "if ((helper ? state.policies.length : all.length) && state.policies.at(-1) !== all.length) no(`the set ends at policy ${state.policies.at(-1) ?? 'none'}, not ${all.length}: rules would be missing`);", 0):
         'a policy seed is 1 or more, or absent: ?? and || print the same',
+    # the page's one-time set-up key (2026-10-14: a Tangem card signs 930 bytes; a policy is longer)
+    ('onboard_wallet_link', 'cardLimit', '\\?\\? -> ||', "return CARD_LIMITS.find(c => c.match.test(String(name ?? '')))?.bytes ?? null;", 0):
+        'a name is a text or absent: String() of it or of \'\' matches the same wallets',
+    ('onboard_wallet_link', 'cardLimit', '\\?\\? -> ||', "return CARD_LIMITS.find(c => c.match.test(String(name ?? '')))?.bytes ?? null;", 1):
+        'a limit is a count of bytes, never 0: ?? and || give the same',
+    ('onboard_decode_setup', 'setupPart', '\\?\\? -> ||', 'const helper = expect.setupKey ?? null;', 0):
+        'a set-up key is an address or absent; every use asks only whether there is one',
+    ('onboard_decode_setup', 'setupWhole', '\\?\\? -> ||', 'const helper = expect.setupKey ?? null;', 0):
+        'a set-up key is an address or absent; every use asks only whether there is one',
+    ('onboard_decode_sol', 'decodeSol', '\\|\\| -> &&', 'if (signers.length !== 1 || signers[0] !== payer || (payer !== owner && payer !== helper)) {', 1):
+        'a legacy message lists its fee payer first among the signers: signers[0] is the payer, and a payer neither yours nor the key is refused above',
+    ('vault_admin', 'ownerSetupPlan', '\\?\\? -> ||', 'const by = helper ?? owner;', 0):
+        'the set-up key is a PublicKey or null: ?? and || give the same',
+    ('vault_admin', 'setupDone', '\\?\\? -> ||', 'if ((s.policySeed ?? 0n) > BigInt(policyExists.length)) return null;', 0):
+        'a policy seed is a bigint or null; 0n || 0n is 0n: the comparison is the same',
+    ('vault_admin', 'connectProblems', '\\?\\? -> ||', "if (policies != null && (s.policySeed ?? 0n) > BigInt(policies)) problems.push(`a policy at seed ${s.policySeed}: the bot's rules make ${policies}`);", 0):
+        'a policy seed is a bigint or null; 0n || 0n is 0n: the comparison is the same',
+    ('onboard_sol_setup', 'setupTxs', '(?<![<>=!-])>(?![>=]) -> >=', 'keyFund = need > held ? need - held : 0n;', 0):
+        'need equal to held: need - held is 0n, the same as 0n',
+    ('onboard_sol_setup', 'setupTxs', '\\?\\? -> ||', 'const known = [...new Set([...(a.planned?.setupKeys ?? []), helper.toBase58()])];', 0):
+        'the planned keys are a list or absent: ?? and || give the same',
+    ('onboard_sol_setup', 'setupTxs', '\\?\\? -> ||', 'const others = setup.others ?? [];', 0):
+        'the other signers are a list or absent: ?? and || give the same',
+    ('onboard_sol_setup', 'setupTxs', '\\?\\? -> ||', 'notBefore: a.notBefore ?? 0 }) : null;', 0):
+        'a time or absent; 0 ?? 0 and 0 || 0 are 0',
+    ('onboard_sol_setup', 'setupTxs', '\\?(?=\\s) -> && false ?', 'gas: funded ? 0n : gas, token: a.token, deposit: funded ? null : a.deposit });', 0):
+        'the cost is read only when something is left to sign, and then no funding was found (funded is null)',
+    ('onboard_sol_setup', 'setupTxs', '\\?(?=\\s) -> && false ?', 'gas: funded ? 0n : gas, token: a.token, deposit: funded ? null : a.deposit });', 1):
+        'the cost is read only when something is left to sign, and then no funding was found (funded is null)',
+    ('onboard_sol_setup', 'finishVault', '\\?\\? -> ||', '{ known: planned.setupKeys ?? [] }), { connection, payer: keys.payer.publicKey, policyKey: keys.policyKey.publicKey });', 0):
+        'the planned keys are a list or absent: ?? and || give the same',
+    ('onboard_sol_setup', 'setupState', '\\?\\? -> ||', '{ known: planned.setupKeys ?? [] }), { connection, payer: keys.payer.publicKey, policyKey: keys.policyKey.publicKey });', 0):
+        'the planned keys are a list or absent: ?? and || give the same',
+    ('onboard_sol_setup', 'setupState', '\\?\\? -> ||', 'const missing = setup.steps.length + (setup.others ?? []).length;', 0):
+        'the other signers are a list or absent: ?? and || give the same',
     ('onboard_wallet_link', 'safeLink', '\\?\\? -> ||', "const s = String(href ?? '').trim();", 0):
         'a falsy href (0, false, \'\') has no scheme either way: no link',
     ('onboard_wallet_link', 'walletLink', '\\?\\? -> ||', "const name = String(metadata?.name ?? '').slice(0, 64) || 'your wallet';", 0):

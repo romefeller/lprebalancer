@@ -12,7 +12,9 @@
 //       transactions the wallet signs in one approval, sent in this order
 //
 // expect.kind: setup (a set) | deposit | withdraw | revoke | approve (a set
-// when it carries a deposit) | close.
+// when it carries a deposit) | close. A setup's expect.setupKey: the page's
+// own one-time key, which signs the policies (each too long for a hardware
+// wallet) and then takes itself off the vault.
 // pins: {payer, policyKey (the bot's keys), operator, pools {venue: [pool]},
 //   rules (rules.json), solana (solana.json)}. Pure, no network.
 import { createRequire } from 'module';
@@ -33,6 +35,20 @@ const BUDGET = ComputeBudgetProgram.programId.toBase58();
 const SQUADS = sq.PROGRAM_ID.toBase58();
 // What the owner pays in priority fees on one transaction, at most (lamports).
 export const MAX_PRIORITY_LAMPORTS = 1_000_000n;
+// The longest message the owner's wallet signs in a set-up: a Tangem card
+// signs at most 930 bytes (Android) or 964 (iOS, firmware before 8), its
+// APDU (tangem-app-android SOLANA_TRANSACTION_SIZE_THRESHOLD_BYTES,
+// tangem-app-ios supportedTransactionSize, 2026-10-14). A policy is longer:
+// the page's one-time set-up key signs those.
+export const OWNER_MESSAGE_BYTES = 900;
+// Rent-exempt lamports of an account of `bytes` (mainnet's rent: 3,480
+// lamports a byte-year, two years, 128 bytes of header).
+export const rentOf = (bytes) => BigInt(bytes + 128) * 6_960n;
+// What the set-up key may get from your wallet for each policy it creates
+// (its rent, at most a policy account of 1,536 bytes: solana.mjs
+// POLICY_ACCOUNT_BYTES, and a fee), and for its own account while it works.
+export const KEY_PER_POLICY = rentOf(1536) + 5_000n;
+export const KEY_BASE = rentOf(0) + 5_000n;
 
 export const short = (k) => { const s = String(k); return s.length > 12 ? `${s.slice(0, 4)}…${s.slice(-4)}` : s; };
 
@@ -99,10 +115,11 @@ function policyAt(r) {
 }
 
 // The settings actions of execute_settings_transaction_sync: policy updates
-// (squads.mjs putSettingsAction 8) and policy creations (7, a venue staged
-// on the vault, admin.mjs approvePlan). Any other action (a signer, a
-// threshold, a removal) is refused, not read. A creation's address is its
-// seed's (squads.mjs policyPda).
+// (squads.mjs putSettingsAction 8), policy creations (7, a venue staged on
+// the vault, admin.mjs approvePlan), and a signer added (0) or removed (1)
+// (a set-up key, admin.mjs ownerSetupPlan: only the set-up's check accepts
+// these). Any other action (a threshold, a policy's removal) is refused, not
+// read. A creation's address is its seed's (squads.mjs policyPda).
 function readSettingsActions(data, settings) {
   const r = new Reader(data);
   r.bytes(8);
@@ -130,6 +147,8 @@ function readSettingsActions(data, settings) {
       return { kind: 'policyCreate', seed, address: sq.policyPda(new PublicKey(settings), seed).toBase58(), signers: policySigners, threshold, timeLock,
         policy, bytes };
     }
+    if (kind === 0) return { kind: 'addSigner', key: r.key(), permissions: r.u8() };
+    if (kind === 1) return { kind: 'removeSigner', key: r.key() };
     throw new Error(`a change other than a policy update (settings action ${kind})`);
   }, 16);
   const memo = r.option(r => r.bytes(r.u32()).toString('utf8'));
@@ -242,6 +261,7 @@ function namesOf(expect, pins) {
   const n = {};
   if (expect.owner) n[expect.owner] = 'your wallet';
   if (expect.vault) n[expect.vault] = 'your vault';
+  if (expect.setupKey) n[expect.setupKey] = 'this page\'s one-time set-up key';
   if (pins.payer) n[pins.payer] = 'the bot\'s gas key';
   if (pins.policyKey) n[pins.policyKey] = 'the bot\'s rules key';
   for (const [venue, list] of Object.entries(pins.pools)) for (const p of list) n[p] = `the ${venue} pool`;
@@ -285,10 +305,20 @@ export function decodeSol(base64, expect, pins) {
   const ctx = { rules: ruleIndex(pins.rules), names: namesOf(expect, pins), symbols: symbolsOf(pins), vault: expect.vault,
     venueNames: { 'meteora-dlmm': 'Meteora', 'raydium-clmm': 'Raydium', orca: 'Orca', byreal: 'Byreal', null: 'Token' } };
   const owner = expect.owner;
-  if (tx.feePayer?.toBase58() !== owner) no(`the fee payer is ${short(tx.feePayer?.toBase58())}, not your wallet`);
+  // a set-up's policies are signed by the page's own one-time key (setupPart); everything else by your wallet alone
+  const helper = expect.kind === 'setup' && expect.part && expect.setupKey ? expect.setupKey : null;
+  const payer = tx.feePayer?.toBase58();
+  if (payer !== owner && (!helper || payer !== helper)) no(`the fee payer is ${short(payer)}, not your wallet`);
   const msg = tx.compileMessage();
   const signers = msg.accountKeys.slice(0, msg.header.numRequiredSignatures).map(k => k.toBase58());
-  if (signers.length !== 1 || signers[0] !== owner) no(`it asks for the signatures of ${signers.map(short).join(', ')}; only your wallet may sign`);
+  if (signers.length !== 1 || signers[0] !== payer || (payer !== owner && payer !== helper)) {
+    no(`it asks for the signatures of ${signers.map(short).join(', ')}; only your wallet may sign`);
+  }
+  ctx.signer = payer;
+  // what your wallet signs in a set-up fits a hardware wallet (a Tangem card signs 930 bytes at most)
+  if (helper && payer === owner && msg.serialize().length > OWNER_MESSAGE_BYTES) {
+    no(`your wallet would sign ${msg.serialize().length} bytes; a hardware wallet signs no more than ${OWNER_MESSAGE_BYTES}`);
+  }
   const ixs = instructionsOfTx(tx);
   if (expect.vault && expect.settings && sq.vaultPda(new PublicKey(expect.settings)).toBase58() !== expect.vault) {
     no('the vault is not the account of these settings');
@@ -446,7 +476,7 @@ const CHECKS = { deposit, withdraw, revoke, approve, close };
 export function decodeSolSet(list, expect, pins) {
   const lines = [], problems = [];
   if (!Array.isArray(list) || !list.length) return { ok: false, lines, problems: ['no transaction to check'] };
-  const state = { policies: [], funding: [], opens: [], created: false, fundedIn: null, policyIn: [] };
+  const state = { policies: [], funding: [], opens: [], created: false, fundedIn: null, policyIn: [], phase: 0, keyFund: 0n, released: false };
   list.forEach((b64, index) => {
     const r = decodeSol(b64, { ...expect, part: { index, count: list.length, state } }, pins);
     lines.push(`Transaction ${index + 1} of ${list.length}:`, ...r.lines.map(l => `  ${l}`));
@@ -474,8 +504,10 @@ export function setupPolicies(expect, pins) {
 }
 
 // The creation of the owner's smart account: the owner its creator and only
-// signer (every permission), threshold 1, no settings authority, no time
-// lock, no rent collector, at the settings of the planned seed.
+// owner (every permission), with `expect.setupKey` (this page's one-time
+// key, every permission) as its second signer when the set-up has one,
+// threshold 1, no settings authority, no time lock, no rent collector, at
+// the settings of the planned seed.
 function readCreate(ix, expect, no, lines) {
   const r = new Reader(ix.data);
   r.bytes(8);
@@ -487,11 +519,15 @@ function readCreate(ix, expect, no, lines) {
   const memo = r.option(r => r.bytes(r.u32()).toString('utf8'));
   if (!r.done()) no('bytes after the vault\'s creation');
   const k = ix.keys.map(x => x.pubkey);
-  lines.push(`Create your vault ${short(expect.vault)}: you its only owner, threshold 1${memo ? ` (memo "${memo}")` : ''}; rent from your wallet`);
+  const want = [expect.owner, ...(expect.setupKey ? [expect.setupKey] : [])];
+  lines.push(expect.setupKey
+    ? `Create your vault ${short(expect.vault)}: you its owner, threshold 1; this page's one-time set-up key ${short(expect.setupKey)} its second signer `
+      + `until the bot's rules are on it, then it takes itself off${memo ? ` (memo "${memo}")` : ''}; rent from your wallet`
+    : `Create your vault ${short(expect.vault)}: you its only owner, threshold 1${memo ? ` (memo "${memo}")` : ''}; rent from your wallet`);
   if (authority) no(`the vault would have a settings authority ${short(authority)} that can change everything`);
   if (threshold !== 1) no(`threshold ${threshold}, not 1`);
-  if (signers.length !== 1 || signers[0].key !== expect.owner || signers[0].permissions !== sq.PERMISSION.all) {
-    no(`the vault's owners would be ${signers.map(x => short(x.key)).join(', ')}, not your wallet alone`);
+  if (signers.length !== want.length || signers.some((s, i) => s.key !== want[i] || s.permissions !== sq.PERMISSION.all)) {
+    no(`the vault's signers would be ${signers.map(x => short(x.key)).join(', ')}, not ${expect.setupKey ? 'your wallet and this page\'s set-up key' : 'your wallet alone'}`);
   }
   if (timeLock !== 0) no(`a time lock of ${timeLock}s`);
   if (collector) no(`a rent collector ${short(collector)}`);
@@ -502,11 +538,30 @@ function readCreate(ix, expect, no, lines) {
   if (ix.keys.length !== 6) no('accounts a creation does not take');
 }
 
+// The phases of a set-up, in the order they are sent: your wallet's part
+// (the vault's creation, the set-up key put on it, its SOL), the set-up
+// key's (the policies, then it takes itself off), the funding (your deposit
+// and the bot's gas). A step of an earlier phase after a later one is out
+// of order.
+const PHASE = { owner: 0, key: 1, fund: 2 };
+function phase(state, p, no, what) {
+  if (state.phase > p) no(`${what} comes after ${state.phase === PHASE.fund ? 'the deposit' : 'the set-up key\'s part'}: out of order`);
+  state.phase = Math.max(state.phase, p);
+}
+
 // One part of an owner's set-up: the vault's creation (first, once), the
 // bot's policies one by one in seed order, then the funding (the deposit and
-// the bot's gas), in the last transaction only.
+// the bot's gas). With `expect.setupKey` (the page's one-time key, the
+// owner's set-up since 2026-10-14), the set-up key signs and pays the
+// policies, then takes itself off the vault and sends its SOL back; your
+// wallet signs the creation (or puts the key on a vault that exists, and
+// takes an older key off), the key's SOL, and the funding, last. Without it
+// (the CLI's set-up), your wallet signs each policy and the funding goes in
+// the last transaction.
 function setupPart(outer, expect, pins, ctx, lines, no) {
   const { index, count, state } = expect.part;
+  const helper = expect.setupKey ?? null;
+  const byKey = Boolean(helper) && ctx.signer === helper;
   if (sq.settingsPda(BigInt(expect.seed)).toBase58() !== expect.settings) no('the vault settings are not those of the planned seed');
   if (sq.vaultPda(new PublicKey(expect.settings)).toBase58() !== expect.vault) no('the vault is not the account of these settings');
   if (!expect.venues?.length) no('no venue for the bot');
@@ -516,23 +571,51 @@ function setupPart(outer, expect, pins, ctx, lines, no) {
     if (!(expect.pools?.[v] ?? []).length) no(`no pool for ${v}`);
   }
   if ((expect.payoutWallets ?? []).slice(1).some(w => w !== pins.operator)) no('a payout wallet beside yours that is not the operator\'s');
+  if (helper && (helper === expect.owner || helper === pins.payer || helper === pins.policyKey)) no('the set-up key is your wallet or a key of the bot');
   const all = setupPolicies(expect, pins);
+  let releasedHere = false;
+  if (byKey) phase(state, PHASE.key, no, 'a set-up key\'s transaction');
   for (const ix of outer) {
     const disc = Buffer.from(ix.data).subarray(0, 8);
     if (ix.programId === SQUADS && disc.equals(sqDisc('create'))) {
-      if (state.created || state.policies.length || state.funding.length) no('the vault\'s creation is not the first step');
+      if (byKey) no('the set-up key creates no vault');
+      if (state.created || state.policies.length || state.funding.length || state.keyFund) no('the vault\'s creation is not the first step');
+      phase(state, PHASE.owner, no, 'the vault\'s creation');
       state.created = true;
       readCreate(ix, expect, no, lines);
       continue;
     }
     if (ix.programId === SQUADS && disc.equals(sqDisc('settings'))) {
-      if (state.funding.length) no('a policy after the deposit: money would reach the vault before its rules');
+      const by = byKey ? helper : expect.owner;
+      if (state.funding.length) no('a change of your vault after the deposit: money would reach it before all its rules');
       if (ix.keys[0]?.pubkey !== expect.settings) no('it changes another vault');
-      if (ix.keys[1]?.pubkey !== expect.owner) no('the rent is paid by someone else than you');
+      if (ix.keys[1]?.pubkey !== by) no(byKey ? 'the rent is paid by someone else than the set-up key' : 'the rent is paid by someone else than you');
       const s = readSettingsActions(ix.data, expect.settings);
-      if (s.signers !== 1 || ix.keys[4]?.pubkey !== expect.owner) no('it is not signed by your wallet alone');
+      if (s.signers !== 1 || ix.keys[4]?.pubkey !== by) no(byKey ? 'it is not signed by the set-up key alone' : 'it is not signed by your wallet alone');
       for (const a of s.actions) {
+        if (a.kind === 'addSigner') {
+          if (!helper || byKey) { no(`it adds the signer ${short(a.key)} to your vault`); continue; }
+          if (a.key !== helper || a.permissions !== sq.PERMISSION.all) { no(`it adds ${short(a.key)} to your vault, not this page's set-up key`); continue; }
+          phase(state, PHASE.owner, no, 'the set-up key put on your vault');
+          lines.push(`Put this page's one-time set-up key ${short(helper)} on your vault: it adds the bot's rules, then takes itself off`);
+          continue;
+        }
+        if (a.kind === 'removeSigner') {
+          if (!helper) { no(`it takes the signer ${short(a.key)} off your vault`); continue; }
+          if (a.key === expect.owner) { no('it takes your wallet off your vault'); continue; }
+          if (byKey) {
+            if (a.key !== helper) { no(`the set-up key takes ${short(a.key)} off your vault`); continue; }
+            state.released = true; releasedHere = true;
+            lines.push('The set-up key takes itself off your vault: you are its only owner again');
+          } else {
+            phase(state, PHASE.owner, no, 'an older set-up key taken off');
+            lines.push(`Take the older set-up key ${short(a.key)} off your vault`);
+          }
+          continue;
+        }
         if (a.kind !== 'policyCreate') { no('a set-up only creates policies'); continue; }
+        if (helper && !byKey) no('with a set-up key, your wallet signs no policy');
+        if (state.released) no('a policy after the set-up key took itself off');
         const w = all[Number(a.seed) - 1];
         const prev = state.policies.at(-1);
         if (!w) { no(`policy seed ${a.seed}: the rules make ${all.length} policies`); continue; }
@@ -547,33 +630,57 @@ function setupPart(outer, expect, pins, ctx, lines, no) {
         if (a.policy.hooks || a.policy.spendingLimits || a.policy.accountIndex !== 0) no('hooks, spending limits or another vault account');
         const same = Buffer.from(a.bytes).equals(sq.encodeProgramInteraction(w.policy));
         lines.push(`New policy ${short(w.address)} (${w.venue}): signer the bot's rules key ${short(pins.policyKey)}; `
-          + `${a.policy.constraints.length} allowed instructions${same ? ', exactly the rules in git' : ''}:`);
+          + `${a.policy.constraints.length} allowed instructions${same ? ', exactly the rules in git' : ''}${byKey ? '; signed and paid by the set-up key' : ''}:`);
         for (const c of a.policy.constraints) lines.push(`  · ${describeConstraint(c, ctx)}`);
         if (!same) no(`policy ${short(w.address)} differs from the rules in git (rules.json) for your vault`);
       }
       continue;
     }
+    const d = describe(ix, ctx), m = d.move;
+    if (byKey) {
+      // the set-up key moves only its own SOL back to your wallet, after it took itself off
+      if (m.kind === 'sol' && m.from === helper && m.to === expect.owner && releasedHere) { lines.push(d.text); continue; }
+      no(`the set-up key may only send its SOL back to your wallet, once it is off your vault: ${d.text}`);
+      continue;
+    }
+    if (helper && m.kind === 'sol' && m.to === helper) {
+      if (m.from !== expect.owner) no('the set-up key\'s SOL does not come from your wallet');
+      phase(state, PHASE.owner, no, 'SOL to the set-up key');
+      state.keyFund += m.raw;
+      lines.push(`${d.text}: the rent of the bot's rules and the fees; what is left comes back to you`);
+      continue;
+    }
     // the vault's token account may open earlier (rent only, no money): read with the deposit
-    const m = describe(ix, ctx).move;
     if (m.kind === 'ata') { state.opens.push(ix); continue; }
-    if (index !== count - 1) no('money moves before the last transaction: it would reach the vault before all its rules');
+    if (helper) phase(state, PHASE.fund, no, 'the deposit');
+    else if (index !== count - 1) no('money moves before the last transaction: it would reach the vault before all its rules');
     state.funding.push(ix);
     state.fundedIn = index;
   }
 }
 
 // The set-up as a whole: every policy the rules make exists after it (the
-// set creates the missing ones, the last of them in the funding's
-// transaction), the vault created with them when the set creates it, and
-// the funding exactly the deposit you chose and the bot's gas.
+// set creates the missing ones), the vault created with them when the set
+// creates it, the set-up key's SOL no more than its work takes, and the
+// funding exactly the deposit you chose and the bot's gas. Without a set-up
+// key, the last policy is in the funding's transaction and the funding must
+// be there; with one, the funding is the set's last part, or none (it is on
+// chain already, or comes with the key's last step).
 function setupWhole(state, expect, pins, lines, no) {
   const all = setupPolicies(expect, pins);
+  const helper = expect.setupKey ?? null;
   // without the creation (a resume), a vault that does not exist fails on chain with the whole last transaction
   if (expect.created === false && state.created) no('it creates a vault that exists');
   if (expect.created === true && !state.created) no('the vault is not created');
   if (state.created && state.policies[0] !== 1) no('the vault is created without its first policy');
-  if (all.length && state.policies.at(-1) !== all.length) no(`the set ends at policy ${state.policies.at(-1) ?? 'none'}, not ${all.length}: rules would be missing`);
-  if (state.policies.length && state.policyIn.at(-1) !== state.fundedIn) no('the deposit is not in the same transaction as the last policy');
+  if ((helper ? state.policies.length : all.length) && state.policies.at(-1) !== all.length) no(`the set ends at policy ${state.policies.at(-1) ?? 'none'}, not ${all.length}: rules would be missing`);
+  if (helper) {
+    const bound = state.policies.length ? KEY_BASE + BigInt(state.policies.length) * KEY_PER_POLICY : 0n;
+    if (state.keyFund > bound) {
+      no(`it sends the set-up key ${fromRaw(state.keyFund, 9)} SOL; ${state.policies.length} policies take no more than ${fromRaw(bound, 9)}`);
+    }
+  } else if (state.policies.length && state.policyIn.at(-1) !== state.fundedIn) no('the deposit is not in the same transaction as the last policy');
+  if (helper && !state.funding.length && !state.opens.length) return;
   const ctx = { rules: ruleIndex(pins.rules), names: namesOf(expect, pins), symbols: symbolsOf(pins), vault: expect.vault,
     venueNames: {} };
   const gas = state.funding.filter(ix => {
@@ -582,7 +689,7 @@ function setupWhole(state, expect, pins, lines, no) {
   });
   if (gas.length !== 1) return no(`${gas.length} payments to the bot's gas key; the set-up pays it once`);
   const g = describe(gas[0], ctx);
-  lines.push(`Funding: ${g.text}`);
+  lines.push(`Funding${helper ? ', sent last, once the set-up key is off your vault' : ''}: ${g.text}`);
   if (g.move.from !== expect.owner) no('the gas does not come from your wallet');
   if (g.move.raw !== BigInt(expect.gasRaw)) no(`it pays the bot ${fromRaw(g.move.raw, 9)} SOL, not the ${fromRaw(BigInt(expect.gasRaw), 9)} SOL gas shown`);
   const rest = [...state.opens, ...state.funding.filter(ix => ix !== gas[0])];
@@ -663,6 +770,7 @@ function policyUpdates(outer, expect, pins, ctx, lines, no, signer) {
     const s = readSettingsActions(ix.data, expect.settings);
     if (s.signers !== 1 || ix.keys[4]?.pubkey !== expect.owner) no('it is not signed by your wallet alone');
     for (const a of s.actions) {
+      if (a.kind === 'addSigner' || a.kind === 'removeSigner') { no(`it changes your vault's signers (${short(a.key)})`); continue; }
       const w = want[a.address];
       if (!w) { no(`policy ${short(a.address)} is not one of your vault's`); continue; }
       // a new policy (a venue staged on the vault) only names the bot: a revoke creates none

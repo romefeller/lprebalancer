@@ -16,6 +16,8 @@ import { vaultPositions } from '../chains/solana/vault/exit.mjs';
 import { signerError } from '../shared/signer_errors.mjs';
 import SOLANA from '../chains/solana/solana.json' with { type: 'json' };
 import { Invalid, fromRaw, nativeOf, own, toRaw } from './intent.mjs';
+// the longest message the owner's wallet signs in a set-up (a hardware wallet's limit)
+import { OWNER_MESSAGE_BYTES } from './decode_sol.mjs';
 
 const bs58 = createRequire(import.meta.url)('bs58').default;
 
@@ -123,13 +125,16 @@ export async function poolRecord(connection, venue, pool, c) {
 }
 
 // The request's vault set-up as cli.mjs setupRequest reads it: the venues
-// it approves (vaultVenues), their pools, and the payouts (the profit
-// wallet's and, for an instance that pays a fee share, the operator's).
-function setupFlags(c, { owner, profitWallet, feeWallet }, seed) {
+// it approves (vaultVenues), their pools, the payouts (the profit wallet's
+// and, for an instance that pays a fee share, the operator's), and the
+// page's set-up keys (`known`, every one this request made; `setupKey`, the
+// one that does the work now).
+function setupFlags(c, { owner, profitWallet, feeWallet }, seed, { known = [], setupKey = null } = {}) {
   const venues = vaultVenues(c);
   if (!venues.length) throw new Error(`no venue of ${c.venues.join(', ')} has vault support yet`);
   return { owner, venue: venues.join(','), pools: venues.map(v => c.pools[v]).join(','),
-    payout: [profitWallet, ...(feeWallet ? [feeWallet] : [])].join(','), 'payout-mint': c.payoutMint, ...(seed != null ? { seed: String(seed) } : {}) };
+    payout: [profitWallet, ...(feeWallet ? [feeWallet] : [])].join(','), 'payout-mint': c.payoutMint, ...(seed != null ? { seed: String(seed) } : {}),
+    ...(known.length ? { 'setup-keys': known.join(',') } : {}), ...(setupKey ? { 'setup-key': setupKey } : {}) };
 }
 
 // Bounds of what the owner's set-up creates, over the program's allocations
@@ -137,58 +142,113 @@ function setupFlags(c, { owner, profitWallet, feeWallet }, seed) {
 // bytes; policies, POLICY_ACCOUNT_BYTES below).
 export const SETTINGS_ACCOUNT_BYTES = 256;
 export const TOKEN_ACCOUNT_BYTES = 165;
+// The fee of a transaction with one signature and no priority fee.
+export const FEE_LAMPORTS = 5_000n;
+// Set-up keys a request may make (a page reloaded, or the verifier, makes a new one).
+export const SETUP_KEYS_MAX = 16;
 
-// The owner's set-up, unsigned, in as few transactions as fit (one wallet
-// approval signs them all): the smart account (the owner its creator, rent
-// payer and only signer, threshold 1), each policy for the bot's key, and,
-// in the SAME transaction as the last policy, the deposit into the vault and
-// the bot's gas to its payer key: money reaches the vault only with every
-// policy, and the bot is paid only for a vault that is whole. The bot signs
-// and pays nothing. `a.planned` ({seed}) resumes a set-up: only what the
-// chain lacks is built; a seed another account took is planned again.
-// Refuses a wallet that cannot pay it all. {planned: {seed, settings,
-// vault}, done, transactions, report, cost}; done (the set-up is on chain):
-// no transactions. The last argument (tests): the set-up reader.
-export async function setupTxs(connection, keys, c, a, { request = setupRequest } = {}) {
+// The owner's set-up, unsigned, as far as the chain lacks it: what the
+// owner's wallet signs (`owner`: the smart account's creation with the
+// page's one-time set-up key as its second signer, and the SOL the key
+// spends; or, for a vault that exists, the owner's change that puts this key
+// on it and takes an older one off), what the set-up key signs (`key`: each
+// policy for the bot's key, paid by the key; once they all exist, the key
+// takes itself off and sends what it holds back to the owner), and the
+// funding (`fund`: the deposit into the vault and the bot's gas, sent last,
+// when the vault has every policy and the owner alone signs it). Every
+// message the owner signs is at most OWNER_MESSAGE_BYTES: a policy is too
+// long for a hardware wallet (admin.mjs ownerSetupPlan). The bot signs and
+// pays nothing. `a.setupKey`: the page's key; `a.planned` ({seed,
+// setupKeys}) resumes; a seed another account took is planned again.
+// `a.notBefore` (seconds): a funding older than this is not this request's.
+// Refuses a wallet that cannot pay it all. {planned: {seed, settings, vault,
+// setupKeys}, done, owner, key, fund, report, cost}; done: nothing to sign.
+// The last argument (tests): the set-up reader, the funding search.
+export async function setupTxs(connection, keys, c, a, { request = setupRequest, find = findFunding } = {}) {
   const owner = new PublicKey(a.owner);
-  const setup = await request(setupFlags(c, a, a.planned?.seed), { connection, payer: keys.payer.publicKey, policyKey: keys.policyKey.publicKey });
-  const planned = { seed: setup.seed, settings: setup.settings, vault: setup.vault };
-  if (!setup.steps.length) return { planned, done: true, transactions: [], report: setup.report };
+  let helper;
+  try { helper = new PublicKey(a.setupKey); } catch { throw new Invalid('the page sent no set-up key: reload the page'); }
+  if ([owner, keys.payer.publicKey, keys.policyKey.publicKey].some(k => k.equals(helper))) throw new Invalid('the set-up key is not the page\'s own');
+  const known = [...new Set([...(a.planned?.setupKeys ?? []), helper.toBase58()])];
+  if (known.length > SETUP_KEYS_MAX) throw new Invalid('this request made too many set-up keys; start a new one');
+  const setup = await request(setupFlags(c, a, a.planned?.seed, { known, setupKey: helper.toBase58() }),
+    { connection, payer: keys.payer.publicKey, policyKey: keys.policyKey.publicKey });
+  const planned = { seed: setup.seed, settings: setup.settings, vault: setup.vault, setupKeys: known };
+  const settings = new PublicKey(setup.settings), vault = new PublicKey(setup.vault);
+  const created = setup.done.includes(0);
+  const policies = created ? setup.steps : setup.steps.slice(1);
+  const others = setup.others ?? [];
+  const keyOn = others.includes(helper.toBase58());
+  const stale = others.filter(k => k !== helper.toBase58()).map(k => new PublicKey(k));
+  const rentOf = async (n) => BigInt(await connection.getMinimumBalanceForRentExemption(n));
+  const held = BigInt(await connection.getBalance(helper, 'confirmed'));
+  const ownerIxs = [], keyGroups = [];
+  let keyFund = 0n;
+  if (policies.length) {
+    // the key pays each policy's rent and its fees, and keeps its account's floor until it sends it all back
+    const need = BigInt(policies.length) * await rentOf(POLICY_ACCOUNT_BYTES) + BigInt(policies.length + 1) * FEE_LAMPORTS + await rentOf(0);
+    keyFund = need > held ? need - held : 0n;
+    if (!created) ownerIxs.push(setup.steps[0]);
+    const actions = [...stale.map(k => ({ kind: 'removeSigner', key: k })), ...(created && !keyOn ? [{ kind: 'addSigner', signer: { key: helper } }] : [])];
+    if (actions.length) ownerIxs.push(sq.settingsSyncIx({ settings, signers: [owner], rentPayer: owner, actions }));
+    if (keyFund > 0n) ownerIxs.push(SystemProgram.transfer({ fromPubkey: owner, toPubkey: helper, lamports: keyFund }));
+    keyGroups.push(...packSteps(policies, helper));
+  } else {
+    // every policy exists: the key takes itself off and sends its SOL back; an older key, or one that cannot pay its fee, the owner takes off
+    const release = keyOn && held >= FEE_LAMPORTS;
+    const off = [...stale, ...(keyOn && !release ? [helper] : [])];
+    if (off.length) ownerIxs.push(sq.settingsSyncIx({ settings, signers: [owner], rentPayer: owner, actions: off.map(k => ({ kind: 'removeSigner', key: k })) }));
+    if (release) {
+      const back = held - FEE_LAMPORTS;
+      keyGroups.push([setup.release, ...(back > 0n ? [SystemProgram.transfer({ fromPubkey: helper, toPubkey: owner, lamports: back })] : [])]);
+    }
+  }
+  // the funding, unless this request's is on chain already (a vault whole and funded: done)
+  const whole = !policies.length && !others.length;
+  const funded = whole ? await find(connection, setup.vault, { owner: a.owner, payer: keys.payer.publicKey.toBase58(), amount: a.gas,
+    notBefore: a.notBefore ?? 0 }) : null;
   const gas = toRaw(a.gas, 9);
-  // a token's vault account opens first (rent only, no money; Raydium's last
-  // policy with the account's opening, the transfer and the gas is 13 bytes
-  // over a transaction); the money moves with the last policy
-  const dep = await depositIxs(connection, c, { owner, vault: new PublicKey(setup.vault), token: a.token, amount: a.deposit });
-  const opens = dep.slice(0, -1);
-  const fund = [dep.at(-1), SystemProgram.transfer({ fromPubkey: owner, toPubkey: keys.payer.publicKey, lamports: gas })];
-  const groups = packSteps([...setup.steps.slice(0, -1), ...opens, [setup.steps.at(-1), ...fund]], owner);
-  const created = setup.done.includes(0) ? 0 : 1;
-  const cost = await setupCost(connection, c, { owner, created, policies: setup.steps.length - created, txs: groups.length, gas,
-    token: a.token, deposit: a.deposit });
+  let fundGroups = [];
+  if (!funded) {
+    const dep = await depositIxs(connection, c, { owner, vault, token: a.token, amount: a.deposit });
+    fundGroups = packSteps([...dep.slice(0, -1), [dep.at(-1), SystemProgram.transfer({ fromPubkey: owner, toPubkey: keys.payer.publicKey, lamports: gas })]],
+      owner, 1 + 64 + OWNER_MESSAGE_BYTES);
+  }
+  const ownerGroups = ownerIxs.length ? packSteps(ownerIxs, owner, 1 + 64 + OWNER_MESSAGE_BYTES) : [];
+  if (!ownerGroups.length && !keyGroups.length && !fundGroups.length) {
+    return { planned, done: true, owner: [], key: [], fund: [], report: setup.report, funded };
+  }
+  const cost = await setupCost(connection, c, { owner, created: created ? 0 : 1, keyFund, txs: ownerGroups.length + fundGroups.length,
+    gas: funded ? 0n : gas, token: a.token, deposit: funded ? null : a.deposit });
   const { blockhash } = await connection.getLatestBlockhash('confirmed');
-  return { planned, done: false, report: setup.report, cost: fromRaw(cost, 9), transactions: groups.map(ixs => {
+  const wire = (payer) => (ixs) => {
     const tx = new Transaction().add(...ixs);
-    tx.feePayer = owner;
+    tx.feePayer = payer;
     tx.recentBlockhash = blockhash;
     return asWire(tx);
-  }) };
+  };
+  return { planned, done: false, report: setup.report, cost: fromRaw(cost, 9), keyFund: fromRaw(keyFund, 9),
+    owner: ownerGroups.map(wire(owner)), key: keyGroups.map(wire(helper)), fund: fundGroups.map(wire(owner)) };
 }
 
 // The SOL the owner's set-up takes from its wallet, or Invalid when the wallet
-// holds less: the account's creation fee (the program's config), the rent of
-// the settings and of each policy (bounds), a fee per transaction, the bot's
-// gas, a SOL deposit (a token: its amount in the wallet, and the vault's token
-// account's rent), and the wallet's own rent-exempt floor. Raw lamports.
-export async function setupCost(connection, c, { owner, created, policies, txs, gas, token, deposit }) {
+// holds less: the account's creation fee (the program's config) and the
+// settings' rent, what the set-up key spends on the policies' rent and its
+// fees (`keyFund`, lamports; what is left comes back), a fee per owner's
+// transaction, the bot's gas, a SOL deposit (a token: its amount in the
+// wallet, and the vault's token account's rent; none: `deposit` null), and
+// the wallet's own rent-exempt floor. Raw lamports.
+export async function setupCost(connection, c, { owner, created, keyFund = 0n, txs, gas, token, deposit }) {
   const t = own(c.tokens, token);
   const rentOf = async (n) => BigInt(await connection.getMinimumBalanceForRentExemption(n));
   const fee = created ? sq.decodeProgramConfig((await connection.getAccountInfo(sq.programConfigPda(), 'confirmed')).data).creationFee : 0n;
-  const need = BigInt(fee) + (created ? await rentOf(SETTINGS_ACCOUNT_BYTES) : 0n) + BigInt(policies) * await rentOf(POLICY_ACCOUNT_BYTES)
-    + BigInt(txs) * 10_000n + gas + (t.native ? toRaw(deposit, 9) : await rentOf(TOKEN_ACCOUNT_BYTES)) + await rentOf(0);
+  const money = deposit == null ? 0n : t.native ? toRaw(deposit, 9) : await rentOf(TOKEN_ACCOUNT_BYTES);
+  const need = BigInt(fee) + (created ? await rentOf(SETTINGS_ACCOUNT_BYTES) : 0n) + keyFund
+    + BigInt(txs) * 10_000n + gas + money + await rentOf(0);
   const have = BigInt(await connection.getBalance(new PublicKey(owner), 'confirmed'));
   if (have < need) {
     throw new Invalid(`your wallet holds ${fromRaw(have, 9)} SOL; the set-up needs ${fromRaw(need, 9)} `
-      + `(the vault's and its rules' rent, the bot's gas ${fromRaw(gas, 9)}${t.native ? `, the deposit ${deposit}` : ''}, fees, and the wallet's own minimum)`);
+      + `(the vault's and its rules' rent, the bot's gas ${fromRaw(gas, 9)}${t.native && deposit != null ? `, the deposit ${deposit}` : ''}, fees, and the wallet's own minimum)`);
   }
   return need;
 }
@@ -199,23 +259,25 @@ export async function setupCost(connection, c, { owner, created, policies, txs, 
 export async function finishVault(connection, keys, c, r, { onLookup, log } = {}) {
   const planned = r.connected?.planned;
   if (!planned?.seed) throw new Error('the request has no planned vault');
-  const setup = await setupRequest(setupFlags(c, { owner: r.owner, profitWallet: r.profit_wallet, feeWallet: r.fee_wallet }, planned.seed),
-    { connection, payer: keys.payer.publicKey, policyKey: keys.policyKey.publicKey });
+  const setup = await setupRequest(setupFlags(c, { owner: r.owner, profitWallet: r.profit_wallet, feeWallet: r.fee_wallet }, planned.seed,
+    { known: planned.setupKeys ?? [] }), { connection, payer: keys.payer.publicKey, policyKey: keys.policyKey.publicKey });
   if (setup.settings !== planned.settings) throw new Error(`the planned vault ${planned.vault} is not this owner's`);
   return finishSetup(setup, { connection, payer: keys.payer, policyKey: keys.policyKey.publicKey, lookup: r.connected?.lookup ?? null,
     onLookup, log });
 }
 
 // Where the owner's set-up stands on chain: {state: 'done'} (every step
-// landed), {state: 'pending', missing} (steps to come), or {state: 'replan'}
+// landed, the owner the vault's only signer), {state: 'pending', missing}
+// (steps to come, or a set-up key still on it), or {state: 'replan'}
 // (another account took the planned seed: the owner signs a new set-up).
 export async function setupState(connection, keys, c, r, { request = setupRequest } = {}) {
   const planned = r.connected?.planned;
   if (!planned?.seed) return { state: 'replan' };
-  const setup = await request(setupFlags(c, { owner: r.owner, profitWallet: r.profit_wallet, feeWallet: r.fee_wallet }, planned.seed),
-    { connection, payer: keys.payer.publicKey, policyKey: keys.policyKey.publicKey });
+  const setup = await request(setupFlags(c, { owner: r.owner, profitWallet: r.profit_wallet, feeWallet: r.fee_wallet }, planned.seed,
+    { known: planned.setupKeys ?? [] }), { connection, payer: keys.payer.publicKey, policyKey: keys.policyKey.publicKey });
   if (setup.settings !== planned.settings) return { state: 'replan' };
-  return setup.steps.length ? { state: 'pending', missing: setup.steps.length } : { state: 'done' };
+  const missing = setup.steps.length + (setup.others ?? []).length;
+  return missing ? { state: 'pending', missing } : { state: 'done' };
 }
 
 // The transaction of a set-up that paid the bot's gas, read from the chain:

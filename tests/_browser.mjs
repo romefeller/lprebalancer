@@ -56,11 +56,12 @@ export function edSign(key, bytes) {
 // inputs, as Phantom does: one approval, logged once as 'signAll'), which the
 // page then sends. `mode`: {offchain: sign messages as a Ledger does (the
 // off-chain message), reject: decline, noSignAll: a wallet that only signs and
-// sends one at a time}.
+// sends one at a time, failAll: a wallet's own error on a set}.
 export async function solanaWallet(context, owner, send, mode = {}) {
   const log = [];
   await context.exposeFunction('__testWallet', async (kind, b64) => {
     if (mode.reject) return { error: 'User rejected the request.' };
+    if (mode.failAll && kind === 'signAll') return { error: mode.failAll };
     if (kind === 'signAll') {
       const txs = JSON.parse(b64).map(t => Transaction.from(Buffer.from(t, 'base64')));
       for (const tx of txs) tx.partialSign(owner);

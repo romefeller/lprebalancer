@@ -17,7 +17,8 @@ import * as I from '../onboard/intent.mjs';
 import * as sq from '../chains/solana/vault/squads.mjs';
 import { compile, instructionsOf, RULES } from '../chains/solana/vault/policy.mjs';
 import { ata } from '../onboard/decode_sol.mjs';
-import { ownerSetupPlan, packSteps } from '../chains/solana/vault/admin.mjs';
+import { ownerSetupPlan } from '../chains/solana/vault/admin.mjs';
+import { setupTxs } from '../onboard/solana.mjs';
 import SOLANA from '../chains/solana/solana.json' with { type: 'json' };
 
 const require = createRequire(import.meta.url);
@@ -32,6 +33,13 @@ const USDC = new PublicKey(SOLANA.usdc_mint), WSOL = new PublicKey(SOLANA.native
 const OPERATOR = SOLANA.operator_profit_wallet;
 const TREASURY = Keypair.generate().publicKey;
 
+// execute_settings_transaction_sync's discriminator
+const SYNC = sq.settingsSyncIx({ settings: PublicKey.default, signers: [], rentPayer: PublicKey.default, actions: [] }).data.subarray(0, 8);
+const programConfig = () => {
+  const disc = crypto.createHash('sha256').update('account:ProgramConfig').digest().subarray(0, 8);
+  const n = Buffer.alloc(16); n.writeBigUInt64LE(41n);
+  return Buffer.concat([disc, n, Keypair.generate().publicKey.toBuffer(), Buffer.alloc(8), Keypair.generate().publicKey.toBuffer()]);
+};
 const unsigned = (ixs, payer) => {
   const tx = new Transaction().add(...ixs);
   tx.feePayer = payer; tx.recentBlockhash = PublicKey.default.toBase58();
@@ -50,41 +58,94 @@ class Chain {
     this.policies = this.compiled.map((_, i) => sq.policyPda(this.settings, i + 1).toBase58());
     this.sol = 0n; this.usdc = 0n; this.positions = 0; this.signer = POLICY.publicKey.toBase58(); this.sent = []; this.tamper = null;
     this.funded = null;                                    // the set-up's transaction that paid the bot's gas
+    this.created = false; this.made = 0;                   // the vault's creation and the policies made, on this chain
+    this.others = []; this.held = new Map();               // the signers beside the owner; what each set-up key holds
   }
 
-  // the owner's set-up, as solana.mjs setupTxs builds it: the vault, its policies, then the deposit and the gas with the last
-  setup(a) {
-    const o = new PublicKey(a.owner);
-    const compiled = compile(VENUE, { vault: this.vault, payer: PAYER.publicKey, pools: [new PublicKey(POOL)],
-      payouts: [a.profitWallet, ...(a.feeWallet ? [a.feeWallet] : [])].map(w => new PublicKey(ata(w, USDC))) });
-    const plan = ownerSetupPlan({ owner: o, treasury: TREASURY, seed: this.seed, policyKey: POLICY.publicKey, venues: [compiled] });
-    const gasTo = this.tamper === 'setup' ? Keypair.generate().publicKey : PAYER.publicKey;
-    const fund = [SystemProgram.transfer({ fromPubkey: o, toPubkey: this.vault, lamports: I.toRaw(a.deposit, 9) }),
-      SystemProgram.transfer({ fromPubkey: o, toPubkey: gasTo, lamports: I.toRaw(a.gas, 9) })];
-    const steps = plan.steps;
-    return packSteps([...steps.slice(0, -1), [steps.at(-1), ...fund]], o).map(ixs => unsigned(ixs, o));
+  // The owner's set-up as solana.mjs setupTxs builds it (the real builder),
+  // over this chain: cli.mjs setupRequest's answer from what landed here.
+  async setup(a) {
+    const chain = this;
+    const request = async (f, keys) => {
+      const compiled = compile(VENUE, { vault: chain.vault, payer: keys.payer, pools: [new PublicKey(POOL)],
+        payouts: f.payout.split(',').map(w => new PublicKey(ata(w, USDC))) });
+      const plan = ownerSetupPlan({ owner: f.owner, treasury: TREASURY, seed: chain.seed, policyKey: keys.policyKey, venues: [compiled], memo: 'lp-bot vault',
+        setupKey: f['setup-key'] ?? null });
+      const done = [...(chain.created ? [0] : []), ...Array.from({ length: chain.made }, (_, i) => i + 1)];
+      return { seed: String(chain.seed), settings: chain.settings.toBase58(), vault: chain.vault.toBase58(), done, others: [...chain.others],
+        release: plan.release, report: { venues: { [VENUE]: { policies: chain.policies, pools: [POOL] } } },
+        steps: plan.steps.filter((_, i) => !done.includes(i)) };
+    };
+    const conn = { getMinimumBalanceForRentExemption: async (n) => 890_880 + 6960 * n, getLatestBlockhash: async () => ({ blockhash: Keypair.generate().publicKey.toBase58() }),
+      getBalance: async (k) => (k.equals(OWNER.publicKey) ? 10e9 : Number(chain.held.get(k.toBase58()) ?? 0n)),
+      getAccountInfo: async (k) => (k.equals(sq.programConfigPda()) ? { data: programConfig() } : { owner: spl.TOKEN_PROGRAM_ID }) };
+    const out = await setupTxs(conn, { payer: PAYER, policyKey: POLICY }, loadConfig().chains.solana, a, { request, find: async () => chain.funded });
+    this.lastSetup = out;
+    if (this.tamper === 'setup' && out.fund.length) {
+      // the gas to someone else
+      const tx = Transaction.from(Buffer.from(out.fund.at(-1), 'base64'));
+      const ixs = tx.instructions.map(ix => (ix.programId.equals(SystemProgram.programId) && ix.keys[1].pubkey.equals(PAYER.publicKey)
+        ? SystemProgram.transfer({ fromPubkey: ix.keys[0].pubkey, toPubkey: Keypair.generate().publicKey, lamports: ix.data.readBigUInt64LE(4) }) : ix));
+      out.fund[out.fund.length - 1] = unsigned(ixs, tx.feePayer);
+    }
+    return out;
   }
+
+  // the vault whole: created, every policy, the owner alone on it
+  whole() { return this.created && this.made === this.compiled.length && !this.others.length; }
 
   row() { return { settings: this.settings.toBase58(), venues: { [VENUE]: { policies: this.policies, pools: [POOL], payouts: [] } } }; }
 
-  // what a transaction the owner sent did to this chain
+  // what a transaction the owner (or the page's set-up key) sent did to this chain
   land(tx) {
     const sig = bs58.encode(tx.signature);
     this.sent.push(tx);
+    // a set-up key pays its fee, and each policy's rent (a policy account's bound)
+    const by = tx.feePayer?.toBase58();
+    if (this.held.has(by)) this.held.set(by, this.held.get(by) - 5000n);
     for (const ix of tx.instructions) {
       const d = Buffer.from(ix.data);
-      if (ix.programId.equals(SystemProgram.programId) && ix.keys[1].pubkey.equals(PAYER.publicKey)) this.funded = sig;
-      if (ix.programId.equals(SystemProgram.programId) && ix.keys[1].pubkey.equals(this.vault)) this.sol += d.readBigUInt64LE(4);
+      if (ix.programId.equals(SystemProgram.programId)) {
+        const [from, to] = [ix.keys[0].pubkey.toBase58(), ix.keys[1].pubkey.toBase58()], lamports = d.readBigUInt64LE(4);
+        if (to === PAYER.publicKey.toBase58()) this.funded = sig;
+        if (to === this.vault.toBase58()) this.sol += lamports;
+        if (this.held.has(from)) this.held.set(from, this.held.get(from) - lamports);
+        if (this.held.has(to) || this.others.includes(to)) this.held.set(to, (this.held.get(to) ?? 0n) + lamports);
+      }
       if (ix.programId.equals(spl.TOKEN_PROGRAM_ID) && d[0] === 12) this.usdc += d.readBigUInt64LE(1);
-      if (ix.programId.equals(sq.PROGRAM_ID)) this.squads(ix);
+      if (ix.programId.equals(sq.PROGRAM_ID)) this.squads(ix, tx);
     }
     return sig;
   }
 
-  squads(ix) {
-    // the vault's creation and its policies' (the owner's set-up): the bot named on them
-    if (ix.keys.length === 6 && ix.keys[5].pubkey.equals(this.settings)) return;
-    if (ix.keys[0].pubkey.equals(this.settings) && Buffer.from(ix.data)[13] === 7) return;
+  squads(ix, tx) {
+    const d = Buffer.from(ix.data);
+    // the vault's creation: its signers (the owner, the page's set-up key)
+    if (ix.keys.length === 6 && ix.keys[5].pubkey.equals(this.settings)) {
+      const n = d.readUInt32LE(8 + 1 + 2);
+      for (let i = 0; i < n; i++) {
+        const k = new PublicKey(d.subarray(15 + 33 * i, 15 + 33 * i + 32)).toBase58();
+        if (k !== OWNER.publicKey.toBase58()) { this.others.push(k); if (!this.held.has(k)) this.held.set(k, 0n); }
+      }
+      this.created = true;
+      return;
+    }
+    if (ix.keys[0].pubkey.equals(this.settings) && d.subarray(0, 8).equals(SYNC) && d.readUInt32LE(9) >= 1 && [0, 1, 7].includes(d[13])) {
+      // the set-up's settings changes: a signer on or off, a policy created (one a transaction)
+      let at = 13;
+      for (let i = 0; i < d.readUInt32LE(9); i++) {
+        const kind = d[at];
+        if (kind === 7) {
+          const payer = ix.keys[1].pubkey.toBase58();
+          if (this.held.has(payer)) this.held.set(payer, this.held.get(payer) - BigInt(1536 + 128) * 6960n);
+          this.made++;
+          return;
+        }
+        const k = new PublicKey(d.subarray(at + 1, at + 33)).toBase58();
+        if (kind === 0) { this.others.push(k); if (!this.held.has(k)) this.held.set(k, 0n); at += 34; } else { this.others = this.others.filter(x => x !== k); at += 33; }
+      }
+      return;
+    }
     if (ix.keys[0].pubkey.equals(this.settings) && ix.keys.length > 5 && ix.keys[1].pubkey.equals(OWNER.publicKey) && ix.keys[4]?.pubkey.equals(OWNER.publicKey)) {
       // a policy update: its signer is the key after the address, as the page decoded it
       const a = Buffer.from(ix.data);
@@ -94,6 +155,7 @@ class Chain {
     // an owner's execute: a close empties the positions, a withdrawal the vault
     if (this.closing) { this.positions = 0; this.sol += 500_000_000n; this.closing = false; }
     if (this.withdrawing) { this.sol = this.withdrawing === 'all' ? 0n : this.sol - this.withdrawing; this.withdrawing = null; }
+    void tx;
   }
 
   status() {
@@ -199,8 +261,7 @@ async function rig({ chain = new Chain(), wc = { projectId: '', relayUrl: 'wss:/
     keys: { public: [PAYER.publicKey.toBase58(), POLICY.publicKey.toBase58()], payee: PAYER.publicKey.toBase58(), secretEnv: 'P', policyKeyEnv: 'Q' },
     expires: true, venueReady: () => true,
     gas: async () => ({ ok: true }),
-    setup: async (a) => ({ planned: { seed: String(chain.seed), settings: chain.settings.toBase58(), vault: chain.vault.toBase58() },
-      done: Boolean(chain.funded), transactions: chain.funded ? [] : chain.setup(a), report: { venues: { [VENUE]: { policies: chain.policies, pools: [POOL] } } } }),
+    setup: (a) => chain.setup(a),
     setupState: async () => (chain.funded ? { state: 'done' } : { state: 'pending', missing: 1 }),
     funding: async () => (chain.funded ? { state: 'ok', payment: chain.funded, deposit: chain.funded } : { state: 'pending', reason: 'not on chain' }),
     finish: async (r) => ({ vault: chain.vault.toBase58(), settings: chain.settings.toBase58(), sent: true, owners: [r.owner], lookup: 'LUT',
@@ -266,10 +327,12 @@ for (const device of [PHONE, DESKTOP]) {
       let f = await flowDone(page);
       assert.deepEqual(f.steps.map(s => s.state), Array(5).fill('done'), JSON.stringify(f));
       const review = f.review.join('\n');
-      assert.match(review, /Create your vault .*you its only owner, threshold 1/);
+      assert.match(review, /Create your vault .*you its owner, threshold 1; this page's one-time set-up key .* its second signer/);
+      assert.match(review, /The set-up key takes itself off your vault: you are its only owner again/);
+      assert.ok(r.chain.whole(), 'every rule on the vault, the owner alone on it');
       assert.match(review, /exactly the rules in git/);
       assert.match(review, /Funding: Send 1\.8814 SOL from your wallet .* to your vault/);
-      assert.match(review, /Funding: Send 0\.1186 SOL from your wallet .* to the bot's gas key/);
+      assert.match(review, /Funding, sent last, once the set-up key is off your vault: Send 0\.1186 SOL from your wallet .* to the bot's gas key/);
       assert.deepEqual(wallet.map(x => x.kind), ['signAll'], 'one approval in the wallet: the whole set-up, no message');
       assert.equal(wallet[0].txs.length, 2);
       assert.equal(r.chain.sol, 1_881_400_000n);
@@ -530,22 +593,42 @@ test('page: the CSP is strict; WalletConnect\'s relay only with a project id; no
   } finally { r.server.close(); }
 });
 
-// A phone wallet behind the mock relay. `signAll`: it offers solana_signAllTransactions.
-async function wcWallet(rl, { signAll = false, redirect, onRequest = async () => {} } = {}) {
+// A phone wallet behind the mock relay, a Tangem card's limit: it signs no
+// message over 930 bytes (the card's APDU, tangem-app-android
+// SOLANA_TRANSACTION_SIZE_THRESHOLD_BYTES). `signAll`: it offers
+// solana_signAllTransactions. `text`: it answers as Tangem's Android app
+// does, JSON as text, a signature as loose text. `sizes`: each message's bytes.
+async function wcWallet(rl, { signAll = false, text = false, redirect, onRequest = async () => {} } = {}) {
   const { wallet } = await import('./_wc_relay.mjs');
   const addr = OWNER.publicKey.toBase58();
-  const signed = (b64) => { const tx = Transaction.from(Buffer.from(b64, 'base64')); tx.partialSign(OWNER); return tx; };
-  return wallet(rl.url, {
+  const sizes = [];
+  const signed = (b64) => {
+    const tx = Transaction.from(Buffer.from(b64, 'base64'));
+    const n = tx.compileMessage().serialize().length;
+    sizes.push(n);
+    if (n > 930) throw new Error(`The card cannot sign a transaction of ${n} bytes`);
+    tx.partialSign(OWNER);
+    return tx;
+  };
+  const w = await wallet(rl.url, {
     redirect,
     accounts: { solana: [`solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp:${addr}`] },
     methods: { solana: ['solana_signMessage', 'solana_signTransaction', ...(signAll ? ['solana_signAllTransactions'] : [])] },
     handle: async (method, p) => {
       await onRequest(method);
       if (method === 'solana_signMessage') return { signature: bs58.encode(edSign(OWNER, bs58.decode(p.message))) };
-      if (method === 'solana_signTransaction') return { signature: bs58.encode(signed(p.transaction).signature) };   // a signature only: the page attaches it, the server sends
-      if (method === 'solana_signAllTransactions') return { transactions: p.transactions.map(t => signed(t).serialize({ requireAllSignatures: false }).toString('base64')) };
+      // a signature only: the page attaches it, the server sends
+      if (method === 'solana_signTransaction') {
+        const sig = bs58.encode(signed(p.transaction).signature);
+        return text ? `{ signature: "${sig}" }` : { signature: sig };
+      }
+      if (method === 'solana_signAllTransactions') {
+        const out = { transactions: p.transactions.map(t => signed(t).serialize({ requireAllSignatures: false }).toString('base64')) };
+        return text ? JSON.stringify(out) : out;
+      }
       throw new Error(`no ${method}`);
     } });
+  return Object.assign(w, { sizes });
 }
 
 test('page: WalletConnect (a phone wallet that only signs): pair by the code, create one by one, the wallet brought forward, revoke', { skip, timeout: 300_000 }, async () => {
@@ -556,7 +639,7 @@ test('page: WalletConnect (a phone wallet that only signs): pair by the code, cr
   let page;
   // each request: the page shows the big button to its wallet (the session's own deep link) while it waits
   const seen = [];
-  const w = await wcWallet(rl, { redirect: { native: 'tangemtest://wc' }, onRequest: async () => {
+  const w = await wcWallet(rl, { text: true, redirect: { native: 'tangemtest://wc' }, onRequest: async () => {
     seen.push(await page.evaluate(() => ({ shown: !document.getElementById('f-wallet').hidden, text: document.getElementById('f-wallet-text').textContent,
       href: document.getElementById('f-open').getAttribute('href'), open: !document.getElementById('f-open').hidden })));
   } });
@@ -580,6 +663,8 @@ test('page: WalletConnect (a phone wallet that only signs): pair by the code, cr
     let f = await flowDone(page);
     assert.deepEqual(f.steps.map(s => s.state), Array(5).fill('done'), JSON.stringify(f));
     assert.deepEqual(w.requests.map(q => q.method), ['solana_signTransaction', 'solana_signTransaction'], 'one request per transaction, no message');
+    assert.ok(w.sizes.length === 2 && w.sizes.every(n => n <= 900), `the card signs short messages only: ${w.sizes}`);
+    assert.ok(r.chain.whole(), 'the vault has every policy, the owner alone on it');
     assert.equal(r.chain.sol, 1_881_400_000n, 'the deposit the server sent for the wallet');
     assert.equal(seen.length, 2);
     for (const x of seen) {
@@ -590,11 +675,16 @@ test('page: WalletConnect (a phone wallet that only signs): pair by the code, cr
     await click(page, '#f-done');
     await visible(page, 'v-active');
     r.store.onExit = () => setTimeout(() => { r.chain.positions = 0; r.store.finishExit(); r.setService('inactive'); }, 300);
+    // a revoke rewrites each policy, longer than the card signs: said so before the card is asked, nothing sent
+    const before = w.requests.length;
     await click(page, '#a-revoke');
     await click(page, '#sh-go');
     f = await flowDone(page);
-    assert.ok(f.steps.every(s => s.state === 'done'), JSON.stringify(f));
-    assert.equal(r.chain.signer, addr);
+    assert.equal(f.steps.at(-1).state, 'failed', JSON.stringify(f));
+    assert.match(f.alert, /Tangem cannot sign this step: one of its transactions is \d+ bytes, and the card signs no more than 930\. Nothing was sent\./);
+    assert.deepEqual(w.requests.slice(before).map(q => q.method), ['solana_signMessage'], 'the card signed the close request only; never asked for the long one');
+    assert.equal(r.chain.signer, POLICY.publicKey.toBase58(), 'nothing changed');
+    void addr;
     assert.deepEqual(errors.filter(e => !/favicon/.test(e)), []);
     assert.ok(rl.log.includes('wc_proposeSession') && rl.log.includes('wc_approveSession'), rl.log.join(','));
   } finally { await page.context().close(); r.server.close(); await w.close(); await rl.close(); }
@@ -633,9 +723,111 @@ test('page: WalletConnect with signAll: the set-up in ONE request; the page\'s s
     const f = await flowDone(page, 120_000);
     assert.deepEqual(f.steps.map(s => s.state), Array(5).fill('done'), JSON.stringify(f));
     assert.deepEqual(w.requests.map(q => q.method), ['solana_signAllTransactions'], 'one approval for the whole set-up');
-    assert.equal(w.requests[0].params.transactions.length, 2);
+    assert.equal(w.requests[0].params.transactions.length, 2, 'the creation with the key\'s SOL, and the funding');
+    assert.ok(w.sizes.every(n => n <= 900), `the card signs short messages only: ${w.sizes}`);
+    assert.ok(r.chain.whole());
     assert.ok(dropped);
     assert.ok(rl.connections().filter(u => /browser/.test(decodeURIComponent(u))).length >= 1, 'the page is connected again');
     assert.equal(r.chain.sol, 1_881_400_000n);
   } finally { await page.context().close(); r.server.close(); await w.close(); await rl.close(); }
+});
+
+// The owner's report, 2026-10-14: "Tangem is not working even on step 1".
+// The set-up asked the card to sign the bot's rules, each longer than the
+// card signs. Now: the card signs only short messages; the page stops
+// half-way (the network refuses one of the key's transactions), the error is
+// shown, and Continue setup goes on from what the chain has: the card is
+// not asked for the vault again, nothing is paid twice.
+test('page: Tangem over WalletConnect: stopped half-way, the error shown, Continue setup resumes from the chain', { skip, timeout: 300_000 }, async () => {
+  const { relay } = await import('./_wc_relay.mjs');
+  const rl = await relay();
+  const r = await rig({ wc: { projectId: 'a'.repeat(32), relayUrl: rl.url, verify: [] } });
+  let page, fail = 1;
+  // the network refuses the set-up key's second policy, once
+  const land = r.chain.land.bind(r.chain);
+  r.chain.land = (tx) => {
+    if (tx.feePayer && !tx.feePayer.equals(OWNER.publicKey) && r.chain.made === 1 && fail-- > 0) throw new I.Invalid('the network refused the transaction: node down');
+    return land(tx);
+  };
+  const w = await wcWallet(rl, { signAll: true, text: true });
+  ({ page } = await openPage(B, r.base, INVITE, { device: PHONE }));
+  try {
+    await click(page, '#w-wc');
+    await visible(page, 'v-wc');
+    await w.pair(await page.getAttribute('#wc-open', 'href'));
+    await page.waitForFunction(() => document.body.dataset.view === 'v-create', null, { timeout: 60_000 });
+    await page.fill('#c-amount', '2');
+    await page.fill('#c-name', 'tangem-pool');
+    await click(page, '#c-go');
+    let f = await flowDone(page, 120_000);
+    assert.equal(f.steps[0].state, 'failed', JSON.stringify(f));
+    assert.match(f.alert, /node down/, 'the error is shown, not swallowed');
+    assert.deepEqual([r.chain.created, r.chain.made, r.chain.funded], [true, 1, null], 'the vault and one rule on chain; no money moved');
+    assert.equal(r.chain.others.length, 1, 'the page\'s set-up key still on the vault');
+    await shot(page, '20-tangem-stopped');
+    // Back: the page shows the set-up to continue
+    await click(page, '#f-done');
+    await visible(page, 'v-setup');
+    assert.match(await page.textContent('#s-text'), /not all on chain yet/);
+    await shot(page, '21-tangem-continue');
+    const asked = w.requests.length;
+    await click(page, '#s-go');
+    f = await flowDone(page, 120_000);
+    assert.deepEqual(f.steps.map(s => s.state), Array(5).fill('done'), JSON.stringify(f));
+    assert.equal(w.requests.length, asked + 1, 'the card asked once more, for the funding alone: the vault is not asked for again');
+    assert.equal(w.requests.at(-1).params.transactions.length, 1);
+    assert.ok(r.chain.whole(), 'every rule, the set-up key off: the owner alone');
+    assert.equal(r.chain.held.get(r.chain.lastSetup.planned.setupKeys[0]), 0n, 'the set-up key sent all it held back');
+    assert.equal(r.chain.sol, 1_881_400_000n, 'the deposit, once');
+    assert.equal(r.chain.sent.filter(t => t.instructions.some(ix => ix.programId.equals(SystemProgram.programId) && ix.keys[1].pubkey.equals(PAYER.publicKey))).length, 1,
+      'the bot\'s gas, once');
+    assert.ok(w.sizes.every(n => n <= 900), `the card signs short messages only: ${w.sizes}`);
+    assert.equal(await page.evaluate(() => Object.keys(localStorage).filter(k => k.startsWith('aperture-setup-key-')).length), 0, 'the set-up key is forgotten');
+  } finally { await page.context().close(); r.server.close(); await w.close(); await rl.close(); }
+});
+
+// The old set-up (one approval for the vault and every rule) asked a card for
+// more than it signs: the card's refusal is shown in the page as it came.
+test('page: a wallet\'s own refusal is shown as it came, never swallowed', { skip, timeout: 120_000 }, async () => {
+  const r = await rig();
+  const { page } = await openPage(B, r.base, INVITE, { device: PHONE,
+    setup: (ctx) => solanaWallet(ctx, OWNER, async (tx) => r.chain.land(tx), { failAll: 'The card cannot sign a transaction of 1147 bytes' }) });
+  try {
+    await connect(page);
+    await page.fill('#c-amount', '2');
+    await page.fill('#c-name', 'refused-pool');
+    await click(page, '#c-go');
+    const f = await flowDone(page);
+    assert.equal(f.steps[0].state, 'failed');
+    assert.match(f.alert, /The card cannot sign a transaction of 1147 bytes/);
+    assert.match(f.steps[0].detail, /The card cannot sign/);
+    assert.equal(r.chain.sent.length, 0, 'nothing sent');
+  } finally { await page.context().close(); r.server.close(); }
+});
+
+// The funding is signed with the owner's part (one approval) and sent last.
+// A card is slow: when the network refuses it as too old, it is built again
+// and the wallet asked once more, saying why; nothing is paid twice.
+test('page: the funding signed first and too old by the time it goes: built again, asked once more, paid once', { skip, timeout: 120_000 }, async () => {
+  const r = await rig();
+  let refused = 0;
+  const land = r.chain.land.bind(r.chain);
+  r.chain.land = (tx) => {
+    const pays = tx.instructions.some(ix => ix.programId.equals(SystemProgram.programId) && ix.keys[1].pubkey.equals(PAYER.publicKey));
+    if (pays && refused++ === 0) throw new I.Invalid('the network refused the transaction: Blockhash not found');
+    return land(tx);
+  };
+  const { page, wallet } = await openPage(B, r.base, INVITE, { device: PHONE, setup: (ctx) => solanaWallet(ctx, OWNER, async (tx) => r.chain.land(tx)) });
+  try {
+    await connect(page);
+    await page.fill('#c-amount', '2');
+    await page.fill('#c-name', 'slow-pool');
+    await click(page, '#c-go');
+    const f = await flowDone(page);
+    assert.deepEqual(f.steps.map(s => s.state), Array(5).fill('done'), JSON.stringify(f));
+    assert.deepEqual(wallet.map(x => [x.kind, x.txs.length]), [['signAll', 2], ['signAll', 1]], 'the set-up, then the funding alone once more');
+    assert.equal(refused, 2, 'the old funding refused once; the new one landed');
+    assert.equal(r.chain.sol, 1_881_400_000n, 'the deposit, once');
+    assert.ok(r.chain.whole());
+  } finally { await page.context().close(); r.server.close(); }
 });

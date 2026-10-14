@@ -595,7 +595,7 @@ function fakes(over = {}, cfg = CFG) {
       calls.setups.push(a);
       const planned = a.planned ?? { seed: `SEED${calls.setups.length}`, settings: 'S', vault: 'VAULT' };
       if (f.setupDone) return { planned, done: true, transactions: [], report: { venues: {} } };
-      return { planned, done: false, transactions: [JSON.stringify(a)], report: { venues: {} }, cost: '0.2' };
+      return { planned, done: false, transactions: [JSON.stringify(a)], owner: ['O'], key: ['K'], fund: ['F'], report: { venues: {} }, cost: '0.2' };
     },
     setupState: async () => f.chainState,
     funding: async (r, hint) => {
@@ -643,8 +643,9 @@ async function serve(f, fn) {
 }
 
 // a request: its set-up for the owner's wallet (no message to sign: the set-up's transactions are)
+const SETUP_KEY = Keypair.generate().publicKey.toBase58();
 const requested = async (post, over = {}) => {
-  const it = await post('intent', { invite: INVITE, ...body(over) });
+  const it = await post('intent', { invite: INVITE, setupKey: SETUP_KEY, ...body(over) });
   assert.equal(it.status, 200, JSON.stringify(it.json));
   return it.json;
 };
@@ -657,7 +658,9 @@ test('server: the set-up for the owner\'s wallet, then the bot finishes, registe
     const it = await requested(post);
     const me = OWNER.publicKey.toBase58();
     assert.deepEqual(JSON.parse(it.transactions[0]), { owner: me, profitWallet: PROFIT.publicKey.toBase58(), feeWallet: OPERATOR_SOL, token: 'SOL',
-      deposit: '1.3814', gas: '0.1186', planned: null }, 'the set-up carries the deposit (amount less the gas) and the gas');
+      deposit: '1.3814', gas: '0.1186', planned: null, setupKey: SETUP_KEY, notBefore: 1_000_000 - CFG.paymentSlackS },
+      'the set-up carries the deposit (amount less the gas), the gas, and the page\'s set-up key');
+    assert.deepEqual([it.owner, it.key, it.fund], [['O'], ['K'], ['F']], 'the owner\'s part, the set-up key\'s, the funding: as built');
     assert.deepEqual(it.terms, { token: 'SOL', amount: '1.5', deposit: '1.3814', gas: '0.1186', payer: PAYER, profitWallet: PROFIT.publicKey.toBase58(),
       feeWallet: OPERATOR_SOL });
     assert.deepEqual([it.name, it.chain, it.done, it.context.seed, it.context.vault], ['my-pool', 'solana', false, 'SEED1', 'VAULT']);
@@ -803,9 +806,13 @@ test('server: a set-up built again: what the chain lacks, today\'s gas, the name
   await serve(f, async ({ post }) => {
     await requested(post);
     f.tick(CFG.intentTtlS * 1000 + 1);                  // the first set-up's blockhash and hold are long gone
-    const again = await post('setup', { invite: INVITE, name: 'my-pool' });
+    const later = Keypair.generate().publicKey.toBase58();
+    const again = await post('setup', { invite: INVITE, name: 'my-pool', setupKey: later });
     assert.equal(again.status, 200, JSON.stringify(again.json));
     assert.deepEqual(f.calls.setups.at(-1).planned, { seed: 'SEED1', settings: 'S', vault: 'VAULT' }, 'the planned vault, not a new one');
+    assert.deepEqual([f.calls.setups.at(-1).setupKey, f.calls.setups.at(-1).notBefore], [later, Math.floor(f.db.rows[0].created_at) - CFG.paymentSlackS],
+      'the page\'s key now; a funding older than the request is not its own');
+    assert.deepEqual([again.json.owner, again.json.key, again.json.fund], [['O'], ['K'], ['F']]);
     assert.deepEqual([again.json.terms.gas, again.json.terms.deposit], ['0.1186', '1.3814']);
     const planned = f.db.calls.filter(c => c[0] === 'planned').map(c => c[1]);
     assert.deepEqual([planned[0].gas, planned[0].deposit, planned[0].expires], ['0.1186', '1.3814', 1_000_000_000 + CFG.intentTtlS * 1000 + 1 + CFG.intentTtlS * 1000]);

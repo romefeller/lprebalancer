@@ -8,8 +8,10 @@
 //
 // One vault per wallet per chain. The page shows, after the wallet connects:
 //   create   no vault yet: amount, profit wallet, name -> the wallet approves
-//            ONE set-up (its own vault, the bot's rules, the deposit, the
-//            bot's gas), the bot finishes the vault and starts
+//            ONE set-up (its own vault, the deposit, the bot's gas; on
+//            Solana this page's one-time set-up key signs the bot's rules,
+//            too long for a hardware wallet), the bot finishes the vault
+//            and starts
 //   setup    a set-up that stopped: it resumes, nothing is paid twice
 //   active   the bot runs: its book as Telegram shows it; Add capital,
 //            Withdraw, Revoke
@@ -17,11 +19,11 @@
 import { SignClient } from '@walletconnect/sign-client';
 import qrcode from 'qrcode-generator';
 import bs58 from 'bs58';
-import { Transaction, VersionedTransaction, PublicKey } from '@solana/web3.js';
+import { Keypair, Transaction, VersionedTransaction, PublicKey } from '@solana/web3.js';
 import RULES from '../../chains/solana/vault/rules.json' with { type: 'json' };
 import SOLANA from '../../chains/solana/solana.json' with { type: 'json' };
 import { decodeSol, decodeSolSet } from '../decode_sol.mjs';
-import { walletLink } from './wallet_link.mjs';
+import { answerOf, cardLimit, walletLink } from './wallet_link.mjs';
 import { decodeEvm } from '../decode_evm.mjs';
 import { fromRaw, toRaw } from '../units.mjs';
 
@@ -77,7 +79,10 @@ function alertBox(msg, kind = 'error') {
 // An error as a person reads it: no stack, no JSON, the wallet's refusal named.
 function human(e) {
   const m = String(e?.message ?? e ?? 'something went wrong');
-  if (e?.code === 4001 || e?.code === 5000 || /reject|denied|declin|cancel|user (closed|abort)/i.test(m)) return 'You declined in your wallet. Nothing was sent.';
+  const refusal = e?.code === 4001 || e?.code === 5000;
+  if (/reject|denied|declin|cancel|user (closed|abort)/i.test(m) || (refusal && !e?.message)) return 'You declined in your wallet. Nothing was sent.';
+  // a wallet's own error under a refusal's code (a card that cannot sign): its words, never "you declined"
+  if (refusal) return `Your wallet refused: ${m.split('\n')[0].trim().slice(0, 280)}. Nothing was sent.`;
   if (/Failed to fetch|NetworkError|Load failed/i.test(m)) return 'The server does not answer. Check your connection and try again.';
   if (/blockhash not found|block height exceeded|expired/i.test(m)) return 'The network moved on before it landed. Try again: a fresh transaction is built.';
   // a signer's error carries its decoded program error, then log lines: the first line says it
@@ -232,20 +237,22 @@ function wcWallet(client, session, chain) {
       },
       async send(tx) {
         if (methods.includes('solana_signAndSendTransaction')) {
-          const out = await request('solana_signAndSendTransaction', { transaction: tx });
+          const out = answerOf(await request('solana_signAndSendTransaction', { transaction: tx }));
           if (out?.signature) return out.signature;
         }
-        const out = await request('solana_signTransaction', { transaction: tx });
+        const out = answerOf(await request('solana_signTransaction', { transaction: tx }));
         if (out?.transaction) return broadcastSigned(unb64(out.transaction));
+        // Tangem's app sends a transaction its card cannot sign whole in another form, and answers no signature
+        if (!out?.signature) throw new Error(`${name} answered without a signature. Check its activity; then try again here: nothing is paid twice.`);
         const t = Transaction.from(unb64(tx));
         t.addSignature(new PublicKey(address), Buffer.from(bs58.decode(out.signature)));
         return broadcastSigned(t.serialize());
       },
       // one request for the whole set, when the wallet offers it (else send() one by one)
       signAll: methods.includes('solana_signAllTransactions') ? async (txs) => {
-        const out = await request('solana_signAllTransactions', { transactions: txs });
+        const out = answerOf(await request('solana_signAllTransactions', { transactions: txs }));
         const list = Array.isArray(out) ? out : out?.transactions;
-        if (!Array.isArray(list) || list.length !== txs.length) throw new Error('the wallet did not return every transaction signed');
+        if (!Array.isArray(list) || list.length !== txs.length) throw new Error(`${name} did not return every transaction signed`);
         return list;
       } : null,
       async disconnect() { await client.disconnect({ topic: session.topic, reason: { code: 6000, message: 'disconnected' } }).catch(() => {}); } };
@@ -434,11 +441,30 @@ async function landed(sig, step, flow) {
   throw new Error('The network has not confirmed it after 4 minutes. Check your wallet\'s activity, then try again: nothing is sent twice.');
 }
 
+// A Solana transaction's message length (a wire transaction: its signature
+// count, the signatures, then the message the wallet signs).
+const messageBytes = (b64) => { const b = unb64(b64); return b.length - 1 - 64 * b[0]; };
+
+// Before the wallet is asked: a transaction longer than the wallet signs
+// (a Tangem card: 930 bytes) is said so, never sent to fail on the card.
+function fitsWallet(txs) {
+  const w = state.wallet, limit = state.chain === 'solana' ? cardLimit(w?.name) : null;
+  if (!limit) return;
+  for (const t of txs) {
+    const n = messageBytes(t);
+    if (n > limit) {
+      throw new Error(`${w.name} cannot sign this step: one of its transactions is ${n} bytes, and the card signs no more than ${limit}. Nothing was sent. `
+        + 'Your vault and your money are yours: Withdraw works with this wallet.');
+    }
+  }
+}
+
 // Decode, check, sign and send one transaction; wait until it lands.
 async function signOne(tx, expect, chainId, step, flow) {
   const r = state.chain === 'solana' ? decodeSol(tx, expect, SOL_PINS) : decodeEvm(tx, expect, EVM_PINS);
   review(r, tx, expect);
   if (!r.ok) throw new Refusal(r.problems.join('; '));
+  if (state.chain === 'solana') fitsWallet([tx]);
   flow.set(step, 'active', `Confirm in ${state.wallet.name}…`);
   const sig = await state.wallet.send(tx, chainId);
   flow.set(step, 'active', 'Sent. Waiting for the network…');
@@ -455,6 +481,7 @@ async function sendSet(txs, expect, step, flow) {
   const r = decodeSolSet(txs, expect, SOL_PINS);
   review(r, txs, expect, [{ tx: txs, expect }]);
   if (!r.ok) throw new Refusal(r.problems.join('; '));
+  fitsWallet(txs);
   const sigs = [];
   if (w.signAll) {
     flow.set(step, 'active', txs.length > 1 ? `Approve in ${w.name}: ${txs.length} transactions, one approval…` : `Confirm in ${w.name}…`);
@@ -472,6 +499,130 @@ async function sendSet(txs, expect, step, flow) {
     sigs.push(await landed(await w.send(t), step, flow));
   }
   return sigs;
+}
+
+// The page's one-time set-up key for this wallet's Solana set-up
+// (admin.mjs ownerSetupPlan): a policy is too long for a hardware wallet to
+// sign (a Tangem card signs 930 bytes at most), so this key signs and pays
+// the bot's rules on the owner's new vault, then takes itself off it. It
+// holds only the SOL for the rules' rent, never the deposit. Kept in this
+// browser until the set-up is done, so a page reloaded half-way goes on
+// with it; without storage it lives as long as the page.
+function setupKeyOf(owner) {
+  const saved = recall(`aperture-setup-key-${owner}`);
+  if (saved) { try { return Keypair.fromSecretKey(bs58.decode(saved)); } catch { /* a bad entry: a new key */ } }
+  const key = Keypair.generate();
+  remember(`aperture-setup-key-${owner}`, bs58.encode(key.secretKey));
+  return key;
+}
+const forgetSetupKey = (owner) => remember(`aperture-setup-key-${owner}`, null);
+const expired = (e) => /blockhash not found|block height exceeded|expired/i.test(String(e?.message ?? e));
+
+// Sign `txs` in the wallet: in one approval when it can; null when it signs
+// and sends one at a time (wallet.send).
+async function walletSigns(txs, step, flow, why = '') {
+  const w = state.wallet;
+  if (!w.signAll || !txs.length) return null;
+  flow.set(step, 'active', why + (txs.length > 1 ? `Approve in ${w.name}: ${txs.length} transactions, one approval…` : `Confirm in ${w.name}…`));
+  return w.signAll(txs);
+}
+
+// Send transactions signed already, in order, each after the one before landed.
+async function sendSigned(txs, step, flow, what) {
+  const sigs = [];
+  for (const [i, t] of txs.entries()) {
+    flow.set(step, 'active', txs.length > 1 ? `${what}: sending ${i + 1} of ${txs.length}…` : `${what}: sending…`);
+    sigs.push(await landed((await post('broadcast', { chain: 'solana', transaction: t })).signature, step, flow));
+  }
+  return sigs;
+}
+
+// The owner's Solana set-up (solana.mjs setupTxs), from where the chain
+// stands: the wallet's part (the vault's creation with this page's set-up
+// key on it, and the key's SOL; with the funding, signed in the same
+// approval and held), then the set-up key's part (each of the bot's rules,
+// then it takes itself off the vault and sends its SOL back), then the
+// funding, sent last. After each part the server is asked again what the
+// chain still lacks: a page that stopped half-way resumes there, and nothing
+// is paid twice. Every transaction is decoded and checked here first, and
+// again as the wallet returns it. Returns the funding's signature, or null
+// when the funding is on chain already.
+async function solanaSetup(first, typed, key, step, flow) {
+  const w = state.wallet, name = first.name, setupKey = key.publicKey.toBase58();
+  let it = first, held = null, why = '';
+  // every part read so far stays in view (and in the copy for the verifier)
+  const lines = [], parts = [];
+  for (let round = 0; round < 8; round++) {
+    if (it.done) { forgetSetupKey(w.address); return null; }
+    const expect = { ...setupExpect(it, typed), setupKey };
+    const set = [...it.owner, ...it.key, ...it.fund];
+    const r = decodeSolSet(set, expect, SOL_PINS);
+    if (lines.length) lines.push('Then, as the chain stands now:');
+    lines.push(...r.lines);
+    parts.push({ tx: set, expect });
+    review({ ok: r.ok, lines, problems: r.problems }, set, expect, parts);
+    if (!r.ok) throw new Refusal(r.problems.join('; '));
+    // the wallet's part, with the funding when it signs a set (the funding is sent last)
+    fitsWallet([...it.owner, ...it.fund]);
+    if (it.owner.length || (!held && w.signAll && it.fund.length)) {
+      const mine = [...it.owner, ...(held ? [] : it.fund)];
+      const signed = await walletSigns(mine, step, flow, why);
+      if (signed) {
+        const back = [...signed.slice(0, it.owner.length), ...it.key, ...signed.slice(it.owner.length)];
+        const again = decodeSolSet(back, expect, SOL_PINS);
+        if (!again.ok) throw new Refusal(`the wallet returned other transactions: ${again.problems.join('; ')}`);
+        if (!held && it.fund.length) held = signed.slice(it.owner.length);
+        await sendSigned(signed.slice(0, it.owner.length), step, flow, 'Your vault');
+      } else {
+        for (const [i, t] of it.owner.entries()) {
+          flow.set(step, 'active', `${i + 1} of ${it.owner.length}: confirm in ${w.name}…`);
+          await landed(await w.send(t), step, flow);
+        }
+      }
+      if (it.owner.length) {
+        // the wallet may have taken a while (a card is tapped): the set-up key's part is built again, fresh
+        flow.set(step, 'active', 'Reading your vault…');
+        it = await post('setup', { name, setupKey });
+        continue;
+      }
+    }
+    // the set-up key's part: signed in this page, sent in order
+    for (const [i, t] of it.key.entries()) {
+      flow.set(step, 'active', `The set-up key adds the bot's rules: ${i + 1} of ${it.key.length}…`);
+      const tx = Transaction.from(unb64(t));
+      tx.sign(key);
+      await landed((await post('broadcast', { chain: 'solana', transaction: b64(tx.serialize()) })).signature, step, flow);
+    }
+    if (it.owner.length || it.key.length) {
+      flow.set(step, 'active', 'Reading your vault…');
+      it = await post('setup', { name, setupKey });
+      continue;
+    }
+    // only the funding is left: last, the vault whole and yours alone
+    if (held) {
+      try {
+        const sigs = await sendSigned(held, step, flow, 'Your deposit and the bot\'s gas');
+        forgetSetupKey(w.address);
+        return sigs.at(-1);
+      } catch (e) {
+        if (!expired(e)) throw e;
+        // signed too long ago: built again, the wallet asked once more
+        held = null;
+        why = 'The network moved on while the rules were added: your deposit and the bot\'s gas once more. ';
+        it = await post('setup', { name, setupKey });
+        continue;
+      }
+    }
+    let sig = null;
+    for (const [i, t] of it.fund.entries()) {
+      flow.set(step, 'active', why + (it.fund.length > 1 ? `Your deposit and the bot's gas, ${i + 1} of ${it.fund.length}: confirm in ${w.name}…`
+        : `Your deposit and the bot's gas: confirm in ${w.name}…`));
+      sig = await landed(await w.send(t), step, flow);
+    }
+    forgetSetupKey(w.address);
+    return sig;
+  }
+  throw new Error('The set-up did not finish after several rounds. Try again: nothing is paid twice.');
 }
 
 // Every transaction of an owner's action, one at a time (a Solana answer holds
@@ -715,9 +866,12 @@ function createFlow({ resume = null } = {}) {
     { label: 'Approve your set-up', busy: 'Building it…', async run(fl) {
       const name = fl.data.name ?? resume?.name;
       let it, typed = null;
+      // Solana: this page's one-time key signs the bot's rules (too long for a hardware wallet)
+      const setupKey = chain === 'solana' ? setupKeyOf(w.address) : null;
+      const more = setupKey ? { setupKey: setupKey.publicKey.toBase58() } : {};
       if (!name) {
         typed = { token: $('c-token').value, amount: $('c-amount').value.trim(), profitWallet: $('c-profit').value.trim() };
-        it = await post('intent', { chain, owner: w.address, ...typed, name: $('c-name').value.trim() });
+        it = await post('intent', { chain, owner: w.address, ...typed, name: $('c-name').value.trim(), ...more });
         // the server's amount is the typed one, normalised
         typed.amount = it.terms.amount;
       } else {
@@ -728,14 +882,16 @@ function createFlow({ resume = null } = {}) {
           this.doneText = 'Sent from this browser before';
           return;
         }
-        it = await post('setup', { name });
+        it = await post('setup', { name, ...more });
       }
       fl.data.name = it.name;
-      if (it.done) { this.doneText = 'Already on chain'; return; }
+      if (it.done) { if (chain === 'solana') forgetSetupKey(w.address); this.doneText = 'Already on chain'; return; }
       if (chain === 'solana') {
-        const sigs = await sendSet(it.transactions, setupExpect(it, typed), this, fl);
-        fl.data.payment = sigs.at(-1);
-        remember(`aperture-payment-${it.name}`, sigs.at(-1));
+        const paid = await solanaSetup(it, typed, setupKey, this, fl);
+        if (paid) {
+          fl.data.payment = paid;
+          remember(`aperture-payment-${it.name}`, paid);
+        }
       } else {
         fl.data.payment = await polygonSetup(it, typed, this, fl);
         remember(`aperture-payment-${it.name}`, fl.data.payment);

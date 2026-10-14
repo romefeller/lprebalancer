@@ -9,7 +9,7 @@ import fc from 'fast-check';
 import * as sq from '../chains/solana/vault/squads.mjs';
 import { RULES, compile, match, plan, needsVault, NotAllowed, POLICY_BYTES, instructionsOf, poolPda } from '../chains/solana/vault/policy.mjs';
 import { vaultConfig, wrap, vaultFundsItsAccounts, withVaultBudget, VAULT_CALL_UNITS } from '../chains/solana/vault/account.mjs';
-import { connectProblems, lookupPlan, ownerSetupPlan, packSteps, setupDone, staticAccounts } from '../chains/solana/vault/admin.mjs';
+import { connectProblems, lookupPlan, otherSigners, ownerSetupPlan, packSteps, setupDone, staticAccounts } from '../chains/solana/vault/admin.mjs';
 import { actingAccount } from '../chains/solana/vault/account.mjs';
 
 const require = createRequire(import.meta.url);
@@ -130,6 +130,28 @@ test('owner set-up: the creation names the owner alone at threshold 1; each poli
   });
 });
 
+test('owner set-up with a set-up key: the creation names the owner and the key; the key signs and pays each policy, then takes itself off', () => {
+  const owner = key(), policyKey = key(), treasury = key(), setupKey = key(), compiled = compile('meteora-dlmm', worst());
+  const p = ownerSetupPlan({ owner, treasury, seed: 5n, policyKey, venues: [compiled], memo: 'm', setupKey });
+  const want = sq.createSmartAccountIx({ creator: owner, treasury, seed: 5n, threshold: 1, memo: 'm', signers: [{ key: owner }, { key: setupKey }] }).ix;
+  assert.deepEqual(p.steps[0].data, want.data);
+  assert.deepEqual(p.steps[0].keys.filter(k => k.isSigner).map(k => String(k.pubkey)), [String(owner)], 'the owner alone signs the creation');
+  compiled.policies.forEach((pol, i) => {
+    const ix = sq.settingsSyncIx({ settings: p.settings, signers: [setupKey], rentPayer: setupKey, extra: [p.policies[i]],
+      actions: [{ kind: 'policyCreate', seed: i + 1, policy: pol.policy, signers: [{ key: policyKey }] }] });
+    assert.deepEqual(p.steps[i + 1].data, ix.data, `policy ${i + 1}`);
+    assert.deepEqual([...new Set(p.steps[i + 1].keys.filter(k => k.isSigner).map(k => String(k.pubkey)))], [String(setupKey)], 'the key alone signs');
+    assert.equal(String(p.steps[i + 1].keys[1].pubkey), String(setupKey), 'rent from the key');
+  });
+  const release = sq.settingsSyncIx({ settings: p.settings, signers: [setupKey], rentPayer: setupKey, actions: [{ kind: 'removeSigner', key: setupKey }] });
+  assert.deepEqual(p.release.data, release.data);
+  assert.deepEqual(p.release.keys.map(k => String(k.pubkey)), release.keys.map(k => String(k.pubkey)));
+  assert.equal(ownerSetupPlan({ owner, treasury, seed: 5n, policyKey, venues: [compiled] }).release, null, 'no key, nothing to take off');
+  for (const k of [owner, policyKey]) {
+    assert.throws(() => ownerSetupPlan({ owner, treasury, seed: 5n, policyKey, venues: [compiled], setupKey: k }), /the set-up key is the owner's or the bot's key/);
+  }
+});
+
 test('packSteps: order kept, a unit stays in one transaction, a step too big alone is refused', () => {
   const owner = key(), big = (n) => new TransactionInstruction({ programId: sq.PROGRAM_ID, keys: [], data: Buffer.alloc(n, 1) });
   const g = packSteps([big(500), big(500), [big(300), big(300)], big(100)], owner);
@@ -157,6 +179,17 @@ test('setupDone: what of an owner\'s set-up landed; a seed another account took 
   assert.deepEqual([...setupDone(mine, [true, true], { owner })].sort(), [0, 1, 2]);
   assert.equal(setupDone(settingsData({ signers: [key()], threshold: 1 }), [false], { owner }), null, 'another owner');
   assert.equal(setupDone(settingsData({ signers: [owner, key()], threshold: 1 }), [false], { owner }), null, 'a second owner');
+  // a set-up key this request made beside the owner: still the owner's vault; a stranger's, or the owner gone, is not
+  const k1 = key(), k2 = key();
+  assert.deepEqual([...setupDone(settingsData({ signers: [owner, k1], threshold: 1 }), [true, false], { owner, known: [k2, k1] })].sort(), [0, 1]);
+  assert.equal(setupDone(settingsData({ signers: [owner, k1, key()], threshold: 1 }), [false], { owner, known: [k1] }), null, 'a stranger beside the key');
+  assert.equal(setupDone(settingsData({ signers: [k1], threshold: 1 }), [false], { owner, known: [k1] }), null, 'the key without the owner');
+  // a policy beyond the plan's (made while another signer was on the account): someone else's
+  assert.deepEqual([...setupDone(settingsData({ signers: [owner], threshold: 1, policySeed: 2n }), [true, true], { owner })].sort(), [0, 1, 2]);
+  assert.equal(setupDone(settingsData({ signers: [owner], threshold: 1, policySeed: 3n }), [true, true], { owner }), null, 'a third policy of two');
+  assert.deepEqual(otherSigners(settingsData({ signers: [owner, k1, k2], threshold: 1 }), owner), [String(k1), String(k2)]);
+  assert.deepEqual(otherSigners(settingsData({ signers: [owner], threshold: 1 }), owner), []);
+  assert.deepEqual(otherSigners(null, owner), []);
 });
 
 test('lookup table addresses: each once, all of them, every venue\'s', () => {
@@ -169,14 +202,15 @@ test('lookup table addresses: each once, all of them, every venue\'s', () => {
 });
 
 // A Settings account with these owners, encoded as the program stores it.
-function settingsData({ signers, threshold, authority = PublicKey.default, timeLock = 0 }) {
+function settingsData({ signers, threshold, authority = PublicKey.default, timeLock = 0, policySeed = 0n }) {
   const disc = createHash('sha256').update('account:Settings').digest().subarray(0, 8);
   const parts = [disc, Buffer.alloc(16), authority.toBuffer()];
   const n = Buffer.alloc(2 + 4 + 8 + 8); n.writeUInt16LE(threshold, 0); n.writeUInt32LE(timeLock, 2); parts.push(n);
   parts.push(Buffer.from([1]), Buffer.alloc(32), Buffer.alloc(8), Buffer.from([255]));
   const len = Buffer.alloc(4); len.writeUInt32LE(signers.length); parts.push(len);
   for (const s of signers) parts.push(s.toBuffer(), Buffer.from([7]));
-  parts.push(Buffer.from([0]), Buffer.from([1]), Buffer.alloc(8), Buffer.from([0]));
+  const seed = Buffer.alloc(8); seed.writeBigUInt64LE(BigInt(policySeed));
+  parts.push(Buffer.from([0]), Buffer.from([1]), seed, Buffer.from([0]));
   return Buffer.concat(parts);
 }
 
@@ -186,6 +220,10 @@ test('onboarding check: catches the bot as owner, a wrong threshold, an authorit
   assert.deepEqual(connectProblems(settingsData({ signers: [a, b], threshold: 1 }), ok), []);
   assert.match(connectProblems(settingsData({ signers: [a, b, bot], threshold: 1 }), ok).join(), /is an owner/);
   assert.match(connectProblems(settingsData({ signers: [a, b], threshold: 2 }), ok).join(), /threshold is 2/);
+  // a new vault: no policy beyond the bot's
+  assert.deepEqual(connectProblems(settingsData({ signers: [a, b], threshold: 1, policySeed: 3n }), { ...ok, policies: 3 }), []);
+  assert.match(connectProblems(settingsData({ signers: [a, b], threshold: 1, policySeed: 4n }), { ...ok, policies: 3 }).join(), /a policy at seed 4: the bot's rules make 3/);
+  assert.deepEqual(connectProblems(settingsData({ signers: [a, b], threshold: 1, policySeed: 9n }), ok), [], 'a vault with venues added later: not counted');
   assert.match(connectProblems(settingsData({ signers: [a, b], threshold: 1, authority: bot }), ok).join(), /settings authority/);
   assert.match(connectProblems(settingsData({ signers: [a, b], threshold: 1, timeLock: 60 }), ok).join(), /time lock/);
   assert.match(connectProblems(settingsData({ signers: [a], threshold: 1 }), ok).join(), /owners are/);

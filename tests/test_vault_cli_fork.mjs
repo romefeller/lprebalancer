@@ -194,3 +194,118 @@ test('a seed another account took is planned again at the next free one', { time
   const stale = await fork.send(planned.steps.slice(0, 1), owner);
   assert.equal(stale.ok, false);
 });
+
+// A Tangem card signs at most 930 bytes of a message (its APDU); one policy's
+// creation is longer. The page's one-time set-up key signs and pays the
+// policies, then takes itself off: the owner's wallet signs only short
+// messages. On the real program: a set-up key that stays, a policy beyond
+// the rules, or a stranger's key on the account keep the bot from finishing.
+test('a set-up key: the owner signs the creation only, the key the policies, then the key leaves; the bot finishes only then', { timeout: 300_000 }, async () => {
+  const { Fork } = await import('./_svm.mjs');
+  const { finishSetup, setupRequest } = await import('../chains/solana/vault/cli.mjs');
+  const { packSteps } = await import('../chains/solana/vault/admin.mjs');
+  const { DLMM_PROGRAM, POOL, freeSeeds } = await import('./_vault.mjs');
+  const { TransactionMessage, SystemProgram } = require('@solana/web3.js');
+  const fork = new Fork();
+  await Promise.all([fork.program(sq.PROGRAM_ID), fork.program(DLMM_PROGRAM)]);
+  await fork.syncClock();
+  await fork.clone([sq.programConfigPda()]);
+  await fork.clone([sq.decodeProgramConfig(fork.get(sq.programConfigPda()).data).treasury]);
+  freeSeeds(fork);
+  const payer = Keypair.generate(), policyKey = Keypair.generate(), owner = fork.wallet(1), profit = Keypair.generate();
+  const key = Keypair.generate(), other = Keypair.generate(), fee = Keypair.generate();
+  const connection = fork.connection();
+  // the profit wallet and an operator's fee share, as the page's vaults have
+  const f = { owner: owner.publicKey.toBase58(), venue: 'meteora-dlmm', pools: POOL, payout: `${profit.publicKey.toBase58()},${fee.publicKey.toBase58()}` };
+  const keys = { connection, payer: payer.publicKey, policyKey: policyKey.publicKey };
+  const msgLen = (ixs, by) => new TransactionMessage({ payerKey: by, recentBlockhash: PublicKey.default.toBase58(), instructions: ixs })
+    .compileToLegacyMessage().serialize().length;
+  const first = await setupRequest({ ...f, 'setup-key': key.publicKey.toBase58() }, keys);
+  assert.ok(first.steps.slice(1).some(ix => msgLen([ix], key.publicKey) > 900), `a policy is longer than the owner's wallet signs: ${first.steps.slice(1).map(ix => msgLen([ix], key.publicKey))}`);
+  // the owner: the creation, the key its second signer, and the key's SOL
+  const grant = [first.steps[0], SystemProgram.transfer({ fromPubkey: owner.publicKey, toPubkey: key.publicKey, lamports: 200_000_000 })];
+  assert.ok(msgLen(grant, owner.publicKey) <= 900, `the owner signs ${msgLen(grant, owner.publicKey)} bytes`);
+  let r = await fork.send(grant, owner);
+  assert.ok(r.ok, r.logs.join('\n'));
+  let s = sq.decodeSettings(fork.get(first.settings).data);
+  assert.deepEqual(s.signers.map(x => x.key.toBase58()), [owner.publicKey.toBase58(), key.publicKey.toBase58()]);
+  // the key: one policy, then the page stops
+  r = await fork.send([first.steps[1]], key);
+  assert.ok(r.ok, r.logs.join('\n'));
+  // the request without the key's name: the vault is someone else's, planned again elsewhere
+  const blind = await setupRequest({ ...f, seed: first.seed }, keys);
+  assert.notEqual(blind.settings, first.settings);
+  // with it: the same vault, the policies left, the key among the others
+  const half = await setupRequest({ ...f, seed: first.seed, 'setup-key': key.publicKey.toBase58() }, keys);
+  assert.equal(half.settings, first.settings);
+  assert.deepEqual(half.others, [key.publicKey.toBase58()]);
+  assert.equal(half.steps.length, first.steps.length - 2);
+  for (const ixs of packSteps(half.steps, key.publicKey)) assert.ok((await fork.send(ixs, key)).ok);
+  // every policy exists, the key still signs: the bot does not finish
+  const keyOn = await setupRequest({ ...f, seed: first.seed, 'setup-keys': key.publicKey.toBase58() }, keys);
+  assert.deepEqual(keyOn.steps, []);
+  await assert.rejects(finishSetup(keyOn, { connection, payer, policyKey: policyKey.publicKey, log: () => {} }), /owners are .*expected/);
+  // a newer page's key: the owner takes the old one off and puts the new one on, in one short message
+  const swap = sq.settingsSyncIx({ settings: new PublicKey(first.settings), signers: [owner.publicKey], rentPayer: owner.publicKey,
+    actions: [{ kind: 'removeSigner', key: key.publicKey }, { kind: 'addSigner', signer: { key: other.publicKey } }] });
+  assert.ok(msgLen([swap], owner.publicKey) <= 900);
+  assert.ok((await fork.send([swap], owner)).ok);
+  s = sq.decodeSettings(fork.get(first.settings).data);
+  assert.deepEqual(s.signers.map(x => x.key.toBase58()), [owner.publicKey.toBase58(), other.publicKey.toBase58()]);
+  // the new key takes itself off and sends its SOL back to the owner, to the lamport
+  fork.fund(other.publicKey, 0.01);
+  const back = fork.balance(other.publicKey) - 5000;
+  const before = fork.balance(owner.publicKey);
+  const done = await setupRequest({ ...f, seed: first.seed, 'setup-key': other.publicKey.toBase58(), 'setup-keys': key.publicKey.toBase58() }, keys);
+  r = await fork.send([done.release, SystemProgram.transfer({ fromPubkey: other.publicKey, toPubkey: owner.publicKey, lamports: back })], other);
+  assert.ok(r.ok, r.logs.join('\n'));
+  assert.equal(fork.balance(other.publicKey), 0, 'the key holds nothing');
+  assert.equal(fork.balance(owner.publicKey) - before, back);
+  s = sq.decodeSettings(fork.get(first.settings).data);
+  assert.deepEqual(s.signers.map(x => x.key.toBase58()), [owner.publicKey.toBase58()]);
+  // the old key, still holding SOL, can do nothing to the vault now
+  r = await fork.send([sq.settingsSyncIx({ settings: new PublicKey(first.settings), signers: [key.publicKey], rentPayer: key.publicKey,
+    actions: [{ kind: 'removeSigner', key: owner.publicKey }] })], key);
+  assert.equal(r.ok, false, 'a key off the vault changes nothing');
+  const whole = await setupRequest({ ...f, seed: first.seed }, keys);
+  assert.deepEqual([whole.steps, whole.others], [[], []]);
+  fork.fund(payer.publicKey, 0.05);
+  const out = await finishSetup(whole, { connection, payer, policyKey: policyKey.publicKey, log: () => {} });
+  assert.deepEqual(out.owners, [owner.publicKey.toBase58()]);
+});
+
+test('a policy beyond the rules (made while a second signer was on the account): planned again elsewhere, never finished', { timeout: 300_000 }, async () => {
+  const { Fork } = await import('./_svm.mjs');
+  const { setupRequest } = await import('../chains/solana/vault/cli.mjs');
+  const { connectProblems } = await import('../chains/solana/vault/admin.mjs');
+  const { compile } = await import('../chains/solana/vault/policy.mjs');
+  const { DLMM_PROGRAM, POOL, freeSeeds } = await import('./_vault.mjs');
+  const { SystemProgram } = require('@solana/web3.js');
+  const fork = new Fork();
+  await Promise.all([fork.program(sq.PROGRAM_ID), fork.program(DLMM_PROGRAM)]);
+  await fork.syncClock();
+  await fork.clone([sq.programConfigPda()]);
+  await fork.clone([sq.decodeProgramConfig(fork.get(sq.programConfigPda()).data).treasury]);
+  freeSeeds(fork);
+  const payer = Keypair.generate(), policyKey = Keypair.generate(), owner = fork.wallet(1), key = fork.wallet(1);
+  const connection = fork.connection();
+  const base = { owner: owner.publicKey.toBase58(), venue: 'meteora-dlmm', pools: POOL, payout: owner.publicKey.toBase58() };
+  const keys = { connection, payer: payer.publicKey, policyKey: policyKey.publicKey };
+  const plan = await setupRequest({ ...base, 'setup-key': key.publicKey.toBase58() }, keys);
+  assert.ok((await fork.send([plan.steps[0], SystemProgram.transfer({ fromPubkey: owner.publicKey, toPubkey: key.publicKey, lamports: 1 })], owner)).ok);
+  for (const ix of plan.steps.slice(1)) assert.ok((await fork.send([ix], key)).ok);
+  // one more policy, for the key itself, at the next seed; then the key leaves
+  const n = plan.steps.length - 1;
+  const extra = sq.policyPda(new PublicKey(plan.settings), n + 1);
+  const mine = compile('meteora-dlmm', { vault: new PublicKey(plan.vault), payer: key.publicKey, pools: [new PublicKey(POOL)], payouts: [] });
+  const r = await fork.send([sq.settingsSyncIx({ settings: new PublicKey(plan.settings), signers: [key.publicKey], rentPayer: key.publicKey, extra: [extra],
+    actions: [{ kind: 'policyCreate', seed: n + 1, policy: mine.policies[0].policy, signers: [{ key: key.publicKey }] }] })], key);
+  assert.ok(r.ok, r.logs.join('\n'));
+  assert.ok((await fork.send([plan.release], key)).ok);
+  assert.equal(sq.decodeSettings(fork.get(plan.settings).data).policySeed, BigInt(n + 1));
+  // the plan's seed is no longer this owner's alone: planned again elsewhere
+  const again = await setupRequest({ ...base, seed: plan.seed, 'setup-keys': key.publicKey.toBase58() }, keys);
+  assert.notEqual(again.settings, plan.settings);
+  assert.match(connectProblems(fork.get(plan.settings).data, { owners: [owner.publicKey], threshold: 1, botKeys: [payer.publicKey], policies: n }).join(),
+    new RegExp(`a policy at seed ${n + 1}: the bot's rules make ${n}`));
+});

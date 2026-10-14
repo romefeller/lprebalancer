@@ -6,7 +6,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fc from 'fast-check';
-import { KNOWN, safeLink, walletLink } from '../onboard/web/wallet_link.mjs';
+import { answerOf, cardLimit, KNOWN, safeLink, walletLink } from '../onboard/web/wallet_link.mjs';
 
 test('the wallet\'s own deep link first, then its universal link, then a known wallet, then wc:', () => {
   assert.deepEqual(walletLink({ name: 'Tangem', redirect: { native: 'tangem://', universal: 'https://app.tangem.com/wc' } }),
@@ -46,4 +46,22 @@ test('links that could run in the page, or are not links, are never offered', ()
     assert.ok(!/^\s*(javascript|data|vbscript|file|blob|about|http):/i.test(l.href), l.href);
     if (l.kind === 'native') assert.equal(l.href, native.trim());
   }), { numRuns: 500 });
+});
+
+test('a wallet\'s answer: an object as it came; JSON text read; a loose signature read (Tangem\'s Android app); anything else as it came', () => {
+  const sig = '5'.repeat(87);
+  assert.deepEqual(answerOf({ signature: sig }), { signature: sig });
+  assert.deepEqual(answerOf(['a', 'b']), ['a', 'b']);
+  assert.equal(answerOf(null), null);
+  assert.deepEqual(answerOf(JSON.stringify({ transactions: ['x'] })), { transactions: ['x'] });
+  assert.deepEqual(answerOf(`{ signature: "${sig}" }`), { signature: sig });
+  assert.deepEqual(answerOf(`{signature:'${sig}'}`), { signature: sig });
+  assert.equal(answerOf('{ signature: "" }'), '{ signature: "" }', 'no signature: as it came, the page says so');
+  assert.equal(answerOf(`{ signature: "${'0'.repeat(87)}" }`), `{ signature: "${'0'.repeat(87)}" }`, 'not base58: no signature');
+  fc.assert(fc.property(fc.string(), (t) => { const out = answerOf(t); assert.ok(out === t || typeof out === 'object' || typeof out === 'number' || typeof out === 'boolean' || out === null); }));
+});
+
+test('a card\'s limit: Tangem signs 930 bytes; other wallets have none known', () => {
+  for (const n of ['Tangem', 'Tangem Wallet', 'tangem']) assert.equal(cardLimit(n), 930);
+  for (const n of ['Phantom', 'Ledger Live', '', undefined, null]) assert.equal(cardLimit(n), null);
 });

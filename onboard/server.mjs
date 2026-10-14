@@ -271,13 +271,16 @@ export function makeServer(cfg, deps) {
 
   // The set-up of a request for the owner's wallet: the transactions (Solana)
   // or calls (EVM) that create the owner's vault with the bot's rules, deposit
-  // and pay the bot's gas, all signed by the owner in one approval. The
-  // request's terms, with the vault the set-up creates.
-  const setupOf = (adapter, r, planned) => adapter.setup({ owner: r.owner, profitWallet: r.profitWallet ?? r.profit_wallet,
-    feeWallet: r.feeWallet ?? r.fee_wallet ?? null, token: r.token, deposit: r.deposit, gas: r.gas, planned });
+  // and pay the bot's gas. Solana: the page's one-time set-up key
+  // (`setupKey`, its public key) signs the bot's policies, which are too long
+  // for a hardware wallet (solana.mjs setupTxs); the owner signs the rest.
+  // The request's terms, with the vault the set-up creates.
+  const setupOf = (adapter, r, planned, more = {}) => adapter.setup({ owner: r.owner, profitWallet: r.profitWallet ?? r.profit_wallet,
+    feeWallet: r.feeWallet ?? r.fee_wallet ?? null, token: r.token, deposit: r.deposit, gas: r.gas, planned, ...more });
 
   function setupAnswer(r, s, expires) {
     return { name: r.name, chain: r.chain, done: s.done, transactions: s.transactions ?? [], calls: s.calls ?? null, chainId: s.chainId ?? null,
+      owner: s.owner ?? [], key: s.key ?? [], fund: s.fund ?? [], keyFund: s.keyFund ?? null,
       cost: s.cost ?? null, expires: new Date(expires).toISOString(),
       terms: { token: r.token, amount: r.amount, deposit: r.deposit, gas: r.gas, payer: r.payer,
         profitWallet: r.profitWallet ?? r.profit_wallet, feeWallet: r.feeWallet ?? r.fee_wallet ?? null },
@@ -297,7 +300,8 @@ export function makeServer(cfg, deps) {
     if (!adapter.venueReady()) throw new HttpError(503, `no venue on ${body.chain} can hold a vault yet`);
     await checkRoom(f);
     if (limits.creates.full(ip) || limits.createsTotal.full('all')) throw new HttpError(429, 'too many new vaults today; try tomorrow');
-    const s = await setupOf(adapter, { ...f, payer: adapter.keys.payee }, null);
+    const s = await setupOf(adapter, { ...f, payer: adapter.keys.payee }, null, { setupKey: I.text(body.setupKey) || null,
+      notBefore: Math.floor(now() / 1000) - cfg.paymentSlackS });
     const nonce = I.newNonce(), expires = now() + cfg.intentTtlS * 1000;
     const text = I.message(f, cfg.chains[f.chain], { site: cfg.site, nonce, expires, payer: adapter.keys.payee });
     limits.creates.add(ip); limits.createsTotal.add('all');
@@ -309,9 +313,11 @@ export function makeServer(cfg, deps) {
   }
 
   // POST /api/setup: the set-up of a request still waiting for it, built
-  // again: what the chain lacks of it (a resume after a partial set-up, or
-  // a blockhash that expired), with today's gas. A request whose set-up is on
-  // chain answers done: the page goes on to /api/pay.
+  // again: what the chain lacks of it (a resume after a partial set-up, the
+  // set-up key's last step once the policies exist, or a blockhash that
+  // expired), with today's gas. Solana: `setupKey`, the page's set-up key. A
+  // request whose set-up is on chain answers done: the page goes on to
+  // /api/pay.
   async function setupAgain(ip, body) {
     gate(ip, body);
     const r = await requestOf(body.name, false);
@@ -320,7 +326,8 @@ export function makeServer(cfg, deps) {
     // today's gas: the page pins it, and a request from before a change carries the old figure
     const terms = I.fields({ chain: r.chain, token: r.token, amount: r.amount, owner: r.owner, profitWallet: r.profit_wallet, name: r.name },
       { ...cfg, reservedNames: [] }, adapter.keys.public);
-    const s = await setupOf(adapter, { ...r, gas: terms.gas, deposit: terms.deposit }, r.connected?.planned ?? null);
+    const s = await setupOf(adapter, { ...r, gas: terms.gas, deposit: terms.deposit }, r.connected?.planned ?? null,
+      { setupKey: I.text(body.setupKey) || null, notBefore: Math.floor(r.created_at) - cfg.paymentSlackS });
     const expires = now() + cfg.intentTtlS * 1000;
     await deps.store('planned', { id: r.id, connected: { planned: s.planned }, gas: terms.gas, deposit: terms.deposit, expires });
     log({ event: 'setup_again', chain: r.chain, name: r.name, vault: s.planned.vault, done: s.done });

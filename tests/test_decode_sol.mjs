@@ -9,7 +9,7 @@ import { createRequire } from 'module';
 import fc from 'fast-check';
 import * as sq from '../chains/solana/vault/squads.mjs';
 import { RULES, compile, instructionsOf } from '../chains/solana/vault/policy.mjs';
-import { ata, decodeSol, decodeSolSet, expectedPolicies, MAX_PRIORITY_LAMPORTS } from '../onboard/decode_sol.mjs';
+import { ata, decodeSol, decodeSolSet, expectedPolicies, MAX_PRIORITY_LAMPORTS, OWNER_MESSAGE_BYTES } from '../onboard/decode_sol.mjs';
 import { ownerSetupPlan, packSteps } from '../chains/solana/vault/admin.mjs';
 import SOLANA from '../chains/solana/solana.json' with { type: 'json' };
 
@@ -461,7 +461,7 @@ test('edges: a policy update with hooks, limits, another account, threshold, tim
       pools: POOLS[VENUE].map(p => new PublicKey(p)), payouts: payoutWallets.map(w => new PublicKey(ata(w, USDC))) }).policies[0].policy, signers: [{ key: POLICY_KEY }] }] });
   refused(decodeSol(wire([two]), e, PINS), /your wallet alone|signatures of/);
   const remove = sq.settingsSyncIx({ settings: SETTINGS, signers: [OWNER], rentPayer: OWNER, actions: [{ kind: 'removeSigner', key: OWNER }] });
-  refused(decodeSol(wire([remove]), e, PINS), /other than a policy update/);
+  refused(decodeSol(wire([remove]), e, PINS), /changes your vault's signers/);
   refused(decodeSol(wire([ix, transfer(OWNER, STRANGER, 1)]), e, PINS), /more than update/);
   const rentByOther = sq.settingsSyncIx({ settings: SETTINGS, signers: [OWNER], rentPayer: STRANGER, extra: [new PublicKey(POLICIES[0])], actions: [] });
   refused(decodeSol(wire([rentByOther]), e, PINS), /rent is paid by someone else|signatures of/);
@@ -546,4 +546,134 @@ test('setup edges: the creator, its programs and memo; a policy\'s signers, thre
   refused(decodeSolSet(setupSet(), setupExpect({ venues: [] }), PINS), /no venue for the bot/);
   refused(decodeSolSet(setupSet(), setupExpect({ venues: ['nowhere'] }), PINS), /nowhere has no rules in git/);
   refused(decodeSolSet(setupSet(), setupExpect({ vault: VAULT.toBase58() }), PINS), /not the account of these settings/);
+});
+
+// --- the set-up with the page's one-time set-up key (a hardware wallet signs 930 bytes at most) ---
+
+const KEY = Keypair.generate().publicKey, KEY2 = key();
+const keyExpect = (over = {}) => setupExpect({ setupKey: KEY.toBase58(), ...over });
+const keyPlan = (over = {}) => ownerSetupPlan({ owner: OWNER, treasury: TREASURY, seed: SEED, policyKey: POLICY_KEY, venues: setupCompiled(), memo: 'lp-bot vault',
+  setupKey: KEY, ...over });
+const keyFund = (lamports = 20_000_000n) => transfer(OWNER, KEY, lamports);
+// the set as solana.mjs setupTxs builds it, in the order the page sends it: yours, the key's, the funding
+function keySet({ plan = keyPlan(), grant = null, keyTxs = null, fund = [...solDeposit(), transfer(OWNER, PAYER, GAS)] } = {}) {
+  const owner = grant ?? [plan.steps[0], keyFund()];
+  const policies = keyTxs ?? plan.steps.slice(1).map(ix => [ix]);
+  return [...(owner.length ? [wire(owner)] : []), ...policies.map(ixs => wire(ixs, KEY)), ...(fund.length ? [wire(fund)] : [])];
+}
+
+test('setup with a set-up key: your wallet signs the creation and the key\'s SOL, the key each policy, the funding last; each of yours fits a card', () => {
+  const set = keySet();
+  const r = decodeSolSet(set, keyExpect(), PINS);
+  ok(r);
+  const text = r.lines.join('\n');
+  assert.match(text, /Create your vault .*you its owner, threshold 1; this page's one-time set-up key .* its second signer until the bot's rules are on it/);
+  assert.match(text, /Send 0\.02 SOL from your wallet .* to this page's one-time set-up key .*: the rent of the bot's rules and the fees; what is left comes back to you/);
+  assert.equal(text.match(/exactly the rules in git; signed and paid by the set-up key/g).length, setupCompiled()[0].policies.length);
+  assert.match(text, /Funding, sent last, once the set-up key is off your vault: Send 0\.1186 SOL/);
+  // a policy alone is longer than a Tangem card signs; what your wallet signs is not
+  const len = (b64) => Transaction.from(Buffer.from(b64, 'base64')).compileMessage().serialize().length;
+  assert.ok(set.slice(1, -1).some(t => len(t) > 930));
+  assert.ok(len(set[0]) <= OWNER_MESSAGE_BYTES && len(set.at(-1)) <= OWNER_MESSAGE_BYTES);
+  // a resume: the key put on the vault that exists (an older one taken off), the rest of the policies, the funding
+  const p = keyPlan();
+  const swap = sq.settingsSyncIx({ settings: SETUP_SETTINGS, signers: [OWNER], rentPayer: OWNER,
+    actions: [{ kind: 'removeSigner', key: KEY2 }, { kind: 'addSigner', signer: { key: KEY } }] });
+  ok(decodeSolSet(keySet({ grant: [swap, keyFund(10_000_000n)], keyTxs: [[p.steps[2]]] }), keyExpect({ created: false }), PINS));
+  // the key on the vault already: no part of yours but the funding
+  ok(decodeSolSet(keySet({ grant: [], keyTxs: [[p.steps[2]]] }), keyExpect(), PINS));
+  // the key's last step: it takes itself off and sends its SOL back; then the funding
+  const back = [p.release, transfer(KEY, OWNER, 1_234_567n)];
+  const release = decodeSolSet([wire(back, KEY), wire([...solDeposit(), transfer(OWNER, PAYER, GAS)])], keyExpect(), PINS);
+  ok(release);
+  assert.match(release.lines.join('\n'), /The set-up key takes itself off your vault: you are its only owner again/);
+  ok(decodeSolSet([wire(back, KEY)], keyExpect(), PINS), 'the funding on chain already: none');
+  // an older key the owner takes off, the vault whole
+  ok(decodeSolSet([wire([sq.settingsSyncIx({ settings: SETUP_SETTINGS, signers: [OWNER], rentPayer: OWNER, actions: [{ kind: 'removeSigner', key: KEY2 }] })]),
+    wire([...solDeposit(), transfer(OWNER, PAYER, GAS)])], keyExpect(), PINS));
+});
+
+test('setup with a set-up key: every way it could go wrong is refused', () => {
+  const e = keyExpect(), p = keyPlan();
+  const fund = [...solDeposit(), transfer(OWNER, PAYER, GAS)];
+  const policies = p.steps.slice(1).map(ix => [ix]);
+  // the creation names another second signer, or none, or the key with fewer rights
+  const create = (signers) => sq.createSmartAccountIx({ creator: OWNER, treasury: TREASURY, seed: SEED, threshold: 1, memo: 'lp-bot vault', signers }).ix;
+  for (const [signers, what] of [[[{ key: OWNER }, { key: STRANGER }], 'a stranger'], [[{ key: OWNER }], 'no key'], [[{ key: OWNER }, { key: KEY, permissions: 1 }], 'fewer rights'],
+    [[{ key: KEY }, { key: OWNER }], 'the key first'], [[{ key: OWNER }, { key: KEY }, { key: STRANGER }], 'a third']]) {
+    refused(decodeSolSet(keySet({ grant: [create(signers), keyFund()] }), e, PINS), /not your wallet and this page's set-up key/, what);
+  }
+  // the page's key is the bot's or your wallet
+  refused(decodeSolSet(keySet(), keyExpect({ setupKey: PAYER.toBase58() }), PINS), /the set-up key is your wallet or a key of the bot/);
+  // someone else signs a policy, or your wallet does (too long for a card), or the key's rent is paid by you
+  refused(decodeSolSet([wire([p.steps[0], keyFund()]), ...policies.map(ixs => wire(ixs, STRANGER)), wire(fund)], e, PINS), /fee payer is .*not your wallet/);
+  const byOwner = keyPlan({ setupKey: null });
+  refused(decodeSolSet([wire([p.steps[0], keyFund()]), ...byOwner.steps.slice(1).map(ix => wire([ix])), wire(fund)], e, PINS),
+    /with a set-up key, your wallet signs no policy|a hardware wallet signs no more than 900/);
+  // more SOL to the key than its policies take; SOL to it with no policy; SOL to it from the key's part
+  refused(decodeSolSet(keySet({ grant: [p.steps[0], keyFund(10n ** 9n)] }), e, PINS), /it sends the set-up key 1 SOL; 2 policies take no more than .*/);
+  refused(decodeSolSet([wire([keyFund()]), wire(fund)], e, PINS), /it sends the set-up key 0\.02 SOL; 0 policies take no more than 0/);
+  // the key moves money elsewhere, or back before it is off the vault, or takes you off
+  refused(decodeSolSet(keySet({ keyTxs: [[p.steps[1], transfer(KEY, STRANGER, 5n)], [p.steps[2]]] }), e, PINS), /the set-up key may only send its SOL back to your wallet/);
+  refused(decodeSolSet(keySet({ keyTxs: [[p.steps[1], transfer(KEY, OWNER, 5n)], [p.steps[2]]] }), e, PINS), /once it is off your vault/);
+  const offOwner = sq.settingsSyncIx({ settings: SETUP_SETTINGS, signers: [KEY], rentPayer: KEY, actions: [{ kind: 'removeSigner', key: OWNER }] });
+  refused(decodeSolSet(keySet({ keyTxs: [...policies, [offOwner]] }), e, PINS), /it takes your wallet off your vault/);
+  const offOther = sq.settingsSyncIx({ settings: SETUP_SETTINGS, signers: [KEY], rentPayer: KEY, actions: [{ kind: 'removeSigner', key: KEY2 }] });
+  refused(decodeSolSet(keySet({ keyTxs: [...policies, [offOther]] }), e, PINS), /the set-up key takes .* off your vault/);
+  const addOther = sq.settingsSyncIx({ settings: SETUP_SETTINGS, signers: [KEY], rentPayer: KEY, actions: [{ kind: 'addSigner', signer: { key: STRANGER } }] });
+  refused(decodeSolSet(keySet({ keyTxs: [...policies, [addOther]] }), e, PINS), /it adds the signer .* to your vault/);
+  // your wallet puts another key on the vault
+  const putOther = sq.settingsSyncIx({ settings: SETUP_SETTINGS, signers: [OWNER], rentPayer: OWNER, actions: [{ kind: 'addSigner', signer: { key: STRANGER } }] });
+  refused(decodeSolSet(keySet({ grant: [putOther, keyFund()], keyTxs: [[p.steps[2]]] }), e, PINS), /not this page's set-up key/);
+  // a policy after the key left; the key's part after the funding; your part after the key's
+  refused(decodeSolSet(keySet({ keyTxs: [[p.steps[1]], [p.release], [p.steps[2]]] }), e, PINS), /a policy after the set-up key took itself off/);
+  refused(decodeSolSet([wire([p.steps[0], keyFund()]), wire(fund), ...policies.map(ixs => wire(ixs, KEY))], e, PINS), /out of order|after the deposit/);
+  refused(decodeSolSet([...keySet({ fund: [] }), wire([keyFund()]), wire(fund)], e, PINS), /SOL to the set-up key comes after the set-up key's part: out of order/);
+  // the funding: the gas to someone else, or none and the deposit alone
+  refused(decodeSolSet(keySet({ fund: [...solDeposit(), transfer(OWNER, STRANGER, GAS)] }), e, PINS), /0 payments to the bot's gas key/);
+  // a policy the rules do not make, from the key
+  const wrong = keyPlan({ venues: setupCompiled({ payouts: [new PublicKey(ata(STRANGER.toBase58(), USDC))] }) });
+  refused(decodeSolSet(keySet({ keyTxs: wrong.steps.slice(1).map(ix => [ix]) }), e, PINS), /differs from the rules in git/);
+  // a message of yours longer than a card signs
+  const memo = sq.createSmartAccountIx({ creator: OWNER, treasury: TREASURY, seed: SEED, threshold: 1, memo: 'x'.repeat(700),
+    signers: [{ key: OWNER }, { key: KEY }] }).ix;
+  refused(decodeSolSet(keySet({ grant: [memo, keyFund()] }), e, PINS), /your wallet would sign \d+ bytes; a hardware wallet signs no more than 900/);
+  // without the page's key in what it expects, a set the key signs is refused: only your wallet may sign
+  refused(decodeSolSet(keySet(), setupExpect(), PINS), /fee payer is .*not your wallet/);
+});
+
+test('setup with a set-up key, edges: the order and who pays, the card\'s bound to the byte, the key only in a set-up\'s set', () => {
+  const e = keyExpect(), p = keyPlan();
+  const fund = [...solDeposit(), transfer(OWNER, PAYER, GAS)];
+  const policies = p.steps.slice(1).map(ixs => wire([ixs], KEY));
+  assert.match(decodeSolSet(keySet(), e, PINS).lines.join('\n'), /then it takes itself off \(memo "lp-bot vault"\); rent from your wallet/);
+  // out of order: the key's part after the funding; the creation after the key's SOL
+  refused(decodeSolSet([wire([p.steps[0], keyFund()]), wire(fund), ...policies], e, PINS), /a set-up key's transaction comes after the deposit: out of order/);
+  refused(decodeSolSet([wire([keyFund()]), wire([p.steps[0]]), ...policies, wire(fund)], e, PINS), /the vault's creation is not the first step/);
+  refused(decodeSolSet([wire([p.steps[0], keyFund()]), ...policies, wire([keyFund(1n)]), wire(fund)], e, PINS),
+    /SOL to the set-up key comes after the set-up key's part: out of order/);
+  // the key's policy with its rent from your wallet, or signed by someone else beside it
+  const rentFromYou = sq.settingsSyncIx({ settings: SETUP_SETTINGS, signers: [KEY], rentPayer: OWNER, extra: [p.steps[1].keys[5].pubkey],
+    actions: [{ kind: 'policyCreate', seed: 1, policy: setupCompiled()[0].policies[0].policy, signers: [{ key: POLICY_KEY }] }] });
+  refused(decodeSolSet(keySet({ keyTxs: [[rentFromYou], [p.steps[2]]] }), e, PINS), /the rent is paid by someone else than the set-up key/);
+  const byStranger = sq.settingsSyncIx({ settings: SETUP_SETTINGS, signers: [STRANGER], rentPayer: KEY, extra: [p.steps[1].keys[5].pubkey],
+    actions: [{ kind: 'policyCreate', seed: 1, policy: setupCompiled()[0].policies[0].policy, signers: [{ key: POLICY_KEY }] }] });
+  refused(decodeSolSet(keySet({ keyTxs: [[byStranger], [p.steps[2]]] }), e, PINS), /it is not signed by the set-up key alone/);
+  // your wallet's part signed by the key as well: only one signer
+  refused(decodeSolSet([wire([p.steps[0], keyFund(), transfer(KEY, OWNER, 1n)]), ...policies, wire(fund)], e, PINS), /only your wallet may sign/);
+  // the card's bound, to the byte: a message of exactly OWNER_MESSAGE_BYTES passes, one more is refused
+  const grantOf = (n) => [sq.createSmartAccountIx({ creator: OWNER, treasury: TREASURY, seed: SEED, threshold: 1, memo: 'm'.repeat(n),
+    signers: [{ key: OWNER }, { key: KEY }] }).ix, keyFund()];
+  const bytes = (n) => Transaction.from(Buffer.from(wire(grantOf(n)), 'base64')).compileMessage().serialize().length;
+  let n = OWNER_MESSAGE_BYTES - bytes(0);
+  while (bytes(n) > OWNER_MESSAGE_BYTES) n--;            // a longer memo's length takes a byte more
+  assert.equal(bytes(n), OWNER_MESSAGE_BYTES);
+  assert.equal(bytes(n + 1), OWNER_MESSAGE_BYTES + 1);
+  const at = (k) => decodeSolSet(keySet({ grant: grantOf(k) }), e, PINS).problems.filter(x => /hardware wallet/.test(x));
+  assert.deepEqual(at(n), [], 'exactly the bound');
+  assert.equal(at(n + 1).length, 1, 'one byte more');
+  // the key signs only in a set-up's set, never in another kind's
+  refused(decodeSolSet([policies[0]], { ...vaultExpect('approve'), setupKey: KEY.toBase58() }, PINS), /fee payer is .*not your wallet/);
+  // a kind no set has
+  refused(decodeSolSet([wire(fund)], vaultExpect('withdraw'), PINS), /nothing to check a withdraw against in a set/);
 });

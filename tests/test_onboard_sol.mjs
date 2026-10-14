@@ -10,8 +10,12 @@ import * as sq from '../chains/solana/vault/squads.mjs';
 import { loadConfig } from '../onboard/server.mjs';
 import * as I from '../onboard/intent.mjs';
 import { broadcast, checkDeposit, confirm, context, depositTxs, depositVerdict, findDeposit, findFunding, funding, ownerTxs, setupCost, setupState, setupTxs, status,
-  vaultVenues, SETTINGS_ACCOUNT_BYTES, POLICY_ACCOUNT_BYTES, TOKEN_ACCOUNT_BYTES } from '../onboard/solana.mjs';
+  vaultVenues, SETTINGS_ACCOUNT_BYTES, POLICY_ACCOUNT_BYTES, TOKEN_ACCOUNT_BYTES, SETUP_KEYS_MAX } from '../onboard/solana.mjs';
 import { toRaw } from '../onboard/units.mjs';
+import { ata, decodeSolSet, OWNER_MESSAGE_BYTES } from '../onboard/decode_sol.mjs';
+import { compile, RULES } from '../chains/solana/vault/policy.mjs';
+import { ownerSetupPlan } from '../chains/solana/vault/admin.mjs';
+import SOLANA from '../chains/solana/solana.json' with { type: 'json' };
 
 const require = createRequire(import.meta.url);
 const { Keypair, PublicKey, SystemInstruction, SystemProgram, Transaction, TransactionMessage } = require('@solana/web3.js');
@@ -214,7 +218,7 @@ test('the vault\'s state: balances, whether every policy still names the bot, it
   assert.equal((await at([])).botActive, false, 'no policy at all: no bot');
 });
 
-// --- the owner's own set-up, with the set-up reader stubbed ----------------------------------
+// --- the owner's own set-up, over a chain kept here ---------------------------------------------
 
 const PAYER = KEYS.payer.publicKey;
 const programConfig = (fee = 0n) => {
@@ -230,85 +234,175 @@ const usdcAccount = (usdc) => {
     state: 1, isNativeOption: 0, isNative: 0n, delegatedAmount: 0n, closeAuthorityOption: 0, closeAuthority: PublicKey.default }, data);
   return { data, owner: spl.TOKEN_PROGRAM_ID, lamports: 2_039_280, executable: false };
 };
-const setupConn = (balance = 10e9, fee = 0n, usdc = 30_000_000n) => ({ ...conn, getBalance: async () => balance,
+// the owner's wallet holds `balance` lamports; the set-up key `held`
+const setupConn = (balance = 10e9, fee = 0n, usdc = 30_000_000n, held = 0) => ({ ...conn,
+  getBalance: async (k) => (KEY && k.equals(KEY.publicKey) ? held : balance),
   getAccountInfo: async (k) => (k.equals(sq.programConfigPda()) ? { data: programConfig(fee) } : k.toBase58() === C.tokens.USDC.mint
     ? { owner: spl.TOKEN_PROGRAM_ID } : usdcAccount(usdc)) });
-function setupStub({ steps = 3, done = [], settings = sq.settingsPda(42n).toBase58() } = {}) {
+let KEY = null;
+const OPERATOR = SOLANA.operator_profit_wallet, POOL = C.pools['raydium-clmm'], TREASURY = Keypair.generate().publicKey;
+const rent = (n) => 890_880 + 6960 * n;
+
+// The set-up reader (cli.mjs setupRequest) over a chain kept here: the real
+// plan (admin.mjs ownerSetupPlan, Raydium) for the flags it is given, the
+// vault `created` or not, `made` of its policies, the signers beside the
+// owner (`others`). `funded`: the funding search's answer.
+function chainStub({ created = false, made = 0, others = [], funded = null } = {}) {
   const calls = [];
-  const step = (i) => SystemProgram.transfer({ fromPubkey: new PublicKey(OWNER), toPubkey: new PublicKey(OTHER), lamports: i + 1 });
-  return { calls, request: async (f, keys) => {
+  return { calls, find: async () => funded, request: async (f, keys) => {
     calls.push([f, keys]);
-    return { seed: f.seed ?? '42', settings, vault: sq.vaultPda(new PublicKey(settings)).toBase58(), report: { venues: {} }, done,
-      steps: Array.from({ length: steps }, (_, i) => step(i)) };
+    const seed = BigInt(f.seed ?? '42'), settings = sq.settingsPda(seed), vault = sq.vaultPda(settings);
+    const compiled = compile('raydium-clmm', { vault, payer: keys.payer, pools: [new PublicKey(POOL)],
+      payouts: f.payout.split(',').map(w => new PublicKey(ata(w, SOLANA.usdc_mint))) });
+    const plan = ownerSetupPlan({ owner: f.owner, treasury: TREASURY, seed, policyKey: keys.policyKey, venues: [compiled], memo: 'lp-bot vault',
+      setupKey: f['setup-key'] ?? null });
+    const done = [...(created ? [0] : []), ...Array.from({ length: made }, (_, i) => i + 1)];
+    return { seed: String(seed), settings: settings.toBase58(), vault: vault.toBase58(), done, others, release: plan.release,
+      report: { venues: { 'raydium-clmm': { policies: plan.policies.map(String), pools: [POOL] } } }, steps: plan.steps.filter((_, i) => !done.includes(i)) };
   } };
 }
-const A = { owner: OWNER, profitWallet: OWNER, feeWallet: OTHER, token: 'SOL', deposit: '0.5', gas: '0.1186', planned: null };
+const A = { owner: OWNER, profitWallet: OWNER, feeWallet: OPERATOR, token: 'SOL', deposit: '0.5', gas: '0.1186', planned: null };
+const PINS = { payer: PAYER.toBase58(), policyKey: KEYS.policyKey.publicKey.toBase58(), operator: OPERATOR,
+  pools: { 'raydium-clmm': [POOL] }, rules: RULES, solana: SOLANA };
+// what the page expects of this set-up (main.mjs setupExpect)
+const pageExpect = (out, over = {}) => ({ kind: 'setup', owner: OWNER, seed: out.planned.seed, settings: out.planned.settings, vault: out.planned.vault,
+  venues: ['raydium-clmm'], pools: { 'raydium-clmm': [POOL] }, payoutWallets: [OWNER, OPERATOR], mint: SOLANA.native_mint, raw: '500000000',
+  gasRaw: '118600000', setupKey: KEY.publicKey.toBase58(), ...over });
+const txOf = (b64) => Transaction.from(Buffer.from(b64, 'base64'));
+const all = (out) => [...out.owner, ...out.key, ...out.fund];
+const ownerBytes = (b64) => txOf(b64).compileMessage().serialize().length;
 
-test('set-up: the owner\'s transactions, the deposit and the gas with the last step; the bot\'s keys only named', async () => {
-  const stub = setupStub();
-  const out = await setupTxs(setupConn(), KEYS, C, A, stub);
+test('set-up: the owner signs the creation and the key\'s SOL; the set-up key each policy; the funding last; every message the owner signs fits a card', async () => {
+  KEY = Keypair.generate();
+  const stub = chainStub();
+  const out = await setupTxs(setupConn(), KEYS, C, { ...A, setupKey: KEY.publicKey.toBase58() }, stub);
   const [f, keys] = stub.calls[0];
   const venues = vaultVenues(C);
-  assert.deepEqual(f, { owner: OWNER, venue: venues.join(','), pools: venues.map(v => C.pools[v]).join(','), payout: `${OWNER},${OTHER}`,
-    'payout-mint': C.payoutMint });
+  assert.deepEqual(f, { owner: OWNER, venue: venues.join(','), pools: venues.map(v => C.pools[v]).join(','), payout: `${OWNER},${OPERATOR}`,
+    'payout-mint': C.payoutMint, 'setup-keys': KEY.publicKey.toBase58(), 'setup-key': KEY.publicKey.toBase58() });
   assert.deepEqual([keys.payer.toBase58(), keys.policyKey.toBase58()], [PAYER.toBase58(), KEYS.policyKey.publicKey.toBase58()]);
-  assert.deepEqual(out.planned, { seed: '42', settings: sq.settingsPda(42n).toBase58(), vault: sq.vaultPda(sq.settingsPda(42n)).toBase58() });
-  assert.equal(out.done, false);
-  const txs = out.transactions.map(t => Transaction.from(Buffer.from(t, 'base64')));
-  for (const t of txs) {
-    assert.equal(t.feePayer.toBase58(), OWNER);
-    assert.equal(t.recentBlockhash, BLOCKHASH);
-    assert.deepEqual(t.signatures.map(s => s.publicKey.toBase58()), [OWNER], 'only the owner signs');
+  assert.deepEqual(out.planned, { seed: '42', settings: sq.settingsPda(42n).toBase58(), vault: sq.vaultPda(sq.settingsPda(42n)).toBase58(),
+    setupKeys: [KEY.publicKey.toBase58()] });
+  assert.deepEqual([out.done, out.owner.length, out.key.length, out.fund.length], [false, 1, 2, 1]);
+  for (const t of [...out.owner, ...out.fund]) {
+    assert.deepEqual(txOf(t).signatures.map(s => s.publicKey.toBase58()), [OWNER], 'the owner alone signs its part');
+    assert.ok(ownerBytes(t) <= OWNER_MESSAGE_BYTES, `${ownerBytes(t)} bytes`);
   }
-  const ixs = txs.flatMap(t => t.instructions).map(ix => SystemInstruction.decodeTransfer(ix));
-  assert.deepEqual(ixs.map(x => [x.toPubkey.toBase58(), x.lamports]), [[OTHER, 1n], [OTHER, 2n], [OTHER, 3n],
-    [out.planned.vault, 500_000_000n], [PAYER.toBase58(), 118_600_000n]]);
-  // the last step, the deposit and the gas: one transaction
-  assert.deepEqual(txs.at(-1).instructions.slice(-3).map(ix => SystemInstruction.decodeTransfer(ix).lamports), [3n, 500_000_000n, 118_600_000n]);
-  // a resume: the planned seed asked for; nothing missing is done, without transactions
-  const again = setupStub({ steps: 0, done: [0, 1, 2] });
-  const done = await setupTxs(setupConn(), KEYS, C, { ...A, planned: { seed: '42' } }, again);
-  assert.equal(again.calls[0][0].seed, '42');
-  assert.deepEqual([done.done, done.transactions], [true, []]);
-  // the operator's own wallet: no fee wallet among the payouts
-  const own = setupStub();
-  await setupTxs(setupConn(), KEYS, C, { ...A, feeWallet: null }, own);
-  assert.equal(own.calls[0][0].payout, OWNER);
+  for (const t of out.key) assert.deepEqual(txOf(t).signatures.map(s => s.publicKey.toBase58()), [KEY.publicKey.toBase58()], 'the key alone signs its part');
+  assert.ok(out.key.some(t => ownerBytes(t) > 930), 'a policy is longer than a Tangem card signs: the key signs it');
+  assert.ok([...out.owner, ...out.key, ...out.fund].every(t => txOf(t).recentBlockhash === BLOCKHASH));
+  // the key gets what its two policies and three transactions take, and its account's floor
+  const keyFund = BigInt(2 * rent(POLICY_ACCOUNT_BYTES) + 3 * 5000 + rent(0));
+  assert.equal(out.keyFund, I.fromRaw(keyFund, 9));
+  const grant = txOf(out.owner[0]).instructions;
+  assert.equal(grant.length, 2, 'the creation and the key\'s SOL');
+  assert.deepEqual(SystemInstruction.decodeTransfer(grant[1]), { fromPubkey: new PublicKey(OWNER), toPubkey: KEY.publicKey, lamports: keyFund });
+  const money = txOf(out.fund[0]).instructions.map(ix => SystemInstruction.decodeTransfer(ix));
+  assert.deepEqual(money.map(x => [x.toPubkey.toBase58(), x.lamports]), [[out.planned.vault, 500_000_000n], [PAYER.toBase58(), 118_600_000n]]);
+  // the page's decoder reads the whole set as the page sends it: the owner's, the key's, the funding
+  const r = decodeSolSet(all(out), pageExpect(out), PINS);
+  assert.deepEqual(r.problems, [], r.lines.join('\n'));
+  // its cost: the creation's rent, the key's SOL, two owner's fees, the gas, the deposit, the floor
+  assert.equal(out.cost, I.fromRaw(BigInt(rent(SETTINGS_ACCOUNT_BYTES)) + keyFund + 20_000n + 118_600_000n + 500_000_000n + BigInt(rent(0)), 9));
   // a wallet that cannot pay all of it is refused before anything is built for it
-  await assert.rejects(setupTxs(setupConn(600_000_000), KEYS, C, A, setupStub()), /your wallet holds 0\.6 SOL; the set-up needs/);
-  // a token deposit: the vault's account opens before the last step; the token transfer goes with it
-  const tok = await setupTxs(setupConn(), KEYS, C, { ...A, token: 'USDC', deposit: '25' }, setupStub());
-  const all = tok.transactions.map(t => Transaction.from(Buffer.from(t, 'base64'))).flatMap(t => t.instructions);
-  const kinds = all.map(ix => (ix.programId.equals(SystemProgram.programId) ? `sol ${SystemInstruction.decodeTransfer(ix).lamports}`
+  await assert.rejects(setupTxs(setupConn(600_000_000), KEYS, C, { ...A, setupKey: KEY.publicKey.toBase58() }, chainStub()), /your wallet holds 0\.6 SOL; the set-up needs/);
+  // a token deposit: the vault's account opened, the transfer and the gas, all in the funding, short
+  const tok = await setupTxs(setupConn(), KEYS, C, { ...A, token: 'USDC', deposit: '25', setupKey: KEY.publicKey.toBase58() }, chainStub());
+  const kinds = tok.fund.map(txOf).flatMap(t => t.instructions).map(ix => (ix.programId.equals(SystemProgram.programId) ? `sol ${SystemInstruction.decodeTransfer(ix).lamports}`
     : ix.programId.equals(spl.ASSOCIATED_TOKEN_PROGRAM_ID) ? 'open' : `token ${ix.data[0]}`));
-  assert.deepEqual(kinds, ['sol 1', 'sol 2', 'open', 'sol 3', 'token 12', 'sol 118600000'], 'the opening before the last step; the money with it');
-  await assert.rejects(setupTxs(setupConn(10e9, 0n, 24_999_999n), KEYS, C, { ...A, token: 'USDC', deposit: '25' }, setupStub()),
+  assert.deepEqual(kinds, ['open', 'token 12', 'sol 118600000']);
+  for (const t of tok.fund) assert.ok(ownerBytes(t) <= OWNER_MESSAGE_BYTES);
+  assert.deepEqual(decodeSolSet(all(tok), pageExpect(tok, { mint: SOLANA.usdc_mint, raw: '25000000' }), PINS).problems, []);
+  await assert.rejects(setupTxs(setupConn(10e9, 0n, 24_999_999n), KEYS, C, { ...A, token: 'USDC', deposit: '25', setupKey: KEY.publicKey.toBase58() }, chainStub()),
     /your wallet holds 24\.999999 USDC; the deposit is 25/);
 });
 
-test('set-up cost: the creation fee, the rent of what it creates, the fees, the gas, a SOL deposit, the wallet\'s floor', async () => {
-  const rent = (n) => 890_880 + 6960 * n;
-  const base = { owner: OWNER, created: 1, policies: 2, txs: 2, gas: 118_600_000n, token: 'SOL', deposit: '0.5' };
-  const need = BigInt(rent(SETTINGS_ACCOUNT_BYTES) + 2 * rent(POLICY_ACCOUNT_BYTES) + 2 * 10_000 + rent(0)) + 118_600_000n + 500_000_000n;
+test('set-up: no set-up key, the owner\'s or the bot\'s as one, or too many of them: refused', async () => {
+  KEY = Keypair.generate();
+  for (const k of [undefined, '', 'not-a-key']) await assert.rejects(setupTxs(setupConn(), KEYS, C, { ...A, setupKey: k }, chainStub()), /no set-up key: reload the page/);
+  for (const k of [OWNER, PAYER.toBase58(), KEYS.policyKey.publicKey.toBase58()]) {
+    await assert.rejects(setupTxs(setupConn(), KEYS, C, { ...A, setupKey: k }, chainStub()), /not the page's own/);
+  }
+  const full = Array.from({ length: SETUP_KEYS_MAX }, () => Keypair.generate().publicKey.toBase58());
+  await assert.rejects(setupTxs(setupConn(), KEYS, C, { ...A, setupKey: KEY.publicKey.toBase58(), planned: { seed: '42', setupKeys: full } }, chainStub()),
+    /too many set-up keys/);
+  const out = await setupTxs(setupConn(), KEYS, C, { ...A, setupKey: full[0], planned: { seed: '42', setupKeys: full } }, chainStub());
+  assert.deepEqual(out.planned.setupKeys, full, 'a key the request made already is no new one');
+  const less = await setupTxs(setupConn(), KEYS, C, { ...A, setupKey: KEY.publicKey.toBase58(), planned: { seed: '42', setupKeys: full.slice(1) } }, chainStub());
+  assert.equal(less.planned.setupKeys.length, SETUP_KEYS_MAX, 'the last one there is room for');
+});
+
+test('set-up resumes from the chain: the key on the vault goes on; a new page\'s key replaces the old; the owner signs little or nothing', async () => {
+  KEY = Keypair.generate();
+  const key = KEY.publicKey.toBase58(), old = Keypair.generate().publicKey.toBase58();
+  const planned = { seed: '42', setupKeys: [key] };
+  // created, one policy of two made, the key on it holding enough: the owner signs nothing until the funding
+  let out = await setupTxs(setupConn(10e9, 0n, 0n, 50_000_000), KEYS, C, { ...A, setupKey: key, planned }, chainStub({ created: true, made: 1, others: [key] }));
+  assert.deepEqual([out.owner.length, out.key.length, out.fund.length, out.keyFund], [0, 1, 1, '0']);
+  // what it costs: no creation, nothing to the key; the funding's fee, the gas, the deposit, the floor
+  assert.equal(out.cost, I.fromRaw(10_000n + 118_600_000n + 500_000_000n + BigInt(rent(0)), 9));
+  // the key holds exactly what it needs: nothing more from the owner
+  const exact = rent(POLICY_ACCOUNT_BYTES) + 2 * 5000 + rent(0);
+  out = await setupTxs(setupConn(10e9, 0n, 0n, exact), KEYS, C, { ...A, setupKey: key, planned }, chainStub({ created: true, made: 1, others: [key] }));
+  assert.deepEqual([out.owner.length, out.keyFund], [0, '0']);
+  // a funding found on chain does not count while the set-up is not whole
+  out = await setupTxs(setupConn(10e9, 0n, 0n, 50_000_000), KEYS, C, { ...A, setupKey: key, planned },
+    chainStub({ created: true, made: 2, others: [key], funded: 'SIG' }));
+  assert.deepEqual([out.done, out.key.length, out.fund.length], [false, 1, 1], 'the key to take off, and the funding');
+  assert.deepEqual(decodeSolSet(all(out), pageExpect(out), PINS).problems, []);
+  // the key holds too little: the owner tops it up, no more
+  out = await setupTxs(setupConn(10e9, 0n, 0n, 1_000_000), KEYS, C, { ...A, setupKey: key, planned }, chainStub({ created: true, made: 1, others: [key] }));
+  const need = BigInt(rent(POLICY_ACCOUNT_BYTES) + 2 * 5000 + rent(0));
+  assert.deepEqual(txOf(out.owner[0]).instructions.map(ix => SystemInstruction.decodeTransfer(ix).lamports), [need - 1_000_000n]);
+  assert.deepEqual(decodeSolSet(all(out), pageExpect(out), PINS).problems, []);
+  // a page reloaded without its key: the owner takes the old key off and puts this one on, one short message
+  out = await setupTxs(setupConn(), KEYS, C, { ...A, setupKey: key, planned: { seed: '42', setupKeys: [old] } }, chainStub({ created: true, made: 1, others: [old] }));
+  assert.deepEqual(out.planned.setupKeys, [old, key]);
+  assert.equal(out.owner.length, 1);
+  assert.ok(ownerBytes(out.owner[0]) <= OWNER_MESSAGE_BYTES);
+  let r = decodeSolSet(all(out), pageExpect(out), PINS);
+  assert.deepEqual(r.problems, [], r.lines.join('\n'));
+  assert.match(r.lines.join('\n'), new RegExp(`Take the older set-up key ${old.slice(0, 4)}…${old.slice(-4)} off your vault`));
+  assert.match(r.lines.join('\n'), /Put this page's one-time set-up key .* on your vault/);
+  // every policy made, the key still on: it takes itself off and sends back all it holds but its fee
+  out = await setupTxs(setupConn(10e9, 0n, 0n, 7_000_000), KEYS, C, { ...A, setupKey: key, planned }, chainStub({ created: true, made: 2, others: [key] }));
+  assert.deepEqual([out.owner.length, out.key.length, out.fund.length], [0, 1, 1]);
+  const release = txOf(out.key[0]).instructions;
+  assert.equal(release.length, 2);
+  assert.deepEqual(SystemInstruction.decodeTransfer(release[1]), { fromPubkey: KEY.publicKey, toPubkey: new PublicKey(OWNER), lamports: 6_995_000n });
+  r = decodeSolSet(all(out), pageExpect(out), PINS);
+  assert.deepEqual(r.problems, [], r.lines.join('\n'));
+  assert.match(r.lines.join('\n'), /The set-up key takes itself off your vault: you are its only owner again/);
+  // a key holding its fee and no more: it takes itself off, nothing to send back
+  out = await setupTxs(setupConn(10e9, 0n, 0n, 5000), KEYS, C, { ...A, setupKey: key, planned }, chainStub({ created: true, made: 2, others: [key] }));
+  assert.deepEqual([out.owner.length, out.key.length, txOf(out.key[0]).instructions.length], [0, 1, 1]);
+  // a key holding less than its fee: the owner takes it off
+  out = await setupTxs(setupConn(10e9, 0n, 0n, 4999), KEYS, C, { ...A, setupKey: key, planned }, chainStub({ created: true, made: 2, others: [key] }));
+  assert.deepEqual([out.owner.length, out.key.length], [1, 0]);
+  assert.deepEqual(decodeSolSet(all(out), pageExpect(out), PINS).problems, []);
+  // the vault whole, the owner alone on it: the funding only, or done when it is on chain
+  out = await setupTxs(setupConn(), KEYS, C, { ...A, setupKey: key, planned }, chainStub({ created: true, made: 2 }));
+  assert.deepEqual([out.owner.length, out.key.length, out.fund.length], [0, 0, 1]);
+  const found = chainStub({ created: true, made: 2, funded: 'SIG' });
+  out = await setupTxs(setupConn(), KEYS, C, { ...A, setupKey: key, planned, notBefore: 99 }, found);
+  assert.deepEqual([out.done, out.owner, out.key, out.fund, out.funded], [true, [], [], [], 'SIG']);
+});
+
+test('set-up cost: the creation fee, the settings\' rent, the key\'s SOL, the fees, the gas, a SOL deposit, the wallet\'s floor', async () => {
+  const base = { owner: OWNER, created: 1, keyFund: 30_000_000n, txs: 2, gas: 118_600_000n, token: 'SOL', deposit: '0.5' };
+  const need = BigInt(rent(SETTINGS_ACCOUNT_BYTES) + 2 * 10_000 + rent(0)) + 30_000_000n + 118_600_000n + 500_000_000n;
   assert.equal(await setupCost(setupConn(), C, base), need);
   assert.equal(await setupCost(setupConn(10e9, 5_000_000n), C, base), need + 5_000_000n, 'a creation fee the program charges');
   assert.equal(await setupCost(setupConn(10e9, 5_000_000n), C, { ...base, created: 0 }), need - BigInt(rent(SETTINGS_ACCOUNT_BYTES)), 'a resume creates no account, pays no fee');
   const usdcNeed = need - 500_000_000n + BigInt(rent(TOKEN_ACCOUNT_BYTES));
   assert.equal(await setupCost(setupConn(), C, { ...base, token: 'USDC', deposit: '25' }), usdcNeed);
+  assert.equal(await setupCost(setupConn(), C, { ...base, deposit: null }), need - 500_000_000n, 'a funding on chain already');
   assert.equal(await setupCost(setupConn(Number(need)), C, base), need, 'exactly enough');
   await assert.rejects(setupCost(setupConn(Number(need) - 1), C, base), /the set-up needs .*\(the vault's and its rules' rent, the bot's gas 0\.1186, the deposit 0\.5, fees/);
   assert.match(await setupCost(setupConn(1), C, { ...base, token: 'USDC', deposit: '25' }).catch(e => e.message), /the bot's gas 0\.1186(?!, the deposit)/);
 });
 
-test('set-up: a resume creates no account and pays no fee; a deposit takes what the wallet holds, to the unit', async () => {
-  const rent = (n) => 890_880 + 6960 * n;
-  // the vault exists, one policy is missing: its rent, one fee, the gas, the deposit, the floor
-  const need = rent(POLICY_ACCOUNT_BYTES) + 10_000 + 118_600_000 + 500_000_000 + rent(0);
-  const resumed = setupStub({ steps: 1, done: [0, 1] });
-  const out = await setupTxs(setupConn(need, 9_000_000n), KEYS, C, { ...A, planned: { seed: '42' } }, resumed);
-  assert.equal(out.cost, I.fromRaw(BigInt(need), 9));
-  await assert.rejects(setupTxs(setupConn(need - 1), KEYS, C, { ...A, planned: { seed: '42' } }, setupStub({ steps: 1, done: [0, 1] })), /the set-up needs/);
-  // a deposit alone (Add capital): SOL with a fee beside it, a token to the unit
+test('a deposit takes what the wallet holds, to the unit', async () => {
   const dep = (balance, usdc) => ({ ...setupConn(balance, 0n, usdc) });
   const sol = await depositTxs(dep(500_010_000), C, { owner: OWNER, vault: VAULT, token: 'SOL', amount: '0.5' });
   const tx = Transaction.from(Buffer.from(sol.transactions[0], 'base64'));
@@ -321,15 +415,19 @@ test('set-up: a resume creates no account and pays no fee; a deposit takes what 
   await assert.rejects(depositTxs(dep(10e9), C, { owner: OWNER, vault: VAULT, token: 'DOGE', amount: '1' }), /token DOGE/);
 });
 
-test('set-up state: done, pending with what is missing, or planned again when the seed was taken', async () => {
-  const r = { owner: OWNER, profit_wallet: OWNER, fee_wallet: null, connected: { planned: { seed: '42', settings: sq.settingsPda(42n).toBase58() } } };
-  assert.deepEqual(await setupState(conn, KEYS, C, r, setupStub({ steps: 0 })), { state: 'done' });
-  assert.deepEqual(await setupState(conn, KEYS, C, r, setupStub({ steps: 2 })), { state: 'pending', missing: 2 });
-  assert.deepEqual(await setupState(conn, KEYS, C, r, setupStub({ steps: 0, settings: sq.settingsPda(43n).toBase58() })), { state: 'replan' });
-  assert.deepEqual(await setupState(conn, KEYS, C, { ...r, connected: null }, setupStub()), { state: 'replan' });
-  const stub = setupStub({ steps: 0 });
+test('set-up state: done only with every step and the owner alone; a set-up key still on it is pending; planned again when the seed was taken', async () => {
+  const key = Keypair.generate().publicKey.toBase58();
+  const r = { owner: OWNER, profit_wallet: OWNER, fee_wallet: null, connected: { planned: { seed: '42', settings: sq.settingsPda(42n).toBase58(), setupKeys: [key] } } };
+  assert.deepEqual(await setupState(conn, KEYS, C, r, chainStub({ created: true, made: 2 })), { state: 'done' });
+  assert.deepEqual(await setupState(conn, KEYS, C, r, chainStub({ created: true, made: 0 })), { state: 'pending', missing: 2 });
+  assert.deepEqual(await setupState(conn, KEYS, C, r, chainStub({ created: true, made: 2, others: [key] })), { state: 'pending', missing: 1 });
+  const moved = { ...r, connected: { planned: { ...r.connected.planned, settings: sq.settingsPda(43n).toBase58() } } };
+  assert.deepEqual(await setupState(conn, KEYS, C, moved, chainStub({ created: true, made: 2 })), { state: 'replan' });
+  assert.deepEqual(await setupState(conn, KEYS, C, { ...r, connected: null }, chainStub()), { state: 'replan' });
+  const stub = chainStub({ created: true, made: 2 });
   await setupState(conn, KEYS, C, r, stub);
   assert.equal(stub.calls[0][0].seed, '42');
+  assert.equal(stub.calls[0][0]['setup-keys'], key, 'the request\'s set-up keys do not make its vault someone else\'s');
 });
 
 test('funding: the page\'s signature when it pays the gas, else the vault\'s recent transactions; never another\'s payment', async () => {

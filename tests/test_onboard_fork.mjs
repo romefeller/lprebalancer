@@ -264,7 +264,10 @@ test('fork (Solana): the owner\'s test in a browser: create, revoke, add capital
       assert.equal(approvals.length, 1, 'one approval for the whole set-up');
       assert.equal(approvals[0].txs.length, 2);
       assert.equal(wallet1.filter(x => x.kind === 'tx' || x.kind === 'message').length, 0, 'no message, no other transaction');
-      assert.match(f.review.join('\n'), /Create your vault .*you its only owner, threshold 1/);
+      assert.match(f.review.join('\n'), /Create your vault .*you its owner, threshold 1; this page's one-time set-up key .* its second signer/);
+      assert.match(f.review.join('\n'), /The set-up key takes itself off your vault: you are its only owner again/);
+      // what the wallet signed fits a Tangem card (930 bytes); each policy the page's set-up key signed does not
+      for (const t of approvals[0].txs) assert.ok(t.compileMessage().serialize().length <= 900);
       const o = json(`select row_to_json(o) from rebalancer.onboard o where name = '${NAME}'`);
       assert.equal(o.state, 'started');
       assert.equal(o.signature, '', 'no message signed');
@@ -276,10 +279,15 @@ test('fork (Solana): the owner\'s test in a browser: create, revoke, add capital
       const s = sq.decodeSettings(fork.get(o.connected.settings).data);
       assert.deepEqual([s.signers.map(x => x.key.toBase58()), s.threshold, s.timeLock, s.settingsAuthority.toBase58()],
         [[owner.publicKey.toBase58()], 1, 0, PublicKey.default.toBase58()]);
-      // the owner paid its own vault: the rent of the settings and the policies, two fees, the gas and the deposit (0.5 in all)
+      // the owner paid its own vault: the rent of the settings and the policies, two fees of its wallet's and three of the
+      // set-up key's (two policies, its leaving), the gas and the deposit (0.5 in all); the key sent back all it held
       const rent = Number(fork.get(o.connected.settings).lamports)
         + o.connected.venues['raydium-clmm'].policies.reduce((a, p) => a + Number(fork.get(p).lamports), 0);
-      assert.equal(ownerBefore - fork.balance(owner.publicKey), 500_000_000 + rent + 2 * 5000, 'the amount, the vault\'s rent and two fees');
+      assert.equal(ownerBefore - fork.balance(owner.publicKey), 500_000_000 + rent + 2 * 5000 + 3 * 5000,
+        'the amount, the vault\'s rent, two fees of the wallet\'s and three of the set-up key\'s');
+      const keyTxs = [...ledger.txs.values()].map(t => t.tx).filter(t => !t.feePayer.equals(owner.publicKey) && !t.feePayer.equals(payer.publicKey));
+      assert.equal(keyTxs.length, 3, 'the set-up key: two policies, then it leaves');
+      assert.equal(fork.balance(keyTxs[0].feePayer), 0, 'the set-up key holds nothing');
       assert.ok(rent < 25_000_000, `the vault's rent ${rent}`);
       const c = json(`select row_to_json(c) from rebalancer.config c where name = '${NAME}'`);
       assert.deepEqual([c.dex, c.pool, c.profit_wallet, c.fee_bps], ['raydium-clmm', POOL, owner.publicKey.toBase58(), 1000]);
@@ -366,8 +374,9 @@ test('fork (Solana): the owner\'s test in a browser: create, revoke, add capital
       await shot(p3, 'fork-04-owner-closed');
 
       // --- 6. the server's refusals: a set-up not all on chain, too little gas, another's payment, a stop and a resume ---
+      const key2 = Keypair.generate();                         // the page's one-time set-up key
       const it = (await post('intent', { chain: 'solana', owner: owner2.publicKey.toBase58(), token: 'SOL', amount: '1',
-        profitWallet: SOLANA.operator_profit_wallet, name: NAME2 })).json;
+        profitWallet: SOLANA.operator_profit_wallet, name: NAME2, setupKey: key2.publicKey.toBase58() })).json;
       assert.match(it.terms_text, /Fee share: none/, 'the operator\'s own wallet is special');
       assert.equal(it.terms.feeWallet, null);
       const payerMid = fork.balance(payer.publicKey);
@@ -377,17 +386,24 @@ test('fork (Solana): the owner\'s test in a browser: create, revoke, add capital
       assert.match(nothing.json.error, /not all on chain yet/);
       // the owner's wallet signs a set-up that pays the bot too little (built here, as a tampered page would)
       const planned = json(`select to_json(connected) from rebalancer.onboard where name = '${NAME2}'`).planned;
-      const short = await adapter.setup({ owner: owner2.publicKey.toBase58(), profitWallet: SOLANA.operator_profit_wallet, feeWallet: null,
-        token: 'SOL', deposit: '0.8814', gas: '0.1', planned });
-      const signedSet = short.transactions.map(t => { const tx = Transaction.from(Buffer.from(t, 'base64')); tx.partialSign(owner2); return tx; });
-      // only its first transaction lands: the vault exists without all its rules and holds nothing
-      assert.ok((await fork.sendSigned(signedSet[0])).ok);
-      ledger.add(signedSet[0]);
-      const half = await pay(bs58.encode(signedSet[0].signature));
-      assert.deepEqual([half.status, half.json.error], [409, 'your set-up is not all on chain yet (1 steps to come); the page asks again']);
+      assert.deepEqual(planned.setupKeys, [key2.publicKey.toBase58()]);
+      const shortOf = () => adapter.setup({ owner: owner2.publicKey.toBase58(), profitWallet: SOLANA.operator_profit_wallet, feeWallet: null,
+        token: 'SOL', deposit: '0.8814', gas: '0.1', planned, setupKey: key2.publicKey.toBase58() });
+      const short = await shortOf();
+      const signed = (t, by) => { const tx = Transaction.from(Buffer.from(t, 'base64')); tx.partialSign(by); return tx; };
+      const land = async (tx) => { const r = await fork.sendSigned(tx); assert.ok(r.ok, r.logs.join('\n')); return ledger.add(tx); };
+      // only the owner's part lands: the vault exists without its rules, with the set-up key on it, and holds nothing
+      const grant = await land(signed(short.owner[0], owner2));
+      const half = await pay(grant);
+      assert.deepEqual([half.status, half.json.error], [409, `your set-up is not all on chain yet (${short.key.length + 1} steps to come); the page asks again`]);
       assert.equal(fork.balance(planned.vault), 0, 'no money in a vault without all its rules');
-      assert.ok((await fork.sendSigned(signedSet[1])).ok);
-      const under = ledger.add(signedSet[1]);
+      for (const t of short.key) await land(signed(t, key2));
+      // every policy: the key still on the vault, so the set-up is not done; it takes itself off
+      const last = await shortOf();
+      assert.equal((await pay(grant)).status, 409, 'a set-up key on the vault: not done');
+      await land(signed(last.key[0], key2));
+      assert.equal(fork.balance(key2.publicKey), 0, 'the set-up key sent back all it held');
+      const under = await land(signed(last.fund[0], owner2));
       for (const [payment, re] of [[under, /less than 0\.1186/], [o.payment, /not from the owner/], ['not-a-signature', /not a transaction signature/]]) {
         const r = await pay(payment);
         assert.equal(r.status, 400, payment);

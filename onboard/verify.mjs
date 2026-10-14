@@ -6,10 +6,13 @@
 //   node onboard/verify.mjs --commit <sha> --from https://romefeller.app/bot --invite <code>
 //        --name <vault name> --owner <your wallet> --action setup|approve|revoke|close|withdraw
 //        [--token SOL|USDC|ALL --amount <n>|all] [--chain solana|polygon]
-//        setup (Solana): the set-up of a request still waiting for it, as one set
+//        setup (Solana): the set-up of a request still waiting for it, as one set;
+//        [--setup-key <key>] the page's one-time set-up key, which signs the policies
+//        (else a throwaway key stands for it: the set is the same but for that key)
 //   --rpc <url>   Solana: also read the vault from the chain (default: the public endpoint;
-//                 --rpc none skips it): your wallet must be its only owner, each policy the
-//                 transaction names must be one of its policies.
+//                 --rpc none skips it): your wallet must be its only owner (in a set-up,
+//                 the page's set-up key beside it), each policy the transaction names
+//                 must be one of its policies.
 //
 // The page's "Copy the transaction" button copies {chain, tx, expect}, or for
 // what the wallet approves at once {chain, parts: [{tx: [...], expect}]}. The
@@ -28,7 +31,7 @@ import * as sq from '../chains/solana/vault/squads.mjs';
 import { isEntry } from '../shared/rpc_policy.mjs';
 
 const require = createRequire(import.meta.url);
-const { Connection, PublicKey } = require('@solana/web3.js');
+const { Connection, Keypair, PublicKey } = require('@solana/web3.js');
 const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 
 export function flags(argv) {
@@ -72,7 +75,10 @@ export async function chainProblems(connection, expect) {
   if (!info) return expect.kind === 'setup' ? [] : [`the settings account ${expect.settings} does not exist`];
   const s = sq.decodeSettings(info.data);
   const owners = s.signers.map(x => x.key.toBase58());
-  if (owners.length !== 1 || owners[0] !== expect.owner || s.threshold !== 1) out.push(`the vault's owners are ${owners.join(', ')} (threshold ${s.threshold}), not your wallet alone`);
+  // a set-up under way: the page's one-time set-up key beside you, until it takes itself off
+  const helper = expect.kind === 'setup' && expect.setupKey ? owners.filter(k => k === expect.setupKey) : [];
+  const rest = owners.filter(k => !helper.includes(k));
+  if (rest.length !== 1 || rest[0] !== expect.owner || s.threshold !== 1) out.push(`the vault's owners are ${owners.join(', ')} (threshold ${s.threshold}), not your wallet alone`);
   if (sq.vaultPda(new PublicKey(expect.settings)).toBase58() !== expect.vault) out.push('the vault is not the account of these settings');
   const policies = Object.values(expect.policies ?? {}).flat();
   const infos = policies.length ? await connection.getMultipleAccountsInfo(policies.map(p => new PublicKey(p)), 'confirmed') : [];
@@ -112,10 +118,12 @@ export async function fromServer(f, pins) {
   const chain = f.chain ?? 'solana';
   if (f.action === 'setup') {
     if (chain !== 'solana') throw new Error('--action setup: Solana (a Polygon set-up: paste what the page copied)');
-    const it = await post('setup', { name: f.name });
+    const setupKey = f['setup-key'] ?? Keypair.generate().publicKey.toBase58();
+    const it = await post('setup', { name: f.name, setupKey });
     if (it.done) throw new Error('the set-up is on chain already: nothing to sign');
-    const expect = setupExpectOf(it, f.owner, pins);
-    return { chain, txs: [it.transactions], expect: () => expect };
+    const expect = { ...setupExpectOf(it, f.owner, pins), setupKey };
+    // in the order the page sends them: your wallet's part, the set-up key's, the funding
+    return { chain, txs: [[...it.owner ?? [], ...it.key ?? [], ...it.fund ?? []]], expect: () => expect };
   }
   const req = { name: f.name, action: f.action, token: f.token, amount: f.amount };
   const txs = [];

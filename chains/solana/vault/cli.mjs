@@ -43,7 +43,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import * as sq from './squads.mjs';
 import { compile } from './policy.mjs';
-import { approvePlan, connectProblems, lookupPlan, ownerSetupPlan, packSteps, setupDone, stagedPolicies, staticAccounts } from './admin.mjs';
+import { approvePlan, connectProblems, lookupPlan, otherSigners, ownerSetupPlan, packSteps, setupDone, stagedPolicies, staticAccounts } from './admin.mjs';
 import { readKeypair, vaultConfig, verifyPolicy } from './account.mjs';
 import { venue as venueOf } from './venues.mjs';
 import { ownerCloseMessages, packMessages } from './exit.mjs';
@@ -143,9 +143,15 @@ export async function poolsByVenue(connection, venues, pools) {
 // account took is planned again at the next free one. The pools are read
 // before anything is built: one that does not fit its venue's rules stops
 // it. {seed, settings, vault, report, steps (instructions to send in order),
-// lookupAddresses}. `payer` and `policyKey` are the bot's public keys.
+// lookupAddresses, others, release}. `payer` and `policyKey` are the bot's
+// public keys. `f['setup-key']` (the owner's page): its one-time key signs
+// and pays the policies (ownerSetupPlan); `f['setup-keys']`: every set-up
+// key this request made, which may still sign the vault (`others`, read from
+// the chain) and do not make it someone else's.
 export async function setupRequest(f, { connection = new Connection(RPC, 'confirmed'), payer, policyKey }) {
   const owner = keysOf(f.owner, '--owner')[0];
+  const setupKey = keysOf(f['setup-key'], '--setup-key')[0] ?? null;
+  const known = [...keysOf(f['setup-keys'], '--setup-keys'), ...(setupKey ? [setupKey] : [])];
   const venues = (f.venue ?? '').split(',').map(v => v.trim()).filter(Boolean);
   const pools = keysOf(f.pools, '--pools');
   const payoutWallets = keysOf(f.payout, '--payout');
@@ -160,13 +166,14 @@ export async function setupRequest(f, { connection = new Connection(RPC, 'confir
   const planAt = (seed) => {
     const vault = sq.vaultPda(sq.settingsPda(seed));
     const compiled = venues.map(v => compile(v, { vault, payer, pools: approved[v], payouts }));
-    return ownerSetupPlan({ owner, treasury: config.treasury, seed, policyKey, venues: compiled, memo: 'lp-bot vault' });
+    return ownerSetupPlan({ owner, treasury: config.treasury, seed, policyKey, venues: compiled, memo: 'lp-bot vault', setupKey });
   };
   let seed = f.seed != null ? BigInt(f.seed) : config.smartAccountIndex + 1n;
-  let plan = planAt(seed), done;
+  let plan = planAt(seed), done, others;
   for (;;) {
     const [settingsInfo, ...policyInfos] = await connection.getMultipleAccountsInfo([plan.settings, ...plan.policies], 'confirmed');
-    done = setupDone(settingsInfo?.data ?? null, policyInfos.map(Boolean), { owner });
+    done = setupDone(settingsInfo?.data ?? null, policyInfos.map(Boolean), { owner, known });
+    others = done ? otherSigners(settingsInfo?.data ?? null, owner) : [];
     if (done) break;
     // another account took this seed: the next free one
     seed = (seed > config.smartAccountIndex ? seed : config.smartAccountIndex) + 1n;
@@ -178,7 +185,7 @@ export async function setupRequest(f, { connection = new Connection(RPC, 'confir
     payouts: payouts.map(String), payoutWallets: payoutWallets.map(String), payer: payer.toBase58(), policyKey: policyKey.toBase58(),
   };
   return { seed: seed.toString(), settings: report.settings, vault: report.vault, report, done: [...done].sort((x, y) => x - y),
-    steps: plan.steps.filter((_, i) => !done.has(i)),
+    steps: plan.steps.filter((_, i) => !done.has(i)), others, release: plan.release,
     lookupAddresses: staticAccounts({ vault: plan.vault, policies: plan.policies, venues: venues.map(venueOf), pools: poolInfo }) };
 }
 
@@ -195,7 +202,8 @@ export async function finishSetup(setup, { connection = new Connection(RPC, 'con
   if (setup.steps.length) throw new Error(`the owner's set-up is not on chain yet: ${setup.steps.length} steps missing`);
   const settings = new PublicKey(report.settings);
   const problems = connectProblems((await connection.getAccountInfo(settings, 'confirmed')).data,
-    { owners: report.owners, threshold: 1, botKeys: [payer.publicKey, policyKey] });
+    { owners: report.owners, threshold: 1, botKeys: [payer.publicKey, policyKey],
+      policies: Object.values(report.venues).reduce((n, v) => n + v.policies.length, 0) });
   if (problems.length) throw new Error(`the vault is not as planned: ${problems.join('; ')}`);
   for (const [venue, v] of Object.entries(report.venues)) {
     const cfg = { settings, vault: new PublicKey(report.vault), policies: v.policies.map(k => new PublicKey(k)) };
