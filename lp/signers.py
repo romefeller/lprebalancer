@@ -125,9 +125,12 @@ def health_key(args, dex):
 
 def counts_as_failure(err):
     """Whether an error is the dependency's fault. Our own refusals, HALT and
-    a missing signer are not: they say nothing about the venue. Pure."""
+    a missing signer are not: they say nothing about the venue; nor is our
+    own price impact limit (2026-10-14: three refusals tripped tang0's swap
+    breaker for 40 min while the swap went in pieces). Pure."""
     e = str(err or '')
-    return bool(e) and not re.search(r'^refused:|HALT present|^no signer for', e) and not revoked(e)
+    return bool(e) and not re.search(r'^refused:|HALT present|^no signer for|price impact [0-9.]+% exceeds', e) \
+        and not revoked(e)
 
 
 def record_health(key, out, err):

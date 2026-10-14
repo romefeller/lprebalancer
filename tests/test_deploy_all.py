@@ -425,6 +425,10 @@ class PieceSwaps(BalanceWallet):
         self.assertFalse(lp.swaps.impact_refused({'signature': 'X'}, 'price impact 1.5% exceeds the 1% limit'))
         self.assertTrue(lp.swaps.impact_refused(None, 'ERROR: price impact 2% exceeds the 1% limit; refusing'))
 
+    def test_our_impact_limit_is_no_venue_failure(self):
+        self.assertFalse(lp.signers.counts_as_failure('ERROR: price impact 1.0388% exceeds the 1% limit; refusing'))
+        self.assertTrue(lp.signers.counts_as_failure('RPC rate limited'))
+
     def test_piece_targets_are_the_fraction_of_the_move(self):
         self.assertEqual(lp.swaps.piece_targets(1449.46, 0.0, 724.73, 724.73, 0.5), ('1087.10', '362.37'))
         self.assertEqual(lp.swaps.piece_targets(10.0, 90.0, 50.0, 50.0, 1.0), ('50.00', '50.00'))
