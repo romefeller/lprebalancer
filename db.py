@@ -1570,6 +1570,33 @@ def record_audit(run_id, check_name, status, detail):
         cur.execute("delete from audits where ts < now() - interval '30 days'")
 
 
+def book_owner_deposits(profile):
+    """The deposits the owner page verified on chain (onboard_deposits) for
+    `profile`, booked as capital flows the moment the bot sees them: the
+    hourly flows audit would book them up to an hour late, and until then a
+    deposit read as profit (2026-10-14). The quote token's amount goes to
+    `usdc`, any other to token A (`sol`). One row per signature, so the audit
+    books none twice. An unpriced deposit waits for the audit. Returns how
+    many it booked."""
+    with cursor(commit=True) as cur:
+        cur.execute("""select d.signature, d.token, d.amount, d.usd, d.created_at, c.token_b, c.wallet_id
+                       from onboard_deposits d join onboard o on o.id = d.onboard_id
+                       join config c on c.name = o.name
+                       where o.name = %s and d.usd is not null
+                         and not exists (select 1 from capital_flows f where f.signature = d.signature)""", (profile,))
+        n = 0
+        for d in cur.fetchall():
+            quote = d['token'] == d['token_b']
+            amount, usd = float(d['amount']), float(d['usd'])
+            cur.execute('insert into capital_flows (ts, kind, sol, usdc, usd, price, signature, detail, wallet_id, profile) '
+                        "values (%s, 'deposit', %s, %s, %s, %s, %s, %s, %s, %s) on conflict (signature) do nothing",
+                        (d['created_at'], 0 if quote else amount, amount if quote else 0, usd,
+                         None if quote or not amount else usd / amount, d['signature'],
+                         f'owner page deposit of {d["amount"]} {d["token"]}', d['wallet_id'], profile))
+            n += cur.rowcount
+        return n
+
+
 def record_flow(ts, kind, sol, usdc, usd, price, signature, detail, amounts=None, profile=None, wallet_id=None):
     """A deposit or withdrawal the flows audit found. One row per signature.
     `amounts` is {mint: human amount} for any token; sol/usdc stay for the

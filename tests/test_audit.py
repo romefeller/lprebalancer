@@ -325,12 +325,12 @@ class Runner(unittest.TestCase):
             prices=types.SimpleNamespace(jupiter_prices=lambda mints: {m: 0.0 for m in mints}, jupiter_token=lambda m: None),
             load=lambda: {'reward_mints_seen': []})
 
-    def run_audit(self):
+    def run_audit(self, only=None):
         cfg = types.SimpleNamespace(RPC='http://rpc.test', POOL=POOL, GAS_RESERVE_SOL=0.05, PROFIT_WALLET=PROFIT)
         fx = types.SimpleNamespace(fetch=lambda url, sig, tries=3: self.txs.get(sig),
                                    harvested=lambda *a, **k: (0.0, 0.0))
         with mock.patch.object(audit, 'rpc', self.fake_rpc), mock.patch.object(audit.time, 'sleep', lambda s: None):
-            return audit.run(self.bot(), db, cfg, fx, lambda ev, **kw: self.notes.append((ev, kw)))
+            return audit.run(self.bot(), db, cfg, fx, lambda ev, **kw: self.notes.append((ev, kw)), only=only)
 
     def rows(self):
         with db.cursor() as cur:
@@ -346,6 +346,15 @@ class Runner(unittest.TestCase):
         self.assertEqual(res['empty'], 'warn')                              # the empty MSOL account
         self.assertEqual(res['flows'], 'warn')                              # the deposit
         self.assertEqual(len(self.rows()), 11)
+
+    def test_only_the_named_checks_run(self):
+        # a vault's start (lp/housekeeping.flows_now): the flows alone, before the first report
+        res = self.run_audit(only={'flows'})
+        self.assertEqual(res, {'flows': 'warn'})
+        self.assertEqual([r['check_name'] for r in self.rows()], ['flows'])
+        with db.cursor() as cur:
+            cur.execute("select signature from capital_flows where kind = 'deposit'")
+            self.assertEqual([r['signature'] for r in cur.fetchall()], ['GIFT'])
 
     def test_a_deposit_is_found_and_recorded_once(self):
         self.run_audit()

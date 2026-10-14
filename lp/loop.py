@@ -143,6 +143,7 @@ def main():
     config.require_wallet()
     signers.probe_rpc()
     state = paths.load()
+    flows_booked = False
     books.notify_book('startup', mode='ARMED — signs its own rebalances',
                       **config.summary())
     # The board is wallet-wide work for the residual owner, and only for a
@@ -195,6 +196,12 @@ def main():
             time.sleep(config.POLL_SECONDS)
             continue
         state.pop('disabled_told', None)
+        housekeeping.book_owner_deposits()
+        if not flows_booked:
+            # A vault's start after the owner withdrew or added capital: its
+            # flows are booked before the first report, not up to an hour later.
+            housekeeping.flows_now()
+            flows_booked = True
         books.portfolio_report(state)
         capital.native_upkeep(state, position=status.get('positionMint'))
 

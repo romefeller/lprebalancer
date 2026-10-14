@@ -235,10 +235,15 @@ function wcWallet(client, session, chain) {
         const out = await request('solana_signMessage', { message: bs58.encode(new TextEncoder().encode(text)), pubkey: address });
         return { signature: b64(bs58.decode(out.signature)) };
       },
+      // Sign here, send from the page: the path every wallet's setup takes. A
+      // wallet's own send fails where its signature does not (Tangem's
+      // signAndSend, 2026-10-14: the withdraw's second step), so the wallet
+      // sends only when it offers no plain signing.
       async send(tx) {
-        if (methods.includes('solana_signAndSendTransaction')) {
+        if (!methods.includes('solana_signTransaction')) {
           const out = answerOf(await request('solana_signAndSendTransaction', { transaction: tx }));
           if (out?.signature) return out.signature;
+          throw new Error(`${name} answered without a signature. Check its activity; then try again here: nothing is paid twice.`);
         }
         const out = answerOf(await request('solana_signTransaction', { transaction: tx }));
         if (out?.transaction) return broadcastSigned(unb64(out.transaction));

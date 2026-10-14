@@ -363,11 +363,12 @@ def idle_sleeves_usd(profiles, claims, balances, prices, holding):
     return total
 
 
-def run(bot, db, config, txfees, notify, now=None, wallet=None):
+def run(bot, db, config, txfees, notify, now=None, wallet=None, only=None):
     """One audit run. `bot` is the rebalancer module (wallet, read_status,
     deployable_usd, pool_tokens, FEED, ROOT). `wallet` is the wallet's book
     (rebalancer.wallet_book: every profile of the wallet, their mints, the
     claims); None audits the ledger as one book (a pre-020 profile).
+    `only`: the names of the checks to run, every one when None.
     Returns {check: status}."""
     run_id = uuid.uuid4().hex[:12]
     url = config.RPC
@@ -387,6 +388,8 @@ def run(bot, db, config, txfees, notify, now=None, wallet=None):
                 notify('AUDIT', check=name, status=status, was=prev, detail=detail)
 
     def guarded(name, fn):
+        if only is not None and name not in only:
+            return
         try:
             record(name, *fn())
         except Exception as e:

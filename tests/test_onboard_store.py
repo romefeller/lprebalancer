@@ -113,6 +113,12 @@ def row(sql, *args):
         return cur.fetchone()
 
 
+def rows(sql, *args):
+    with db.cursor() as cur:
+        cur.execute(sql, args)
+        return cur.fetchall()
+
+
 class Store(unittest.TestCase):
     def setUp(self):
         clean()
@@ -473,6 +479,35 @@ class OwnerPage(unittest.TestCase):
             self.assertGreater(float(r2['max_usd']), float(r['max_usd']))
         finally:
             db.token_prices = original
+
+    def test_owner_deposits_are_booked_as_flows_once(self):
+        # 2026-10-14: a deposit waited up to an hour for the flows audit and read as profit meanwhile
+        prices = {SOL: 100.0, USDC: 1.0}
+        original = db.token_prices
+        db.token_prices = lambda mints: {m: prices[m] for m in mints if m in prices}
+        try:
+            i = begin()
+            register(i)
+            store.run('deposited', {'id': i, 'signature': 'sig-sol', 'token': 'SOL', 'mint': SOL, 'amount': '1.5', 'headroom': 3})
+            store.run('deposited', {'id': i, 'signature': 'sig-usdc', 'token': 'USDC', 'mint': USDC, 'amount': '40', 'headroom': 3})
+            prices.pop(SOL)
+            store.run('deposited', {'id': i, 'signature': 'sig-unpriced', 'token': 'SOL', 'mint': SOL, 'amount': '2', 'headroom': 3})
+        finally:
+            db.token_prices = original
+        try:
+            self.assertEqual(db.book_owner_deposits('ob-one'), 2, 'the unpriced one waits for the audit')
+            self.assertEqual(db.book_owner_deposits('ob-one'), 0, 'once per signature')
+            f = {r['signature']: r for r in rows("select * from capital_flows where profile = 'ob-one' and kind = 'deposit'")}
+            self.assertEqual(set(f), {'sig-sol', 'sig-usdc'})
+            self.assertEqual((float(f['sig-sol']['sol']), float(f['sig-sol']['usdc']), float(f['sig-sol']['usd'])), (1.5, 0.0, 150.0))
+            self.assertAlmostEqual(f['sig-sol']['price'], 100.0)
+            self.assertEqual((float(f['sig-usdc']['sol']), float(f['sig-usdc']['usdc']), f['sig-usdc']['price']), (0.0, 40.0, None))
+            self.assertFalse(db.record_flow(f['sig-sol']['ts'], 'deposit', 1.5, 0, 150, 100, 'sig-sol', 'audit', profile='ob-one'),
+                             'the hourly audit books none twice')
+            self.assertEqual(db.book_owner_deposits('ob-two'), 0, 'another profile books nothing of this one')
+        finally:
+            with db.cursor(commit=True) as cur:
+                cur.execute("delete from capital_flows where profile = 'ob-one'")
 
     def test_an_exit_request_once_pending_and_done_by_the_loop_or_a_start(self):
         i = begin()

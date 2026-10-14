@@ -23,6 +23,32 @@ def bot_view():
                                  plan_sweep=swaps.plan_sweep, read_status=signers.read_status, prices=jupiter_api)
 
 
+def book_owner_deposits():
+    """A vault profile's deposits from the owner page, booked as capital
+    flows before this poll's report (db.book_owner_deposits). Never blocks
+    the loop."""
+    if not config.VAULT:
+        return 0
+    try:
+        return db.book_owner_deposits(config.PROFILE)
+    except Exception as e:
+        books.notify('audit_failed', reason=f'owner deposits: {type(e).__name__}: {books.tidy(e)}')
+        return 0
+
+
+def flows_now():
+    """The flows audit alone, now: a vault started after its owner withdrew
+    or added capital books those flows before its first report. The hourly
+    audit runs every check, this one too. Never blocks the loop."""
+    if not config.VAULT or not signers.housekeeper('audit'):
+        return None
+    try:
+        return audit.run(bot_view(), db, config, txfees, books.notify, wallet=capital.wallet_book(), only={'flows'})
+    except Exception as e:
+        books.notify('audit_failed', reason=f'flows: {type(e).__name__}: {books.tidy(e)}')
+        return None
+
+
 def run_audits(state):
     """The hourly audit (audit.py) of the whole wallet: the residual owner's
     chore, where the chain has the audits. Never blocks the loop."""
