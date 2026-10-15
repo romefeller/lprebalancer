@@ -547,7 +547,64 @@ def wrap_native(state, bal=None):
     books.notify('WRAP', amount=round(amount, 6), symbol=sym, kept=config.NATIVE_KEEP,
                  native_before=round(float(bal.get('sol') or 0), 6), signature=out['signature'])
     db.event('WRAP', f'{amount:.4f} {sym} wrapped into the pool token, {config.NATIVE_KEEP:g} kept for gas: {out["signature"]}')
+    book_native_deposit(amount, bal, out['signature'])
     return True
+
+
+def native_deposit_flow(amount, wrapped, tokens, bal):
+    """The capital flow of a wrap: native coin above native_keep can only
+    come from outside, so the wrapped `amount` is a deposit of the pool's
+    wrapped token `wrapped`. `tokens` is pool_tokens(); `bal` the wallet
+    read the wrap used (uiPrice or price: B per A; quoteUsd: B's dollar
+    price). (usd, price of the wrapped token in dollars), or None when
+    either price is unknown. Pure."""
+    (ma, _), (mb, _) = tokens
+    q = bal.get('quoteUsd')
+    p = bal.get('uiPrice') or bal.get('price')
+    try:
+        q, p, amount = float(q), float(p), float(amount)
+    except (TypeError, ValueError):
+        return None
+    if not all(math.isfinite(x) and x > 0 for x in (q, p, amount)):
+        return None
+    w = wallets.norm(wrapped)
+    if w == ma:
+        px = p * q
+    elif w == mb:
+        px = q
+    else:
+        return None
+    return amount * px, px
+
+
+def book_native_deposit(amount, bal, signature):
+    """Book a wrapped native deposit as a capital flow, once per wrap
+    transaction. A native POL deposit was wrapped and added to the position
+    but never booked (2026-10-08, $56 on poly-wpol-usdt): the P&L read it as
+    profit. No booking when the gas refill can lift the native balance over
+    native_keep (then a wrap may be the bot's own gas, not a deposit) or the
+    price is unknown; the book says so. Never fails the poll."""
+    sym = config.CAPS['native_symbol']
+    if refill_target() > config.NATIVE_KEEP:
+        books.notify('deposit_unbooked', amount=round(amount, 6), symbol=sym, signature=signature,
+                     reason=f'gas_refill_to {refill_target():g} is above native_keep {config.NATIVE_KEEP:g}')
+        return False
+    try:
+        wrapped = config.CAPS['wrapped_native']
+        flow = native_deposit_flow(amount, wrapped, pool_tokens(), bal)
+        if flow is None:
+            books.notify('deposit_unbooked', amount=round(amount, 6), symbol=sym, signature=signature,
+                         reason='no price for the wrapped token')
+            return False
+        usd, px = flow
+        ts = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
+        return db.record_flow(ts, 'deposit', 0.0, 0.0, usd, px, signature,
+                              f'{amount:.6f} {sym} deposit, wrapped into the pool token (capital.wrap_native)',
+                              amounts={wallets.norm(wrapped): amount})
+    except Exception as e:
+        books.notify('deposit_unbooked', amount=round(amount, 6), symbol=sym, signature=signature,
+                     reason=f'{type(e).__name__}: {books.tidy(e)}')
+        return False
 
 
 # --- gas refill: the native coin from the pool's own wrapped token ------------

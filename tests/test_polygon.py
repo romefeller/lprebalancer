@@ -19,6 +19,7 @@ import unittest
 from unittest import mock
 
 import psycopg2
+from hypothesis import given, settings, strategies as st
 
 import _fixtures  # noqa: F401  (first: it puts lp_bot on the path)
 import calm
@@ -213,8 +214,9 @@ class NativeToWrap(unittest.TestCase):
 
 
 class WrapNative(unittest.TestCase):
-    def go(self, caps=None, keep=10.0, sol=4010.0, tokens=((WPOL.lower(), 'WPOL'), (USDT0.lower(), 'USDT0')), answer=None):
-        calls, seen, self.reads = [], [], []
+    def go(self, caps=None, keep=10.0, sol=4010.0, tokens=((WPOL.lower(), 'WPOL'), (USDT0.lower(), 'USDT0')), answer=None,
+           price=None, quote=None, refill_to=0.0, record=None):
+        calls, seen, self.reads, self.flows = [], [], [], []
 
         def read_tokens():
             self.reads.append('tokens')
@@ -224,7 +226,13 @@ class WrapNative(unittest.TestCase):
 
         def read_wallet(p):
             self.reads.append('wallet')
-            return {'sol': sol, 'balanceA': 0.0, 'balanceB': 0.0}
+            return {'sol': sol, 'balanceA': 0.0, 'balanceB': 0.0, 'price': price, 'quoteUsd': quote}
+
+        def record_flow(*a, **k):
+            if isinstance(record, Exception):
+                raise record
+            self.flows.append((a, k))
+            return True
         caps = chains.caps('polygon') if caps is None else caps
         with mock.patch.object(config, 'CAPS', caps), \
                 mock.patch.object(config, 'NATIVE_KEEP', keep), \
@@ -234,7 +242,10 @@ class WrapNative(unittest.TestCase):
                 mock.patch.object(lp.signers, 'chain', lambda *a, **k: (calls.append((a, k)) or (answer or ({'signature': 'W'}, None)))), \
                 mock.patch.object(lp.paths, 'save', lambda s: None), \
                 mock.patch.object(lp.books, 'notify', lambda e, **kw: seen.append((e, kw))), \
-                mock.patch.object(db, 'event', lambda *a: None):
+                mock.patch.object(db, 'event', lambda *a: None), \
+                mock.patch.object(db, 'record_flow', record_flow), \
+                mock.patch.object(config, 'GAS_REFILL_TO', refill_to), \
+                mock.patch.object(config, 'VAULT', None):
             state = {}
             out = lp.capital.wrap_native(state)
         return out, calls, seen, state
@@ -284,6 +295,99 @@ class WrapNative(unittest.TestCase):
         self.assertIs(out, False)
         self.assertEqual(seen[0][0], 'wrap_failed')
         self.assertEqual(state['wrap_failed_told'], 'refused: below reserve')
+
+
+    # A native POL deposit is wrapped and must be booked as a capital flow
+    # (2026-10-08: 576 POL, $56, went into poly-wpol-usdt unbooked and read as profit).
+    def test_a_wrap_books_its_deposit_once(self):
+        out, _, seen, _ = self.go(price=0.097, quote=1.0, refill_to=3.0)
+        self.assertIs(out, True)
+        self.assertEqual(len(self.flows), 1)
+        (ts, kind, sol, usdc, usd, px, sig, detail), k = self.flows[0]
+        self.assertEqual((kind, sol, usdc, sig), ('deposit', 0.0, 0.0, 'W'))
+        self.assertAlmostEqual(usd, 4000 * 0.097)
+        self.assertAlmostEqual(px, 0.097)
+        self.assertEqual(k['amounts'], {WPOL.lower(): 4000.0})
+        self.assertIn('4000.000000 POL deposit', detail)
+        self.assertNotIn('deposit_unbooked', [e for e, _ in seen])
+
+    def test_a_failed_wrap_books_nothing(self):
+        for answer in (({'signature': 'W'}, 'timed out'), (None, 'refused')):
+            out, _, _, _ = self.go(answer=answer, price=0.097, quote=1.0)
+            self.assertIs(out, False)
+            self.assertEqual(self.flows, [], answer)
+
+    def test_unpriced_or_refill_over_keep_is_said_not_booked(self):
+        for kw, why in (({'price': None, 'quote': 1.0}, 'no price'), ({'price': 0.097, 'quote': None}, 'no price'),
+                        ({'price': 0.097, 'quote': 1.0, 'refill_to': 20.0}, 'gas_refill_to 20')):
+            out, _, seen, _ = self.go(**kw)
+            self.assertIs(out, True, kw)                                    # the wrap itself stands
+            self.assertEqual(self.flows, [], kw)
+            told = [x for e, x in seen if e == 'deposit_unbooked']
+            self.assertEqual(len(told), 1, kw)
+            self.assertIn(why, told[0]['reason'])
+            self.assertEqual(told[0]['signature'], 'W')
+
+    def test_a_booking_error_never_fails_the_wrap(self):
+        out, _, seen, _ = self.go(price=0.097, quote=1.0, record=RuntimeError('db down'))
+        self.assertIs(out, True)
+        self.assertIn('db down', [x for e, x in seen if e == 'deposit_unbooked'][0]['reason'])
+
+
+class NativeDepositFlow(unittest.TestCase):
+    TOKENS = ((WPOL.lower(), 'WPOL'), (USDT0.lower(), 'USDT0'))
+
+    def test_the_table(self):
+        f = lp.capital.native_deposit_flow
+        self.assertEqual(f(100, WPOL, self.TOKENS, {'price': 0.1, 'quoteUsd': 1.0}), (100 * 0.1, 0.1))
+        self.assertEqual(f(100, WPOL, self.TOKENS, {'uiPrice': 0.2, 'price': 9e9, 'quoteUsd': 1.0}), (100 * 0.2, 0.2))
+        flipped = ((USDT0.lower(), 'USDT0'), (WPOL.lower(), 'WPOL'))     # wrapped native as token B
+        self.assertEqual(f(100, WPOL, flipped, {'price': 10.0, 'quoteUsd': 0.1}), (100 * 0.1, 0.1))
+        self.assertIsNone(f(100, USDC, self.TOKENS, {'price': 0.1, 'quoteUsd': 1.0}))    # not a pool token
+        for bal in ({'price': 0.1}, {'quoteUsd': 1.0}, {'price': 'x', 'quoteUsd': 1.0},
+                    {'price': float('nan'), 'quoteUsd': 1.0}, {'price': 0.1, 'quoteUsd': float('inf')},
+                    {'price': -0.1, 'quoteUsd': 1.0}, {'price': 0.0, 'quoteUsd': 1.0}):
+            self.assertIsNone(f(100, WPOL, self.TOKENS, bal), bal)
+        for amount in (0, -5, None, float('nan')):
+            self.assertIsNone(f(amount, WPOL, self.TOKENS, {'price': 0.1, 'quoteUsd': 1.0}), amount)
+
+    @settings(max_examples=300, deadline=None)
+    @given(st.floats(1e-6, 1e9), st.floats(1e-9, 1e6), st.floats(1e-6, 10), st.booleans())
+    def test_property_usd_is_amount_times_the_dollar_price(self, amount, price, quote, wrapped_is_a):
+        tokens = self.TOKENS if wrapped_is_a else self.TOKENS[::-1]
+        usd, px = lp.capital.native_deposit_flow(amount, WPOL, tokens, {'price': price, 'quoteUsd': quote})
+        self.assertAlmostEqual(px, price * quote if wrapped_is_a else quote, delta=1e-12 * max(1.0, px))
+        self.assertAlmostEqual(usd, amount * px, delta=1e-9 * max(1.0, usd))
+        self.assertGreater(usd, 0)
+
+
+class BookedOnce(unittest.TestCase):
+    """Against the test database: one row per wrap signature."""
+    SIG = '0xtest_native_deposit_once'
+
+    def setUp(self):
+        with db.cursor(commit=True) as cur:
+            cur.execute('delete from capital_flows where signature = %s', (self.SIG,))
+
+    tearDown = setUp
+
+    def test_one_row_per_signature(self):
+        bal = {'price': 0.097, 'quoteUsd': 1.0}
+        tokens = ((WPOL.lower(), 'WPOL'), (USDT0.lower(), 'USDT0'))
+        with mock.patch.object(config, 'CAPS', chains.caps('polygon')), \
+                mock.patch.object(config, 'NATIVE_KEEP', 10.0), \
+                mock.patch.object(config, 'GAS_REFILL_TO', 3.0), \
+                mock.patch.object(lp.capital, 'pool_tokens', lambda: tokens), \
+                mock.patch.object(lp.books, 'notify', lambda *a, **k: None):
+            self.assertTrue(lp.capital.book_native_deposit(576.3723, bal, self.SIG))
+            self.assertFalse(lp.capital.book_native_deposit(576.3723, bal, self.SIG))
+        with db.cursor() as cur:
+            cur.execute('select kind, usd, amounts from capital_flows where signature = %s', (self.SIG,))
+            rows = cur.fetchall()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]['kind'], 'deposit')
+        self.assertAlmostEqual(float(rows[0]['usd']), 576.3723 * 0.097, places=6)
+        self.assertAlmostEqual(float(rows[0]['amounts'][WPOL.lower()]), 576.3723)
 
 
 class Migration035(unittest.TestCase):
