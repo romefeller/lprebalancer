@@ -1,0 +1,15 @@
+[Unit]
+Description=Meteora DLMM fee counters of SOL/USDC 5rCf1DM8… into dlmm_fee_samples (research, moves no money)
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=ubuntu
+WorkingDirectory=/home/ubuntu/agent-fin/lp_bot
+Environment=LPBOT_DSN=dbname=rebalancer
+# LPBOT_RPC, the bots' RPC; no wallet key is read
+EnvironmentFile=-/home/ubuntu/.kamino-keys/env
+ExecStart=/usr/bin/python3 -m venues.meteora_dlmm.fees sample 5rCf1DM8LjKTw4YqhnoLcngyZYeNnQqztScTogYHAS6 60
+TimeoutStartSec=120
+NoNewPrivileges=true

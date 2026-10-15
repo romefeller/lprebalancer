@@ -1,0 +1,10 @@
+[Unit]
+Description=Every 10 minutes, as the bots' fee_growth sampler (venue_sample_seconds 600)
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=10min
+AccuracySec=10s
+
+[Install]
+WantedBy=timers.target
