@@ -2,8 +2,9 @@
 Description=Every 10 minutes, as the bots' fee_growth sampler (venue_sample_seconds 600)
 
 [Timer]
-OnBootSec=2min
-OnUnitActiveSec=10min
+# on the clock: a timer counted from the unit's last run had no next run
+# when the unit ran before the timer was enabled (2026-10-15)
+OnCalendar=*:0/10
 AccuracySec=10s
 
 [Install]
