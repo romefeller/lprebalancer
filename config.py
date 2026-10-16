@@ -282,6 +282,8 @@ DAILY_COMPARE = ((_CFG.get('daily_compare_from'), _CFG.get('daily_compare_to'))
 # VENUE_MIN_HOURS of evidence on both the held pool and the target.
 VENUE_SAMPLE_S = _env('LPBOT_VENUE_SAMPLE_S', int, int(_CFG.get('venue_sample_seconds') or 600))
 VENUE_MIN_HOURS = _env('LPBOT_VENUE_MIN_HOURS', int, int(_CFG.get('venue_min_hours') or 6))
+# A calm move needs its gain over the last VENUE_RECENT_HOURS as well as 24 hours.
+VENUE_RECENT_HOURS = _env('LPBOT_VENUE_RECENT_HOURS', int, int(_CFG.get('venue_recent_hours') or 6))
 # Swap to 50/50 before an open when the wallet is lopsided. Without it, an
 # open after an exit is limited by the scarcer token and most capital idles.
 REBALANCE_SWAP = _env('LPBOT_REBALANCE_SWAP', lambda s: s.lower() in ('1', 'true', 'yes'),

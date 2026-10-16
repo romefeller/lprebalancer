@@ -2,6 +2,7 @@
 
 import time
 
+import chains
 import config
 import db
 import dexes
@@ -216,9 +217,40 @@ def consider_migration(state, status, current_best):
     return True
 
 
+# Board-shaped rows of the home pools, by address: one API read each per run.
+_HOME_ROWS = {}
+
+
+def home_rows(mints):
+    """Board-shaped rows of the SOL/USDC home pools (solana.json) when the
+    held pair is SOL/USDC. The scan screens a pool on the API's volume, and
+    the API under-reports 8sLb: $0.7M a day while its counters paid twice
+    3ucNos per unit of liquidity (2026-10-16). The counters decide, so the
+    home pools stay candidates whatever the scan says. A pool the API
+    cannot read is left out and tried again at the next call."""
+    if mints != {chains.SOLANA['native_mint'], chains.SOLANA['usdc_mint']}:
+        return []
+    out = []
+    for dex, address in chains.SOLANA['sol_usdc_pools'].items():
+        if dex not in solana_state.FEE_LAYOUT_DEXES:
+            continue
+        if address not in _HOME_ROWS:
+            try:
+                rec = dexes.pool(dex, address)
+            except Exception:
+                rec = None
+            if not rec:
+                continue
+            _HOME_ROWS[address] = {'dex': dex, 'address': address, 'pair': rec['pair'], 'token_a': rec['token_a'],
+                                   'token_b': rec['token_b'], 'net_day_pct': None, 'band_pct': None}
+        out.append(_HOME_ROWS[address])
+    return out
+
+
 def venue_candidates():
-    """(dex, address, pair row) of the held pool and every screened pool of
-    the same pair on the latest board, on a venue whose counters we read."""
+    """(dex, address, pair row) of the held pool, every screened pool of the
+    same pair on the latest board, and the home pools of that pair
+    (home_rows), on a venue whose counters we read."""
     run, rows = db.latest_scan(max_age_seconds=config.SCAN_INTERVAL * 3)
     try:
         mints = {m for m, _ in capital.pool_tokens()}
@@ -232,6 +264,8 @@ def venue_candidates():
         if mints and not config.ALLOW_SWAP and pair != mints:
             continue
         out[r['address']] = (r['dex'], r['address'], r)
+    for r in home_rows(mints):
+        out.setdefault(r['address'], (r['dex'], r['address'], r))
     return list(out.values())
 
 
@@ -279,10 +313,10 @@ def sample_v3_fee_growth(state):
             books.notify('venue_sample_failed', reason=why)
 
 
-def venue_income(pool, usd_a, usd_b, band=1.01):
+def venue_income(pool, usd_a, usd_b, band=1.01, hours=24):
     """The pool's on-chain income for a centred band, % per day, over up to
-    the last 24 hours of samples, with the hours of evidence."""
-    span = db.fee_state_span(pool)
+    the last `hours` of samples, with the hours of evidence."""
+    span = db.fee_state_span(pool, hours)
     if not span:
         return None
     first, last, secs = span
@@ -343,6 +377,23 @@ def calm_board_check(state, status):
     if gain < config.MIGRATE_MIN_GAIN:
         books.notify('board_checked', held=held_txt, best=best_txt,
                      verdict=f'on-chain: {gain * 100:.0f}% more income is under the {config.MIGRATE_MIN_GAIN * 100:.0f}% threshold')
+        return False
+    # 24 hours mix calm and HOT hours, and the bot holds a tight band only
+    # in calm ones. 3ucNos won 24 hours on its HOT bursts and paid half of
+    # 8sLb in the calm hours the bot then held it (2026-10-16). The gain must
+    # hold over the last VENUE_RECENT_HOURS too: the hours that look like now.
+    q = status['quoteUsd']
+    held_r = venue_income(held_v['address'], status['price'] * q, q, hours=config.VENUE_RECENT_HOURS)
+    top_r = venue_income(top['address'], status['price'] * q, q, hours=config.VENUE_RECENT_HOURS)
+    if not held_r or not top_r:
+        books.notify('board_checked', held=held_txt, best=best_txt,
+                     verdict=f'on-chain: no income over the last {config.VENUE_RECENT_HOURS}h on both pools; staying')
+        return False
+    recent = top_r['total_pct_day'] / max(held_r['total_pct_day'], 1e-9) - 1
+    if recent < config.MIGRATE_MIN_GAIN:
+        books.notify('board_checked', held=held_txt, best=best_txt,
+                     verdict=f'on-chain: {gain * 100:.0f}% more over 24h but {recent * 100:.0f}% over the last '
+                             f'{config.VENUE_RECENT_HOURS}h, under the {config.MIGRATE_MIN_GAIN * 100:.0f}% threshold')
         return False
     best = top['row']
     books.notify('MIGRATE', held=held_txt, best=best_txt, gain_pct=round(gain * 100),

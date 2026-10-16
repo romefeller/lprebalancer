@@ -104,6 +104,7 @@ class Sampling(unittest.TestCase):
                  'token_a': {'address': SOL}, 'token_b': {'address': USDC}}]
         with mock.patch.object(db, 'latest_scan', lambda max_age_seconds=None: ({'id': 1}, rows)), \
                 mock.patch.object(lp.capital, 'pool_tokens', lambda: ((SOL, 'SOL'), (USDC, 'USDC'))), \
+                mock.patch.object(lp.board, 'home_rows', lambda mints: []), \
                 mock.patch.object(config, 'POOL', 'HELD'), \
                 mock.patch.object(config, 'DEX', 'raydium-clmm'), \
                 mock.patch.object(config, 'ALLOW_SWAP', False):
@@ -116,6 +117,86 @@ class Sampling(unittest.TestCase):
                 lp.board.sample_fee_growth(st); self.assertEqual(calls, [])
                 st['last_fee_sample'] = time.time() - 700
                 lp.board.sample_fee_growth(st); self.assertEqual(len(calls), 1)
+
+
+class HomePools(unittest.TestCase):
+    """The SOL/USDC home pools stay candidates when the scan screens them out
+    (8sLb on the API's volume, 2026-10-16)."""
+
+    def setUp(self):
+        lp.board._HOME_ROWS.clear()
+
+    def rec(self, dex, address):
+        return {'pair': 'SOL/USDC', 'token_a': {'address': SOL}, 'token_b': {'address': USDC}}
+
+    def test_home_pools_join_an_empty_board(self):
+        home = lp.board.chains.SOLANA['sol_usdc_pools']
+        with mock.patch.object(db, 'latest_scan', lambda max_age_seconds=None: ({'id': 1}, [])), \
+                mock.patch.object(lp.capital, 'pool_tokens', lambda: ((SOL, 'SOL'), (USDC, 'USDC'))), \
+                mock.patch.object(lp.board.dexes, 'pool', self.rec), \
+                mock.patch.object(config, 'POOL', 'HELD'), \
+                mock.patch.object(config, 'DEX', 'raydium-clmm'):
+            got = {a: row for _, a, row in lp.board.venue_candidates()}
+        want = {a for d, a in home.items() if d in solana_state.FEE_LAYOUT_DEXES}
+        self.assertEqual(set(got), {'HELD'} | want)
+        self.assertNotIn(home['meteora-dlmm'], got)           # no counters on DLMM
+        self.assertIsNone(got['HELD'])                         # the held pool stays the held row
+        r = got[home['raydium-clmm']]
+        self.assertEqual((r['dex'], r['address']), ('raydium-clmm', home['raydium-clmm']))
+
+    def test_other_pairs_get_none_and_a_failed_read_is_retried(self):
+        self.assertEqual(lp.board.home_rows({SOL, 'MU'}), [])
+        self.assertEqual(lp.board.home_rows(None), [])
+        with mock.patch.object(lp.board.dexes, 'pool', mock.Mock(side_effect=RuntimeError('api down'))):
+            self.assertEqual(lp.board.home_rows({SOL, USDC}), [])
+        calls = []
+        with mock.patch.object(lp.board.dexes, 'pool', lambda d, a: calls.append(a) or self.rec(d, a)):
+            first = lp.board.home_rows({SOL, USDC})
+            lp.board.home_rows({SOL, USDC})
+        self.assertTrue(first)
+        self.assertEqual(len(calls), len(first))              # one API read per pool, then cached
+
+
+class RecentGain(unittest.TestCase):
+    """A calm move needs the gain over 24 hours AND over the recent hours."""
+
+    def run_check(self, recent_held, recent_top):
+        venues = [{'dex': 'raydium-clmm', 'address': 'HELD', 'held': True, 'pair': 'SOL/USDC',
+                   'total_pct_day': 3.0, 'hours': 24.0, 'row': None},
+                  {'dex': 'raydium-clmm', 'address': 'TOP', 'held': False, 'pair': 'SOL/USDC',
+                   'total_pct_day': 4.5, 'hours': 24.0, 'row': {'dex': 'raydium-clmm', 'address': 'TOP'}}]
+        recent = {'HELD': recent_held, 'TOP': recent_top}
+        moved, told = [], []
+        with mock.patch.object(lp.board, 'venue_view', lambda p, q: venues), \
+                mock.patch.object(lp.board, 'venue_income',
+                                  lambda a, ua, ub, band=1.01, hours=24: recent[a] and {'total_pct_day': recent[a]}), \
+                mock.patch.object(lp.board.moves, 'rebalance', lambda *a, **k: moved.append(k)), \
+                mock.patch.object(lp.board.books, 'notify', lambda kind, **k: told.append((kind, k))), \
+                mock.patch.object(lp.board.db, 'event', lambda *a: None), \
+                mock.patch.object(config, 'POOL_PINNED', False), \
+                mock.patch.object(config, 'REGIME_ENABLED', False), \
+                mock.patch.object(config, 'MIGRATE_MIN_GAIN', 0.25), \
+                mock.patch.object(config, 'VENUE_MIN_HOURS', 6), \
+                mock.patch.object(config, 'EXECUTE_DEXES', ('raydium-clmm',)), \
+                mock.patch.object(lp.board.signers, 'SIGNERS', {'raydium-clmm': None}):
+            ok = lp.board.calm_board_check({}, {'price': 105.0, 'quoteUsd': 1.0})
+        return ok, moved, told
+
+    def test_a_24h_win_lost_in_the_recent_hours_stays(self):
+        ok, moved, told = self.run_check(recent_held=2.6, recent_top=1.3)
+        self.assertFalse(ok)
+        self.assertEqual(moved, [])
+        self.assertIn('last 6h', told[-1][1]['verdict'])
+
+    def test_a_win_over_both_windows_moves(self):
+        ok, moved, _ = self.run_check(recent_held=2.0, recent_top=3.0)
+        self.assertTrue(ok)
+        self.assertEqual(len(moved), 1)
+
+    def test_no_recent_income_stays(self):
+        ok, moved, _ = self.run_check(recent_held=None, recent_top=3.0)
+        self.assertFalse(ok)
+        self.assertEqual(moved, [])
 
 
 class Ledger(unittest.TestCase):
