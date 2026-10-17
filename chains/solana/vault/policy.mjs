@@ -27,6 +27,19 @@ const MAX_CONSTRAINTS = 20;
 // accounts and signature. tests/test_vault_policy.mjs builds the real
 // transaction for every packed policy and checks it fits.
 export const POLICY_BYTES = 760;
+// A vault whose owner signs on a card packs smaller policies (ctx.policyBytes,
+// vaults.policy_bytes): each update then fits one card-sized transaction. A
+// Tangem card signs at most 930 bytes; tang0's Raydium update was 1,043-1,050
+// at 760 (2026-10-17). Never above POLICY_BYTES, never under the floor.
+export const MIN_POLICY_BYTES = 400;
+export function policyBytesOf(ctx) {
+  const b = ctx?.policyBytes;
+  if (b == null) return POLICY_BYTES;
+  if (!Number.isInteger(b) || b < MIN_POLICY_BYTES || b > POLICY_BYTES) {
+    throw new Error(`policy bytes ${b}: an integer from ${MIN_POLICY_BYTES} to ${POLICY_BYTES}`);
+  }
+  return b;
+}
 
 // A JSON import, not a file read: the onboarding page's bundle compiles the
 // same rules in the browser (onboard/decode_sol.mjs).
@@ -136,7 +149,7 @@ const size = (constraints) => encodeProgramInteraction({ accountIndex: 0, constr
 
 // Compile `venue`'s rules for one vault: {venue, policies: [{policy, index}]},
 // the policies in the order they are created, each at most `limit` bytes.
-export function compile(venue, ctx, rules = RULES, limit = POLICY_BYTES) {
+export function compile(venue, ctx, rules = RULES, limit = policyBytesOf(ctx)) {
   const policies = [];
   let current = null;
   for (const rule of rulesFor(venue, rules, Boolean(ctx.payouts?.length))) {

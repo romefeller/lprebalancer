@@ -25,7 +25,7 @@
 import { createRequire } from 'module';
 import fs from 'node:fs/promises';
 import * as sq from './squads.mjs';
-import { compile, plan } from './policy.mjs';
+import { compile, plan, policyBytesOf } from './policy.mjs';
 import SOLANA from '../solana.json' with { type: 'json' };
 
 const require = createRequire(import.meta.url);
@@ -47,6 +47,8 @@ export function vaultConfig(env = process.env) {
     pools: list(env.LPBOT_VAULT_POOLS).map(k => new PublicKey(k)),
     payouts: list(env.LPBOT_VAULT_PAYOUTS).map(k => new PublicKey(k)),
     lookup: env.LPBOT_VAULT_LOOKUP ? new PublicKey(env.LPBOT_VAULT_LOOKUP) : null,
+    // the vault's policy size (vaults.policy_bytes), when its owner signs on a card
+    policyBytes: env.LPBOT_VAULT_POLICY_BYTES ? policyBytesOf({ policyBytes: Number(env.LPBOT_VAULT_POLICY_BYTES) }) : undefined,
   };
 }
 
@@ -76,7 +78,7 @@ export async function actingAccount({ connection, payer, venue, env = process.en
       } };
   }
   const policyKey = await readKeypair(cfg.policyKeyPath);
-  const compiled = given ?? compile(venue, { vault: cfg.vault, payer: payer.publicKey, pools: cfg.pools, payouts: cfg.payouts });
+  const compiled = given ?? compile(venue, { vault: cfg.vault, payer: payer.publicKey, pools: cfg.pools, payouts: cfg.payouts, policyBytes: cfg.policyBytes });
   await verifyPolicy(connection, cfg, policyKey.publicKey, compiled);
   const tables = [];
   if (cfg.lookup) {

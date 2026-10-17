@@ -108,7 +108,7 @@ def vault_row(wallet_id):
     ({venue: {policies, pools, payouts}}), or None: the wallet's key holds
     its money (sql/036). Holds no secret."""
     with cursor() as cur:
-        cur.execute('select wallet_id, kind, settings, owners, threshold, policy_key_env, lookup '
+        cur.execute('select wallet_id, kind, settings, owners, threshold, policy_key_env, lookup, policy_bytes '
                     'from vaults where wallet_id = %s', (wallet_id,))
         v = cur.fetchone()
         if not v:

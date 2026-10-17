@@ -285,8 +285,10 @@ const symbolsOf = (pins) => ({ [pins.solana.native_mint]: 'SOL', [pins.solana.us
 // payouts of `payoutWallets` (rules.json's compile, the same code the bot runs).
 export function expectedPolicies(venue, expect, pins) {
   const payouts = (expect.payoutWallets ?? []).map(w => new PublicKey(ata(w, pins.solana.usdc_mint)));
+  // the vault's policy size (a card-signing owner's packs smaller): bounded by
+  // compile, so a server cannot ask for anything but a split of the same rules
   return compile(venue, { vault: new PublicKey(expect.vault), payer: new PublicKey(pins.payer),
-    pools: expect.pools[venue].map(p => new PublicKey(p)), payouts }, pins.rules).policies;
+    pools: expect.pools[venue].map(p => new PublicKey(p)), payouts, policyBytes: expect.policyBytes ?? undefined }, pins.rules).policies;
 }
 
 // --- the check ----------------------------------------------------------------------------------
@@ -756,7 +758,8 @@ function policyUpdates(outer, expect, pins, ctx, lines, no, signer) {
   const venues = Object.keys(expect.policies ?? {});
   const want = Object.fromEntries(venues.flatMap(v => {
     for (const p of expect.pools[v] ?? []) if (!(pins.pools[v] ?? []).includes(p)) no(`the pool ${short(p)} is not the ${v} pool the rules approve`);
-    const compiled = expectedPolicies(v, expect, pins);
+    let compiled;
+    try { compiled = expectedPolicies(v, expect, pins); } catch (e) { no(`the ${v} rules cannot be compiled for your vault: ${e.message}`); compiled = []; }
     if (compiled.length !== expect.policies[v].length) no(`the ${v} rules make ${compiled.length} policies; your vault has ${expect.policies[v].length}`);
     return expect.policies[v].map((addr, i) => [addr, { venue: v, policy: compiled[i]?.policy }]);
   }));

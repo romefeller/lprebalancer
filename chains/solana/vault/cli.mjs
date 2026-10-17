@@ -43,7 +43,7 @@ import { createRequire } from 'module';
 import fs from 'node:fs';
 import path from 'node:path';
 import * as sq from './squads.mjs';
-import { compile } from './policy.mjs';
+import { compile, policyBytesOf } from './policy.mjs';
 import { approvePlan, connectProblems, lookupPlan, otherSigners, ownerSetupPlan, packSteps, setupDone, stagedPolicies, staticAccounts } from './admin.mjs';
 import { readKeypair, vaultConfig, verifyPolicy } from './account.mjs';
 import { venue as venueOf } from './venues.mjs';
@@ -234,7 +234,7 @@ async function status() {
   if (payer) out.payerGasSol = (await connection.getBalance(payer)) / 1e9;
   const policyKey = process.env.LPBOT_VAULT_POLICY_KEY ? (await readKeypair(process.env.LPBOT_VAULT_POLICY_KEY)).publicKey : null;
   if (payer && policyKey && process.env.LPBOT_VAULT_VENUE) {
-    const compiled = compile(process.env.LPBOT_VAULT_VENUE, { vault: cfg.vault, payer, pools: cfg.pools, payouts: cfg.payouts });
+    const compiled = compile(process.env.LPBOT_VAULT_VENUE, { vault: cfg.vault, payer, pools: cfg.pools, payouts: cfg.payouts, policyBytes: cfg.policyBytes });
     try { await verifyPolicy(connection, cfg, policyKey, compiled); out.policies = 'as configured'; }
     catch (e) { out.policies = e.message; }
     out.botIsOwner = out.owners.includes(payer.toBase58()) || out.owners.includes(policyKey.toBase58());
@@ -395,7 +395,7 @@ export async function rulesRequest(action, { connection, settings, owner, payer,
   const steps = approvePlan({ settings, settingsData: settingsInfo.data, owner, signer, create: action === 'approve',
     venues: venues.map(v => {
       const keys = (xs) => xs.map(k => new PublicKey(k));
-      const compiled = compile(v.venue, { vault, payer, pools: keys(v.pools), payouts: keys(v.payouts) });
+      const compiled = compile(v.venue, { vault, payer, pools: keys(v.pools), payouts: keys(v.payouts), policyBytes: v.policyBytes ?? undefined });
       const mine = infos.slice(at, at + v.policies.length);
       at += v.policies.length;
       return { venue: v.venue, compiled, addresses: v.policies, infos: mine };
@@ -429,7 +429,7 @@ export async function stageVenue(f, { connection = new Connection(RPC, 'confirme
   await poolsByVenue(connection, [venue], pools);
   const settings = sq.decodeSettings((await connection.getAccountInfo(cfg.settings, 'confirmed')).data);
   const poolInfo = await Promise.all(pools.map(p => venueOf(venue).poolAccounts(connection, p)));
-  const compiled = compile(venue, { vault: cfg.vault, payer: payer.publicKey, pools, payouts: cfg.payouts });
+  const compiled = compile(venue, { vault: cfg.vault, payer: payer.publicKey, pools, payouts: cfg.payouts, policyBytes: cfg.policyBytes });
   const policies = stagedPolicies(cfg.settings, settings.policySeed, compiled.policies.length);
   const exist = await connection.getMultipleAccountsInfo(policies, 'confirmed');
   if (exist.some(Boolean)) throw new Error(`a policy at the vault's next seeds exists already (${policies.filter((_, i) => exist[i]).join(', ')})`);
@@ -477,7 +477,9 @@ export async function stagePool(f, { connection = new Connection(RPC, 'confirmed
   await poolsByVenue(connection, [venue], fresh);
   const pools = [...cfg.pools, ...fresh];
   const settings = sq.decodeSettings((await connection.getAccountInfo(cfg.settings, 'confirmed')).data);
-  const compiled = compile(venue, { vault: cfg.vault, payer: payer.publicKey, pools, payouts: cfg.payouts });
+  // --policy-bytes: the size the owners approve with (a card-signing owner), stored with the row
+  const policyBytes = f['policy-bytes'] != null ? policyBytesOf({ policyBytes: Number(f['policy-bytes']) }) : cfg.policyBytes;
+  const compiled = compile(venue, { vault: cfg.vault, payer: payer.publicKey, pools, payouts: cfg.payouts, policyBytes });
   const extra = compiled.policies.length - cfg.policies.length;
   if (extra < 0) throw new Error(`the rules over ${pools.length} pools compile to ${compiled.policies.length} policies, fewer than the vault's ${cfg.policies.length}`);
   const staged = stagedPolicies(cfg.settings, settings.policySeed, extra);
@@ -492,7 +494,7 @@ export async function stagePool(f, { connection = new Connection(RPC, 'confirmed
   const lookup = lookupPlan({ payer: payer.publicKey, table: cfg.lookup, have: table.state.addresses, addresses });
   const report = { settings: cfg.settings.toBase58(), vault: cfg.vault.toBase58(), venue,
     policies: [...cfg.policies, ...staged].map(String), pools: pools.map(String), payouts: cfg.payouts.map(String),
-    added: fresh.map(String), staged: staged.map(String), lookup: cfg.lookup.toBase58(),
+    added: fresh.map(String), staged: staged.map(String), lookup: cfg.lookup.toBase58(), policyBytes: policyBytes ?? null,
     lookupAdds: addresses.filter(a => !table.state.addresses.some(k => k.equals(a))).length };
   if (!f.execute) {
     log(JSON.stringify({ ...report, sent: false }, null, 1));
@@ -528,7 +530,7 @@ export async function main(argv = process.argv.slice(2)) {
   if (cmd === 'add-venue') return stageVenue(f);
   if (cmd === 'add-pool') return stagePool(f);
   console.log('commands: keys <dir> | setup|finish --owner <k> --venue <v>[,<v>] --pools .. [--payout ..] [--seed n] | status '
-    + '| request <withdraw|close|revoke|approve> --owner <k> [...] | add-venue --venue <v> --pools .. [--execute] | add-pool --venue <v> --pools .. [--execute]');
+    + '| request <withdraw|close|revoke|approve> --owner <k> [...] | add-venue --venue <v> --pools .. [--execute] | add-pool --venue <v> --pools .. [--policy-bytes n] [--execute]');
 }
 
 if (isEntry(import.meta.url)) main().catch(e => { console.error('ERROR:', signerError(e)); process.exitCode = 1; });

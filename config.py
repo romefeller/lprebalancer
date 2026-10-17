@@ -379,7 +379,9 @@ def vault_env(dex):
     return {'LPBOT_VAULT_SETTINGS': VAULT['settings'], 'LPBOT_VAULT_VENUE': dex,
             'LPBOT_VAULT_POLICIES': ','.join(v['policies']), 'LPBOT_VAULT_POOLS': ','.join(v['pools']),
             'LPBOT_VAULT_PAYOUTS': ','.join(v['payouts']), 'LPBOT_VAULT_LOOKUP': VAULT.get('lookup') or '',
-            'LPBOT_VAULT_POLICY_KEY': key_path}
+            'LPBOT_VAULT_POLICY_KEY': key_path,
+            # a card-signing owner's vault packs smaller policies (sql/047)
+            **({'LPBOT_VAULT_POLICY_BYTES': str(VAULT['policy_bytes'])} if VAULT.get('policy_bytes') is not None else {})}
 
 
 def require_wallet():

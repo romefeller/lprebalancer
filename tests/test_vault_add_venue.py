@@ -430,6 +430,35 @@ class PoolRow(unittest.TestCase):
         self.assertEqual(add_vault.pool_row(self.V, self.staged(policies=have['policies']))[0], have['policies'])
         self.assertEqual(add_vault.pool_row(self.V, self.staged(sent=False, lookupAdds=0))[1][-1], self.NEW_POOL)
 
+    def test_the_pool_command_stores_the_size_with_the_rows(self):
+        # tang0 (2026-10-17): the staging compiled at 600 bytes; the rows and the size go in one write
+        import json, tempfile, types
+        v = dict(self.V, policy_bytes=None)
+        writes = []
+
+        class Cur:
+            def execute(self, sql, args):
+                writes.append((sql.split()[1], args))
+
+        class Ctx:
+            def __enter__(self): return Cur()
+            def __exit__(self, *a): return False
+        for size, want in ((600, 2), (None, 1)):
+            writes.clear()
+            with tempfile.NamedTemporaryFile('w', suffix='.json', delete=False) as f:
+                json.dump(self.staged(**({'policyBytes': size} if size else {})), f)
+            with mock.patch.object(add_vault.db, 'vault_row', lambda w: v), \
+                    mock.patch.object(add_vault.db, 'cursor', lambda commit=False: Ctx()):
+                add_vault.pool(types.SimpleNamespace(wallet='w', json=f.name, apply=True))
+            self.assertEqual(len(writes), want, size)
+            if size:
+                self.assertEqual(writes[1], ('vaults', (600, 'w')))
+        for bad in (100, 900, 600.5, '600'):
+            with tempfile.NamedTemporaryFile('w', suffix='.json', delete=False) as f:
+                json.dump(self.staged(policyBytes=bad), f)
+            with mock.patch.object(add_vault.db, 'vault_row', lambda w: v), self.assertRaises(add_vault.Refused):
+                add_vault.pool(types.SimpleNamespace(wallet='w', json=f.name, apply=True))
+
     def test_every_refusal(self):
         have = self.V['venues']['raydium-clmm']
         bad = [self.staged(settings='OTHER'), self.staged(venue='orca'), self.staged(sent=False),

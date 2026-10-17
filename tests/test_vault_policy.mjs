@@ -7,7 +7,7 @@ import { createHash } from 'node:crypto';
 import { createRequire } from 'module';
 import fc from 'fast-check';
 import * as sq from '../chains/solana/vault/squads.mjs';
-import { RULES, compile, match, plan, needsVault, NotAllowed, POLICY_BYTES, instructionsOf, poolPda } from '../chains/solana/vault/policy.mjs';
+import { RULES, compile, match, plan, needsVault, NotAllowed, POLICY_BYTES, MIN_POLICY_BYTES, policyBytesOf, instructionsOf, poolPda } from '../chains/solana/vault/policy.mjs';
 import { vaultConfig, wrap, vaultFundsItsAccounts, withVaultBudget, VAULT_CALL_UNITS } from '../chains/solana/vault/account.mjs';
 import { connectProblems, lookupPlan, otherSigners, ownerSetupPlan, packSteps, setupDone, staticAccounts } from '../chains/solana/vault/admin.mjs';
 import { actingAccount } from '../chains/solana/vault/account.mjs';
@@ -80,6 +80,63 @@ test('policies: packing keeps every rule, in order, and is deterministic', () =>
       b.policies.map(p => sq.encodeProgramInteraction(p.policy).toString('hex')));
     assert.ok(a.policies.every(p => p.policy.constraints.length <= 20 && sq.encodeProgramInteraction(p.policy).length <= POLICY_BYTES), venue);
   }
+});
+
+// --- a vault's own policy size (sql/047): a card-signing owner's packs smaller -----------------------
+
+test('policy bytes: the default, a vault\'s own, and nothing outside the bounds', () => {
+  assert.equal(policyBytesOf({}), POLICY_BYTES);
+  assert.equal(policyBytesOf({ policyBytes: null }), POLICY_BYTES);
+  assert.equal(policyBytesOf({ policyBytes: 600 }), 600);
+  for (const bad of [MIN_POLICY_BYTES - 1, POLICY_BYTES + 1, 600.5, '600', NaN, 0, -1]) {
+    assert.throws(() => policyBytesOf({ policyBytes: bad }), /policy bytes/, String(bad));
+    assert.throws(() => compile('raydium-clmm', { ...worst(), policyBytes: bad }), /policy bytes/, String(bad));
+  }
+});
+
+test('policy bytes: any size packs the same rules, in order, each policy under it; only the split changes', () => {
+  fc.assert(fc.property(fc.constantFrom(...VENUES), fc.integer({ min: MIN_POLICY_BYTES, max: POLICY_BYTES }), (venue, size) => {
+    const ctx = worst();
+    const a = compile(venue, ctx);
+    let b;
+    try { b = compile(venue, { ...ctx, policyBytes: size }); } catch (e) {
+      // a size under one single rule is refused, never packed past it
+      assert.match(e.message, /one rule alone is over/); return;
+    }
+    const flat = (c) => c.policies.flatMap(p => p.policy.constraints.map(x => sq.encodeProgramInteraction({ accountIndex: 0, constraints: [x] }).toString('hex')));
+    assert.deepEqual(flat(b), flat(a), 'the same constraints, in the same order');
+    assert.ok(b.policies.every(p => sq.encodeProgramInteraction(p.policy).length <= size), 'each policy under the size');
+    assert.ok(b.policies.length >= a.policies.length, 'a smaller size never packs into fewer policies');
+    assert.deepEqual(compile(venue, { ...ctx, policyBytes: POLICY_BYTES }).policies.map(p => sq.encodeProgramInteraction(p.policy).toString('hex')),
+      a.policies.map(p => sq.encodeProgramInteraction(p.policy).toString('hex')), 'the default size is the default');
+  }), { numRuns: 60 });
+});
+
+// tang0, 2026-10-17: a Tangem card signs at most 930 bytes; at 760 its Raydium update was 1,043-1,050.
+test('policy bytes 600: every update of a two-pool Raydium vault fits a Tangem card (930 bytes)', () => {
+  const owner = Keypair.generate(), settings = key();
+  for (let run = 0; run < 20; run++) {
+    const ctx = { vault: key(), payer: key(), pools: [key(), key()], payouts: [key()] };
+    const sizes = (c) => c.policies.map((p, i) => {
+      const address = sq.policyPda(settings, i + 1);
+      const ix = sq.settingsSyncIx({ settings, signers: [owner.publicKey], rentPayer: owner.publicKey, extra: [address],
+        actions: [{ kind: 'policyUpdate', address, policy: p.policy, signers: [{ key: key() }] }] });
+      const tx = new Transaction().add(ix); tx.feePayer = owner.publicKey; tx.recentBlockhash = BLOCKHASH;
+      return tx.serializeMessage().length;
+    });
+    assert.ok(Math.max(...sizes(compile('raydium-clmm', ctx))) > 930, 'the default does not fit a card (why sql/047 exists)');
+    const small = compile('raydium-clmm', { ...ctx, policyBytes: 600 });
+    assert.equal(small.policies.length, 3, 'three policies: the two the vault has and one staged');
+    assert.ok(Math.max(...sizes(small)) <= 930, `card: ${sizes(small)}`);
+  }
+});
+
+test('policy bytes: the environment carries a vault\'s size to the signer, and nothing invalid', () => {
+  const base = { LPBOT_VAULT_SETTINGS: key().toBase58(), LPBOT_VAULT_POLICIES: key().toBase58(), LPBOT_VAULT_POLICY_KEY: '/x',
+    LPBOT_VAULT_POOLS: key().toBase58() };
+  assert.equal(vaultConfig(base).policyBytes, undefined);
+  assert.equal(vaultConfig({ ...base, LPBOT_VAULT_POLICY_BYTES: '600' }).policyBytes, 600);
+  for (const bad of ['10', '900', 'abc', '600.5']) assert.throws(() => vaultConfig({ ...base, LPBOT_VAULT_POLICY_BYTES: bad }), /policy bytes/, bad);
 });
 
 test('policies: no payout rule without payout accounts', () => {

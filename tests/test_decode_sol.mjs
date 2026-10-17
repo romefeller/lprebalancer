@@ -299,6 +299,38 @@ test('approve over two pools: passes with the extra pool pinned, refused without
   refused(decodeSol(txs[0], expect, { ...PINS, pools: { ...POOLS, orca: [...POOLS.orca, ...extra] } }), /not the raydium-clmm pool/);
 });
 
+// sql/047: a card-signing owner's vault packs smaller policies; the page compiles with the size the
+// server's context names (bounded by compile), and each transaction fits the card.
+test('approve at the vault\'s policy size: passes, fits a Tangem card; another size or an invalid one is refused', () => {
+  const both = [...POOLS[VENUE], ...SOLANA.vault_extra_pools[VENUE]];
+  const pinned = { ...PINS, pools: { ...POOLS, [VENUE]: both } };
+  const payouts = payoutWallets.map(w => new PublicKey(ata(w, USDC)));
+  const build = (size) => {
+    const compiled = compile(VENUE, { vault: VAULT, payer: PAYER, pools: both.map(p => new PublicKey(p)), payouts, policyBytes: size }).policies;
+    const have = compile(VENUE, { vault: VAULT, payer: PAYER, pools: POOLS[VENUE].map(p => new PublicKey(p)), payouts }).policies.length;
+    const addresses = compiled.map((_, i) => (i < have ? new PublicKey(POLICIES[i]) : sq.policyPda(SETTINGS, BigInt(i + 1))));
+    const txs = compiled.map(({ policy }, i) => {
+      const t = new Transaction().add(sq.settingsSyncIx({ settings: SETTINGS, signers: [OWNER], rentPayer: OWNER, extra: [addresses[i]],
+        actions: [{ kind: i < have ? 'policyUpdate' : 'policyCreate', address: addresses[i], ...(i < have ? {} : { seed: BigInt(i + 1) }),
+          policy, signers: [{ key: POLICY_KEY }] }] }));
+      t.feePayer = OWNER; t.recentBlockhash = PublicKey.default.toBase58();
+      return t;
+    });
+    return { addresses, txs, wires: txs.map(t => t.serialize({ requireAllSignatures: false, verifySignatures: false }).toString('base64')) };
+  };
+  const at600 = build(600);
+  const expect = (size, addresses = at600.addresses) => vaultExpect('approve', { policies: { [VENUE]: addresses.map(String) },
+    pools: { [VENUE]: both }, ...(size === undefined ? {} : { policyBytes: size }) });
+  for (const w of at600.wires) ok(decodeSol(w, expect(600), pinned));
+  for (const t of at600.txs) assert.ok(t.serializeMessage().length <= 930, `card: ${t.serializeMessage().length} bytes`);
+  // the default size splits the rules otherwise: the set is refused without the vault's size (a policy that
+  // happens to be the same at both sizes passes on its own, the others do not)
+  refused(decodeSolSet(at600.wires, expect(undefined), pinned), /differs from the rules in git|rules make/);
+  assert.ok(at600.wires.some(w => !decodeSol(w, expect(undefined), pinned).ok));
+  // a size outside the bounds is refused, never compiled
+  for (const bad of [100, 2000, 600.5, 'x']) refused(decodeSol(at600.wires[0], expect(bad), pinned), /cannot be compiled for your vault/, String(bad));
+});
+
 test('the page and the offline verifier pin the same pools: each venue\'s home pool, then its extra ones', async () => {
   const fs = await import('node:fs');
   const { pinsOf } = await import('../onboard/verify.mjs');

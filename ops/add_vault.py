@@ -244,6 +244,10 @@ def pool(args):
     text = sys.stdin.read() if args.json == '-' else pathlib.Path(args.json).read_text()
     staged = json.loads(text)
     policies, pools = pool_row(v, staged)
+    size = staged.get('policyBytes')
+    if size is not None and not (isinstance(size, int) and 400 <= size <= 760):
+        raise Refused(f'policyBytes {size!r}: an integer from 400 to 760')
+    print('policy bytes now:', v.get('policy_bytes'), 'new:', size if size is not None else v.get('policy_bytes'))
     print('policies now:', v['venues'][staged['venue']]['policies'])
     print('policies new:', policies)
     print('pools now:', v['venues'][staged['venue']]['pools'])
@@ -254,6 +258,9 @@ def pool(args):
     with db.cursor(commit=True) as cur:
         cur.execute('update vault_policies set policies = %s, pools = %s, updated_at = now() where wallet_id = %s and venue = %s',
                     (policies, pools, args.wallet, staged['venue']))
+        if size is not None:
+            # the size the staging compiled with: the policies the owners approve
+            cur.execute('update vaults set policy_bytes = %s where wallet_id = %s', (size, args.wallet))
     print('written. The bot holds this venue until the owners approve with Approve bot rules on the owner page.')
 
 

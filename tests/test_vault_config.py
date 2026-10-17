@@ -67,6 +67,17 @@ class Database(unittest.TestCase):
         self.assertEqual(v['settings'], SETTINGS)
         self.assertEqual(v['venues'], {'meteora-dlmm': {'policies': POLICIES, 'pools': [DLMM_POOL], 'payouts': []}})
 
+    # sql/047: a card-signing owner's vault packs smaller policies
+    def test_a_vaults_policy_size_reads_back_and_stays_in_bounds(self):
+        self.insert_vault()
+        self.assertIsNone(db.vault_row('v-test')['policy_bytes'])
+        with db.cursor(commit=True) as cur:
+            cur.execute("update vaults set policy_bytes = 600 where wallet_id = 'v-test'")
+        self.assertEqual(db.vault_row('v-test')['policy_bytes'], 600)
+        for bad in (399, 761, 0):
+            with self.subTest(bad=bad), self.assertRaises(psycopg2.errors.CheckViolation), db.cursor(commit=True) as cur:
+                cur.execute("update vaults set policy_bytes = %s where wallet_id = 'v-test'", (bad,))
+
     def test_an_unreachable_threshold_is_refused(self):
         with self.assertRaises(psycopg2.errors.CheckViolation):
             self.insert_vault(threshold=2)
@@ -109,6 +120,15 @@ class SignerEnvironment(unittest.TestCase):
         with mock.patch.object(config, 'VAULT', vault(lookup=DLMM_POOL)), \
                 mock.patch.dict(os.environ, {'LPBOT_VAULT_TEST_POLICY_KEY': '/keys/policy.json'}):
             self.assertEqual(config.vault_env('meteora-dlmm')['LPBOT_VAULT_LOOKUP'], DLMM_POOL)
+
+    def test_a_vaults_policy_size_reaches_the_signer_only_when_set(self):
+        with mock.patch.dict(os.environ, {'LPBOT_VAULT_TEST_POLICY_KEY': '/keys/policy.json'}):
+            with mock.patch.object(config, 'VAULT', vault()):
+                self.assertNotIn('LPBOT_VAULT_POLICY_BYTES', config.vault_env('meteora-dlmm'))
+            with mock.patch.object(config, 'VAULT', vault(policy_bytes=None)):
+                self.assertNotIn('LPBOT_VAULT_POLICY_BYTES', config.vault_env('meteora-dlmm'))
+            with mock.patch.object(config, 'VAULT', vault(policy_bytes=600)):
+                self.assertEqual(config.vault_env('meteora-dlmm')['LPBOT_VAULT_POLICY_BYTES'], '600')
 
     def test_a_safe_vault_gets_its_safe_role_pools_and_payouts(self):
         safe = vault(kind='safe', settings='0x5FbDB2315678afecb367f032d93F642f64180aa3', policy_key_env='LPBOT_V_PAYER',

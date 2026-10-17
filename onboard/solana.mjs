@@ -360,7 +360,8 @@ export function requestEnv(row, venue, keys) {
   const v = row.venues[venue];
   return { LPBOT_VAULT_SETTINGS: row.settings, LPBOT_VAULT_POLICIES: v.policies.join(','), LPBOT_VAULT_POOLS: v.pools.join(','),
     LPBOT_VAULT_PAYOUTS: v.payouts.join(','), LPBOT_VAULT_LOOKUP: row.lookup ?? '', LPBOT_VAULT_VENUE: venue,
-    LPBOT_VAULT_POLICY_KEY: keys.policyPath };
+    LPBOT_VAULT_POLICY_KEY: keys.policyPath,
+    ...(row.policy_bytes != null ? { LPBOT_VAULT_POLICY_BYTES: String(row.policy_bytes) } : {}) };
 }
 
 // Withdraw (to the owner's own wallet; token ALL: everything, its accounts
@@ -397,7 +398,7 @@ export async function ownerTxs(connection, c, row, keys, { action, owner, token,
     // policies of a venue staged on this vault created; every venue in one
     // request, new policies first (cli.mjs rulesRequest)
     const r = await rulesRequest(action, { connection, settings: row.settings, owner: new PublicKey(owner), payer: keys.payer.publicKey,
-      policyKey: keys.policyKey.publicKey, venues: venues.map(venue => ({ venue, ...row.venues[venue] })) });
+      policyKey: keys.policyKey.publicKey, venues: venues.map(venue => ({ venue, ...row.venues[venue], policyBytes: row.policy_bytes ?? undefined })) });
     const t = action === 'approve' && token ? own(c.tokens, token) : null;
     if (action === 'approve' && token && !t) throw new Invalid(`token ${token}`);
     const deposit = t ? await depositIxs(connection, c, { owner, vault: sq.vaultPda(new PublicKey(row.settings)), token, amount }) : [];
@@ -477,7 +478,9 @@ export function context(r) {
   return { settings: row.settings, vault: sq.vaultPda(new PublicKey(row.settings)).toBase58(),
     policies: Object.fromEntries(Object.entries(row.venues).map(([v, x]) => [v, x.policies])),
     pools: Object.fromEntries(Object.entries(row.venues).map(([v, x]) => [v, x.pools])),
-    payoutWallets: [r.profit_wallet, ...(r.fee_wallet ? [r.fee_wallet] : [])] };
+    payoutWallets: [r.profit_wallet, ...(r.fee_wallet ? [r.fee_wallet] : [])],
+    // a card-signing owner's vault packs smaller policies (vaults.policy_bytes): the page compiles with it
+    ...(row.policy_bytes != null ? { policyBytes: row.policy_bytes } : {}) };
 }
 
 // What a deposit transaction moved from the owner into the vault, from its
@@ -561,7 +564,7 @@ export function rulesCurrent(row, vault, keys, infos) {
   let i = 0;
   for (const [venue, v] of Object.entries(row.venues)) {
     const compiled = compile(venue, { vault, payer: keys.payer.publicKey, pools: v.pools.map(k => new PublicKey(k)),
-      payouts: v.payouts.map(k => new PublicKey(k)) });
+      payouts: v.payouts.map(k => new PublicKey(k)), policyBytes: row.policy_bytes ?? undefined });
     if (compiled.policies.length !== v.policies.length) return false;
     for (const p of compiled.policies) {
       const info = infos[i++];
