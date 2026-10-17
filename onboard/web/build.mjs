@@ -35,7 +35,7 @@ export async function pins(over = {}) {
     site: cfg.site,
     solana: {
       payer: sol.botKeys[0], policyKey: sol.botKeys[1], operator: solana[sol.operatorWallet],
-      pools: Object.fromEntries(Object.entries(solana[sol.poolsKey]).map(([v, p]) => [v, [p]])),
+      pools: Object.fromEntries(Object.entries(solana[sol.poolsKey]).map(([v, p]) => [v, [p, ...(solana.vault_extra_pools?.[v] ?? [])]])),
       tokens: Object.fromEntries(Object.entries(sol.tokens).map(([s, t]) => [s, { mint: solana[t.mintKey], decimals: t.decimals, native: Boolean(t.native) }])),
     },
     polygon: {

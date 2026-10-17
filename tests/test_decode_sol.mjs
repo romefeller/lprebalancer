@@ -277,6 +277,43 @@ test('transactions the page cannot read, or that cost the owner, are refused', (
   refused(decodeSol(wire([transfer(OWNER, PAYER, 1)]), { ...base, kind: 'payment', raw: '1' }, PINS), /nothing to check/, 'a gas payment alone is no kind any more');
 });
 
+// 2026-10-17: tang0 adds Raydium 3ucNos to its vault (cli.mjs add-pool): the rules over both
+// pools, the existing policies updated and one created. The page pins the extra pool from
+// solana.json vault_extra_pools; without the pin it refuses, as it did before the pin.
+test('approve over two pools: passes with the extra pool pinned, refused without it', () => {
+  const extra = SOLANA.vault_extra_pools[VENUE];
+  assert.deepEqual(extra, ['3ucNos4NbumPLZNWztqGHNFFgkHeRMBQAVemeeomsUxv']);
+  const both = [...POOLS[VENUE], ...extra];
+  const pinned = { ...PINS, pools: { ...POOLS, [VENUE]: both } };
+  const compiled = compile(VENUE, { vault: VAULT, payer: PAYER, pools: both.map(p => new PublicKey(p)),
+    payouts: payoutWallets.map(w => new PublicKey(ata(w, USDC))) }).policies;
+  // the policies the vault has stay where they are; a created one is the vault's policy at its next seed
+  const addresses = compiled.map((_, i) => (i < POLICIES.length ? new PublicKey(POLICIES[i]) : sq.policyPda(SETTINGS, BigInt(i + 1))));
+  const expect = vaultExpect('approve', { policies: { [VENUE]: addresses.map(String) }, pools: { [VENUE]: both } });
+  const txs = compiled.map(({ policy }, i) => wire([sq.settingsSyncIx({ settings: SETTINGS, signers: [OWNER], rentPayer: OWNER,
+    extra: [addresses[i]], actions: [{ kind: i < POLICIES.length ? 'policyUpdate' : 'policyCreate', address: addresses[i],
+      ...(i < POLICIES.length ? {} : { seed: BigInt(i + 1) }), policy, signers: [{ key: POLICY_KEY }] }] })]));
+  for (const t of txs) ok(decodeSol(t, expect, pinned));
+  for (const t of txs) refused(decodeSol(t, expect, PINS), /3ucNos.*not the raydium-clmm pool|not the raydium-clmm pool/);
+  // a pool pinned for another venue does not count for this one
+  refused(decodeSol(txs[0], expect, { ...PINS, pools: { ...POOLS, orca: [...POOLS.orca, ...extra] } }), /not the raydium-clmm pool/);
+});
+
+test('the page and the offline verifier pin the same pools: each venue\'s home pool, then its extra ones', async () => {
+  const fs = await import('node:fs');
+  const { pinsOf } = await import('../onboard/verify.mjs');
+  const polygon = await import('../chains/evm/polygon.mjs');
+  const read = (f) => fs.readFileSync(new URL(f, import.meta.url), 'utf8');
+  const p = pinsOf(read('../chains/solana/vault/rules.json'), read('../chains/solana/solana.json'), read('../onboard/onboard.json'), polygon);
+  for (const [v, home] of Object.entries(SOLANA.sol_usdc_pools)) {
+    assert.deepEqual(p.solana.pools[v], [home, ...(SOLANA.vault_extra_pools[v] ?? [])], v);
+  }
+  // the bundle's builder pins with the same expression
+  const build = read('../onboard/web/build.mjs'), verify = read('../onboard/verify.mjs');
+  const expr = '[v, [p, ...(solana.vault_extra_pools?.[v] ?? [])]]';
+  assert.ok(build.includes(expr) && verify.includes(expr));
+});
+
 test('close: the venue\'s exit instructions only, pinned to the vault and the approved pool', () => {
   const rule = (name) => instructionsOf(VENUE).find(r => r.name === name);
   const pool = new PublicKey(POOLS[VENUE][0]), program = new PublicKey(RULES.venues[VENUE].program);

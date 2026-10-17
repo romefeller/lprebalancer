@@ -38,7 +38,7 @@ test('the pins of a commit: its rules (hashed), pools, the bot\'s keys and the o
   assert.match(PINS.rulesSha256, /^[0-9a-f]{64}$/);
   assert.equal(PINS.solana.payer, ONBOARD.chains.solana.botKeys[0]);
   assert.equal(PINS.solana.policyKey, ONBOARD.chains.solana.botKeys[1]);
-  assert.deepEqual(PINS.solana.pools[VENUE], [POOL]);
+  assert.deepEqual(PINS.solana.pools[VENUE], [POOL, ...(SOLANA.vault_extra_pools?.[VENUE] ?? [])]);   // the home pool, then the extra ones
   assert.equal(PINS.polygon.botKey, ONBOARD.chains.polygon.botKeys[0]);
   assert.equal(PINS.polygon.npm, POLYGON.V3.npm);
   // git show, for a commit id only

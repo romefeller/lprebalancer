@@ -16,6 +16,10 @@
     "orca": "Czfq3xZZDmsdGdUyrNLtRhGc47cXcZtLG4crryfu44zE",
     "byreal": "9GTj99g9tbz9U6UYDsX6YeRTgUnkYG6GTnHv3qLa5aXq"
   },
+  "vault_extra_pools_about": "More SOL/USDC pools an owner's vault may approve per venue, after its sol_usdc_pools one (2026-10-17: Raydium 3ucNos for tang0, cli.mjs add-pool). The owner page pins these too.",
+  "vault_extra_pools": {
+    "raydium-clmm": ["3ucNos4NbumPLZNWztqGHNFFgkHeRMBQAVemeeomsUxv"]
+  },
   "programs": {
     "system": "11111111111111111111111111111111",
     "token": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",

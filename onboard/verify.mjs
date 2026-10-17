@@ -57,7 +57,7 @@ export function pinsOf(rulesText, solanaText, onboardText, polygon) {
   return {
     rulesSha256: crypto.createHash('sha256').update(rulesText).digest('hex'),
     solana: { payer: sol.botKeys[0], policyKey: sol.botKeys[1], operator: solana[sol.operatorWallet],
-      pools: Object.fromEntries(Object.entries(solana[sol.poolsKey]).map(([v, p]) => [v, [p]])), rules, solana },
+      pools: Object.fromEntries(Object.entries(solana[sol.poolsKey]).map(([v, p]) => [v, [p, ...(solana.vault_extra_pools?.[v] ?? [])]])), rules, solana },
     polygon: { chainId: polygon.CHAIN_ID, botKey: poly.botKeys[0], npm: polygon.V3.npm, wrapped: { WPOL: polygon.WPOL },
       tokens: Object.fromEntries(Object.entries(poly.tokens).map(([s, t]) => [s, { address: t.native ? null : polygon[s], decimals: t.decimals }])),
       // the owner's own vault, as the page's bundle pins it (onboard/web/build.mjs)
