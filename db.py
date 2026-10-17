@@ -536,18 +536,6 @@ def record_fee_state(dex, pool, st):
         cur.execute('delete from fee_growth where ts < now() - make_interval(days => %s)', (FEE_GROWTH_KEEP_DAYS,))
 
 
-def our_liquidity(pool):
-    """The liquidity every profile's open position on `pool` holds, from each
-    one's latest snapshot (raw units, the pool's own), as an int; 0 with none.
-    What the board's crowding counts as ours (lp/board.py fleet_factor)."""
-    with cursor() as cur:
-        cur.execute("""select coalesce(sum(s.liquidity), 0) l from positions p
-                        join lateral (select liquidity from snapshots where mint = p.mint and liquidity is not null
-                                      order by ts desc limit 1) s on true
-                       where p.closed_at is null and p.pool = %s""", (pool,))
-        return int(cur.fetchone()['l'] or 0)
-
-
 def fee_state_span(pool, hours=24):
     """The oldest sample within `hours` and the newest, for one pool, with
     the seconds between them; or None with fewer than two samples."""

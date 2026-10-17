@@ -106,8 +106,8 @@ def decode_rewards(raw, now=None):
 # Raydium's PoolState (Raydium, Byreal, PancakeSwap): after tick_current and
 # two u16 paddings. Orca's Whirlpool: fee_growth_global_a after vault_a,
 # fee_growth_global_b after vault_b. Each also says its active liquidity (Raydium
-# after tick_spacing, Orca after the protocol fee rate): the crowding of the board
-# (lp/board.py fleet_factor). Verified on chain 2026-09-26: both grow,
+# after tick_spacing, Orca after the protocol fee rate), kept in fee_growth as
+# evidence; the board does not rank on it (sql/050). Verified on chain 2026-09-26: both grow,
 # and a 75-second delta gives a +/-1% position 1.14%/day on Raydium.
 FEE_LAYOUT_DEXES = {'raydium-clmm': 'raydium', 'byreal': 'raydium',
                     'pancakeswap-v3-solana': 'raydium', 'orca': 'orca'}

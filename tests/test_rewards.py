@@ -93,8 +93,8 @@ class CalmReview(unittest.TestCase):
     def go(self, venues):
         moved, sent = [], []
         recent = {v['address']: {'total_pct_day': v['total_pct_day']} for v in venues}   # the last 6h as 24h
-        with mock.patch.object(lp.board, 'venue_view', lambda price, q=1.0, capital_usd=None: venues), \
-                mock.patch.object(lp.board, 'venue_income', lambda a, ua, ub, band=1.01, hours=24, **k: recent.get(a)), \
+        with mock.patch.object(lp.board, 'venue_view', lambda price, q=1.0: venues), \
+                mock.patch.object(lp.board, 'venue_income', lambda a, ua, ub, band=1.01, hours=24: recent.get(a)), \
                 mock.patch.object(lp.books, 'notify', lambda ev, **kw: sent.append((ev, kw))), \
                 mock.patch.object(db, 'event', lambda *a: None), \
                 mock.patch.object(lp.moves, 'rebalance', lambda *a, **k: moved.append(k)), \

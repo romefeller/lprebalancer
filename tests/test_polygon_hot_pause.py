@@ -199,7 +199,7 @@ class SolanaSampler(unittest.TestCase):
                 mock.patch.object(lp.board, 'venue_candidates', lambda: cands), \
                 mock.patch.object(solana_state, 'fee_states', lambda pools: {'A1': {'g0': 1}} if states is None else states), \
                 mock.patch.object(db, 'record_fee_state', lambda *a: recorded.append(a)), \
-                mock.patch.object(lp.board, 'venue_view', lambda px, q, capital_usd=None: viewed.append((px, q))), \
+                mock.patch.object(lp.board, 'venue_view', lambda px, q: viewed.append((px, q))), \
                 mock.patch.object(lp.paths, 'save', lambda s: None), \
                 mock.patch.object(lp.books, 'notify', lambda ev, **kw: told.append(ev)):
             state = {'last_fee_sample': last}

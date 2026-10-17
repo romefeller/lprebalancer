@@ -197,7 +197,7 @@ class FailoverEdges(unittest.TestCase):
         with mock.patch.object(config, 'DEX', 'raydium-clmm'), mock.patch.object(config, 'POOL', 'POOL_raydium-clmm'), \
                 mock.patch.object(config, 'POOL_PINNED', pinned), mock.patch.object(config, 'EXECUTE_DEXES', ARMED), \
                 mock.patch.object(config, 'REGIME_ENABLED', regime), mock.patch.object(lp.signers, 'SIGNERS', SIGS), \
-                mock.patch.object(lp.board, 'venue_view', lambda p, q=1.0, capital_usd=None: (seen['vv'].append((p, q)), venues)[1]), \
+                mock.patch.object(lp.board, 'venue_view', lambda p, q=1.0: (seen['vv'].append((p, q)), venues)[1]), \
                 mock.patch.object(lp.regime, 'regime_choice_now', lambda *a: choice), \
                 mock.patch.object(lp.paths, 'save', lambda s: None), mock.patch.object(db, 'event', lambda *a: None), \
                 mock.patch.object(lp.books, 'notify', lambda *a, **k: None), \
