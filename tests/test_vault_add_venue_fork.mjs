@@ -205,7 +205,9 @@ test('a Meteora-only vault adds Raydium: owner approves once, the bot closes on 
   const first = await ask('approve');
   const steps = (await rulesRequest('approve', { connection, settings, owner: owner.publicKey,
     payer: payer.publicKey, policyKey: policyKey.publicKey, venues: Object.entries(row.venues).map(([venue, v]) => ({ venue, ...v })) })).steps;
-  assert.deepEqual(steps.map(s => `${s.kind} ${s.seed}`), ['update 1', 'update 2', 'update 3', 'create 4', 'create 5']);
+  // the Raydium policies to create; a Meteora policy already holding its rules is not resent (2026-10-17)
+  assert.deepEqual(steps.filter(s => s.kind === 'create').map(s => String(s.seed)), ['4', '5']);
+  assert.ok(steps.every(s => !s.current));
   const need = await S.affordsRules(connection, owner.publicKey.toBase58(), steps);
   // packed: as few transactions as fit, one wallet approval
   assert.equal(first.transactions.length, packSteps(steps.map(s => s.ixs), owner.publicKey).length);

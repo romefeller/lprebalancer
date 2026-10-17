@@ -11,7 +11,7 @@ import { RULES, compile, match, NotAllowed, vaultWsolAccount } from '../chains/s
 import { approvePlan, stagedPolicies } from '../chains/solana/vault/admin.mjs';
 import { AWAITS_OWNERS, PolicyMismatch, verifyPolicy } from '../chains/solana/vault/account.mjs';
 import { affordsRules, ownerTxs, POLICY_ACCOUNT_BYTES, POLICY_GROWTH_BYTES, status as solStatus } from '../onboard/solana.mjs';
-import { stagePool, stageVenue } from '../chains/solana/vault/cli.mjs';
+import { rulesRequest, stagePool, stageVenue } from '../chains/solana/vault/cli.mjs';
 
 const require = createRequire(import.meta.url);
 const { Keypair, PublicKey, SystemProgram, Transaction } = require('@solana/web3.js');
@@ -184,6 +184,33 @@ test('add-pool: the owners update the policies the vault has and create the stag
     assert.ok(approvePlan({ settings, settingsData: settingsData(BigInt(after.policies.length)), owner, signer,
       venues: [{ venue, compiled: after, addresses: [...have, ...staged], infos: landed }] }).every(s => s.kind === 'update' && s.current));
   }), { numRuns: 30 });
+});
+
+// tang0, 2026-10-17: the owner's card approved two policy updates; the third (a create) expired. The
+// next request sends only what is not on chain yet, one transaction, not the two again.
+test('approve: a policy already holding its rules is left out; nothing left to sign is said', async () => {
+  const settings = key(), vault = sq.vaultPda(settings), owner = key(), payer = key(), policyKey = key();
+  const pools = [key(), key()], payouts = [key()];
+  const compiled = compile('raydium-clmm', { vault, payer, pools, payouts, policyBytes: 600 });
+  const addresses = compiled.policies.map((_, i) => sq.policyPda(settings, BigInt(i + 1)));
+  const landed = compiled.policies.map((p, i) => policyAccount(settings, BigInt(i + 1), [policyKey], p.policy));
+  const conn = (infos, seed) => ({ getAccountInfo: async () => ({ data: settingsData(seed) }), getMultipleAccountsInfo: async () => infos });
+  const venues = [{ venue: 'raydium-clmm', policies: addresses.map(String), pools: pools.map(String), payouts: payouts.map(String), policyBytes: 600 }];
+  const n = compiled.policies.length;
+  // all but the last landed: only the create is asked
+  let r = await rulesRequest('approve', { connection: conn([...landed.slice(0, -1), null], BigInt(n - 1)), settings, owner, payer, policyKey, venues });
+  assert.deepEqual(r.steps.map(s => `${s.kind} ${s.seed}`), [`create ${n}`]);
+  assert.equal(r.groups.length, 1);
+  // one update did not land either: it is asked too, in seed order
+  const older = policyAccount(settings, 1n, [policyKey], compile('raydium-clmm', { vault, payer, pools: pools.slice(0, 1), payouts }).policies[0].policy);
+  r = await rulesRequest('approve', { connection: conn([older, ...landed.slice(1, -1), null], BigInt(n - 1)), settings, owner, payer, policyKey, venues });
+  assert.deepEqual(r.steps.map(s => `${s.kind} ${s.seed}`), ['update 1', `create ${n}`]);
+  // everything landed: nothing to sign, said
+  await assert.rejects(rulesRequest('approve', { connection: conn(landed, BigInt(n)), settings, owner, payer, policyKey, venues }), /nothing to approve/);
+  // a revoke: every policy still names the bot, so every one is asked
+  r = await rulesRequest('revoke', { connection: conn(landed, BigInt(n)), settings, owner, payer, policyKey, venues });
+  assert.equal(r.steps.length, n);
+  assert.ok(r.steps.every(s => s.kind === 'update'));
 });
 
 test('add-pool: tang0, raydium 8sLb + 3ucNos compiles to one more policy than the vault holds', () => {

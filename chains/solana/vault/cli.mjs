@@ -392,6 +392,10 @@ export async function rulesRequest(action, { connection, settings, owner, payer,
   const addresses = venues.flatMap(v => v.policies.map(k => new PublicKey(k)));
   const infos = addresses.length ? await connection.getMultipleAccountsInfo(addresses, 'confirmed') : [];
   let at = 0;
+  // A policy that already holds what it should is left out: the owner signs only what changes. The
+  // set is built once and sent in order, and each send waits for the one before; on 2026-10-17 the
+  // third of tang0's approval expired after two that changed nothing new were resent. (The list is
+  // built once per request, so leaving these out shifts nothing the page asks for by index.)
   const steps = approvePlan({ settings, settingsData: settingsInfo.data, owner, signer, create: action === 'approve',
     venues: venues.map(v => {
       const keys = (xs) => xs.map(k => new PublicKey(k));
@@ -399,7 +403,7 @@ export async function rulesRequest(action, { connection, settings, owner, payer,
       const mine = infos.slice(at, at + v.policies.length);
       at += v.policies.length;
       return { venue: v.venue, compiled, addresses: v.policies, infos: mine };
-    }) });
+    }) }).filter(s => !s.current);
   if (!steps.length) throw new Error(`nothing to ${action}: every policy of the vault ${vault.toBase58()} is already as asked`);
   const created = steps.filter(s => s.kind === 'create').length;
   const summary = action === 'revoke'
