@@ -11,7 +11,7 @@ import { RULES, compile, match, NotAllowed, vaultWsolAccount } from '../chains/s
 import { approvePlan, stagedPolicies } from '../chains/solana/vault/admin.mjs';
 import { AWAITS_OWNERS, PolicyMismatch, verifyPolicy } from '../chains/solana/vault/account.mjs';
 import { affordsRules, ownerTxs, POLICY_ACCOUNT_BYTES, POLICY_GROWTH_BYTES, status as solStatus } from '../onboard/solana.mjs';
-import { stageVenue } from '../chains/solana/vault/cli.mjs';
+import { stagePool, stageVenue } from '../chains/solana/vault/cli.mjs';
 
 const require = createRequire(import.meta.url);
 const { Keypair, PublicKey, SystemProgram, Transaction } = require('@solana/web3.js');
@@ -146,6 +146,57 @@ test('stage: a venue and its pools, or nothing is read', async () => {
   await assert.rejects(stageVenue({ venue: 'raydium-clmm' }, quiet), /add-venue needs --venue and --pools/);
   await assert.rejects(stageVenue({ venue: 'meteora-dlmm', pools: key().toBase58() }, quiet), /has it already/);
   await assert.rejects(stageVenue({ venue: 'raydium-clmm', pools: key().toBase58() }, { ...quiet, env: {} }), /LPBOT_VAULT_SETTINGS is not set/);
+});
+
+// --- one more pool on a venue the vault has (2026-10-17: tang0 into 3ucNos) -------------------------
+
+test('add-pool: refused before anything is read', async () => {
+  const held = key();
+  const env = { LPBOT_VAULT_SETTINGS: key().toBase58(), LPBOT_VAULT_POLICIES: key().toBase58(), LPBOT_VAULT_POLICY_KEY: '/nowhere',
+    LPBOT_VAULT_POOLS: held.toBase58(), LPBOT_VAULT_VENUE: 'raydium-clmm' };
+  const quiet = { connection: {}, env, payer: { publicKey: key() }, log: () => {} };
+  await assert.rejects(stagePool({ pools: key().toBase58() }, quiet), /add-pool needs --venue and --pools/);
+  await assert.rejects(stagePool({ venue: 'raydium-clmm' }, quiet), /add-pool needs --venue and --pools/);
+  await assert.rejects(stagePool({ venue: 'orca', pools: key().toBase58() }, quiet), /not the venue the environment names/);
+  await assert.rejects(stagePool({ venue: 'raydium-clmm', pools: held.toBase58() }, quiet), /has every one of these pools already/);
+  await assert.rejects(stagePool({ venue: 'raydium-clmm', pools: key().toBase58() }, { ...quiet, env: {} }), /LPBOT_VAULT_SETTINGS is not set/);
+});
+
+test('add-pool: the owners update the policies the vault has and create the staged ones, in seed order', () => {
+  fc.assert(fc.property(fc.constantFrom(...VENUES), fc.integer({ min: 1, max: 2 }), fc.integer({ min: 1, max: 2 }), (venue, nOld, nNew) => {
+    const settings = key(), vault = sq.vaultPda(settings), signer = key(), owner = key(), payer = key(), payouts = [key()];
+    const oldPools = Array.from({ length: nOld }, key), newPools = Array.from({ length: nNew }, key);
+    const before = compile(venue, { vault, payer, pools: oldPools, payouts });
+    const after = compile(venue, { vault, payer, pools: [...oldPools, ...newPools], payouts });
+    fc.pre(after.policies.length >= before.policies.length);
+    const have = before.policies.map((_, i) => sq.policyPda(settings, BigInt(i + 1)));
+    const staged = stagedPolicies(settings, BigInt(have.length), after.policies.length - have.length);
+    const infos = [...before.policies.map((p, i) => policyAccount(settings, BigInt(i + 1), [signer], p.policy)), ...staged.map(() => null)];
+    const steps = approvePlan({ settings, settingsData: settingsData(BigInt(have.length)), owner, signer,
+      venues: [{ venue, compiled: after, addresses: [...have, ...staged], infos }] });
+    assert.deepEqual(steps.map(s => s.kind), [...have.map(() => 'update'), ...staged.map(() => 'create')]);
+    assert.deepEqual(steps.map(s => s.seed), Array.from({ length: after.policies.length }, (_, i) => BigInt(i + 1)));
+    // the old rules differ wherever the new pools are named: those updates are not current, the owners approve them
+    assert.ok(steps.some(s => !s.current));
+    for (const s of steps) assert.ok(txSize(s.ixs, owner) <= 1232, 'one transaction per policy');
+    // after they land, the vault holds exactly the new rules: nothing more to approve
+    const landed = after.policies.map((p, i) => policyAccount(settings, BigInt(i + 1), [signer], p.policy));
+    assert.ok(approvePlan({ settings, settingsData: settingsData(BigInt(after.policies.length)), owner, signer,
+      venues: [{ venue, compiled: after, addresses: [...have, ...staged], infos: landed }] }).every(s => s.kind === 'update' && s.current));
+  }), { numRuns: 30 });
+});
+
+test('add-pool: tang0, raydium 8sLb + 3ucNos compiles to one more policy than the vault holds', () => {
+  const settings = new PublicKey('7yw9FuFRB7mKhJsdcqyrZGq2iEnQjxpL9e8jB2ZV4CGz'), vault = sq.vaultPda(settings);
+  const payer = new PublicKey('Hce75RqXeuH4mBxZhRK8iojUMkx89961RUPLHb283iJJ'), payouts = [new PublicKey('CvkYX7aRberphM2wx2Mf2f7BomxtikEqPvsM4USGYG9z')];
+  const S8 = new PublicKey('8sLbNZoA1cfnvMJLPfp98ZLAnFSYCFApfJKMbiXNLwxj'), S3 = new PublicKey('3ucNos4NbumPLZNWztqGHNFFgkHeRMBQAVemeeomsUxv');
+  assert.equal(compile('raydium-clmm', { vault, payer, pools: [S8], payouts }).policies.length, 2);
+  const both = compile('raydium-clmm', { vault, payer, pools: [S8, S3], payouts });
+  assert.equal(both.policies.length, 3);
+  // every rule that names a pool names both
+  const named = both.policies.flatMap(p => p.index).flatMap(e => e.accounts).filter(a => a.keys?.some(k => k.equals(S8)));
+  assert.ok(named.length > 0);
+  assert.ok(named.every(a => a.keys.some(k => k.equals(S3))));
 });
 
 test('withdraw at /bot: a positive amount or all, refused before anything is read', async () => {

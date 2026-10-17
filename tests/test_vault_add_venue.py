@@ -364,11 +364,11 @@ class OperatorMove(unittest.TestCase):
 class MoveWaits(unittest.TestCase):
     """Who is asked before an operator move, and who is not."""
 
-    def ask(self, vault, dex='meteora-dlmm', target='raydium-clmm', answer=(None, None)):
+    def ask(self, vault, dex='meteora-dlmm', target='raydium-clmm', answer=(None, None), pool='HELD', address=RAY_POOL):
         calls = []
-        with mock.patch.multiple(config, VAULT=vault, DEX=dex), \
+        with mock.patch.multiple(config, VAULT=vault, DEX=dex, POOL=pool), \
                 mock.patch.object(lp.signers, 'chain', lambda *a, **k: calls.append((a, k)) or answer):
-            why = lp.board.move_waits({'dex': target, 'address': RAY_POOL})
+            why = lp.board.move_waits({'dex': target, 'address': address})
         return why, calls
 
     def test_a_squads_vault_reads_the_target_venue_first(self):
@@ -378,10 +378,72 @@ class MoveWaits(unittest.TestCase):
         self.assertEqual(self.ask(VAULT, answer=(None, AWAITING))[0], AWAITING)
         self.assertEqual(self.ask(VAULT, answer=(None, 'all RPC endpoints failed'))[0], 'all RPC endpoints failed')
 
-    def test_no_vault_a_safe_or_the_same_venue_asks_nothing(self):
-        for vault, dex in ((None, 'meteora-dlmm'), (dict(VAULT, kind='safe'), 'meteora-dlmm'), (VAULT, 'raydium-clmm')):
-            why, calls = self.ask(vault, dex=dex, answer=(None, AWAITING))
+    def test_no_vault_a_safe_or_the_pool_it_is_on_asks_nothing(self):
+        for vault, dex, pool in ((None, 'meteora-dlmm', 'HELD'), (dict(VAULT, kind='safe'), 'meteora-dlmm', 'HELD'),
+                                 (VAULT, 'raydium-clmm', RAY_POOL)):
+            why, calls = self.ask(vault, dex=dex, pool=pool, answer=(None, AWAITING))
             self.assertEqual((why, calls), (None, []), (vault and vault['kind'], dex))
+
+    # 2026-10-17: tang0 to 3ucNos, another pool of the venue it is on. Its policy
+    # holds the pool only once the owners approve it (cli.mjs add-pool).
+    def test_another_pool_of_the_same_venue_waits_for_the_owners(self):
+        why, calls = self.ask(VAULT, dex='raydium-clmm', pool=RAY_POOL, address='3ucNos4NbumPLZNWztqGHNFFgkHeRMBQAVemeeomsUxv')
+        self.assertIn('does not hold pool 3ucNos', why)
+        self.assertEqual(calls, [], 'a pool the policy does not list is refused before any read')
+        staged = dict(VAULT, venues=dict(VAULT['venues'], **{'raydium-clmm': {
+            'policies': ['p4', 'p5'], 'pools': [RAY_POOL, '3ucNos4NbumPLZNWztqGHNFFgkHeRMBQAVemeeomsUxv'], 'payouts': []}}))
+        why, calls = self.ask(staged, dex='raydium-clmm', pool=RAY_POOL, address='3ucNos4NbumPLZNWztqGHNFFgkHeRMBQAVemeeomsUxv',
+                              answer=(None, AWAITING))
+        self.assertEqual(why, AWAITING, 'listed but not approved yet: the signer\'s read refuses, the move waits')
+        self.assertEqual(calls, [(('balance', '3ucNos4NbumPLZNWztqGHNFFgkHeRMBQAVemeeomsUxv'), {'dex': 'raydium-clmm'})])
+        why, _ = self.ask(staged, dex='raydium-clmm', pool=RAY_POOL, address='3ucNos4NbumPLZNWztqGHNFFgkHeRMBQAVemeeomsUxv',
+                          answer=({'owner': 'v'}, None))
+        self.assertIsNone(why, 'approved: the move runs')
+
+    def test_the_pool_list_compares_addresses_not_spellings(self):
+        lower = dict(VAULT, venues=dict(VAULT['venues'], **{'raydium-clmm': {'policies': ['p4'], 'pools': [RAY_POOL], 'payouts': []}}))
+        why, calls = self.ask(lower, dex='meteora-dlmm', address=RAY_POOL, answer=({'owner': 'v'}, None))
+        self.assertIsNone(why)
+        self.assertEqual(len(calls), 1)
+
+
+class PoolRow(unittest.TestCase):
+    """ops/add_vault.py pool: more pools on a venue the vault has (cli.mjs add-pool)."""
+    V = {'wallet_id': 'w', 'kind': 'squads', 'settings': 'S', 'venues': {
+        'raydium-clmm': {'policies': ['EbfaT1qboAz4cZ6JAUYBPuP9wCHkW83LfZvSASiTNgMC', '3MPJ3vLeaHqNLrMH5DAmBzLByRrZJE5M5tN135ueWzpX'],
+                         'pools': ['8sLbNZoA1cfnvMJLPfp98ZLAnFSYCFApfJKMbiXNLwxj'],
+                         'payouts': ['CvkYX7aRberphM2wx2Mf2f7BomxtikEqPvsM4USGYG9z']}}}
+    NEW_POLICY = '7yw9FuFRB7mKhJsdcqyrZGq2iEnQjxpL9e8jB2ZV4CGz'
+    NEW_POOL = '3ucNos4NbumPLZNWztqGHNFFgkHeRMBQAVemeeomsUxv'
+
+    def staged(self, **kw):
+        have = self.V['venues']['raydium-clmm']
+        return dict({'settings': 'S', 'venue': 'raydium-clmm', 'policies': have['policies'] + [self.NEW_POLICY],
+                     'pools': have['pools'] + [self.NEW_POOL], 'payouts': have['payouts'], 'sent': True, 'lookupAdds': 3}, **kw)
+
+    def test_a_staged_pool_keeps_every_approved_policy_and_pool_and_adds(self):
+        policies, pools = add_vault.pool_row(self.V, self.staged())
+        have = self.V['venues']['raydium-clmm']
+        self.assertEqual(policies, have['policies'] + [self.NEW_POLICY])
+        self.assertEqual(pools, have['pools'] + [self.NEW_POOL])
+        # the same number of policies is fine: the old ones hold the new pool after the update
+        self.assertEqual(add_vault.pool_row(self.V, self.staged(policies=have['policies']))[0], have['policies'])
+        self.assertEqual(add_vault.pool_row(self.V, self.staged(sent=False, lookupAdds=0))[1][-1], self.NEW_POOL)
+
+    def test_every_refusal(self):
+        have = self.V['venues']['raydium-clmm']
+        bad = [self.staged(settings='OTHER'), self.staged(venue='orca'), self.staged(sent=False),
+               self.staged(policies=[self.NEW_POLICY] + have['policies']),                # reordered
+               self.staged(policies=have['policies'][:1]),                               # dropped
+               self.staged(pools=[self.NEW_POOL] + have['pools']),                       # reordered
+               self.staged(pools=have['pools']),                                         # nothing added
+               self.staged(payouts=['CvkYX7aRberphM2wx2Mf2f7BomxtikEqPvsM4USGYG9z', self.NEW_POOL]),
+               self.staged(policies=have['policies'] + ['not an address'])]
+        for b in bad:
+            with self.assertRaises(add_vault.Refused, msg=str(b)[:120]):
+                add_vault.pool_row(self.V, b)
+        with self.assertRaises(add_vault.Refused):
+            add_vault.pool_row(dict(self.V, kind='safe'), self.staged())
 
 
 if __name__ == '__main__':

@@ -30,6 +30,7 @@
 //       for the venue, pools and payouts now configured; a staged policy is
 //       created).
 //   node chains/solana/vault/cli.mjs add-venue --venue <venue> --pools <pool>[,<pool>] [--execute]
+//   node chains/solana/vault/cli.mjs add-pool --venue <its venue> --pools <pool>[,<pool>] [--execute]
 //       stage one more venue on the vault in LPBOT_VAULT_*: its policies'
 //       addresses (the vault's next seeds), and with --execute its accounts
 //       in the vault's lookup table. ops/add_vault.py venue stores the row;
@@ -452,6 +453,58 @@ export async function stageVenue(f, { connection = new Connection(RPC, 'confirme
   return done;
 }
 
+// Stage more pools on a venue the vault has (the venue the environment names):
+// the bot's rules compiled over the old pools and the new ones may need more
+// policies than the vault holds, and those are staged at the vault's next
+// policy seeds, as for a new venue; the new pools' accounts go into the
+// lookup table (with --execute). Prints the venue's whole row for
+// ops/add_vault.py pool. Until the owners approve (Approve bot rules: the
+// existing policies updated, the staged ones created) the bot's signer
+// refuses this venue: store the row only when the owners are ready to sign.
+// Never fewer policies than the vault has: a pool is only ever added.
+export async function stagePool(f, { connection = new Connection(RPC, 'confirmed'), env = process.env, payer = null, log = console.log } = {}) {
+  const cfg = vaultConfig(env);
+  if (!cfg) throw new Error('LPBOT_VAULT_SETTINGS is not set: add a pool on a vault that exists');
+  const venue = String(f.venue ?? '').trim();
+  const asked = keysOf(f.pools, '--pools');
+  if (!venue || !asked.length) throw new Error('add-pool needs --venue and --pools');
+  if (venue !== env.LPBOT_VAULT_VENUE) {
+    throw new Error(`${venue} is not the venue the environment names (${env.LPBOT_VAULT_VENUE}): a new venue is add-venue`);
+  }
+  const fresh = asked.filter((p, i) => !cfg.pools.some(k => k.equals(p)) && asked.findIndex(q => q.equals(p)) === i);
+  if (!fresh.length) throw new Error(`the vault's ${venue} policy has every one of these pools already`);
+  payer ??= await readKeypair(process.env.WALLET_SECRET_PATH ?? '');
+  await poolsByVenue(connection, [venue], fresh);
+  const pools = [...cfg.pools, ...fresh];
+  const settings = sq.decodeSettings((await connection.getAccountInfo(cfg.settings, 'confirmed')).data);
+  const compiled = compile(venue, { vault: cfg.vault, payer: payer.publicKey, pools, payouts: cfg.payouts });
+  const extra = compiled.policies.length - cfg.policies.length;
+  if (extra < 0) throw new Error(`the rules over ${pools.length} pools compile to ${compiled.policies.length} policies, fewer than the vault's ${cfg.policies.length}`);
+  const staged = stagedPolicies(cfg.settings, settings.policySeed, extra);
+  const exist = staged.length ? await connection.getMultipleAccountsInfo(staged, 'confirmed') : [];
+  if (exist.some(Boolean)) throw new Error(`a policy at the vault's next seeds exists already (${staged.filter((_, i) => exist[i]).join(', ')})`);
+  if (!cfg.lookup) throw new Error('the vault has no lookup table (LPBOT_VAULT_LOOKUP)');
+  const table = (await connection.getAddressLookupTable(cfg.lookup)).value;
+  if (!table) throw new Error(`vault lookup table ${cfg.lookup.toBase58()} does not exist`);
+  if (!table.state.authority?.equals(payer.publicKey)) throw new Error(`the bot's payer is not the authority of the lookup table ${cfg.lookup.toBase58()}`);
+  const poolInfo = await Promise.all(fresh.map(p => venueOf(venue).poolAccounts(connection, p)));
+  const addresses = staticAccounts({ vault: cfg.vault, policies: staged, venues: [venueOf(venue)], pools: poolInfo });
+  const lookup = lookupPlan({ payer: payer.publicKey, table: cfg.lookup, have: table.state.addresses, addresses });
+  const report = { settings: cfg.settings.toBase58(), vault: cfg.vault.toBase58(), venue,
+    policies: [...cfg.policies, ...staged].map(String), pools: pools.map(String), payouts: cfg.payouts.map(String),
+    added: fresh.map(String), staged: staged.map(String), lookup: cfg.lookup.toBase58(),
+    lookupAdds: addresses.filter(a => !table.state.addresses.some(k => k.equals(a))).length };
+  if (!f.execute) {
+    log(JSON.stringify({ ...report, sent: false }, null, 1));
+    log('DRY RUN: pass --execute to add the accounts to the lookup table. Store the row (ops/add_vault.py pool) when the owners are ready to approve.');
+    return report;
+  }
+  const signatures = await sendAll(connection, payer, lookup.txs);
+  const done = { ...report, signatures, sent: true };
+  log(JSON.stringify(done, null, 1));
+  return done;
+}
+
 export async function main(argv = process.argv.slice(2)) {
   const [cmd, ...rest] = argv;
   const f = parseFlags(rest);
@@ -473,8 +526,9 @@ export async function main(argv = process.argv.slice(2)) {
   }
   if (cmd === 'request') return console.log(JSON.stringify(await request(f._[0], f)));
   if (cmd === 'add-venue') return stageVenue(f);
+  if (cmd === 'add-pool') return stagePool(f);
   console.log('commands: keys <dir> | setup|finish --owner <k> --venue <v>[,<v>] --pools .. [--payout ..] [--seed n] | status '
-    + '| request <withdraw|close|revoke|approve> --owner <k> [...] | add-venue --venue <v> --pools .. [--execute]');
+    + '| request <withdraw|close|revoke|approve> --owner <k> [...] | add-venue --venue <v> --pools .. [--execute] | add-pool --venue <v> --pools .. [--execute]');
 }
 
 if (isEntry(import.meta.url)) main().catch(e => { console.error('ERROR:', signerError(e)); process.exitCode = 1; });

@@ -456,9 +456,15 @@ def move_waits(target):
     the vault there (its read checks every policy of the venue on chain): a
     venue staged on the vault waits for the owners' signature. Any refusal
     of that read waits too: a close whose open cannot follow would leave the
-    capital idle. Not a vault, or the venue it is on: never waits."""
-    if not config.VAULT or config.VAULT['kind'] != 'squads' or target['dex'] == config.DEX:
+    capital idle. Another pool of the same venue too: its policy holds the
+    pool only once the owners approve it (cli.mjs add-pool, 2026-10-17). Not
+    a vault, or the pool it is on: never waits."""
+    if not config.VAULT or config.VAULT['kind'] != 'squads' or \
+            (target['dex'] == config.DEX and target['address'] == config.POOL):
         return None
+    v = (config.VAULT.get('venues') or {}).get(target['dex'])
+    if v is not None and wallets.norm(target['address']) not in {wallets.norm(p) for p in v.get('pools') or []}:
+        return f"the vault's {target['dex']} policy does not hold pool {target['address']}: stage it (cli.mjs add-pool)"
     _out, err = signers.chain('balance', target['address'], dex=target['dex'])
     return err or None
 

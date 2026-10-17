@@ -19,6 +19,10 @@ writes nothing.
     node chains/solana/vault/cli.mjs add-venue --venue raydium-clmm --pools <pool> --execute > staged.json
     LPBOT_DSN=dbname=rebalancer python3 ops/add_vault.py venue --wallet tangem-vault --json staged.json [--apply]
 
+    # one more pool on a venue the vault has: stage it, then store it when the owners are ready to sign
+    node chains/solana/vault/cli.mjs add-pool --venue raydium-clmm --pools <pool> --execute > staged.json
+    LPBOT_DSN=dbname=rebalancer python3 ops/add_vault.py pool --wallet tangem-vault --json staged.json [--apply]
+
 A Safe vault registers the same way: its owner sends the transactions of
 `chains/evm/vault/cli.mjs request create`, then `cli.mjs check ... > vault.json` writes
 the JSON. It has one key: its --policy-key-env is its --secret-env. Its payout wallets
@@ -205,6 +209,54 @@ def venue(args):
     print(f'written. Add {row[1]} to the profile\'s execute_dexes; the owners approve with Approve bot rules.')
 
 
+def pool_row(v, staged):
+    """The policy row of a venue the vault has, with the pools `cli.mjs add-pool`
+    staged: (policies, pools) to store. Refused: another vault's staging, a
+    venue the vault has not, a row that drops or reorders a policy or a pool
+    the vault approved, nothing added, a dry run of the lookup accounts it
+    needs, payouts that differ. Pure."""
+    if staged.get('settings') != v['settings']:
+        raise Refused(f"the staging is for the vault {staged.get('settings')}, not {v['settings']}")
+    name = staged.get('venue')
+    if v['kind'] != 'squads' or name not in v['venues']:
+        raise Refused(f'the vault has no {name!r} policy to add pools to (add-venue stages a new venue)')
+    have = v['venues'][name]
+    if staged.get('sent') is not True and staged.get('lookupAdds'):
+        raise Refused(f"the lookup table lacks {staged['lookupAdds']} of the pools' accounts: run add-pool with --execute first")
+    policies = addresses(staged.get('policies'), 'policies')
+    pools = addresses(staged.get('pools'), 'pools')
+    if policies[:len(have['policies'])] != have['policies'] or len(policies) < len(have['policies']):
+        raise Refused(f"the staged policies {policies} do not start with the vault's {have['policies']}")
+    if pools[:len(have['pools'])] != have['pools'] or len(pools) <= len(have['pools']):
+        raise Refused(f"the staged pools {pools} do not add to the vault's {have['pools']}")
+    if addresses(staged.get('payouts'), 'payouts') != have['payouts']:
+        raise Refused('the staged payouts differ from the approved ones: change payouts with the payouts command')
+    return policies, pools
+
+
+def pool(args):
+    """Store more pools on a venue of the vault. The bot's signer refuses the
+    venue from this write until the owners approve (Approve bot rules): run it
+    only when they are ready to sign."""
+    v = db.vault_row(args.wallet)
+    if not v:
+        raise Refused(f'wallet {args.wallet} has no vault')
+    text = sys.stdin.read() if args.json == '-' else pathlib.Path(args.json).read_text()
+    staged = json.loads(text)
+    policies, pools = pool_row(v, staged)
+    print('policies now:', v['venues'][staged['venue']]['policies'])
+    print('policies new:', policies)
+    print('pools now:', v['venues'][staged['venue']]['pools'])
+    print('pools new:', pools)
+    if not args.apply:
+        print('DRY RUN: pass --apply to write.')
+        return
+    with db.cursor(commit=True) as cur:
+        cur.execute('update vault_policies set policies = %s, pools = %s, updated_at = now() where wallet_id = %s and venue = %s',
+                    (policies, pools, args.wallet, staged['venue']))
+    print('written. The bot holds this venue until the owners approve with Approve bot rules on the owner page.')
+
+
 def main(argv):
     p = argparse.ArgumentParser(description=__doc__.split('\n')[0])
     sub = p.add_subparsers(dest='cmd', required=True)
@@ -219,9 +271,12 @@ def main(argv):
     s = sub.add_parser('venue')
     s.add_argument('--wallet', required=True), s.add_argument('--json', required=True)
     s.add_argument('--apply', action='store_true')
+    o = sub.add_parser('pool')
+    o.add_argument('--wallet', required=True), o.add_argument('--json', required=True)
+    o.add_argument('--apply', action='store_true')
     args = p.parse_args(argv)
     try:
-        {'register': register, 'payouts': payouts, 'venue': venue}[args.cmd](args)
+        {'register': register, 'payouts': payouts, 'venue': venue, 'pool': pool}[args.cmd](args)
     except Refused as e:
         raise SystemExit(f'refused: {e}')
 
