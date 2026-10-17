@@ -529,11 +529,23 @@ def record_fee_state(dex, pool, st):
     go. Two weeks, not two days: the fee/variance guard's backtest needs on-chain
     fees over many days, and two days of them could not decide it (2026-10-03)."""
     with cursor(commit=True) as cur:
-        cur.execute('insert into fee_growth (ts, dex, pool, sqrt_price, g0, g1, rewards, dec_a, dec_b, mint_a, mint_b) '
-                    'values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)',
+        cur.execute('insert into fee_growth (ts, dex, pool, sqrt_price, g0, g1, rewards, dec_a, dec_b, mint_a, mint_b, liquidity) '
+                    'values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)',
                     (now(), dex, pool, st['sqrt_price'], st['g0'], st['g1'], json.dumps(st.get('rewards') or []),
-                     st['dec_a'], st['dec_b'], st['mint_a'], st['mint_b']))
+                     st['dec_a'], st['dec_b'], st['mint_a'], st['mint_b'], st.get('liquidity')))
         cur.execute('delete from fee_growth where ts < now() - make_interval(days => %s)', (FEE_GROWTH_KEEP_DAYS,))
+
+
+def our_liquidity(pool):
+    """The liquidity every profile's open position on `pool` holds, from each
+    one's latest snapshot (raw units, the pool's own), as an int; 0 with none.
+    What the board's crowding counts as ours (lp/board.py fleet_factor)."""
+    with cursor() as cur:
+        cur.execute("""select coalesce(sum(s.liquidity), 0) l from positions p
+                        join lateral (select liquidity from snapshots where mint = p.mint and liquidity is not null
+                                      order by ts desc limit 1) s on true
+                       where p.closed_at is null and p.pool = %s""", (pool,))
+        return int(cur.fetchone()['l'] or 0)
 
 
 def fee_state_span(pool, hours=24):

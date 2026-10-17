@@ -105,7 +105,9 @@ def decode_rewards(raw, now=None):
 # token, as a Q64 fixed-point number that only grows (it wraps at 2^128).
 # Raydium's PoolState (Raydium, Byreal, PancakeSwap): after tick_current and
 # two u16 paddings. Orca's Whirlpool: fee_growth_global_a after vault_a,
-# fee_growth_global_b after vault_b. Verified on chain 2026-09-26: both grow,
+# fee_growth_global_b after vault_b. Each also says its active liquidity (Raydium
+# after tick_spacing, Orca after the protocol fee rate): the crowding of the board
+# (lp/board.py fleet_factor). Verified on chain 2026-09-26: both grow,
 # and a 75-second delta gives a +/-1% position 1.14%/day on Raydium.
 FEE_LAYOUT_DEXES = {'raydium-clmm': 'raydium', 'byreal': 'raydium',
                     'pancakeswap-v3-solana': 'raydium', 'orca': 'orca'}
@@ -127,13 +129,13 @@ def decode_fee_state(raw, layout):
                 rewards.append([mint, str(int.from_bytes(b[153:169], 'little'))])
         return {'sqrt_price': u(o + 20, o + 36), 'g0': u(o + 44, o + 60), 'g1': u(o + 60, o + 76),
                 'dec_a': raw[o], 'dec_b': raw[o + 1], 'mint_a': b58(raw[73:105]), 'mint_b': b58(raw[105:137]),
-                'rewards': rewards}
+                'rewards': rewards, 'liquidity': u(o + 4, o + 20)}
     if layout == 'orca':
         if len(raw) < 261:
             return None
         return {'sqrt_price': u(65, 81), 'g0': u(165, 181), 'g1': u(245, 261),
                 'mint_a': b58(raw[101:133]), 'mint_b': b58(raw[181:213]), 'dec_a': None, 'dec_b': None,
-                'rewards': []}
+                'rewards': [], 'liquidity': u(49, 65)}
     return None
 
 
@@ -195,7 +197,8 @@ def band_income(first, last, seconds, band, usd_a, usd_b, reward_usd=None):
     if value <= 0:
         return None
     return {'fee_pct_day': (fee_usd / value) / seconds * 86400 * 100,
-            'reward_pct_day': (rw_usd / value) / seconds * 86400 * 100}
+            'reward_pct_day': (rw_usd / value) / seconds * 86400 * 100,
+            'value_per_l_usd': value}
 
 
 def fee_yield(first, last, usd_a, usd_b):

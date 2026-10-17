@@ -17,6 +17,7 @@ import engine      # noqa: E402
 import rebalancer  # noqa: E402
 import lp.regime  # noqa: E402
 import lp.tape  # noqa: E402
+import lp.tuning  # noqa: E402
 import config  # noqa: E402
 import db  # noqa: E402
 
@@ -514,8 +515,9 @@ class ViewWiring(unittest.TestCase):
 
     def test_the_liquidity_threshold_is_clamped(self):
         base = config.REGIME_THRESHOLD
-        self.assertAlmostEqual(self.view({}, tape(), factor=1.0)['threshold'], min(max(base, 0.05), 0.40))
-        self.assertAlmostEqual(self.view({}, tape(), factor=1e6)['threshold'], 0.40)
+        top = lp.tuning.REGIME_THETA_MAX                      # 0.96 since sql/046 (0.40 before)
+        self.assertAlmostEqual(self.view({}, tape(), factor=1.0)['threshold'], min(max(base, 0.05), top))
+        self.assertAlmostEqual(self.view({}, tape(), factor=1e6)['threshold'], top)
         self.assertAlmostEqual(self.view({}, tape(), factor=1e-6)['threshold'], 0.05)
         self.assertAlmostEqual(self.view({}, tape(), factor=0.2 / base)['threshold'], 0.2)
 

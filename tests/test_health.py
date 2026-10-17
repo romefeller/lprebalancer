@@ -306,7 +306,7 @@ class Failover(unittest.TestCase):
                 mock.patch.object(config, 'EXECUTE_DEXES', ARMED), \
                 mock.patch.object(config, 'REGIME_ENABLED', False), \
                 mock.patch.object(lp.signers, 'SIGNERS', SIGS), \
-                mock.patch.object(lp.board, 'venue_view', lambda p, q=1.0: venues), \
+                mock.patch.object(lp.board, 'venue_view', lambda p, q=1.0, capital_usd=None: venues), \
                 mock.patch.object(lp.paths, 'save', lambda s: None), \
                 mock.patch.object(db, 'event', lambda *a: None), \
                 mock.patch.object(lp.books, 'notify', lambda ev, **kw: calls['notify'].append(ev)), \

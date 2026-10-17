@@ -18,6 +18,14 @@ from lp import books, capital, harvest, moves, paths, regime, signers, swaps, tu
 FAILOVER_MIN_RATIO = 0.8          # a failover target earns at least this share of the held venue
 
 
+def rank_of(v):
+    """A venue row's ranking figure: what it adds to all our bots together
+    (rank_pct_day, crowding counted), else its plain on-chain income; 0 for
+    none. Pure."""
+    r = v.get('rank_pct_day')
+    return (r if r is not None else v.get('total_pct_day')) or 0.0
+
+
 def failover_pick(held_dex, venues, allowed, *, execute_dexes, signers, min_hours, min_ratio=FAILOVER_MIN_RATIO):
     """The venue to fail over to when `held_dex` is tripped, or None. Pure.
     `venues` is venue_view(); `allowed(dex)` says whether that venue's
@@ -26,12 +34,13 @@ def failover_pick(held_dex, venues, allowed, *, execute_dexes, signers, min_hour
     venue's on-chain income ("similar fee goodness"); the best such wins.
     Without evidence on the held venue, any eligible venue qualifies."""
     held = next((v for v in venues if v.get('held')), None)
-    floor = (held.get('total_pct_day') or 0.0) * min_ratio if held and (held.get('hours') or 0) >= min_hours else None
+    rank = rank_of
+    floor = rank(held) * min_ratio if held and (held.get('hours') or 0) >= min_hours else None
     ok = [v for v in venues
           if not v.get('held') and v.get('dex') != held_dex and v.get('row')
           and (v.get('hours') or 0) >= min_hours and v.get('dex') in execute_dexes and v.get('dex') in signers
-          and allowed(v['dex']) and (floor is None or (v.get('total_pct_day') or 0.0) >= floor)]
-    return max(ok, key=lambda v: v.get('total_pct_day') or 0.0) if ok else None
+          and allowed(v['dex']) and (floor is None or rank(v) >= floor)]
+    return max(ok, key=rank) if ok else None
 
 
 def venue_failover(state, status, price=None, quote=None):
@@ -57,7 +66,7 @@ def venue_failover(state, status, price=None, quote=None):
     if not p or q is None:
         return False                    # income cannot be compared in dollars: no move on a guess
     try:
-        venues = venue_view(p, q)
+        venues = venue_view(p, q, capital_usd=bot_capital(status))
     except Exception as e:
         venues = []
         books.notify('venue_sample_failed', reason=books.tidy(e))
@@ -289,7 +298,7 @@ def sample_fee_growth(state, status=None):
             if a in states:
                 db.record_fee_state(d, a, states[a])
         if status and status.get('quoteUsd') is not None:
-            venue_view(status['price'], status['quoteUsd'])
+            venue_view(status['price'], status['quoteUsd'], capital_usd=bot_capital(status))
     except Exception as e:
         books.notify('venue_sample_failed', reason=books.tidy(e))
 
@@ -313,9 +322,32 @@ def sample_v3_fee_growth(state):
             books.notify('venue_sample_failed', reason=why)
 
 
-def venue_income(pool, usd_a, usd_b, band=1.01, hours=24):
+def fleet_factor(held, l_total, l_ours, l_bot):
+    """How much of a pool's measured fee rate per unit of liquidity this bot
+    adds to all our bots together: the fees outsiders' liquidity would
+    otherwise take, not what it takes from our own (2026-10-17: our four bots
+    held 65% of 8sLb's active liquidity and split its fees among themselves).
+    The counters' rate already carries our liquidity in the pool. A bot that
+    joins the pool takes `l_bot` from everyone there: l_others / (l_total +
+    l_bot). A bot that stays holds what leaving would give back: l_others /
+    (l_total - l_bot). `l_ours` counts every profile's liquidity there, the
+    bot's own when it is in. None when a figure is missing: no crowding said.
+    In [0, 1] otherwise. Pure."""
+    if not l_total or l_total <= 0 or l_ours is None or l_bot is None or l_bot < 0:
+        return None
+    others = max(l_total - l_ours, 0)
+    den = l_total - l_bot if held else l_total + l_bot
+    if den <= 0:
+        return 0.0
+    return min(max(others / den, 0.0), 1.0)
+
+
+def venue_income(pool, usd_a, usd_b, band=1.01, hours=24, capital_usd=None, held=False):
     """The pool's on-chain income for a centred band, % per day, over up to
-    the last `hours` of samples, with the hours of evidence."""
+    the last `hours` of samples, with the hours of evidence. With the bot's
+    capital and the pool's liquidity on the last sample: `fleet_factor` and
+    `rank_pct_day`, the income it adds to all our bots together; otherwise
+    `rank_pct_day` is the plain total."""
     span = db.fee_state_span(pool, hours)
     if not span:
         return None
@@ -327,18 +359,39 @@ def venue_income(pool, usd_a, usd_b, band=1.01, hours=24):
     inc = solana_state.band_income(first, last, secs, band, usd_a, usd_b, rw_usd)
     if not inc:
         return None
-    return dict(inc, total_pct_day=inc['fee_pct_day'] + inc['reward_pct_day'], hours=round(secs / tuning.HOUR_S, 1))
+    total = inc['fee_pct_day'] + inc['reward_pct_day']
+    factor = None
+    if capital_usd and last.get('liquidity') is not None and inc.get('value_per_l_usd'):
+        try:
+            factor = fleet_factor(held, int(last['liquidity']), db.our_liquidity(pool),
+                                  float(capital_usd) / inc['value_per_l_usd'])
+        except Exception:
+            factor = None
+    return dict(inc, total_pct_day=total, hours=round(secs / tuning.HOUR_S, 1), fleet_factor=factor,
+                rank_pct_day=total * factor if factor is not None else total)
 
 
-def venue_view(price, quote_usd=1.0):
-    """Every candidate's on-chain +/-1% income, best first."""
+def bot_capital(status):
+    """The dollars this bot would bring to a pool: its position's value, else
+    the configured capital. None without either. Never fails."""
+    try:
+        v = capital.position_usd(status) if status else None
+    except Exception:
+        v = None
+    return v if v else (config.CAPITAL_USD or None)
+
+
+def venue_view(price, quote_usd=1.0, capital_usd=None):
+    """Every candidate's on-chain +/-1% income, best first by what the bot
+    adds to all our bots together (rank_pct_day: crowding counted when the
+    bot's capital is given)."""
     out = []
     for d, a, row in venue_candidates():
-        inc = venue_income(a, price * quote_usd, quote_usd)
+        inc = venue_income(a, price * quote_usd, quote_usd, capital_usd=capital_usd, held=a == config.POOL)
         if inc:
             out.append({'dex': d, 'address': a, 'held': a == config.POOL,
                         'pair': (row or {}).get('pair') or config.PAIR_LABEL, **inc, 'row': row})
-    out.sort(key=lambda v: -v['total_pct_day'])
+    out.sort(key=lambda v: -rank_of(v))
     books.LAST_VENUES['view'] = [{k: (round(v, 4) if isinstance(v, float) else v) for k, v in x.items() if k != 'row'}
                                  for x in out]
     return out
@@ -356,7 +409,7 @@ def calm_board_check(state, status):
     # Raydium and live it earned half (2026-09-26). A move needs at least
     # VENUE_MIN_HOURS of counter samples on both pools.
     try:
-        venues = venue_view(status['price'], status['quoteUsd'])
+        venues = venue_view(status['price'], status['quoteUsd'], capital_usd=bot_capital(status))
     except Exception as e:
         venues = []
         books.notify('venue_sample_failed', reason=books.tidy(e))
@@ -371,9 +424,10 @@ def calm_board_check(state, status):
                      verdict='on-chain income: no other pool with enough evidence; staying')
         return False
     top = ok[0]
-    gain = top['total_pct_day'] / max(held_v['total_pct_day'], 1e-9) - 1
-    held_txt = f"{config.DEX} {config.PAIR_LABEL} {held_v['total_pct_day']:.2f}%/d at ±1% on chain ({held_v['hours']}h)"
-    best_txt = f"{top['dex']} {top['pair']} {top['total_pct_day']:.2f}%/d at ±1% on chain ({top['hours']}h)"
+    # ranked on what the move adds to all our bots together: crowding counted (fleet_factor)
+    gain = rank_of(top) / max(rank_of(held_v), 1e-9) - 1
+    held_txt = f"{config.DEX} {config.PAIR_LABEL} {rank_of(held_v):.2f}%/d at ±1% on chain ({held_v['hours']}h)"
+    best_txt = f"{top['dex']} {top['pair']} {rank_of(top):.2f}%/d at ±1% on chain ({top['hours']}h)"
     if gain < config.MIGRATE_MIN_GAIN:
         books.notify('board_checked', held=held_txt, best=best_txt,
                      verdict=f'on-chain: {gain * 100:.0f}% more income is under the {config.MIGRATE_MIN_GAIN * 100:.0f}% threshold')
@@ -383,13 +437,14 @@ def calm_board_check(state, status):
     # 8sLb in the calm hours the bot then held it (2026-10-16). The gain must
     # hold over the last VENUE_RECENT_HOURS too: the hours that look like now.
     q = status['quoteUsd']
-    held_r = venue_income(held_v['address'], status['price'] * q, q, hours=config.VENUE_RECENT_HOURS)
-    top_r = venue_income(top['address'], status['price'] * q, q, hours=config.VENUE_RECENT_HOURS)
+    cap = bot_capital(status)
+    held_r = venue_income(held_v['address'], status['price'] * q, q, hours=config.VENUE_RECENT_HOURS, capital_usd=cap, held=True)
+    top_r = venue_income(top['address'], status['price'] * q, q, hours=config.VENUE_RECENT_HOURS, capital_usd=cap)
     if not held_r or not top_r:
         books.notify('board_checked', held=held_txt, best=best_txt,
                      verdict=f'on-chain: no income over the last {config.VENUE_RECENT_HOURS}h on both pools; staying')
         return False
-    recent = top_r['total_pct_day'] / max(held_r['total_pct_day'], 1e-9) - 1
+    recent = rank_of(top_r) / max(rank_of(held_r), 1e-9) - 1
     if recent < config.MIGRATE_MIN_GAIN:
         books.notify('board_checked', held=held_txt, best=best_txt,
                      verdict=f'on-chain: {gain * 100:.0f}% more over 24h but {recent * 100:.0f}% over the last '
