@@ -79,6 +79,37 @@ class Maths(unittest.TestCase):
         self.assertTrue(np.allclose(calm.instability(s2)[:700], i[:700]))
 
 
+class Theta(unittest.TestCase):
+    """The factor-scaled touch threshold (sql/046: base 0.60, ceiling 0.96)."""
+
+    def test_base_060_scales_up_to_the_ceiling(self):
+        with mock.patch.object(config, 'REGIME_THRESHOLD', 0.60):
+            self.assertAlmostEqual(lp.regime.regime_theta(1.0), 0.60)
+            self.assertAlmostEqual(lp.regime.regime_theta(1.6), 0.96)          # the replayed ceiling
+            self.assertAlmostEqual(lp.regime.regime_theta(3.0), 0.96)          # never above it
+            self.assertAlmostEqual(lp.regime.regime_theta(0.05), 0.05)         # nor under the floor
+
+    def test_property_inside_the_bounds_and_monotone(self):
+        import random
+        rng = random.Random(46)
+        for _ in range(2000):
+            base, f1, f2 = rng.uniform(0.01, 0.99), rng.uniform(0, 4), rng.uniform(0, 4)
+            with mock.patch.object(config, 'REGIME_THRESHOLD', base):
+                a, b = lp.regime.regime_theta(min(f1, f2)), lp.regime.regime_theta(max(f1, f2))
+            self.assertTrue(0.05 <= a <= 0.96 and 0.05 <= b <= 0.96)
+            self.assertLessEqual(a, b + 1e-12)
+
+    def test_a_looser_threshold_never_picks_a_wider_band(self):
+        # the narrowest width with P(touch) <= theta: a larger theta can only narrow it
+        probs = [0.32, 0.20, 0.13, 0.07, 0.03, 0.01, 0.003, 0.0]
+        widths = [1.0, 1.25, 1.5, 2.0, 2.5, 3.0, 4.0, 5.0]
+        pick = lambda th: next((k for k, p in zip(widths, probs) if p <= th), widths[-1])
+        self.assertEqual(pick(0.25), 1.25)
+        self.assertEqual(pick(0.60), 1.0)
+        for lo, hi in ((0.05, 0.1), (0.2, 0.4), (0.4, 0.96)):
+            self.assertGreaterEqual(pick(lo), pick(hi))
+
+
 class Decide(unittest.TestCase):
     def v(self, held, choice, inside=True):
         return {'held': held, 'choice': choice, 'inside': inside}

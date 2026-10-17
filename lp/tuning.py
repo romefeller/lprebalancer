@@ -8,7 +8,9 @@ POOL_RECORD_TTL_S = HOUR_S       # a pool record is refetched after this (reward
 BARS_PER_DAY = 288               # five-minute bars
 GECKO_PAGE_BARS = 1000           # GeckoTerminal's OHLCV page
 TAPE_REORIENT_JUMP = 0.15        # a stored tape this far from the live price is the other orientation: rebuild
-REGIME_THETA_MIN, REGIME_THETA_MAX = 0.05, 0.40   # the touch threshold after the liquidity factor
+# the touch threshold after the liquidity factor. The ceiling was 0.40; with the
+# threshold at 0.60 (sql/046) the liquidity factor reaches 1.6 x 0.60 (2026-10-17)
+REGIME_THETA_MIN, REGIME_THETA_MAX = 0.05, 0.96
 LIQ_WINDOW_BARS = 72             # six hours of five-minute bars
 TOUCH_CALIBRATION_EVERY_S = HOUR_S
 HOT_PAUSE_MIN_COVERAGE = 0.8     # fee samples must span this share of the hot-pause window
