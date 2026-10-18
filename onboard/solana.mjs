@@ -14,6 +14,7 @@ import { finishSetup, request as buildRequest, rulesRequest as buildRules, setup
 import { packSteps } from '../chains/solana/vault/admin.mjs';
 import { vaultPositions } from '../chains/solana/vault/exit.mjs';
 import { signerError } from '../shared/signer_errors.mjs';
+import { MAINNET, errorKind } from '../shared/rpc_policy.mjs';
 import SOLANA from '../chains/solana/solana.json' with { type: 'json' };
 import { Invalid, fromRaw, nativeOf, own, toRaw } from './intent.mjs';
 // the longest message the owner's wallet signs in a set-up (a hardware wallet's limit)
@@ -22,7 +23,7 @@ import { OWNER_MESSAGE_BYTES } from './decode_sol.mjs';
 const bs58 = createRequire(import.meta.url)('bs58').default;
 
 const require = createRequire(import.meta.url);
-const { Message, PublicKey, SystemProgram, Transaction, VersionedTransaction } = require('@solana/web3.js');
+const { Connection, Message, PublicKey, SystemProgram, Transaction, VersionedTransaction } = require('@solana/web3.js');
 const spl = require('@solana/spl-token');
 
 // The chain's config with every solana.json key replaced by its address.
@@ -452,7 +453,22 @@ export async function affordsRules(connection, owner, steps, extra = 0n) {
 // lists the bot's policy key; a policy staged for a venue the owners have
 // not approved yet does not exist and says nothing), and how many positions
 // it holds.
-export async function status(connection, c, row, keys, { positionsOf = vaultPositions } = {}) {
+// A venue's positions, from `connection`; when that endpoint refuses the
+// lookup (a rate limit or a refused indexed call: Alchemy's free plan refuses
+// Meteora's getProgramAccounts outright, 2026-10-18), once more from the
+// public endpoint, which serves it. Any other error, or a second refusal,
+// is thrown: an unread count is never taken as zero (it decides whether a
+// withdrawal closes a position first).
+export async function positionsWithFallback(connection, args, { positionsOf = vaultPositions, fallback = () => new Connection(MAINNET, 'confirmed') } = {}) {
+  try {
+    return await positionsOf(connection, args);
+  } catch (e) {
+    if (errorKind(e) !== 'rotate') throw e;
+    return positionsOf(fallback(), args);
+  }
+}
+
+export async function status(connection, c, row, keys, { positionsOf = vaultPositions, fallback } = {}) {
   const vault = sq.vaultPda(new PublicKey(row.settings));
   const balances = {};
   for (const [sym, t] of Object.entries(c.tokens)) {
@@ -465,7 +481,8 @@ export async function status(connection, c, row, keys, { positionsOf = vaultPosi
   const botActive = present.length > 0 && present.every(i => sq.decodePolicyHead(i.data).signers.some(s => s.key.equals(keys.policyKey.publicKey)));
   let positions = 0;
   for (const [venue, v] of Object.entries(row.venues)) {
-    positions += (await positionsOf(connection, { venue, pools: v.pools, vault: vault.toBase58() })).length;
+    positions += (await positionsWithFallback(connection, { venue, pools: v.pools, vault: vault.toBase58() },
+      { positionsOf, ...(fallback ? { fallback } : {}) })).length;
   }
   return { vault: vault.toBase58(), balances, botActive, rulesCurrent: rulesCurrent(row, vault, keys, infos), positions };
 }

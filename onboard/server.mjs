@@ -549,7 +549,10 @@ export function makeServer(cfg, deps) {
         gas: r.gas, payer: r.payer, error: r.state === 'stuck' ? r.error : undefined, created: r.created_at,
         profitWallet: r.profit_wallet, feeWallet: r.fee_wallet };
       if (r.vault_row) {
-        try { Object.assign(v, await chainOf(r.chain).status(r.vault_row)); } catch (e) { v.error = `the chain could not be read: ${e.message}`; }
+        try { Object.assign(v, await chainOf(r.chain).status(r.vault_row)); } catch (e) {
+          v.error = `the chain could not be read: ${e.message}`;
+          log({ event: 'status_unread', name: r.name, error: String(e?.message ?? e).slice(0, 300) });
+        }
         const s = await deps.status(serviceCommand(cfg.service.status, r.name));
         v.service = s.out.trim() || 'unknown';
         v.botReachable = v.service === 'active';
