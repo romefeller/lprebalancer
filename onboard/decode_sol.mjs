@@ -33,6 +33,9 @@ const ATA = SOLANA.programs.associated_token;
 const SYSTEM = SystemProgram.programId.toBase58();
 const BUDGET = ComputeBudgetProgram.programId.toBase58();
 const SQUADS = sq.PROGRAM_ID.toBase58();
+// Phantom adds Lighthouse assertions to what it signs: checks of account
+// state that make the transaction fail if they do not hold (2026-10-18).
+const LIGHTHOUSE = SOLANA.programs.lighthouse;
 // What the owner pays in priority fees on one transaction, at most (lamports).
 export const MAX_PRIORITY_LAMPORTS = 1_000_000n;
 // The longest message the owner's wallet signs in a set-up: a Tangem card
@@ -330,6 +333,16 @@ export function decodeSol(base64, expect, pins) {
   let units = 200_000n * BigInt(ixs.length), micro = 0n;
   const outer = [];
   for (const ix of ixs) {
+    if (ix.programId === LIGHTHOUSE) {
+      // A guard the wallet added. Flags are the message's: an account the
+      // checked instructions write (the owner, the vault) shows as writable
+      // here too. The guard may add no signer or writable account of its own;
+      // it reads, and we trust its pinned program id not to move money.
+      const used = new Set(ixs.filter(x => x.programId !== LIGHTHOUSE).flatMap(x => x.keys.map(k => k.pubkey)));
+      if (ix.keys.some(k => (k.isSigner || k.isWritable) && !used.has(k.pubkey))) no('a wallet guard instruction that could change an account');
+      else lines.push('Wallet guard (Lighthouse): checks accounts, moves nothing');
+      continue;
+    }
     if (ix.programId === BUDGET) {
       const d = describe(ix, ctx);
       if (d.move.kind === 'budget') units = d.move.units;
@@ -388,7 +401,9 @@ function deposit(outer, expect, pins, ctx, lines, no) {
   const native = expect.mint === pins.solana.native_mint;
   const moves = outer.map(ix => { const d = describe(ix, ctx); lines.push(d.text); return d.move; });
   if (native) {
-    if (moves.length !== 1 || moves[0].kind !== 'sol') return no('a SOL deposit is one transfer');
+    if (moves.length !== 1 || moves[0].kind !== 'sol') {
+      return no(`a SOL deposit is one transfer; this has ${outer.length} instruction(s): ${outer.map(ix => short(ix.programId)).join(', ')}`);
+    }
     const m = moves[0];
     if (m.from !== expect.owner || m.to !== expect.vault) no('the SOL does not go from your wallet to your vault');
     if (m.raw !== BigInt(expect.raw)) no(`it deposits ${fromRaw(m.raw, 9)} SOL, not ${fromRaw(BigInt(expect.raw), 9)}`);

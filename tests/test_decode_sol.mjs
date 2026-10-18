@@ -197,6 +197,24 @@ test('deposit: SOL to the vault, or USDC from the wallet\'s account to the vault
     /not your vault's/);
 });
 
+test('deposit signed by Phantom: its read-only Lighthouse guard passes; a writable or signing one, or another program, is refused', () => {
+  const LIGHTHOUSE = new PublicKey(SOLANA.programs.lighthouse);
+  const e = { ...base, kind: 'deposit', mint: WSOL.toBase58(), raw: '1590000000' };
+  // the owner is the fee payer: signer and writable in the message whatever the guard asks
+  const guard = (writable, signer = false, who = STRANGER) => new TransactionInstruction({ programId: LIGHTHOUSE, data: Buffer.from([4, 0, 1, 2]),
+    keys: [{ pubkey: OWNER, isSigner: true, isWritable: true }, { pubkey: VAULT, isSigner: false, isWritable: false },
+      ...(writable || signer ? [{ pubkey: who, isSigner: signer, isWritable: writable }] : [])] });
+  const r = decodeSol(wire([transfer(OWNER, VAULT, 1_590_000_000), guard(false)]), e, PINS);
+  ok(r);
+  assert.match(r.lines.join('\n'), /Wallet guard \(Lighthouse\)/);
+  ok(decodeSol(wire([guard(false), transfer(OWNER, VAULT, 1_590_000_000), guard(false)]), e, PINS));
+  refused(decodeSol(wire([transfer(OWNER, VAULT, 1_590_000_000), guard(true)]), e, PINS), /could change an account/);
+  ok(decodeSol(wire([transfer(OWNER, VAULT, 1_590_000_000), guard(true, false, VAULT)]), e, PINS));   // the vault: written by the transfer already
+  refused(decodeSol(wire([transfer(OWNER, VAULT, 1_590_000_000), guard(false, true)]), e, PINS), /could change an account/);
+  const other = new TransactionInstruction({ programId: STRANGER, data: Buffer.from([1]), keys: [] });
+  refused(decodeSol(wire([transfer(OWNER, VAULT, 1_590_000_000), other]), e, PINS), /2 instruction\(s\)/);
+});
+
 test('withdraw: from the vault into the owner\'s wallet only, the asked amount', () => {
   const e = (raw, mint = WSOL) => ({ ...base, kind: 'withdraw', mint: mint.toBase58(), raw });
   ok(decodeSol(wire([ownerExec([transfer(VAULT, OWNER, 500_000_000)])]), e('500000000'), PINS));
