@@ -925,3 +925,18 @@ class MacroSeed(unittest.TestCase):
         for k, v in (('macro_pause_before_minutes', '241'), ('macro_pause_after_minutes', '14')):
             with self.assertRaises(Exception, msg=k):
                 db.set_param('sol-usdc', k, v)
+
+
+class EveryHot(unittest.TestCase):
+    """sql/053: with hot_pause_every_hot, every HOT choice is a bad moment,
+    with no fee read; WARM and CALM never are."""
+
+    def test_every_hot_choice_pauses_without_a_fee_read(self):
+        import calm
+        with mock.patch.object(config, 'HOT_PAUSE_EVERY_HOT', True), \
+                mock.patch.object(db, 'fee_state_span', side_effect=AssertionError('no fee read')):
+            for choice, bad in ((1.01, False), (1.0125, False), (1.02, False), (1.025, True), (1.05, True)):
+                out = lp.pauses.hot_pause_view('P', 120.0, 1.0, choice)
+                self.assertEqual((out['hot'], out['bad']), (bad, bad), choice)
+            self.assertFalse(lp.pauses.hot_pause_view('P', 120.0, 1.0, None)['bad'])
+        self.assertEqual(calm.WARM_MAX, 1.02)

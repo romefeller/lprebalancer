@@ -11,7 +11,7 @@ import guards
 import txfees
 import wallets
 from venues.jupiter import prices as jupiter_api
-from lp import books, capital, paths, signers, swaps, tuning
+from lp import books, capital, governor, paths, signers, swaps, tuning
 
 def harvest_ready(fees_usd, since_s, interval_s, min_usd):
     """The dividend: accrued fees go to the wallet every `interval_s`, once
@@ -146,8 +146,12 @@ def distribute(state, position, fee_a, fee_b):
     # A vault's fees never refill gas: its payer key pays the fees and only
     # the owners top it up. A non-special instance's share goes to the fee
     # wallet (fees.fee_share).
+    # The payout governor (sql/053): pay the share the recent bands earned
+    # above their re-centre loss; off, every payout-token fee is paid.
+    share, gov = governor.share_now() if config.PAYOUT_GOVERNOR else (None, None)
     parts = fees.split([(mint_a, sym_a, fee_a, px_a), (mint_b, sym_b, fee_b, px_b)],
-                       wallets.norm(config.PAYOUT_MINT), None if config.VAULT else sol_before, config.GAS_RESERVE_SOL)
+                       wallets.norm(config.PAYOUT_MINT), None if config.VAULT else sol_before, config.GAS_RESERVE_SOL,
+                       share=share)
     parts = fees.fee_share(parts, config.FEE_BPS)
     owed = state.setdefault('payout_owed', {})
     held = {mint_a: bal['balanceA'], mint_b: bal['balanceB']}
@@ -215,7 +219,10 @@ def distribute(state, position, fee_a, fee_b):
     held = [{'symbol': x['symbol'], 'amount': round(x['amount'], 6),
              'usd': round(x['usd'], 4) if x['usd'] is not None else None}
             for x in parts if x['kind'] == 'reinvested' and x['mint'] == payout_mint]
-    books.notify('PAYOUT', sent=sent, split=summary, gas_low=not config.VAULT and sol_before < config.GAS_RESERVE_SOL,
+    if gov is not None:
+        gov = {k: (round(v, 4) if isinstance(v, float) else v) for k, v in gov.items()}
+        gov.update(share=round(share, 4), days=config.GOVERNOR_DAYS, keep=config.GOVERNOR_KEEP)
+    books.notify('PAYOUT', sent=sent, split=summary, governor=gov, gas_low=not config.VAULT and sol_before < config.GAS_RESERVE_SOL,
                  sol_before=round(sol_before, 6), gas_reserve=config.GAS_RESERVE_SOL, held=held, to=config.PROFIT_WALLET,
                  parts=[{k: (round(v, 6) if isinstance(v, float) else v) for k, v in x.items()} for x in parts])
     return parts

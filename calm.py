@@ -492,6 +492,10 @@ def p_touch_cond(table, d_up, d_down, sigma_now, vel_now=None, min_origins=150):
     return float(((u > d_up / sigma_now) | (d > d_down / sigma_now)).mean())
 
 
+# The widest width the regime still calls WARM; any wider choice is HOT.
+WARM_MAX = 1.02
+
+
 def regime_view(bars, price, lower, upper, *, widths=WIDTHS, horizon_minutes=120, threshold=0.25):
     """The market's width, from the five-minute tape. Pure."""
     if bars is None:
@@ -509,7 +513,7 @@ def regime_view(bars, price, lower, upper, *, widths=WIDTHS, horizon_minutes=120
     p_held = (p_touch_cond(table, math.log(upper / price), math.log(price / lower), s_now, v_now)
               if inside and half else (1.0 if half else None))
     idx = widths.index(choice)
-    mode = 'CALM' if idx == 0 else 'WARM' if choice <= 1.02 else 'HOT'
+    mode = 'CALM' if idx == 0 else 'WARM' if choice <= WARM_MAX else 'HOT'
     return {'mode': mode, 'choice': choice, 'choice_pct': round((choice - 1) * 100, 2),
             'held': held, 'held_pct': round((half - 1) * 100, 2) if half else None,
             'inside': inside, 'p_held': None if p_held is None else round(p_held, 3),

@@ -452,7 +452,7 @@ class Distribute(unittest.TestCase):
         self.assertIn('uncertain', [r['kind'] for r in rows]); self.assertEqual(state['payout_owed'], {})
 
     def test_the_summary_counts_a_part_without_dollars_as_zero(self):
-        with mock.patch.object(fees, 'split', lambda *a: [
+        with mock.patch.object(fees, 'split', lambda *a, **k: [
                 {'mint': USDC, 'symbol': 'USDC', 'amount': 0.3, 'usd': None, 'kind': 'reinvested'}]):
             *_, seen = self.run_it(0.002, 0.3)
         self.assertEqual([kw for e, kw in seen if e == 'PAYOUT'][0]['split']['reinvested'], 0)
@@ -484,14 +484,14 @@ class Distribute(unittest.TestCase):
 
     def test_held_none_sends_nothing(self):
         bal = {'balanceA': 0.07, 'balanceB': 40.0, 'sol': 0.07, 'price': 120.0, 'quoteUsd': 1.0}
-        with mock.patch.object(fees, 'split', lambda *a: [
+        with mock.patch.object(fees, 'split', lambda *a, **k: [
                 {'mint': USDC, 'symbol': 'USDC', 'amount': 0.3, 'usd': 0.3, 'kind': 'paid'},
                 {'mint': BONK, 'symbol': 'BONK', 'amount': 1.0, 'usd': 1.0, 'kind': 'paid'}]):
             _, rows, calls, *_ = self.run_it(0.002, 0.3, bal=bal)
         self.assertEqual([c[1] for c in calls], [USDC])          # BONK is not in the wallet map
 
     def test_a_part_without_dollars_is_paid_without_dollars(self):
-        with mock.patch.object(fees, 'split', lambda *a: [
+        with mock.patch.object(fees, 'split', lambda *a, **k: [
                 {'mint': USDC, 'symbol': 'USDC', 'amount': 0.3, 'usd': None, 'kind': 'paid'}]):
             _, rows, *_ = self.run_it(0.002, 0.3)
         self.assertEqual([(r['kind'], r['usd']) for r in rows], [('paid', None)])

@@ -29,6 +29,10 @@ def hot_pause_view(pool, usd_a, usd_b, choice):
     out = {'hot': None, 'ratio': None, 'bad': False}
     if choice is None:
         return out
+    if config.HOT_PAUSE_EVERY_HOT:
+        # sql/053: every moment the regime calls HOT, no fee check
+        out['hot'] = out['bad'] = choice > calm.WARM_MAX
+        return out
     out['hot'] = choice > 1 + config.HOT_PAUSE_HOT_PCT / 100
     if not out['hot']:
         return out
@@ -154,8 +158,11 @@ def hot_pause(state, status, rv):
         return False
     if regime.calm_budget_left(state) <= 0 or not regime.voluntary_move_allowed(state):
         return False
-    why = (f"hot pause: +/-{rv.get('choice_pct')}% chosen and fees {v['ratio']}x the in-band loss "
-           f"over {config.HOT_PAUSE_FG_HOURS:g}h (< {config.HOT_PAUSE_FG_THRESHOLD:g})")
+    if config.HOT_PAUSE_EVERY_HOT:
+        why = f"hot pause: the regime calls the market HOT (+/-{rv.get('choice_pct')}% chosen)"
+    else:
+        why = (f"hot pause: +/-{rv.get('choice_pct')}% chosen and fees {v['ratio']}x the in-band loss "
+               f"over {config.HOT_PAUSE_FG_HOURS:g}h (< {config.HOT_PAUSE_FG_THRESHOLD:g})")
     books.notify_book('HOT_PAUSE', price=status['price'], lower=status['lowerPrice'], upper=status['upperPrice'],
                       ratio=v['ratio'], threshold=config.HOT_PAUSE_FG_THRESHOLD, hours=config.HOT_PAUSE_FG_HOURS,
                       resume_minutes=config.HOT_PAUSE_RESUME_S // 60, regime=rv)

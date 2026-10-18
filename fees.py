@@ -19,13 +19,20 @@ import chains
 NATIVE_MINT = chains.SOLANA['native_mint']
 
 
-def split(fees, payout_mint, sol_before, gas_reserve):
+def split(fees, payout_mint, sol_before, gas_reserve, share=None):
     """Where each harvested amount goes.
 
     `fees` is a list of (mint, symbol, amount, usd_per_unit). `sol_before` is
-    the LP wallet's native SOL before this harvest landed. Returns a list of
-    dicts {mint, symbol, amount, usd, kind} with kind 'paid', 'reinvested' or
-    'gas'; amounts of zero are dropped."""
+    the LP wallet's native SOL before this harvest landed. With `share` (0..1),
+    the payout is that share of the harvest's dollar value, taken from the
+    payout-token fees only (never more than they are; no swap), and the rest
+    of them is reinvested (the payout governor, lp/governor.py). Returns a list of dicts
+    {mint, symbol, amount, usd, kind} with kind 'paid', 'reinvested' or 'gas';
+    amounts of zero are dropped."""
+    if share is not None and not 0 <= share <= 1:
+        raise ValueError(f'payout share {share} is outside 0..1')
+    total_usd = sum(max(float(a or 0.0), 0.0) * px for _m, _s, a, px in fees if px is not None)
+    budget = share * total_usd if share is not None else None
     gas_low = sol_before is not None and sol_before < gas_reserve
     need = max(gas_reserve - sol_before, 0.0) if gas_low else 0.0
     out = []
@@ -45,7 +52,15 @@ def split(fees, payout_mint, sol_before, gas_reserve):
             need -= g
             add(mint, sym, g, px, 'gas')
             amt -= g
-        add(mint, sym, amt, px, 'paid' if mint == payout_mint and not gas_low else 'reinvested')
+        if mint != payout_mint or gas_low:
+            add(mint, sym, amt, px, 'reinvested')
+        elif budget is None:
+            add(mint, sym, amt, px, 'paid')
+        else:
+            pay = min(amt, budget / px) if px else 0.0
+            budget -= pay * px if px else 0.0
+            add(mint, sym, pay, px, 'paid')
+            add(mint, sym, amt - pay, px, 'reinvested')
     return out
 
 

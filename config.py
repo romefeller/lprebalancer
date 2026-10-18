@@ -256,6 +256,11 @@ HOT_PAUSE_MAX_S = float(_CFG.get('hot_pause_max_hours') or 12) * 3600
 HOT_PAUSE_COOLDOWN_S = int(_CFG.get('hot_pause_cooldown_minutes') or 60) * 60
 # The pools the HOT pause guards (sql/033); empty: every pool the profile holds.
 HOT_PAUSE_POOLS = frozenset(_CFG.get('hot_pause_pools') or ())
+# Pause in every HOT moment, without the fee check (sql/053, owner
+# 2026-10-18): the band waits 50/50 whenever the regime calls the market HOT.
+# Audited on 8sLb, 333 h by the bot's own label: fees / in-band loss was
+# CALM 1.55, WARM 1.04, HOT 0.84.
+HOT_PAUSE_EVERY_HOT = bool(_CFG.get('hot_pause_every_hot'))
 # Scheduled pause around macro releases (sql/030, rebalancer.macro_events):
 # closed and waiting 50/50 from MACRO_PAUSE_BEFORE_S before each event to
 # MACRO_PAUSE_AFTER_S after it, whatever the market says.
@@ -301,6 +306,15 @@ DEPLOY_ALL = _env('LPBOT_DEPLOY_ALL', lambda s: s.lower() in ('1', 'true', 'yes'
 PAYOUT_ENABLED = _env('LPBOT_PAYOUT', lambda s: s.lower() in ('1', 'true', 'yes'), bool(_CFG.get('payout_enabled')))
 PROFIT_WALLET = _env('LPBOT_PROFIT_WALLET', str, _CFG.get('profit_wallet') or '')
 PAYOUT_MINT = _env('LPBOT_PAYOUT_MINT', str, _CFG.get('payout_mint') or '')
+# The payout governor (sql/053, owner 2026-10-18): each harvest pays out the
+# share of its fees that the profile's closed bands of the last GOVERNOR_DAYS
+# earned above their re-centre loss, minus GOVERNOR_KEEP of that profit
+# (kept, so the LP grows), never above GOVERNOR_CAP (lp/governor.py). Off:
+# every payout-token fee is paid, as before.
+PAYOUT_GOVERNOR = bool(_CFG.get('payout_governor'))
+GOVERNOR_DAYS = float(_CFG.get('governor_days') or 7)
+GOVERNOR_KEEP = float(_CFG['governor_keep']) if _CFG.get('governor_keep') is not None else 0.2
+GOVERNOR_CAP = float(_CFG['governor_cap']) if _CFG.get('governor_cap') is not None else 0.5
 # An instance of the operator's own pays nothing; any other pays fee_bps of
 # its payout-token fees to fee_wallet at each harvest. Only a vault instance
 # can pay one: the chain then lets payouts reach the approved wallets only.
