@@ -12,6 +12,7 @@ import fees        # noqa: E402
 import rebalancer  # noqa: E402
 import lp.capital  # noqa: E402
 import lp.harvest  # noqa: E402
+import lp.governor  # noqa: E402
 import lp.swaps  # noqa: E402
 import config  # noqa: E402
 import db  # noqa: E402
@@ -83,6 +84,38 @@ class Distribute(unittest.TestCase):
         self.assertIn('--execute', a)
         self.assertEqual(sorted(rows), ['paid', 'reinvested'])
         self.assertIn('PAYOUT', sent)
+
+    def run_governed(self, gov):
+        """distribute() under the equity governor that returns `gov`: the
+        notified events with their payloads, and the USDC sent."""
+        events, sends = [], []
+        bal = {'balanceA': 0.07, 'balanceB': 40.0, 'sol': 0.07, 'price': 120.0, 'quoteUsd': 1.0}
+        with mock.patch.dict(os.environ, {'LPBOT_PROFIT_WALLET_PIN': PROFIT}), \
+                mock.patch.multiple(config, PAYOUT_ENABLED=True, PAYOUT_MINT=USDC, PROFIT_WALLET=PROFIT,
+                                    GAS_RESERVE_SOL=0.05, PAYOUT_GOVERNOR=True, GOVERNOR_MODE='equity'), \
+                mock.patch.object(lp.capital, 'pool_tokens', lambda: ((SOL, 'SOL'), (USDC, 'USDC'))), \
+                mock.patch.object(lp.capital, 'wallet', lambda p: bal), \
+                mock.patch.object(lp.governor, 'share_now', lambda: (gov[0], dict(gov[1]))), \
+                mock.patch.object(lp.signers, 'chain', lambda *a, **k: (sends.append(float(a[2])) or ({'signature': 's'}, None))), \
+                mock.patch.object(lp.paths, 'save', lambda s: None), \
+                mock.patch.object(lp.books, 'notify', lambda ev, **kw: events.append((ev, kw))), \
+                mock.patch.object(db, 'record_payout', lambda *a, **k: None):
+            lp.harvest.distribute({}, 'M', 0.002, 0.3)                      # $0.54 of fees
+        return dict(events), sends
+
+    def test_the_equity_governor_pays_its_share_and_names_a_switch(self):
+        m = {'mode': 'equity', 'paying': True, 'switched': True, 'gap_pct': 5.2, 'equity_usd': 1600.0, 'target_usd': 1521.0}
+        ev, sends = self.run_governed((0.3, m))
+        self.assertAlmostEqual(sends[0], 0.3 * 0.54, places=6)
+        self.assertEqual(ev['GOVERNOR']['state'], 'PAY')
+        self.assertEqual(ev['GOVERNOR']['share'], 0.3)
+        g = ev['PAYOUT']['governor']
+        self.assertEqual((g['share'], g['paying']), (0.3, True))
+        self.assertNotIn('switched', g)
+        self.assertNotIn('keep', g)                                   # the 053 fields are not the equity mode's
+        ev, _ = self.run_governed((0.05, dict(m, paying=False, switched=False)))
+        self.assertNotIn('GOVERNOR', ev)
+        self.assertEqual(ev['PAYOUT']['governor']['share'], 0.05)
 
     def test_gas_low_sends_nothing(self):
         rows, calls, _, _ = self.run_it(sol=0.03)

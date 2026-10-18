@@ -163,9 +163,9 @@ def distribute(state, position, fee_a, fee_b):
                              detail=('gas under the reserve' if p['kind'] == 'gas' else None))
             continue
         # The fee share is owed and paid on its own account, to its own wallet.
-        share = p['kind'] == 'fee'
-        to = config.FEE_WALLET if share else config.PROFIT_WALLET
-        key = f"fee:{p['mint']}" if share else p['mint']
+        fee_part = p['kind'] == 'fee'
+        to = config.FEE_WALLET if fee_part else config.PROFIT_WALLET
+        key = f"fee:{p['mint']}" if fee_part else p['mint']
         due = p['amount'] + float(owed.get(key, 0.0))
         have = float(held.get(p['mint']) or 0.0)
         amt = min(due, have)
@@ -221,7 +221,13 @@ def distribute(state, position, fee_a, fee_b):
             for x in parts if x['kind'] == 'reinvested' and x['mint'] == payout_mint]
     if gov is not None:
         gov = {k: (round(v, 4) if isinstance(v, float) else v) for k, v in gov.items()}
-        gov.update(share=round(share, 4), days=config.GOVERNOR_DAYS, keep=config.GOVERNOR_KEEP)
+        gov.update(share=round(share, 4))
+        if gov.get('mode') != 'equity':
+            gov.update(days=config.GOVERNOR_DAYS, keep=config.GOVERNOR_KEEP)
+        elif gov.pop('switched', False):
+            books.notify('GOVERNOR', state='PAY' if gov['paying'] else 'REINVEST', share=gov['share'],
+                         gap_pct=gov.get('gap_pct'), equity_usd=gov.get('equity_usd'), target_usd=gov.get('target_usd'),
+                         enter_pct=config.GOVERNOR_ENTER_PCT, exit_pct=config.GOVERNOR_EXIT_PCT)
     books.notify('PAYOUT', sent=sent, split=summary, governor=gov, gas_low=not config.VAULT and sol_before < config.GAS_RESERVE_SOL,
                  sol_before=round(sol_before, 6), gas_reserve=config.GAS_RESERVE_SOL, held=held, to=config.PROFIT_WALLET,
                  parts=[{k: (round(v, 6) if isinstance(v, float) else v) for k, v in x.items()} for x in parts])

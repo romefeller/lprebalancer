@@ -35,7 +35,7 @@ USD_KEYS = ('equity_usd', 'lp_usd', 'idle_usd',
             'fees_today_usd', 'fees_realised_usd', 'fees_unrealised_usd', 'fees_total_usd',
             'fees_per_day_6h_usd', 'fees_per_day_24h_usd', 'fees_per_day_usd',
             'paid_usd', 'reinvested_usd', 'gas_usd',
-            'pnl_usd', 'profit_usd', 'vs_hold_usd', 'vs_hold_50_50_usd',
+            'pnl_usd', 'profit_usd', 'kept_usd', 'paid_out_usd', 'vs_hold_usd', 'vs_hold_50_50_usd',
             'deposits_usd', 'withdrawals_usd')
 COUNT_KEYS = ('recentres', 'harvests', 'deposits', 'withdrawals')
 # Token amounts: one pool's own tokens, never summed.
@@ -81,12 +81,24 @@ def record(profile, book, payouts, flows, pools=(), tag=None):
         'in_range_pct': book.get('in_range_pct'), 'tracked_days': book.get('tracked_days'),
         'pnl_usd': book.get('pnl_usd'), 'pnl_basis': book.get('pnl_basis'),
         'since': s.get('since'), 'profit_usd': s.get('profit_usd'), 'profit_pct': s.get('profit_pct'),
+        # the P&L in two parts: what the LP kept (equity against the money put
+        # in, the payout governor's measure) and what was paid out
+        **_pnl_parts(s),
         'vs_hold_usd': s.get('vs_hold_start_assets_usd'), 'vs_hold_50_50_usd': s.get('vs_hold_50_50_usd'),
         'deposits_usd': flows.get('deposits_usd'), 'deposits': flows.get('deposits') or 0,
         'withdrawals_usd': flows.get('withdrawals_usd'), 'withdrawals': flows.get('withdrawals') or 0,
         'last_seen': book.get('last_seen'),
         'by_pool': [{k: p.get(k) for k in POOL_KEYS} for p in pools],
     }
+
+
+def _pnl_parts(s):
+    """{'kept_usd', 'paid_out_usd'} of a since_start: the payouts and gas
+    refills, and the profit less them. Both None without a profit. Pure."""
+    if s.get('profit_usd') is None or s.get('paid_out_usd') is None:
+        return {'kept_usd': None, 'paid_out_usd': None}
+    out = float(s['paid_out_usd']) + float(s.get('gas_refill_usd') or 0.0)
+    return {'kept_usd': round(float(s['profit_usd']) - out, 4), 'paid_out_usd': round(out, 4)}
 
 
 def total(records):
@@ -227,11 +239,18 @@ def _sum_lines(t, label):
             f' · since start {_pct(t["apr_pct"])}',
             f'    payouts paid {_usd(t["paid_usd"], 4)} · reinvested {_usd(t["reinvested_usd"], 4)}'
             f' · gas {_usd(t["gas_usd"], 4)}',
-            f'    P&L     {_signed(t["profit_usd"])} since start · vs holding the start assets {_signed(t["vs_hold_usd"])}'
+            f'    P&L     {_signed(t["profit_usd"])} since start{_parts_text(t)} · vs holding the start assets {_signed(t["vs_hold_usd"])}'
             f' · vs 50/50 {_signed(t["vs_hold_50_50_usd"])}',
             f'    flows   deposits {_usd(t["deposits_usd"])} ({t["deposits"]}) · withdrawals'
             f' {_usd(t["withdrawals_usd"])} ({t["withdrawals"]}) · {t["recentres"]} re-centres'
             f' · {t["harvests"]} harvests · in range {_pct(t["in_range_pct"])}']
+
+
+def _parts_text(r):
+    """' (in LP x · paid out y)', or '' without the parts."""
+    if r.get('kept_usd') is None:
+        return ''
+    return f' (in LP {_signed(r["kept_usd"])} · paid out {_signed(r["paid_out_usd"])})'
 
 
 def _pool_lines(r):
@@ -250,7 +269,7 @@ def _pool_lines(r):
             f' · since start {_pct(r["apr_pct"])}',
             f'    payouts paid {_usd(r["paid_usd"], 4)} · reinvested {_usd(r["reinvested_usd"], 4)}'
             f' · gas {_usd(r["gas_usd"], 4)}',
-            f'    P&L     {_signed(r["profit_usd"])} since {str(r["since"] or "-")[:10]}'
+            f'    P&L     {_signed(r["profit_usd"])} since {str(r["since"] or "-")[:10]}{_parts_text(r)}'
             f' · vs holding the start assets {_signed(r["vs_hold_usd"])} · vs 50/50 {_signed(r["vs_hold_50_50_usd"])}',
             f'    flows   deposits {_usd(r["deposits_usd"])} ({r["deposits"]}) · withdrawals'
             f' {_usd(r["withdrawals_usd"])} ({r["withdrawals"]}) · {r["recentres"]} re-centres'

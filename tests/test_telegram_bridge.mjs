@@ -710,3 +710,43 @@ test('a log line of exactly 160 characters is shown whole', () => {
   const exact = 'L'.repeat(160);
   assert.equal(logLines({ logs: [exact, 'M'.repeat(161)] }), `\nprogram logs:\n${exact}\n${'M'.repeat(159)}…`);
 });
+
+// The equity governor (sql/054) in the book's PAYOUT block, the PAYOUT event and the switch event.
+test('the PAYOUT block of the equity governor shows the state, the target and the next switch', () => {
+  const g = { mode: 'equity', state: 'REINVEST', share: 0.05, floor: 0.05, high: 0.3, enter_pct: 5, exit_pct: 2, growth_pct: 2,
+    equity_usd: 1357.55, target_usd: 1462.4, put_in_usd: 1452.33, gap_pct: -7.17, gap_usd: -104.85,
+    enter_at_usd: 1535.52, exit_at_usd: 1491.65, switched_at: null,
+    fees_per_day_usd: 20.97, paid_per_day_usd: 1.0485, reinvested_per_day_usd: 19.9215 };
+  const text = render({ event: 'in_band', price: 190, governor: g });
+  const block = text.slice(text.indexOf('━━ 💸 PAYOUT ━━')).split('\n').slice(0, 5);
+  assert.deepEqual(block, [
+    '━━ 💸 PAYOUT ━━',
+    'governor    REINVEST · pays 5.0% of each harvest',
+    'equity      $1357.55 · target $1462.40 (put in $1452.33 +2.0%/30d) · -$104.85 (-7.2%)',
+    'switch      30.0% from equity ≥ $1535.52 (target +5.0%) · $177.97 to go',
+    'expected    $1.05/day paid · $19.92/day reinvested (fees $20.97/day, 24h)']);
+  const pay = render({ event: 'in_band', price: 190, governor: { ...g, state: 'PAY', share: 0.3, switched_at: '2026-10-25T14:03:11+00:00',
+    equity_usd: 1540, gap_pct: 5.31, gap_usd: 77.6 } });
+  assert.ok(pay.includes('governor    PAY · pays 30.0% of each harvest since 10-25 14:03Z'));
+  assert.ok(pay.includes('· +$77.60 (+5.3%)'));
+  assert.ok(pay.includes('switch      back to 5.0% at equity ≤ $1491.65 (target +2.0%)'));
+  assert.ok(!pay.includes('undefined') && !text.includes('undefined'));
+});
+
+test('the 053 PAYOUT block is unchanged', () => {
+  const text = render({ event: 'in_band', price: 190, governor: { share: 0.07, keep: 0.2, cap: 0.5, days: 7, bands: 30,
+    fees_usd: 40, loss_usd: -35, profit_usd: 5, fees_per_day_usd: 10, paid_per_day_usd: 0.7, reinvested_per_day_usd: 9.3 } });
+  assert.ok(text.includes('governor    pays 7.0% of each harvest · keeps 20.0% of the profit · cap 50.0%'));
+  assert.ok(text.includes('expected    $0.70/day paid · $9.30/day reinvested (fees $10.00/day, 24h)'));
+});
+
+test('a PAYOUT names the equity governor; a switch has its own message', () => {
+  const row = { event: 'PAYOUT', gas_low: false, sent: [], split: { paid: 0.3, reinvested: 0.7, gas: 0 },
+    governor: { mode: 'equity', paying: false, share: 0.05, gap_pct: -7.17 } };
+  assert.equal(message(row), '💸 PAYOUT\nnothing sent this harvest\nsplit  paid $0.3000 · reinvested $0.7000 · gas $0.0000'
+    + '\ngovernor REINVEST 5.0% · equity -7.2% vs target');
+  assert.equal(message({ event: 'GOVERNOR', state: 'PAY', share: 0.3, gap_pct: 5.04, equity_usd: 1600, target_usd: 1523.2, enter_pct: 5, exit_pct: 2 }),
+    '💸 PAYOUT GOVERNOR → PAY · pays 30.0% of each harvest\nequity $1600.00 · target $1523.20 · +5.0% (≥ +5.0%)');
+  assert.equal(message({ event: 'GOVERNOR', state: 'REINVEST', share: 0.05, gap_pct: 1.9, equity_usd: 1552, target_usd: 1523.2, enter_pct: 5, exit_pct: 2 }),
+    '💸 PAYOUT GOVERNOR → REINVEST · pays 5.0% of each harvest\nequity $1552.00 · target $1523.20 · +1.9% (≤ +2.0%)');
+});

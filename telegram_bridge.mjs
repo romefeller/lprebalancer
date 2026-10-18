@@ -234,14 +234,26 @@ export function render(row) {
   // The payout governor (sql/053): what each harvest pays out now, from the
   // last days' closed bands (fees minus their re-centre loss), and what that
   // means per day at the 24h fee rate.
+  // Equity mode (sql/054): the state, the equity against its target, and the
+  // equity at which the share switches.
   function payoutBlock(g) {
     if (!g) return [];
     const pct = (x) => `${n(Number(x) * 100, 1)}%`;
+    const expected = g.fees_per_day_usd != null ? [
+      `expected    $${n(g.paid_per_day_usd, 2)}/day paid · $${n(g.reinvested_per_day_usd, 2)}/day reinvested (fees $${n(g.fees_per_day_usd, 2)}/day, 24h)`] : [];
+    if (g.mode === 'equity') {
+      const pay = g.state === 'PAY';
+      return [`━━ 💸 PAYOUT ━━`,
+        `governor    ${g.state} · pays ${pct(g.share)} of each harvest${g.switched_at ? ` since ${String(g.switched_at).slice(5, 16).replace('T', ' ')}Z` : ''}`,
+        `equity      $${n(g.equity_usd, 2)} · target $${n(g.target_usd, 2)} (put in $${n(g.put_in_usd, 2)} +${n(g.growth_pct, 1)}%/30d) · ${g.gap_usd >= 0 ? "+" : "-"}$${n(Math.abs(g.gap_usd), 2)} (${g.gap_pct >= 0 ? '+' : ''}${n(g.gap_pct, 1)}%)`,
+        pay ? `switch      back to ${pct(g.floor)} at equity ≤ $${n(g.exit_at_usd, 2)} (target +${n(g.exit_pct, 1)}%)`
+            : `switch      ${pct(g.high)} from equity ≥ $${n(g.enter_at_usd, 2)} (target +${n(g.enter_pct, 1)}%) · $${n(g.enter_at_usd - g.equity_usd, 2)} to go`,
+        ...expected];
+    }
     return [`━━ 💸 PAYOUT ━━`,
       `governor    pays ${pct(g.share)} of each harvest · keeps ${pct(g.keep)} of the profit · cap ${pct(g.cap)}`,
       `last ${n(g.days, 0)}d     ${g.bands} bands: fees $${n(g.fees_usd, 2)} · re-centre loss ${sign(g.loss_usd)} · profit ${sign(g.profit_usd)}`,
-      ...(g.fees_per_day_usd != null ? [
-        `expected    $${n(g.paid_per_day_usd, 2)}/day paid · $${n(g.reinvested_per_day_usd, 2)}/day reinvested (fees $${n(g.fees_per_day_usd, 2)}/day, 24h)`] : []),
+      ...expected,
     ];
   }
 
@@ -409,8 +421,15 @@ export function render(row) {
       const split = `split  paid $${n(row.split?.paid, 4)} · reinvested $${n(row.split?.reinvested, 4)} · gas $${n(row.split?.gas, 4)}`;
       if (row.gas_low) return payoutHeld(row) + '\n' + split;
       const sent = (row.sent ?? []).map(x => `${x.amount} ${x.symbol} ($${n(x.usd, 4)}) → profit wallet\n${x.signature}`).join('\n');
-      return 'PAYOUT\n' + (sent || 'nothing sent this harvest') + '\n' + split;
+      const g = row.governor;
+      const gov = g?.mode === 'equity' && g.share != null
+        ? `\ngovernor ${g.paying ? 'PAY' : 'REINVEST'} ${n(g.share * 100, 1)}% · equity ${g.gap_pct >= 0 ? '+' : ''}${n(g.gap_pct, 1)}% vs target` : '';
+      return 'PAYOUT\n' + (sent || 'nothing sent this harvest') + '\n' + split + gov;
     }
+    case 'GOVERNOR':
+      return `PAYOUT GOVERNOR → ${row.state} · pays ${n(row.share * 100, 1)}% of each harvest\n`
+        + `equity $${n(row.equity_usd, 2)} · target $${n(row.target_usd, 2)} · ${row.gap_pct >= 0 ? '+' : ''}${n(row.gap_pct, 1)}%`
+        + (row.state === 'PAY' ? ` (≥ +${n(row.enter_pct, 1)}%)` : ` (≤ +${n(row.exit_pct, 1)}%)`);
     case 'WRAP':
       return `WRAP · ${row.amount} ${row.symbol} into the pool token · ${row.kept} ${row.symbol} kept for gas\n${row.signature ?? ''}`;
     case 'wrap_failed':

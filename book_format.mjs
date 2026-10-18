@@ -58,9 +58,18 @@ export function equityLine(r) {
   const sol = r.last_price != null ? ` · ${v.symbol} $${n(px)}` : '';
   const s = r.since_start;
   if (s && s.profit_usd != null) {
-    return `equity      $${n(r.equity_usd)}${sol}   P&L ${sign(s.profit_usd)} since start · includes pending fees`;
+    return `equity      $${n(r.equity_usd)}${sol}   P&L ${sign(s.profit_usd)} since start${pnlParts(s)} · includes pending fees`;
   }
   return `equity      $${n(r.equity_usd)}${sol}   P&L ${sign(r.pnl_usd)} · includes pending fees`;
+}
+
+// The P&L in its two parts: what the LP kept (equity against the money put
+// in: the payout governor's measure, sql/054) and what was paid out (payouts
+// and gas refills). Empty without the payout figures.
+export function pnlParts(s) {
+  if (s.paid_out_usd == null) return '';
+  const out = Number(s.paid_out_usd) + Number(s.gas_refill_usd ?? 0);
+  return ` (in LP ${sign(Number(s.profit_usd) - out)} · paid out ${sign(out)})`;
 }
 
 // A share is shown only when it is in [0, 100] and, with the equity known,

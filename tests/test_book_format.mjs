@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { equityLine, lpLine, sinceStartLine, shareAgrees } from '../book_format.mjs';
+import { equityLine, pnlParts, lpLine, sinceStartLine, shareAgrees } from '../book_format.mjs';
 
 const R = { equity_usd: 240.0, pnl_usd: 3.52, last_price: 118.0905, lp_usd: 221.24, deployed_pct: 92.2, wallet_usd: 18.73,
   since_start: { since: '2026-09-22T19:56:24+00:00', start_usd: 248.096, start_sol: 2.102865, value_usd: 242.4247,
@@ -163,4 +163,11 @@ test('stable token A: prices invert, band edges swap, moves and sides turn; zero
   assert.equal(shownSide(H, 'above'), 'below'); assert.equal(shownSide(H, 'below'), 'above');
   assert.equal(shownSide(H, 'up'), 'down'); assert.equal(shownSide(H, 'sideways'), 'sideways');
   assert.equal(shownSide(R, 'above'), 'above');
+});
+
+test('the P&L shows what the LP kept and what was paid out', () => {
+  const s = { profit_usd: -59.5, paid_out_usd: 35.12, gas_refill_usd: 0.1 };
+  assert.equal(equityLine({ equity_usd: 1357.55, last_price: 190, since_start: s }),
+    'equity      $1357.55 · SOL $190.00   P&L -59.50 since start (in LP -94.72 · paid out +35.22) · includes pending fees');
+  assert.equal(pnlParts({ profit_usd: 1 }), '');
 });

@@ -315,6 +315,18 @@ PAYOUT_GOVERNOR = bool(_CFG.get('payout_governor'))
 GOVERNOR_DAYS = float(_CFG.get('governor_days') or 7)
 GOVERNOR_KEEP = float(_CFG['governor_keep']) if _CFG.get('governor_keep') is not None else 0.2
 GOVERNOR_CAP = float(_CFG['governor_cap']) if _CFG.get('governor_cap') is not None else 0.5
+# The equity governor (sql/054, owner 2026-10-18): GOVERNOR_MODE 'equity' pays
+# GOVERNOR_HIGH of each harvest while the equity is ahead of its target, else
+# GOVERNOR_FLOOR. It starts paying HIGH at GOVERNOR_ENTER_PCT above the target
+# and goes back at GOVERNOR_EXIT_PCT or less. The target is the money put in,
+# grown GOVERNOR_GROWTH_PCT per 30 days. 'profit' is the 053 rule above. The
+# state (paying or not) is read from the database at each harvest.
+GOVERNOR_MODE = _CFG.get('governor_mode') or 'profit'
+GOVERNOR_FLOOR = float(_CFG['governor_floor']) if _CFG.get('governor_floor') is not None else 0.05
+GOVERNOR_HIGH = float(_CFG['governor_high']) if _CFG.get('governor_high') is not None else 0.3
+GOVERNOR_ENTER_PCT = float(_CFG['governor_enter_pct']) if _CFG.get('governor_enter_pct') is not None else 5.0
+GOVERNOR_EXIT_PCT = float(_CFG['governor_exit_pct']) if _CFG.get('governor_exit_pct') is not None else 2.0
+GOVERNOR_GROWTH_PCT = float(_CFG['governor_growth_pct']) if _CFG.get('governor_growth_pct') is not None else 2.0
 # An instance of the operator's own pays nothing; any other pays fee_bps of
 # its payout-token fees to fee_wallet at each harvest. Only a vault instance
 # can pay one: the chain then lets payouts reach the approved wallets only.

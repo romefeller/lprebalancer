@@ -57,6 +57,10 @@ TARGETS = {
     'distribute': ('lp/harvest.py', ['distribute'], PY_TESTS('test_money_paths.Distribute', 'test_fee_integrity.DistributeProperties', 'test_fee_integrity.Replay', 'test_payout',
                             'test_polygon_loop', 'test_vault_config')),
     'read_status': ('lp/signers.py', ['read_status', 'fee_problem', 'sanitised'], PY_TESTS('test_money_paths.Status', 'test_fee_integrity.ReadStatus', 'test_fee_integrity.Replay')),
+    'governor_equity': ('lp/governor.py', ['equity_share', 'target_usd', 'equity_measure', 'equity_share_now', 'share_now'],
+                        PY_TESTS('test_governor')),
+    'governor_db': ('db.py', ['governor_capital', 'governor_state', 'set_governor_state', '_equity_governor_view'],
+                    PY_TESTS('test_governor')),
     'measured': ('lp/harvest.py', ['measured_fees'], PY_TESTS('test_money_paths.Measured', 'test_fee_integrity.Replay')),
     'risk': ('calm.py', ['chi2_sf_even', 'arch_lm', '_rms', 'risk_metrics'],
              PY_TESTS('test_money_paths.RiskMath', 'test_fee_integrity.RiskMetrics')),
@@ -500,7 +504,7 @@ TARGETS = {
                       NODE_TESTS('test_book_format.mjs', 'test_telegram_bridge.mjs')),
 }
 
-SQL_TARGETS = {'deposit_db', 'unichain_book', 'unichain_quote', 'band_profile', 'daily', 'capital_db', 'book_scope', 'book_sums', 'stats_sum', 'wallets_db', 'wallet_names', 'db_stats', 'liq_window', 'pause_db', 'macro_db'}
+SQL_TARGETS = {'governor_db', 'deposit_db', 'unichain_book', 'unichain_quote', 'band_profile', 'daily', 'capital_db', 'book_scope', 'book_sums', 'stats_sum', 'wallets_db', 'wallet_names', 'db_stats', 'liq_window', 'pause_db', 'macro_db'}
 
 # Mutants that cannot change behaviour, with the reason. Keyed by the mutant's
 # identity (see "identity" below):
