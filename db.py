@@ -27,6 +27,7 @@ is nothing, and it means a dropped connection cannot wedge the loop.
 import json
 import os
 import re
+import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
 import datetime as dt
@@ -1374,6 +1375,20 @@ def since_start(extra_usd=0.0, profile=None, wallet_id=None):
         last = cur.fetchone()
         if not base or not last:
             return None
+        # What left or reached the book after its last snapshot: a disabled
+        # profile closes and its capital is withdrawn, and no snapshot follows
+        # (2026-10-18: sol-swing read $169.93 and +$142 after its $164 left).
+        # Only with nothing open: an open book's next poll snapshots it anyway.
+        cur.execute('select count(*) n from positions where closed_at is null and config_name = any(%s)', (list(names),))
+        after = 0.0
+        if not cur.fetchone()['n']:
+            cur.execute(f"""select coalesce(sum(case when kind in ('deposit', 'internal_in') then usd else -usd end), 0) n
+                            from capital_flows where kind in ('deposit', 'withdrawal', 'internal_in', 'internal_out')
+                             and ts > %(t)s and {FLOW_IN}""", dict(a, t=last['ts']))
+            after = float(cur.fetchone()['n'])
+            cur.execute("select coalesce(sum(usd), 0) u from payouts where kind in ('paid', 'uncertain', 'fee') "
+                        f"and ts > %(t)s and {PAYOUT_IN}", dict(a, t=last['ts']))
+            after -= float(cur.fetchone()['u'])
         # Only flows after the baseline: the baseline is the sleeve as funded,
         # so a deposit that landed before it is in it already (2026-10-02:
         # mu-usdc's deposit and baseline were the same MU, and its P&L read
@@ -1406,7 +1421,8 @@ def since_start(extra_usd=0.0, profile=None, wallet_id=None):
     p0, p1 = float(base['price']), float(last['price'])
     v0, v1 = volatile_usd(p0, stable_a), volatile_usd(p1, stable_a)
     start = float(base['usd']) + float(fl['net_usd'])
-    value = float(last['equity_usd']) + float(extra_usd or 0.0) + paid + refill      # refill: see daily_line
+    equity_now = float(last['equity_usd']) + after
+    value = equity_now + float(extra_usd or 0.0) + paid + refill      # refill: see daily_line
     hold = ((float(base['sol']) + float(fl['net_sol'])) * v1 + float(base['usdc']) + float(fl['net_usdc'])
             + float(fl['net_fixed_usd']))
     hold_50 = float(base['usd']) * (0.5 + 0.5 * v1 / v0) + float(fl['net_usd'])
@@ -1414,7 +1430,8 @@ def since_start(extra_usd=0.0, profile=None, wallet_id=None):
     out = {'since': base['ts'].isoformat(), 'days': round(days, 2),
            'start_usd': round(start, 4), 'start_sol': round(float(base['sol']) + float(fl['net_sol']), 6),
            'price_start': p0, 'price_now': round(p1, 4),
-           'equity_usd': round(float(last['equity_usd']), 4), 'uncounted_usd': round(float(extra_usd or 0.0), 4),
+           'equity_usd': round(equity_now, 4), 'unsnapshotted_usd': round(after, 4),
+           'uncounted_usd': round(float(extra_usd or 0.0), 4),
            'paid_out_usd': round(paid, 4), 'gas_refill_usd': round(refill, 4), 'value_usd': round(value, 4),
            'profit_usd': round(value - start, 4), 'profit_pct': round((value / start - 1) * 100, 3) if start else None,
            'hold_start_assets_usd': round(hold, 4), 'vs_hold_start_assets_usd': round(value - hold, 4),
@@ -1632,6 +1649,38 @@ def _pct(part, whole):
     return round(min(max(part / whole * 100, 0.0), 100.0), 1)
 
 
+_GOVERNOR_VIEWS = {}            # profile -> (time, measurement): the band read is a query per band
+GOVERNOR_VIEW_S = 600
+
+
+def governor_view(name, cfg, fees_per_day):
+    """The payout governor as the book shows it (lp/governor.py, sql/053):
+    the profile's closed bands of the last governor_days (fees, re-centre
+    loss, profit), the share each harvest pays out now, and what that means
+    per day at `fees_per_day`: paid out and reinvested. The band read is
+    cached GOVERNOR_VIEW_S. None when it cannot be read."""
+    from lp import governor                       # lp.governor imports db
+    days = float(cfg.get('governor_days') or 7)
+    keep = float(cfg['governor_keep']) if cfg.get('governor_keep') is not None else 0.2
+    cap = float(cfg['governor_cap']) if cfg.get('governor_cap') is not None else 0.5
+    hit = _GOVERNOR_VIEWS.get(name)
+    if hit and time.time() - hit[0] < GOVERNOR_VIEW_S:
+        m = hit[1]
+    else:
+        try:
+            m = governor.measure(name, days)
+        except Exception:
+            return None
+        _GOVERNOR_VIEWS[name] = (time.time(), m)
+    share = governor.payout_share(m['fees'], m['loss'], keep, cap)
+    rate = float(fees_per_day) if fees_per_day is not None else None
+    return {'days': days, 'keep': keep, 'cap': cap, 'bands': m['bands'], 'fees_usd': round(m['fees'], 4),
+            'loss_usd': round(m['loss'], 4), 'profit_usd': round(m['fees'] + m['loss'], 4), 'share': round(share, 4),
+            'fees_per_day_usd': round(rate, 4) if rate is not None else None,
+            'paid_per_day_usd': round(rate * share, 4) if rate is not None else None,
+            'reinvested_per_day_usd': round(rate * (1 - share), 4) if rate is not None else None}
+
+
 def _deployment(latest, equity):
     """What is in the LP position and what is in the wallet, from the latest
     snapshot. The position mark is zero when the latest snapshot's position is
@@ -1642,6 +1691,8 @@ def _deployment(latest, equity):
         return {'lp_usd': None, 'wallet_usd': None, 'deployed_pct': None}
     lp = _f(latest.get('position_usd')) if latest.get('open') else 0.0
     wallet = latest.get('wallet_usd')
+    if not latest.get('open') and equity is not None:
+        wallet = _f(equity)                    # no position: the equity is all in the wallet (flows after the snapshot too)
     eq = _f(equity) if equity is not None else None
     pct = _pct(lp, eq)
     if pct is not None and wallet is not None and latest.get('open'):
@@ -1760,6 +1811,8 @@ def stats(token_a=None, token_b=None, profile=None, wallet_id=None):
         equity = last_priced and last_priced['equity_usd']
     started = first_eq and first_eq['equity_usd']
     sst = _since_start_or_none(name)
+    if equity is not None and sst and sst.get('unsnapshotted_usd'):
+        equity = float(equity) + sst['unsnapshotted_usd']     # flows and payouts after the last snapshot
 
     midnight = now().replace(hour=0, minute=0, second=0, microsecond=0)
     today = fees_between(midnight, None, name)
@@ -1849,6 +1902,7 @@ def stats(token_a=None, token_b=None, profile=None, wallet_id=None):
                          if span and span['ir'] is not None else None),
         'tracked_days': round(days, 3) if days else None,
         'split': payout_totals(name) if cfg.get('payout_enabled') else None,
+        'governor': governor_view(name, cfg, (t24 and t24['fees_per_day_usd']) or rate) if cfg.get('payout_governor') else None,
         'daily': _daily_or_none(name),
         'since_start': sst,
         'last_price': _f(latest and latest['price']) or None,

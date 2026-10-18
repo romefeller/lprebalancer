@@ -206,15 +206,7 @@ export function render(row) {
       ...(r.split ? [
         `profit      $${n(r.split.paid_usd, 4)} paid to the profit wallet · $${n(r.split.paid_today_usd, 4)} today`,
         `reinvested  $${n(r.split.reinvested_usd, 4)} back in the LP · gas $${n(r.split.gas_usd, 4)}`] : []),
-      ...(Array.isArray(r.by_pool) && r.by_pool.length > 1 ? [
-        `━━ 🏊 POOLS ━━`,
-        ...r.by_pool.slice(0, 5).map(p =>
-          `${p.open_now ? '▸' : '·'} ${p.dex} ${p.pair_label} ${n(p.days, 2)}d fees $${n(p.fees_usd, 4)}`
-          + `${p.apr_pct != null ? ` APR ${n(p.apr_pct, 0)}%` : ''}`
-          + `${p.pnl_usd != null ? ` P&L ${sign(p.pnl_usd)}` : ''}`
-          + `${p.in_range_pct != null ? ` ${n(p.in_range_pct, 0)}% in` : ''}`),
-        `all pools   fees $${n(r.fees_total_usd, 4)}   P&L ${r.pnl_all_pools_usd != null ? sign(r.pnl_all_pools_usd) : '—'}`,
-      ] : []),
+      ...payoutBlock(r.governor),
       `━━ 📒 BOOK ━━`,
       equityLine(r),
       ...[lpLine(r), sinceStartLine(r), healthLine(r.health)].filter(Boolean),
@@ -238,6 +230,20 @@ export function render(row) {
         + `${plural(r.harvests, 'harvest')}${r.failures ? ` · ${plural(r.failures, 'failure')}` : ''}`,
     ].join('\n');
   };
+
+  // The payout governor (sql/053): what each harvest pays out now, from the
+  // last days' closed bands (fees minus their re-centre loss), and what that
+  // means per day at the 24h fee rate.
+  function payoutBlock(g) {
+    if (!g) return [];
+    const pct = (x) => `${n(Number(x) * 100, 1)}%`;
+    return [`━━ 💸 PAYOUT ━━`,
+      `governor    pays ${pct(g.share)} of each harvest · keeps ${pct(g.keep)} of the profit · cap ${pct(g.cap)}`,
+      `last ${n(g.days, 0)}d     ${g.bands} bands: fees $${n(g.fees_usd, 2)} · re-centre loss ${sign(g.loss_usd)} · profit ${sign(g.profit_usd)}`,
+      ...(g.fees_per_day_usd != null ? [
+        `expected    $${n(g.paid_per_day_usd, 2)}/day paid · $${n(g.reinvested_per_day_usd, 2)}/day reinvested (fees $${n(g.fees_per_day_usd, 2)}/day, 24h)`] : []),
+    ];
+  }
 
   // The survival block. The full forecast rides on the event when the loop
   // made one this poll; otherwise the figures recorded at the last poll.
