@@ -560,7 +560,8 @@ RISK_COLUMNS = ('mode', 'choice_pct', 'held_pct', 'inside', 'p_held', 'threshold
                 'arch_lm_p_24h', 'kurtosis_24h', 'n_bars',
                 'sigma_24h_pct', 'vol_regime_x', 'p_exit_6h', 'p_exit_24h', 'p_exit_72h', 'p_exit_168h',
                 'band_position', 'liquidity_factor', 'inflow', 'inflow_raw', 'volume_x',
-                'fee_loss_3h', 'shadow_in')
+                'fee_loss_3h', 'shadow_in',
+                'fee_pct_1h', 'fee_loss_1h', 'vol_1h_usd', 'range_1h_pct', 'drift_1h_pct', 'l_share', 'moment')
 
 
 def risk_row(regime, metrics, forecast):
@@ -579,13 +580,42 @@ def risk_row(regime, metrics, forecast):
            'band_position': f.get('position'),
            'liquidity_factor': lq.get('factor'), 'inflow': lq.get('inflow'), 'inflow_raw': lq.get('inflow_raw'),
            'volume_x': lq.get('volume_x'),
-           'fee_loss_3h': v.get('fee_loss_3h'), 'shadow_in': v.get('shadow_in')}
+           'fee_loss_3h': v.get('fee_loss_3h'), 'shadow_in': v.get('shadow_in'),
+           'fee_pct_1h': v.get('fee_pct_1h'), 'fee_loss_1h': v.get('fee_loss_1h'), 'vol_1h_usd': v.get('vol_1h_usd'),
+           'range_1h_pct': v.get('range_1h_pct'), 'drift_1h_pct': v.get('drift_1h_pct'), 'l_share': v.get('l_share'),
+           'moment': v.get('moment')}
     for h in (6, 24, 72, 168):
         row[f'p_exit_{h}h'] = f.get(f'p_exit_{h}h_regime', f.get(f'p_exit_{h}h'))
     for k in ('rms_1h_pct', 'rms_6h_pct', 'rms_24h_pct', 'vol_ratio_1h_24h', 'park_1h_pct', 'vol_of_vol_24h',
               'acf_r2_lag1_24h', 'arch_lm_24h', 'arch_lm_p_24h', 'kurtosis_24h', 'n_bars'):
         row[k] = m.get(k)
     return row
+
+
+_MOMENT_REF = {}
+
+
+def moment_reference(pool, days=7):
+    """The pool's 7-day reference for the fee moments (sql/057): the median and
+    90th percentile of fee_pct_1h and of rms_1h_pct over its risk_profile rows,
+    and their count; cached tuning.MOMENT_REF_S. Empty with no rows."""
+    from lp import tuning
+    hit = _MOMENT_REF.get(pool)
+    if hit and time.time() - hit[0] < tuning.MOMENT_REF_S:
+        return hit[1]
+    with cursor() as cur:
+        cur.execute("""select percentile_cont(0.5) within group (order by fee_pct_1h) fee_med,
+                              percentile_cont(0.9) within group (order by fee_pct_1h) fee_p90,
+                              percentile_cont(0.5) within group (order by rms_1h_pct) sigma_med,
+                              percentile_cont(0.9) within group (order by rms_1h_pct) sigma_p90,
+                              count(fee_pct_1h) n
+                       from risk_profile where pool = %s and ts > now() - make_interval(days => %s)
+                         and fee_pct_1h is not null""", (pool, days))
+        r = cur.fetchone()
+    ref = {} if not r or not r['n'] else {k: (round(float(r[k]), 5) if r[k] is not None else None)
+                                           for k in ('fee_med', 'fee_p90', 'sigma_med', 'sigma_p90')} | {'n': int(r['n']), 'days': days}
+    _MOMENT_REF[pool] = (time.time(), ref)
+    return ref
 
 
 def record_risk_profile(pool, mint, price, regime, metrics, forecast):

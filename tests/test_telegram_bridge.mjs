@@ -762,3 +762,21 @@ test('the REGIME block shows the fee-to-loss shadow when the poll read it, and n
   const unread = text({ ...regime, fee_loss_3h: null, shadow: { in: true, hours: 3, out_below: 1.0, in_above: 1.5 } });
   assert.match(unread, /fee\/loss 3h — · shadow pause IN/);
 });
+
+test('a FEE_MOMENT names the spell and every stat of the hour; the REGIME block shows the hour (sql/057)', () => {
+  const stats = { fee_pct_1h: 0.0812, fee_loss_1h: 2.3, fee_loss_3h: 1.82, sigma_1h_pct: 0.401, range_1h_pct: 0.8, drift_1h_pct: 0.29,
+                  vol_1h_usd: 37000, mode: 'WARM', held_pct: 1.25, l_share: 0.41, ref: { fee_med: 0.045, fee_p90: 0.07 } };
+  const start = render({ event: 'FEE_MOMENT', phase: 'start', kind: 'GREAT', pair: 'SOL/USDC', price: 104.2, ...stats });
+  assert.match(start, /^GREAT FEE MOMENT · price 104\.2000/);
+  assert.match(start, /fees 0\.081%\/h of the band \(7d median 0\.045, p90 0\.070\) · fee\/loss 1h 2\.30x 3h 1\.82x/);
+  assert.match(start, /σ 1h 0\.401% · range 0\.80% · drift \+0\.29% · pool volume \$37k\/h · WARM ±1\.25% · our share of active L 41%/);
+  const end = render({ event: 'FEE_MOMENT', phase: 'end', kind: 'BAD', hours: 2.5, next: null, pair: 'SOL/USDC', ...stats, fee_pct_1h: null });
+  assert.match(end, /^BAD FEE SPELL ENDED after 2\.5h · now normal\nfees —%\/h of the band/);
+  const regime = { mode: 'WARM', held_pct: 1.25, choice_pct: 1.25, probs: [[1.25, 0.2]], threshold: 0.25, horizon_minutes: 120,
+                   fee_pct_1h: 0.0812, vol_1h_usd: 37000, range_1h_pct: 0.8, drift_1h_pct: -0.3, moment: 'GREAT',
+                   moment_ref: { fee_med: 0.045, fee_p90: 0.07 } };
+  const line = render({ event: 'in_band', regime });
+  assert.match(line, /fees 1h     0\.081%\/h of the band \(7d median 0\.045 · p90 0\.070\) · volume \$37k\/h · range 0\.80% · drift -0\.30% · GREAT MOMENT/);
+  assert.match(render({ event: 'in_band', regime: { ...regime, moment: null, moment_ref: {} } }), /\(7d reference building\)/);
+  assert.ok(!render({ event: 'in_band', regime: { ...regime, fee_pct_1h: null } }).includes('fees 1h'));
+});

@@ -273,6 +273,10 @@ export function render(row) {
       `vol 5m      σ ${n(g.sigma_5m_pct, 4)}% · velocity ${sign(g.velocity)}/h · instability ${n(g.instability, 3)}`,
       `P(touch ≤${g.horizon_minutes}m)  ${probs}`,
       `held band   P(touch) ${pct(g.p_held)} · rule: narrowest width ≤ ${pct(g.threshold)}, move at ${g.steps ?? 2} steps, exits re-centre`,
+      ...(g.fee_pct_1h != null ? [`fees 1h     ${n(g.fee_pct_1h, 3)}%/h of the band`
+        + (g.moment_ref?.fee_p90 != null ? ` (7d median ${n(g.moment_ref.fee_med, 3)} · p90 ${n(g.moment_ref.fee_p90, 3)})` : ' (7d reference building)')
+        + ` · volume $${g.vol_1h_usd != null ? n(g.vol_1h_usd / 1000, 0) : '—'}k/h · range ${g.range_1h_pct != null ? n(g.range_1h_pct, 2) : '—'}%`
+        + ` · drift ${g.drift_1h_pct != null ? sign(g.drift_1h_pct) : '—'}%` + (g.moment ? ` · ${g.moment} MOMENT` : '')] : []),
       ...(g.fee_loss_3h != null || g.shadow ? [`fee/loss ${g.shadow ? n(g.shadow.hours, 0) : 3}h ${g.fee_loss_3h != null ? n(g.fee_loss_3h, 2) + 'x' : '—'}`
         + (g.shadow ? ` · shadow pause ${g.shadow.in ? 'IN' : 'OUT'} (out < ${n(g.shadow.out_below, 1)}, in > ${n(g.shadow.in_above, 1)}; nothing traded)` : '')] : []),
       ...(g.p_exit ? [`P(exit)     6h ${pct(g.p_exit[6] ?? g.p_exit['6'])}   24h ${pct(g.p_exit[24] ?? g.p_exit['24'])}`
@@ -380,6 +384,18 @@ export function render(row) {
     case 'REGIME_WIDEN':
       return `HEATING · widening ±${n(row.regime?.held_pct, 2)}% → ±${n(row.regime?.choice_pct, 2)}% (${row.regime?.mode})\n`
         + `σ ${n(row.regime?.sigma_5m_pct, 4)}% · velocity ${sign(row.regime?.velocity)}/h\n` + book(row);
+    case 'FEE_MOMENT': {
+      // sql/057: a GREAT or BAD fee spell starts or ends; every stat of the hour rides on it
+      const st = `fees ${row.fee_pct_1h != null ? n(row.fee_pct_1h, 3) : '—'}%/h of the band`
+        + (row.ref?.fee_p90 != null ? ` (7d median ${n(row.ref.fee_med, 3)}, p90 ${n(row.ref.fee_p90, 3)})` : '')
+        + ` · fee/loss 1h ${row.fee_loss_1h != null ? n(row.fee_loss_1h, 2) + 'x' : '—'} 3h ${row.fee_loss_3h != null ? n(row.fee_loss_3h, 2) + 'x' : '—'}`
+        + `\nσ 1h ${row.sigma_1h_pct != null ? n(row.sigma_1h_pct, 3) : '—'}% · range ${row.range_1h_pct != null ? n(row.range_1h_pct, 2) : '—'}%`
+        + ` · drift ${row.drift_1h_pct != null ? sign(row.drift_1h_pct) : '—'}% · pool volume $${row.vol_1h_usd != null ? n(row.vol_1h_usd / 1000, 0) : '—'}k/h`
+        + ` · ${row.mode ?? '—'} ±${n(row.held_pct, 2)}% · our share of active L ${row.l_share != null ? n(row.l_share * 100, 0) + '%' : '—'}`;
+      if (row.phase === 'end')
+        return `${row.kind} FEE SPELL ENDED after ${n(row.hours, 1)}h · now ${row.next ?? 'normal'}\n${st}\n` + book(row);
+      return `${row.kind} FEE MOMENT · price ${pxText(row, row.price)}\n${st}\n` + book(row);
+    }
     case 'HOT_PAUSE':
       return `PAUSED · bad hot moment: fees ${n(row.ratio, 2)}x the in-band loss over ${n(row.hours, 0)}h`
         + ` (< ${n(row.threshold, 2)}) · ±${n(row.regime?.choice_pct, 2)}% chosen\n`

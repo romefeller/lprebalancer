@@ -5,7 +5,8 @@ import time
 import config
 import db
 import scanner
-from lp import (board, books, capital, harvest, housekeeping, moves, paths, pauses, polls, regime, shadow, signers,
+from lp import (board, books, capital, harvest, housekeeping, moments, moves, paths, pauses, polls, regime, shadow,
+                signers,
                 swaps, tape, tuning)
 
 def profile_enabled():
@@ -270,6 +271,7 @@ def main():
         cv = regime.calm_view(state, status) if not config.REGIME_ENABLED else None
         rv = regime.regime_view(state, status)
         shadow.r_shadow(state, status, rv)
+        moments.record(state, status, rv, books.LAST_REGIME.get('risk'))
         regime.track_touch_forecasts(state, rv, status)
         if rv and fc:
             # the held band's survival over the long horizons, from the hourly

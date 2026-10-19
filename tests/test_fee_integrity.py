@@ -552,7 +552,9 @@ class RiskProfileRecord(unittest.TestCase):
                 'bar_age_s': 600, 'probs': [[1.0, 0.4], [1.5, 0.18]], 'sigma_5m_pct': 0.1548,
                 'velocity': 0.353, 'instability': 0.0607,
                 'liquidity': {'factor': 1.25, 'inflow': 0.79, 'inflow_raw': 0.5, 'volume_x': 9.2},
-                'fee_loss_3h': 1.82, 'shadow_in': True}            # sql/056
+                'fee_loss_3h': 1.82, 'shadow_in': True,            # sql/056
+                'fee_pct_1h': 0.081, 'fee_loss_1h': 2.1, 'vol_1h_usd': 31000.0, 'range_1h_pct': 0.8,
+                'drift_1h_pct': -0.2, 'l_share': 0.41, 'moment': 'GREAT'}  # sql/057
 
     def test_every_column_is_written(self):
         m = calm.risk_metrics(tape(garch(400, 1)))
