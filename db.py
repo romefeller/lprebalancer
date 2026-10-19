@@ -559,7 +559,8 @@ RISK_COLUMNS = ('mode', 'choice_pct', 'held_pct', 'inside', 'p_held', 'threshold
                 'vol_ratio_1h_24h', 'park_1h_pct', 'vol_of_vol_24h', 'acf_r2_lag1_24h', 'arch_lm_24h',
                 'arch_lm_p_24h', 'kurtosis_24h', 'n_bars',
                 'sigma_24h_pct', 'vol_regime_x', 'p_exit_6h', 'p_exit_24h', 'p_exit_72h', 'p_exit_168h',
-                'band_position', 'liquidity_factor', 'inflow', 'inflow_raw', 'volume_x')
+                'band_position', 'liquidity_factor', 'inflow', 'inflow_raw', 'volume_x',
+                'fee_loss_3h', 'shadow_in')
 
 
 def risk_row(regime, metrics, forecast):
@@ -577,7 +578,8 @@ def risk_row(regime, metrics, forecast):
            'sigma_24h_pct': f.get('sigma_24h_pct'), 'vol_regime_x': f.get('vol_regime_x'),
            'band_position': f.get('position'),
            'liquidity_factor': lq.get('factor'), 'inflow': lq.get('inflow'), 'inflow_raw': lq.get('inflow_raw'),
-           'volume_x': lq.get('volume_x')}
+           'volume_x': lq.get('volume_x'),
+           'fee_loss_3h': v.get('fee_loss_3h'), 'shadow_in': v.get('shadow_in')}
     for h in (6, 24, 72, 168):
         row[f'p_exit_{h}h'] = f.get(f'p_exit_{h}h_regime', f.get(f'p_exit_{h}h'))
     for k in ('rms_1h_pct', 'rms_6h_pct', 'rms_24h_pct', 'vol_ratio_1h_24h', 'park_1h_pct', 'vol_of_vol_24h',

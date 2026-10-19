@@ -750,3 +750,15 @@ test('a PAYOUT names the equity governor; a switch has its own message', () => {
   assert.equal(message({ event: 'GOVERNOR', state: 'REINVEST', share: 0.05, gap_pct: 1.9, equity_usd: 1552, target_usd: 1523.2, enter_pct: 5, exit_pct: 2 }),
     '💸 PAYOUT GOVERNOR → REINVEST · pays 5.0% of each harvest\nequity $1552.00 · target $1523.20 · +1.9% (≤ +2.0%)');
 });
+
+test('the REGIME block shows the fee-to-loss shadow when the poll read it, and nothing otherwise (sql/056)', () => {
+  const regime = { mode: 'WARM', held_pct: 1.25, choice_pct: 1.25, probs: [[1.25, 0.2]], threshold: 0.25, horizon_minutes: 120 };
+  const text = (g) => render({ event: 'in_band', regime: g });
+  assert.ok(!text(regime).includes('fee/loss'));
+  const on = text({ ...regime, fee_loss_3h: 1.82, shadow_in: true, shadow: { in: true, hours: 3, out_below: 1.0, in_above: 1.5 } });
+  assert.match(on, /fee\/loss 3h 1\.82x · shadow pause IN \(out < 1\.0, in > 1\.5; nothing traded\)/);
+  const off = text({ ...regime, fee_loss_3h: 0.71, shadow_in: false, shadow: { in: false, hours: 3, out_below: 1.0, in_above: 1.5 } });
+  assert.match(off, /fee\/loss 3h 0\.71x · shadow pause OUT/);
+  const unread = text({ ...regime, fee_loss_3h: null, shadow: { in: true, hours: 3, out_below: 1.0, in_above: 1.5 } });
+  assert.match(unread, /fee\/loss 3h — · shadow pause IN/);
+});

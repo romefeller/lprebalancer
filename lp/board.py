@@ -284,8 +284,12 @@ def sample_fee_growth(state, status=None):
     state['last_fee_sample'] = time.time(); paths.save(state)
     try:
         cands = venue_candidates()
-        states = solana_state.fee_states([(d, a) for d, a, _ in cands])
-        for d, a, _ in cands:
+        seen = {a for _, a, _ in cands}
+        # sql/056: watched pools ride the same RPC call and are stored, but
+        # they never enter the ranking (another pair, another fee tier).
+        watch = [(d, a) for d, a in config.VENUE_WATCH if a not in seen and d in solana_state.FEE_LAYOUT_DEXES]
+        states = solana_state.fee_states([(d, a) for d, a, _ in cands] + watch)
+        for d, a in [(d, a) for d, a, _ in cands] + watch:
             if a in states:
                 db.record_fee_state(d, a, states[a])
         if status and status.get('quoteUsd') is not None:

@@ -36,24 +36,33 @@ def hot_pause_view(pool, usd_a, usd_b, choice):
     out['hot'] = choice > 1 + config.HOT_PAUSE_HOT_PCT / 100
     if not out['hot']:
         return out
-    hours = config.HOT_PAUSE_FG_HOURS
     try:
-        span = db.fee_state_span(pool, hours=max(int(round(hours)), 1))
-        if not span or span[2] < tuning.HOT_PAUSE_MIN_COVERAGE * hours * tuning.HOUR_S:
-            return out
-        first, last, _ = span
-        t0, t1 = first['ts'].timestamp(), last['ts'].timestamp()
-        bars = db.tape_load(pool, t0)
-        if bars is None:
-            return out
-        out['ratio'] = calm.fee_loss_ratio(solana_state.fee_yield(first, last, usd_a, usd_b), bars[0], bars[4], t0, t1)
+        out['ratio'] = fee_loss_recent(pool, usd_a, usd_b, config.HOT_PAUSE_FG_HOURS)
     except Exception as e:
         books.notify('hot_pause_unread', reason=f'{type(e).__name__}: {books.tidy(e)}')
         return out
     if out['ratio'] is not None:
-        out['ratio'] = round(out['ratio'], 3)
         out['bad'] = out['ratio'] < config.HOT_PAUSE_FG_THRESHOLD
     return out
+
+
+def fee_loss_recent(pool, usd_a, usd_b, hours):
+    """The pool's fees over its in-band loss over the last `hours`
+    (calm.fee_loss_ratio on solana_state.fee_yield), rounded to 3 places.
+    None when the samples cover less than tuning.HOT_PAUSE_MIN_COVERAGE of
+    the window, the tape is missing, or the ratio cannot be formed. Prices
+    are pool-native dollars (the counters count raw units). Raises on a
+    failed read: the callers decide what a failure means."""
+    span = db.fee_state_span(pool, hours=max(int(round(hours)), 1))
+    if not span or span[2] < tuning.HOT_PAUSE_MIN_COVERAGE * hours * tuning.HOUR_S:
+        return None
+    first, last, _ = span
+    t0, t1 = first['ts'].timestamp(), last['ts'].timestamp()
+    bars = db.tape_load(pool, t0)
+    if bars is None:
+        return None
+    r = calm.fee_loss_ratio(solana_state.fee_yield(first, last, usd_a, usd_b), bars[0], bars[4], t0, t1)
+    return None if r is None else round(r, 3)
 
 
 def hot_pause_swap(state, p):

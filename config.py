@@ -286,6 +286,17 @@ DAILY_COMPARE = ((_CFG.get('daily_compare_from'), _CFG.get('daily_compare_to'))
 # active price earned: sampled every VENUE_SAMPLE_S, and a move needs at least
 # VENUE_MIN_HOURS of evidence on both the held pool and the target.
 VENUE_SAMPLE_S = _env('LPBOT_VENUE_SAMPLE_S', int, int(_CFG.get('venue_sample_seconds') or 600))
+
+
+def _watch(xs):
+    """(dex, address) pairs from 'dex:address' strings; anything else is dropped."""
+    return tuple(tuple(x.split(':', 1)) for x in (xs or ()) if isinstance(x, str) and ':' in x)
+
+
+# Pools whose fee counters this profile samples read-only, beside the held pool
+# and its same-pair candidates, so their fee-to-loss ratio can be measured from
+# the counters before any move (sql/056). Never ranked, never a board candidate.
+VENUE_WATCH = _watch(_CFG.get('venue_watch'))
 VENUE_MIN_HOURS = _env('LPBOT_VENUE_MIN_HOURS', int, int(_CFG.get('venue_min_hours') or 6))
 # A calm move needs its gain over the last VENUE_RECENT_HOURS as well as 24 hours.
 VENUE_RECENT_HOURS = _env('LPBOT_VENUE_RECENT_HOURS', int, int(_CFG.get('venue_recent_hours') or 6))
