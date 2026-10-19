@@ -381,29 +381,9 @@ def _solana_balance(url, owner, mint, native_mint, timeout, at=None):
             int(r['context']['slot']))
 
 
-def _evm_call(url, to, data, timeout, block):
-    return int(_rpc(url, 'eth_call', [{'to': to, 'data': data}, hex(block)], timeout), 16)
-
-
-def _evm_balance(url, owner, mint, native_mint, timeout, at):
-    """(ERC-20 balanceOf in human units, block) at block `at`; the native
-    mint counts native ETH too (the EVM signer reports native ETH as WETH)."""
-    dec = _evm_call(url, mint, '0x313ce567', timeout, at)                       # decimals()
-    raw = _evm_call(url, mint, '0x70a08231' + owner[2:].lower().rjust(64, '0'), timeout, at)   # balanceOf(owner)
-    human = raw / 10 ** dec
-    if mint == native_mint:
-        human += int(_rpc(url, 'eth_getBalance', [owner, hex(at)], timeout), 16) / 1e18
-    return human, at
-
-
-def _evm_head(url, timeout):
-    return int(_rpc(url, 'eth_blockNumber', [], timeout), 16)
-
-
-READERS = {'solana': _solana_balance, 'base': _evm_balance, 'unichain': _evm_balance, 'polygon': _evm_balance}
-# The slot (block) every read of one measurement is pinned to: EVM reads
-# name a block; Solana reads report theirs.
-HEADS = {'base': _evm_head, 'unichain': _evm_head, 'polygon': _evm_head}
+READERS = {'solana': _solana_balance}
+# The slot every read of one measurement is pinned to: Solana reads report theirs.
+HEADS = {}
 
 
 def read_balances(chain, url, owner, mints, native_mint, timeout=10, tries=2):
@@ -447,18 +427,7 @@ def _solana_write_slot(url, signatures, timeout):
     return max(slots)
 
 
-def _evm_write_slot(url, signatures, timeout):
-    slots = []
-    for h in signatures:
-        rc = _rpc(url, 'eth_getTransactionReceipt', [h], timeout)
-        if not rc or rc.get('blockNumber') is None:
-            return None
-        slots.append(int(rc['blockNumber'], 16))
-    return max(slots)
-
-
-WRITE_SLOTS = {'solana': _solana_write_slot, 'base': _evm_write_slot, 'unichain': _evm_write_slot,
-               'polygon': _evm_write_slot}
+WRITE_SLOTS = {'solana': _solana_write_slot}
 
 
 def write_slot(chain, url, signatures, timeout=10):

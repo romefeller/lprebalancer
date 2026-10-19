@@ -198,7 +198,7 @@ class SignerEnv(unittest.TestCase):
     def test_the_venue_signer_gets_them_and_no_other_script_does(self):
         script = pathlib.Path(__file__).resolve().parent / '_env_probe_signer.mjs'
         script.write_text("console.log(JSON.stringify({adaptive: process.env.LPBOT_ORCA_ADAPTIVE ?? null, "
-                          "rpc: process.env.LPBOT_RPC ?? null, gas: process.env.LPBOT_GAS_RESERVE_NATIVE ?? null, "
+                          "rpc: process.env.LPBOT_RPC ?? null, gas: process.env.LPBOT_GAS_RESERVE_SOL ?? null, "
                           "run: process.env.LPBOT_RUN_DIR ?? null}));\n")
         self.addCleanup(lambda: script.unlink(missing_ok=True))
         env = dict(os.environ); env.pop('LPBOT_ORCA_ADAPTIVE', None)
@@ -259,16 +259,6 @@ class Headroom(unittest.TestCase):
         with mock.patch.object(config, 'DEX', 'meteora-dlmm'), mock.patch.object(config, 'GAS_RESERVE_SOL', 0.05):
             self.assertAlmostEqual(lp.capital.native_reserve({}), 0.1)
             self.assertEqual(lp.capital.native_reserve({'nativeReserve': 0.2}), 0.2)
-
-    def test_aerodrome_keeps_no_rent_back(self):
-        # An Aerodrome position holds no rent: 0.009 ETH (~$25) never deployed
-        # and a shifted swap target, before (review, 2026-10-02).
-        self.assertEqual(lp.capital.open_headroom('aerodrome-slipstream'), 0.0)
-        bal = {'balanceA': 0.1, 'balanceB': 0.0, 'price': 2500.0, 'quoteUsd': 1.0, 'nativeSide': 'A'}
-        with mock.patch.object(config, 'DEX', 'aerodrome-slipstream'), mock.patch.object(config, 'GAS_RESERVE_SOL', 0.003):
-            self.assertAlmostEqual(lp.capital.native_reserve(bal), 0.003)
-            self.assertAlmostEqual(lp.capital.deployable_usd(bal), (0.1 - 0.003) * 2500.0)
-
 
 class Audits(unittest.TestCase):
     def test_ui_amounts_come_from_the_rpc_string(self):

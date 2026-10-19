@@ -27,10 +27,10 @@
 // owner's set-up and gas are on chain, act without the invite, change a
 // profile or wallet it did not create.
 //
-// Environment: LPBOT_DSN (the database), the RPC variables the chain modules
-// read (LPBOT_RPC / SOLANA_RPC_URL, LPBOT_POLYGON_RPC), the key PATHS the
-// config names (payerKeyEnv, policyKeyEnv, keyEnv) and the invite hashes
-// (inviteEnv: comma-separated SHA-256 hex of the invite codes).
+// Environment: LPBOT_DSN (the database), the RPC variables the chain module
+// reads (LPBOT_RPC / SOLANA_RPC_URL), the key PATHS the config names
+// (payerKeyEnv, policyKeyEnv) and the invite hashes (inviteEnv:
+// comma-separated SHA-256 hex of the invite codes).
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -39,8 +39,6 @@ import { fileURLToPath } from 'node:url';
 import { createRequire } from 'module';
 import * as I from './intent.mjs';
 import * as S from './solana.mjs';
-import * as P from './polygon.mjs';
-import { saltOf } from '../chains/evm/vault/owner_setup.mjs';
 import { isEntry } from '../shared/rpc_policy.mjs';
 import { message as telegramMessage } from '../telegram_bridge.mjs';
 import { pricedView, shownBand, shownPrice } from '../book_format.mjs';
@@ -68,7 +66,6 @@ export function loadConfig(file = path.join(HERE, 'onboard.json'), env = process
   }
   const chains = {};
   if (raw.chains.solana) chains.solana = S.resolve(raw.chains.solana);
-  if (raw.chains.polygon) chains.polygon = P.resolve(raw.chains.polygon);
   if (!(raw.fee.bps >= 0 && raw.fee.bps <= 5000)) throw new Error(`fee.bps ${raw.fee.bps}`);
   for (const [k, c] of Object.entries(chains)) {
     for (const [s, t] of Object.entries(c.tokens)) {
@@ -211,19 +208,19 @@ export function clientOf(req) {
   return /^(::ffff:)?127\.|^::1$/.test(peer) && fwd ? fwd : peer;
 }
 
-// The profile's venues from a connect report: a Solana vault names each
-// venue's pools under `venues`, a Safe its one venue. The profile opens on the
-// first approved venue in the config's order (`order`) and may move to every
-// approved one. {dex, pool, execute}. Pure.
+// The profile's venues from a connect report: the vault names each venue's
+// pools under `venues`. The profile opens on the first approved venue in the
+// config's order (`order`) and may move to every approved one. {dex, pool,
+// execute}. Pure.
 export function profileVenues(connected, order) {
-  const v = connected.venues ?? { [connected.venue]: { pools: connected.pools } };
+  const v = connected.venues ?? {};
   const names = [...order.filter(n => I.own(v, n)), ...Object.keys(v).filter(n => !order.includes(n))];
   const pool = names.length ? v[names[0]].pools?.[0] : undefined;
   if (!pool) throw new Error('the connect approved no pool');
   return { dex: names[0], pool, execute: names };
 }
 
-// The server. `deps`: {chains: {solana: adapter, polygon: adapter}, store, start, status, now, log}.
+// The server. `deps`: {chains: {solana: adapter}, store, start, status, now, log}.
 export function makeServer(cfg, deps) {
   const now = deps.now ?? (() => Date.now());
   const log = deps.log ?? ((o) => console.log(JSON.stringify({ t: new Date(now()).toISOString(), ...o })));
@@ -269,9 +266,9 @@ export function makeServer(cfg, deps) {
     }
   }
 
-  // The set-up of a request for the owner's wallet: the transactions (Solana)
-  // or calls (EVM) that create the owner's vault with the bot's rules, deposit
-  // and pay the bot's gas. Solana: the page's one-time set-up key
+  // The set-up of a request for the owner's wallet: the transactions that
+  // create the owner's vault with the bot's rules, deposit and pay the bot's
+  // gas. The page's one-time set-up key
   // (`setupKey`, its public key) signs the bot's policies, which are too long
   // for a hardware wallet (solana.mjs setupTxs); the owner signs the rest.
   // The request's terms, with the vault the set-up creates.
@@ -279,7 +276,7 @@ export function makeServer(cfg, deps) {
     feeWallet: r.feeWallet ?? r.fee_wallet ?? null, token: r.token, deposit: r.deposit, gas: r.gas, planned, ...more });
 
   function setupAnswer(r, s, expires) {
-    return { name: r.name, chain: r.chain, done: s.done, transactions: s.transactions ?? [], calls: s.calls ?? null, chainId: s.chainId ?? null,
+    return { name: r.name, chain: r.chain, done: s.done, transactions: s.transactions ?? [],
       owner: s.owner ?? [], key: s.key ?? [], fund: s.fund ?? [], keyFund: s.keyFund ?? null,
       cost: s.cost ?? null, expires: new Date(expires).toISOString(),
       terms: { token: r.token, amount: r.amount, deposit: r.deposit, gas: r.gas, payer: r.payer,
@@ -704,54 +701,6 @@ export async function solanaAdapter(c, { connection, env = process.env, log }) {
     broadcast: (tx) => S.broadcast(connection, tx), confirm: (sig) => S.confirm(connection, sig) };
 }
 
-// Polygon: the owner's wallet deploys its Safe and, in a second transaction,
-// the bot's Roles module and role (a CREATE2 address cannot name the other
-// in one); then the deposit and the bot's gas, last (polygon.mjs setupTxs).
-// The bot sends nothing for a vault. `now` numbers a request's salt.
-export function polygonAdapter(c, { env = process.env, deps = null, log, now = () => Date.now() }) {
-  const keys = P.botKeys(c, env, deps);
-  const args = (r) => ({ owner: r.owner, profitWallet: r.profitWallet ?? r.profit_wallet, feeWallet: r.feeWallet ?? r.fee_wallet ?? null });
-  // what verifySetup finds wrong with the request's planned vault ([]: all of it on chain, as built)
-  const problems = (r) => {
-    const p = r.connected?.planned;
-    return P.verifySetup(keys, c, { ...args(r), safe: p.safe, roles: p.roles, fromBlock: p.fromBlock });
-  };
-  return { keys, venueReady: () => c.venues.length > 0, gas: () => P.gas(keys, c),
-    setup: async (a) => {
-      const saltNonce = a.planned?.saltNonce ?? String(saltOf(a.owner, now()));
-      const out = await P.setupTxs(keys, c, { ...args(a), token: a.token, deposit: a.deposit, gas: a.gas, saltNonce });
-      // the first build's block: verifySetup reads the Roles module's events from it
-      const planned = { saltNonce: out.saltNonce, safe: out.safe, roles: out.roles, vault: out.safe, settings: out.safe,
-        fromBlock: a.planned?.fromBlock ?? out.fromBlock, report: out.report };
-      return { planned, done: false, calls: { setup: out.setup, fund: out.fund }, chainId: out.chainId, report: out.report };
-    },
-    setupState: async (r) => {
-      if (!r.connected?.planned?.safe) return { state: 'replan' };
-      const found = await problems(r);
-      return found.length ? { state: 'pending', missing: found.length } : { state: 'done' };
-    },
-    // the bot's gas: the transaction the page names (an EVM transfer leaves no trace to search for)
-    funding: async (r, hint) => {
-      if (!hint.payment) return { state: 'pending', reason: 'the bot\'s gas is not paid yet' };
-      const v = await P.checkPayment(keys, c, hint.payment, { owner: r.owner, payer: r.payer, amount: r.gas, notBefore: hint.notBefore });
-      return v.state === 'ok' ? { state: 'ok', payment: hint.payment, deposit: hint.deposit } : v;
-    },
-    finish: async (r) => {
-      const found = await problems(r);
-      if (found.length) throw new Error(`the vault is not as built: ${found.join('; ')}`);
-      log({ event: 'connect_report', line: JSON.stringify(r.connected.planned.report).slice(0, 4000) });
-      return { ...r.connected.planned.report, sent: true };
-    },
-    record: () => P.poolRecord(keys, c),
-    deposit: (a) => P.depositTxs(keys, c, a), owner: (row, a) => P.ownerTxs(keys, c, row, a),
-    holdings: (owner, token) => P.holdings(keys, c, owner, token),
-    status: (row) => P.status(keys, c, row), hasDeposit: P.hasDeposit,
-    context: (r) => ({ safe: r.vault_row.settings, roles: Object.values(r.vault_row.venues)[0].policies[0] }),
-    mintOf: (token) => I.own(c.tokens, token)?.address ?? null,
-    checkDeposit: (hash, expect) => P.checkDeposit(keys, c, hash, { owner: expect.owner, safe: expect.vault }),
-    confirm: (hash) => P.confirm(keys, hash) };
-}
-
 // The bot's public keys pinned in onboard.json (botKeys) against the key files
 // the environment names: a server whose keys differ from the ones the page's
 // bundle pins would only build transactions the page refuses. Pure.
@@ -765,8 +714,7 @@ async function main() {
   const log = (o) => console.log(JSON.stringify({ t: new Date().toISOString(), ...o }));
   const chains = {};
   const rpc = process.env.LPBOT_RPC || process.env.SOLANA_RPC_URL || 'https://api.mainnet-beta.solana.com';
-  for (const [name, make] of [['solana', () => solanaAdapter(cfg.chains.solana, { connection: new Connection(rpc, 'confirmed'), log })],
-    ['polygon', () => polygonAdapter(cfg.chains.polygon, { log })]]) {
+  for (const [name, make] of [['solana', () => solanaAdapter(cfg.chains.solana, { connection: new Connection(rpc, 'confirmed'), log })]]) {
     if (!cfg.chains[name]) continue;
     try {
       const a = await make();

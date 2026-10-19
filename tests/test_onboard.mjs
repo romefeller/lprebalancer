@@ -1,7 +1,7 @@
 // onboard/: what a request must be (fields, signature, nonce, expiry, invite),
 // the rate limits, and the server's refusals, with the chains and the database
-// replaced by fakes. The real chains: test_onboard_fork.mjs and
-// test_onboard_polygon_fork.mjs; the real database: test_onboard_store.py.
+// replaced by fakes. The real chain: test_onboard_fork.mjs; the real
+// database: test_onboard_store.py.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
@@ -10,11 +10,9 @@ import os from 'node:os';
 import path from 'node:path';
 import { createRequire } from 'module';
 import fc from 'fast-check';
-import { privateKeyToAccount } from 'viem/accounts';
 import * as I from '../onboard/intent.mjs';
 import { StoreError, Windows, clientOf, loadConfig, makeServer, profileVenues, serviceCommand } from '../onboard/server.mjs';
 import { resolve as resolveSolana, vaultVenues, paymentVerdict as solVerdict, gas as solGas, holdings as solHoldings } from '../onboard/solana.mjs';
-import { paymentVerdict as evmVerdict, checkPayment as evmCheck, gas as evmGas, holdings as evmHoldings } from '../onboard/polygon.mjs';
 
 const require = createRequire(import.meta.url);
 const { Keypair, PublicKey, Transaction } = require('@solana/web3.js');
@@ -22,10 +20,9 @@ const bs58 = require('bs58').default;
 const spl = require('@solana/spl-token');
 
 const CFG = loadConfig();
-const SOL = CFG.chains.solana, POLY = CFG.chains.polygon;
-const OPERATOR_SOL = SOL.operatorWallet, OPERATOR_POL = POLY.operatorWallet;
-const EVM_OWNER = privateKeyToAccount('0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d');
-const EVM_OTHER = privateKeyToAccount('0x5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a');
+const SOL = CFG.chains.solana;
+const OPERATOR_SOL = SOL.operatorWallet;
+const EVM_ADDRESS = '0x70997970C51812dc3A010C7d01b50e0d17dc79C8';      // never a Solana owner
 const INVITE = 'correct horse battery staple';
 const HASH = crypto.createHash('sha256').update(INVITE).digest('hex');
 
@@ -49,9 +46,6 @@ test('fields: a good request, in canonical form', () => {
     feeBps: CFG.fee.bps, feeWallet: OPERATOR_SOL });
   const u = I.fields(body({ token: 'USDC', amount: '10' }), CFG);
   assert.deepEqual([u.amount, u.deposit, u.gas, u.gasToken], ['10', '10', '0.1186', 'SOL'], 'a token deposit pays the gas in SOL beside it');
-  const e = I.fields(body({ chain: 'polygon', token: 'USDT0', amount: '25', owner: EVM_OWNER.address.toLowerCase(), profitWallet: EVM_OWNER.address }), CFG);
-  assert.equal(e.owner, EVM_OWNER.address, 'an EVM address in its checksum spelling');
-  assert.equal(e.feeWallet, OPERATOR_POL);
 });
 
 test('fields: every refusal', () => {
@@ -67,9 +61,9 @@ test('fields: every refusal', () => {
     [{ amount: '' }, /a number/], [{ amount: ' 1 ' }, null],
     [{ amount: '0,18' }, null], [{ amount: '1,000.5' }, /a number/], [{ amount: '1.000,5' }, /a number/], [{ amount: '0,1,8' }, /a number/], [{ amount: ',5' }, /a number/], [{ name: 'My-Pool' }, /name/], [{ name: 'ab' }, /name/],
     [{ name: 'a--b' }, /name/], [{ name: 'pool-' }, /name/], [{ name: '1pool' }, /name/], [{ name: 'a'.repeat(33) }, /name/],
-    [{ name: 'sol-usdc' }, /reserved/], [{ name: 'poly-wpol-usdt' }, /reserved/], [{ name: 'sol-lp' }, /reserved/],
+    [{ name: 'sol-usdc' }, /reserved/], [{ name: 'sol-lp2' }, /reserved/], [{ name: 'sol-lp' }, /reserved/],
     [{ name: 'my pool' }, /name/], [{ name: 'pool;rm' }, /name/],
-    [{ chain: 'polygon', token: 'USDT0', amount: '20', owner: '0x123', profitWallet: EVM_OWNER.address }, /owner: not an address/],
+    [{ owner: EVM_ADDRESS }, /owner: not a Solana address/],
   ];
   for (const [over, re] of cases) {
     if (re === null) { assert.doesNotThrow(() => I.fields(body(over), CFG), JSON.stringify(over)); continue; }
@@ -77,8 +71,6 @@ test('fields: every refusal', () => {
   }
   assert.throws(() => I.fields(body({ owner: BOT.publicKey.toBase58() }), CFG, [BOT.publicKey.toBase58()]), /bot's own key/);
   assert.throws(() => I.fields(body({ profitWallet: BOT.publicKey.toBase58() }), CFG, [BOT.publicKey.toBase58()]), /bot's own key/);
-  assert.throws(() => I.fields(body({ chain: 'polygon', token: 'WPOL', amount: '30', owner: EVM_OWNER.address,
-    profitWallet: EVM_OWNER.address.toLowerCase() }), CFG, [EVM_OWNER.address]), /bot's own key/);
   assert.throws(() => I.fields(null, CFG), /chain/);
   // only JSON strings, and only the config's own chains and tokens
   for (const [over, re] of [[{ amount: 1.5 }, /a number like/], [{ chain: '__proto__' }, /chain/], [{ chain: 'constructor' }, /chain/],
@@ -108,8 +100,6 @@ test('amount: exact decimal arithmetic, any input', () => {
 test('fee terms: the operator\'s own wallet is special, any other pays the configured share', () => {
   assert.deepEqual(I.feeTerms('solana', OPERATOR_SOL, OPERATOR_SOL, 1000), { special: true, feeBps: 0, feeWallet: null });
   assert.deepEqual(I.feeTerms('solana', PROFIT.publicKey.toBase58(), OPERATOR_SOL, 1000), { special: false, feeBps: 1000, feeWallet: OPERATOR_SOL });
-  assert.deepEqual(I.feeTerms('polygon', OPERATOR_POL.toLowerCase(), OPERATOR_POL, 1000), { special: true, feeBps: 0, feeWallet: null });
-  assert.deepEqual(I.feeTerms('polygon', EVM_OWNER.address, OPERATOR_POL, 700), { special: false, feeBps: 700, feeWallet: OPERATOR_POL });
   assert.equal(I.fields(body({ profitWallet: OPERATOR_SOL }), CFG).special, true);
   // a Solana address differs by case: never folded
   assert.equal(I.sameAddress('solana', 'Abc', 'abc'), false);
@@ -117,12 +107,9 @@ test('fee terms: the operator\'s own wallet is special, any other pays the confi
 
 test('gas: the configured setup, margin and reserve; the minimum covers it', () => {
   assert.equal(I.fromRaw(I.gasTotal(SOL), 9), '0.1186');
-  assert.equal(I.fromRaw(I.gasTotal(POLY), 18), '3', 'the running gas only: the owner pays its own set-up');
   assert.equal(I.minimum(SOL, 'SOL'), '0.1386');
   assert.equal(I.minimum(SOL, 'USDC'), '10');
-  assert.equal(I.minimum(POLY, 'POL'), '23');
-  assert.equal(I.minimum(POLY, 'WPOL'), '20', 'wrapped: the gas is paid in POL beside it');
-  assert.deepEqual(I.nativeOf(POLY)[0], 'POL');
+  assert.deepEqual(I.nativeOf(SOL)[0], 'SOL');
   assert.throws(() => I.nativeOf({ label: 'x', tokens: { A: {}, B: {} } }), /exactly one native/);
   assert.throws(() => I.nativeOf({ label: 'x', tokens: { A: { native: true }, B: { native: true } } }), /exactly one native/);
   fc.assert(fc.property(fc.integer({ min: 195, max: 50_000 }), (milli) => {
@@ -135,7 +122,6 @@ test('gas: the configured setup, margin and reserve; the minimum covers it', () 
 // --- Max: the most a wallet can put in ---------------------------------------------------
 
 const SOL_FEES = 30_000_000n, USDC_FEES = 32_000_000n, GAS = 118_600_000n;      // onboard.json, in lamports
-const E18 = 10n ** 18n;
 
 test('max (native): the balance less the owner\'s fees, exact to the unit, capped at the max', () => {
   assert.deepEqual([SOL.tokens.SOL.fees, SOL.tokens.USDC.fees], ['0.03', '0.032'], 'the config this test reads');
@@ -149,11 +135,6 @@ test('max (native): the balance less the owner\'s fees, exact to the unit, cappe
   assert.deepEqual(max(138_600_000n + SOL_FEES - 1n), { short: 'not enough: you have 0.168599999 SOL, the minimum is 0.1686 SOL with your fees' });
   assert.deepEqual(max(0n), { short: 'not enough: you have 0 SOL, the minimum is 0.1686 SOL with your fees' });
   assert.deepEqual(max(500n), { short: 'not enough: you have 0.0000005 SOL, the minimum is 0.1686 SOL with your fees' }, 'less than the fees');
-  const pol = (wei) => I.maxAmount(POLY, 'POL', { POL: wei });
-  assert.deepEqual(pol(88n * E18 + 123n), { amount: '87.000000000000000123' }, '18 decimals, a point');
-  assert.deepEqual(pol(24n * E18), { amount: '23' });
-  assert.match(pol(24n * E18 - 1n).short, /you have 23.999999999999999999 POL, the minimum is 24 POL with your fees/);
-  assert.deepEqual(pol(200_000n * E18), { amount: '100000' });
 });
 
 test('max (token): the whole balance, capped; the native coin must hold the gas and the fees beside it', () => {
@@ -169,14 +150,10 @@ test('max (token): the whole balance, capped; the native coin must hold the gas 
   assert.deepEqual(max(50_000_000n, enough - 1n),
     { short: 'not enough SOL for the bot\'s gas and your fees: you have 0.150599999 SOL, you need 0.1506 SOL' });
   assert.deepEqual(max(50_000_000n, 0n), { short: 'not enough SOL for the bot\'s gas and your fees: you have 0 SOL, you need 0.1506 SOL' });
-  assert.deepEqual(I.maxAmount(POLY, 'USDT0', { USDT0: 25_000_000n, POL: 4n * E18 }), { amount: '25' });
-  assert.match(I.maxAmount(POLY, 'WPOL', { WPOL: 30n * E18, POL: 4n * E18 - 1n }).short, /not enough POL .* you have 3.999999999999999999 POL, you need 4 POL/);
-  assert.deepEqual(I.maxAmount(POLY, 'WPOL', { WPOL: 30n * E18 + 7n, POL: 5n * E18 }), { amount: '30.000000000000000007' });
 });
 
 test('max: whatever the wallet holds, Max is an amount the server signs, and no more than the wallet can pay', () => {
-  for (const [c, chain, token, owner] of [[SOL, 'solana', 'SOL', OWNER.publicKey.toBase58()], [SOL, 'solana', 'USDC', OWNER.publicKey.toBase58()],
-    [POLY, 'polygon', 'POL', EVM_OWNER.address], [POLY, 'polygon', 'WPOL', EVM_OWNER.address], [POLY, 'polygon', 'USDT0', EVM_OWNER.address]]) {
+  for (const [c, chain, token, owner] of [[SOL, 'solana', 'SOL', OWNER.publicKey.toBase58()], [SOL, 'solana', 'USDC', OWNER.publicKey.toBase58()]]) {
     const t = c.tokens[token], [native, n] = I.nativeOf(c);
     const scale = 10n ** BigInt(t.decimals), nscale = 10n ** BigInt(n.decimals);
     fc.assert(fc.property(fc.bigInt({ min: 0n, max: 200_000n * scale }), fc.bigInt({ min: 0n, max: 10n * nscale }), (have, gasCoin) => {
@@ -204,9 +181,9 @@ test('max: every token of the config names its fees, or the server does not star
   try {
     for (const fees of [undefined, '', '1e-3', '-0.1', 0.001]) {
       const bad = structuredClone(raw);
-      bad.chains.polygon.tokens.WPOL.fees = fees;
+      bad.chains.solana.tokens.USDC.fees = fees;
       fs.writeFileSync(path.join(dir, 'c.json'), JSON.stringify(bad));
-      assert.throws(() => loadConfig(path.join(dir, 'c.json')), /chains\.polygon\.tokens\.WPOL\.fees: a decimal/, String(fees));
+      assert.throws(() => loadConfig(path.join(dir, 'c.json')), /chains\.solana\.tokens\.USDC\.fees: a decimal/, String(fees));
     }
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
@@ -229,12 +206,6 @@ test('max: the balances it reads, the native coin and the token\'s own account',
   assert.deepEqual(await solHoldings(conn(7n, 12_345_678n), SOL, owner.toBase58(), 'USDC'), { SOL: 7n, USDC: 12_345_678n });
   assert.deepEqual(await solHoldings(conn(7n, null), SOL, owner.toBase58(), 'USDC'), { SOL: 7n, USDC: 0n }, 'no token account: none');
   assert.deepEqual(asked, Array(3).fill(owner.toBase58()), 'the owner\'s balance, nobody else\'s');
-  const reads = [];
-  const keys = (pol, tok) => ({ pub: { getBalance: async (a) => { reads.push(['POL', a.address]); return pol; },
-    readContract: async (a) => { reads.push([a.address, ...a.args]); return tok; } } });
-  assert.deepEqual(await evmHoldings(keys(5n, 9n), POLY, EVM_OWNER.address, 'POL'), { POL: 5n });
-  assert.deepEqual(await evmHoldings(keys(5n, 9n), POLY, EVM_OWNER.address, 'USDT0'), { POL: 5n, USDT0: 9n });
-  assert.deepEqual(reads, [['POL', EVM_OWNER.address], ['POL', EVM_OWNER.address], [POLY.tokens.USDT0.address, EVM_OWNER.address]]);
 });
 
 // --- the gas payment ---------------------------------------------------------------------
@@ -275,61 +246,7 @@ test('payment (Solana): from the owner, to the bot\'s key, enough, confirmed, ne
   assert.equal(v(OK, parsedTx([xfer(own, PAYER, 145_000_000)], { blockTime: 1000 })).state, 'ok', 'at the bound');
 });
 
-test('payment (EVM) read from the chain: a hash only; one not seen is pending; nothing more is read for it; other errors are errors', async () => {
-  const H = (c) => `0x${c.repeat(64)}`;
-  const notFound = (what) => { throw new Error(`${what} with hash could not be found. The Transaction may not be processed on a block yet.`); };
-  const read = [];
-  const chain = { receipts: { [H('a')]: { status: 'success', blockNumber: 90n }, [H('b')]: { status: 'success', blockNumber: 90n } },
-    txs: { [H('a')]: { from: EVM_OWNER.address, to: EVM_OTHER.address, value: 3n * 10n ** 18n } } };
-  const pub = {
-    getTransactionReceipt: async ({ hash }) => { read.push(['receipt', hash]); return chain.receipts[hash] ?? notFound('Transaction receipt'); },
-    getTransaction: async ({ hash }) => { read.push(['tx', hash]); return chain.txs[hash] ?? notFound('Transaction'); },
-    getBlock: async ({ blockNumber }) => { read.push(['block', blockNumber]); return { timestamp: 2000n }; },
-    getBlockNumber: async () => 100n,
-  };
-  const expect = { owner: EVM_OWNER.address, payer: EVM_OTHER.address, amount: '3', notBefore: 1000 };
-  const check = (hash, p = pub) => evmCheck({ pub: p }, POLY, hash, expect);
-  assert.deepEqual(await check(H('a')), { state: 'ok' });
-  for (const bad of ['0x1234', H('a').slice(0, -1), `${H('a')}0`, H('g'), 'a'.repeat(66), undefined]) {
-    read.length = 0;
-    assert.deepEqual(await check(bad), { state: 'bad', reason: 'not a transaction hash' }, String(bad));
-    assert.deepEqual(read, [], 'nothing read for it');
-  }
-  read.length = 0;
-  assert.deepEqual(await check(H('c')), { state: 'pending', reason: 'the payment is not on chain (yet)' });
-  assert.deepEqual(read, [['receipt', H('c')]], 'no receipt: neither the transaction nor its block is read');
-  // a receipt whose transaction the node does not serve (yet): pending, not someone else's payment
-  assert.deepEqual(await check(H('b')), { state: 'pending', reason: 'the payment is not on chain (yet)' });
-  await assert.rejects(check(H('a'), { ...pub, getTransactionReceipt: async () => { throw new Error('HTTP request failed: 503'); } }), /503/);
-});
-
-test('payment (EVM): from the owner, to the bot\'s key, enough, confirmed, newer than the request', () => {
-  const ex = { owner: EVM_OWNER.address, payer: EVM_OTHER.address, wei: 4n * 10n ** 18n, notBefore: 1000, confirmations: 5 };
-  const good = { receipt: { status: 'success', blockNumber: 100n }, tx: { from: EVM_OWNER.address.toLowerCase(), to: EVM_OTHER.address, value: 4n * 10n ** 18n },
-    block: { timestamp: 1000n }, head: 104n };
-  assert.deepEqual(evmVerdict(good, ex), { state: 'ok' });
-  const cases = [
-    [{ receipt: null, tx: null }, 'pending', /not on chain/],
-    [{ tx: null }, 'pending', /not on chain/],
-    [{ head: 103n }, 'pending', /not confirmed/],
-    [{ receipt: { status: 'reverted', blockNumber: 100n } }, 'bad', /failed on chain/],
-    [{ tx: { ...good.tx, value: 4n * 10n ** 18n - 1n } }, 'bad', /less than 4/],
-    [{ tx: { ...good.tx, from: EVM_OTHER.address } }, 'bad', /not from the owner/],
-    [{ tx: { ...good.tx, to: EVM_OWNER.address } }, 'bad', /does not go to the bot's key/],
-    [{ tx: { ...good.tx, to: null } }, 'bad', /does not go/],
-    [{ block: { timestamp: 999n } }, 'bad', /older/],
-  ];
-  for (const [over, state, re] of cases) {
-    const got = evmVerdict({ ...good, ...over }, ex);
-    assert.equal(got.state, state, JSON.stringify(over, (k, x) => typeof x === 'bigint' ? String(x) : x));
-    assert.match(got.reason, re);
-  }
-});
-
 test('the bot\'s key: one setup and its margin, exactly', async () => {
-  // Polygon: the owner's wallet sends its own set-up; the bot needs nothing for it
-  const k = (wei) => ({ account: { address: EVM_OTHER.address }, pub: { getBalance: async () => wei } });
-  assert.deepEqual(await evmGas(k(0n), POLY), { ok: true, have: '0', need: '0', symbol: 'POL', key: EVM_OTHER.address });
   const sk = { payer: BOT };
   const sc = (l) => ({ getBalance: async () => l });
   assert.equal((await solGas(sc(18_600_000), sk, SOL)).ok, true, '0.0065 + 0.0121: the lookup table and its margin');
@@ -440,18 +357,6 @@ test('verify (Solana): no format confusion: a transaction is never a message, a 
   }), { numRuns: 300 });
 });
 
-test('verify (EVM): personal_sign recovered to the owner only', async () => {
-  const text = 'hello\nNonce: 2';
-  const sig = await EVM_OWNER.signMessage({ message: text });
-  assert.equal(await I.verify('polygon', EVM_OWNER.address, text, sig), true);
-  assert.equal(await I.verify('polygon', EVM_OWNER.address.toLowerCase(), text, sig), true);
-  assert.equal(await I.verify('polygon', EVM_OTHER.address, text, sig), false, 'wrong signer');
-  assert.equal(await I.verify('polygon', EVM_OWNER.address, `${text}.`, sig), false, 'tampered text');
-  assert.equal(await I.verify('polygon', EVM_OWNER.address, text, sig.slice(0, -2)), false, 'short');
-  assert.equal(await I.verify('polygon', EVM_OWNER.address, text, `${sig.slice(0, 10)}zz${sig.slice(12)}`), false, 'not hex');
-  assert.equal(await I.verify('polygon', EVM_OWNER.address, text, `0x${'00'.repeat(65)}`), false, 'garbage');
-});
-
 test('invite: the hash of the code, nothing else', () => {
   assert.equal(I.inviteOk(INVITE, [HASH]), true);
   assert.equal(I.inviteOk(INVITE, ['bad', HASH.toUpperCase(), HASH]), true);
@@ -505,9 +410,6 @@ test('profile venues: the first approved one in the config\'s order opens; every
   assert.deepEqual(profileVenues(v('byreal', 'meteora-dlmm'), order), { dex: 'meteora-dlmm', pool: 'pool-meteora-dlmm', execute: ['meteora-dlmm', 'byreal'] },
     'a venue the order does not name runs, after the named ones');
   assert.deepEqual(profileVenues(v('byreal'), order), { dex: 'byreal', pool: 'pool-byreal', execute: ['byreal'] });
-  // a Safe (Polygon) report names its one venue
-  assert.deepEqual(profileVenues({ venue: 'uniswap-v3-polygon', pools: ['0xP'] }, ['uniswap-v3-polygon']),
-    { dex: 'uniswap-v3-polygon', pool: '0xP', execute: ['uniswap-v3-polygon'] });
   for (const bad of [{ venues: {} }, { venues: { orca: { pools: [] } } }, { venues: { orca: {} } }, { venue: 'orca', pools: [] }, {}]) {
     assert.throws(() => profileVenues(bad, order), /approved no pool/, JSON.stringify(bad));
   }
@@ -525,7 +427,7 @@ test('the client address: the forwarded one only from the local proxy', () => {
 test('the config: loopback only, a service command with {name}', () => {
   assert.equal(CFG.listen.host, '127.0.0.1');
   assert.equal(CFG.base, '/bot');
-  for (const name of ['sol-usdc', 'sol-swing', 'poly-wpol-usdt']) assert.ok(CFG.reservedNames.includes(name), name);
+  for (const name of ['sol-usdc', 'sol-lp', 'sol-lp2']) assert.ok(CFG.reservedNames.includes(name), name);
 });
 
 // --- the server with fake chains and a fake database ----------------------------------------
@@ -923,7 +825,7 @@ test('add capital: Max without the gas or the minimum, and every Max is an amoun
   assert.deepEqual(I.maxAmount(SOL, 'USDC', { USDC: 1_000_000n, SOL: USDC_FEES - 1n }, add),
     { short: 'not enough SOL for your fees: you have 0.031999999 SOL, you need 0.032 SOL' });
   assert.deepEqual(I.maxAmount(SOL, 'USDC', { USDC: 0n, SOL: GAS }, add), { short: 'not enough: you have 0 USDC, the minimum is 0.000001 USDC' });
-  for (const [c, token] of [[SOL, 'SOL'], [SOL, 'USDC'], [POLY, 'POL'], [POLY, 'WPOL'], [POLY, 'USDT0']]) {
+  for (const [c, token] of [[SOL, 'SOL'], [SOL, 'USDC']]) {
     const t = c.tokens[token], [native, n] = I.nativeOf(c);
     const scale = 10n ** BigInt(t.decimals), nscale = 10n ** BigInt(n.decimals);
     fc.assert(fc.property(fc.bigInt({ min: 0n, max: 200_000n * scale }), fc.bigInt({ min: 0n, max: 10n * nscale }), (have, gasCoin) => {
@@ -942,7 +844,7 @@ test('add capital: Max without the gas or the minimum, and every Max is an amoun
 });
 
 test('add capital: an amount is positive, at most the max, exact to the unit', () => {
-  for (const [c, token] of [[SOL, 'SOL'], [SOL, 'USDC'], [POLY, 'WPOL']]) {
+  for (const [c, token] of [[SOL, 'SOL'], [SOL, 'USDC']]) {
     const t = c.tokens[token], max = I.toRaw(t.max, t.decimals);
     fc.assert(fc.property(fc.bigInt({ min: -10n, max: max + 10n }), (raw) => {
       const s = raw < 0n ? `-${I.fromRaw(-raw, t.decimals)}` : I.fromRaw(raw, t.decimals);
@@ -1002,7 +904,7 @@ test('server: a chain whose transactions expire answers one at a time', async ()
     landedSetup(g);
     await post('pay', { invite: INVITE, name: 'my-pool', payment: 'P' });
     const all = await post('tx', { invite: INVITE, name: 'my-pool', action: 'withdraw', amount: 'all', token: 'SOL' });
-    assert.deepEqual([all.json.count, all.json.transactions], [2, ['one', 'two']], 'EVM: every transaction at once');
+    assert.deepEqual([all.json.count, all.json.transactions], [2, ['one', 'two']], 'every transaction at once');
   });
 });
 
@@ -1071,7 +973,7 @@ test('server: Max reads the owner\'s balances behind the invite; a bad chain, ad
     const pda = PublicKey.findProgramAddressSync([Buffer.from('x')], BOT.publicKey)[0].toBase58();
     for (const [over, status, re] of [[{ invite: 'wrong-invite-code' }, 403, /invite/], [{ invite: undefined }, 403, /invite/],
       [{ owner: 'nope' }, 400, /owner: not a Solana address/], [{ owner: pda }, 400, /owner: not a wallet/],
-      [{ owner: EVM_OWNER.address }, 400, /owner/], [{ owner: undefined }, 400, /owner/],
+      [{ owner: EVM_ADDRESS }, 400, /owner/], [{ owner: undefined }, 400, /owner/],
       [{ token: 'BTC' }, 400, /token: one of SOL, USDC/], [{ token: '__proto__' }, 400, /token/], [{ token: undefined }, 400, /token/],
       [{ chain: 'polygon' }, 400, /chain polygon is not open/], [{ chain: '__proto__' }, 400, /not open/],
       [{ rpc: 'http://evil', url: 'http://evil' }, 200, null]]) {
@@ -1240,16 +1142,8 @@ test('the CSP: own scripts only; the relay and verify origins only with a projec
   assert.equal(walletConnectOf({ walletConnect: { ...cfg.walletConnect, projectId: 'c'.repeat(32) } }, {}).projectId, 'c'.repeat(32));
   for (const bad of ['xyz', 'A'.repeat(32), 'a'.repeat(31)]) assert.throws(() => walletConnectOf(cfg, { WCID: bad }), /32 hex/);
   assert.match(CFG.walletConnect.projectId, /^[0-9a-f]{32}$/, 'the owner\'s Reown project (public config)');
-  const { polygonEnv } = await import('../onboard/polygon.mjs');
-  assert.deepEqual(polygonEnv({ LPBOT_RPC: 'https://solana.example', LPBOT_POLYGON_RPC: 'https://polygon.example' }),
-    { LPBOT_RPC: '', LPBOT_POLYGON_RPC: 'https://polygon.example' }, 'the Solana endpoint never serves Polygon');
-  assert.deepEqual(polygonEnv({ LPBOT_RPC: 'http://127.0.0.1:8545' }), { LPBOT_RPC: 'http://127.0.0.1:8545' }, 'a local fork stays the endpoint');
-  assert.deepEqual(polygonEnv({}), { LPBOT_RPC: '' });
-  const P = await import('../chains/evm/polygon.mjs');
-  assert.deepEqual(P.endpoints(polygonEnv({ LPBOT_RPC: 'https://solana.example', LPBOT_POLYGON_RPC: 'https://polygon.example' }))[0], 'https://polygon.example');
   // the pinned keys: the server opens a chain only with the key files git pins
   assert.equal(keysMatch({ botKeys: ['A', 'B'] }, { public: ['A', 'B'] }), true);
-  assert.equal(keysMatch({ botKeys: ['0xAb'] }, { public: ['0xab'] }), true, 'EVM: any letter case');
   for (const pub of [['A'], ['B', 'A'], ['A', 'C'], ['A', 'B', 'C']]) assert.equal(keysMatch({ botKeys: ['A', 'B'] }, { public: pub }), false, pub.join());
   assert.equal(keysMatch({}, { public: ['A'] }), false, 'nothing pinned: closed');
   assert.deepEqual(CFG.chains.solana.botKeys.length, 2);

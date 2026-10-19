@@ -14,11 +14,10 @@ import _fixtures
 TESTS = pathlib.Path(__file__).resolve().parent
 # the alias tests and modules use -> the module it names
 ALIASES = {'dexes': 'dexes', 'venue_api': 'venues.api', 'solana_state': 'venues.solana_state',
-           'jupiter_api': 'venues.jupiter.prices', 'jupiter': 'venues.jupiter.prices', 'evm': 'venues.evm',
+           'jupiter_api': 'venues.jupiter.prices', 'jupiter': 'venues.jupiter.prices',
            'orca_pools': 'venues.orca.pools', 'raydium_pools': 'venues.raydium_clmm.pools',
            'byreal_pools': 'venues.byreal.pools', 'pancake_pools': 'venues.pancakeswap_v3.pools',
-           'meteora_pools': 'venues.meteora_dlmm.pools', 'aerodrome_pools': 'venues.aerodrome.pools',
-           'uniswap_pools': 'venues.uniswap_v3.pools',
+           'meteora_pools': 'venues.meteora_dlmm.pools',
            **{m: f'lp.{m}' for m in ('paths', 'tuning', 'books', 'signers', 'capital', 'tape', 'regime', 'pauses',
                                      'harvest', 'swaps', 'board', 'moves', 'polls', 'housekeeping', 'loop')}}
 PATCH = re.compile(r"(?:patch\.object|self\.patch)\(([\w.]+), '(\w+)'")

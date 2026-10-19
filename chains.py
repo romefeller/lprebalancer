@@ -1,8 +1,6 @@
-"""What each chain can do, as data. The loop asks `caps(config.CHAIN)` before
-any step that exists on one chain only (Jupiter, the janitor, the Solana
-audits), so a profile on another chain skips the step instead of failing it.
-
-Adding a chain is a row here plus a signer that speaks SIGNER_CONTRACT.md.
+"""What the chain can do, as data. The loop asks `caps(config.CHAIN)` before
+a step that exists on one chain only. Solana only since 2026-10-19 (the EVM
+chains were removed with their profiles: nothing earned there).
 """
 import json
 import pathlib
@@ -39,85 +37,12 @@ CHAINS = {
         # the shortest poll the chain's public RPC tolerates (config.POLL_SECONDS)
         'min_poll_seconds': 0,
     },
-    'base': {
-        'native_symbol': 'ETH', 'native_decimals': 18, 'gecko_network': 'base',
-        # native ETH counts as WETH (SIGNER_CONTRACT additions, EVM signer)
-        'native_mint': '0x4200000000000000000000000000000000000006',
-        # WETH: the gas refill unwraps it into ETH (capital.refill_gas, the signer's `refill`)
-        'wrapped_native': '0x4200000000000000000000000000000000000006',
-        'stable_mints': ('0x833589fcd6edb6e08f4c7c32d4f71b54bda02913',),        # USDC (lower case)
-        'sweep': False, 'janitor': False, 'audit': False,
-        # the signer refills its gas from the pool's wrapped native (sql/041)
-        'gas_refill': True,
-        'scanner': False,
-        'payout': True,
-        'swap_via': 'venue', 'payout_via': 'venue',
-        'pin_env': 'LPBOT_EVM_PROFIT_WALLET_PIN',
-        'rewards': False,
-        'txfees': False,
-        'venues': False,
-        'probe': 'eth_blockNumber',
-        # the public Base RPC rate-limits after a few calls: no poll under two minutes
-        'min_poll_seconds': 120,
-        # the public endpoint, and the environment variable that replaces it
-        # (config.PUBLIC_RPC)
-        'public_rpc': 'https://mainnet.base.org', 'rpc_env': 'LPBOT_BASE_RPC',
-    },
-    'unichain': {
-        'native_symbol': 'ETH', 'native_decimals': 18, 'gecko_network': 'unichain',
-        # native ETH counts as WETH, as on Base (the EVM signers report it so)
-        'native_mint': '0x4200000000000000000000000000000000000006',
-        'wrapped_native': '0x4200000000000000000000000000000000000006',         # WETH
-        'stable_mints': ('0x078d782b760474a361dda0af3839290b0ef57ad6',),        # USDC (lower case)
-        'sweep': False, 'janitor': False, 'audit': False,
-        'gas_refill': True,
-        'scanner': False,
-        'payout': True,
-        'swap_via': 'venue', 'payout_via': 'venue',
-        # one EVM profit wallet serves every EVM chain: the same pin
-        'pin_env': 'LPBOT_EVM_PROFIT_WALLET_PIN',
-        'rewards': False,
-        'txfees': False,
-        'venues': False,
-        'probe': 'eth_blockNumber',
-        'min_poll_seconds': 60,
-        'public_rpc': 'https://mainnet.unichain.org', 'rpc_env': 'LPBOT_UNICHAIN_RPC',
-    },
-    'polygon': {
-        'native_symbol': 'POL', 'native_decimals': 18, 'gecko_network': 'polygon_pos',
-        # Polygon's native-token address, NOT WPOL: WPOL is a pool token and the
-        # EVM balance reader adds native gas to the native mint. Gas POL stays
-        # outside the pool, as ETH does on Unichain.
-        'native_mint': '0x0000000000000000000000000000000000001010',
-        # the wrapped native token, a pool token here: native POL above the
-        # profile's native_keep is wrapped into it (capital.wrap_native), and the
-        # gas is refilled from it (capital.refill_gas)
-        'wrapped_native': '0x0d500b1d8e8ef31e21c99d1db9a6444d3adf1270',
-        'stable_mints': ('0xc2132d05d31c914a87c6611c10748aeb04b58e8f',          # USDT0 (lower case)
-                         '0x3c499c542cef5e3811e1192ce70d8cc03d5c3359'),         # USDC (lower case)
-        'sweep': False, 'janitor': False, 'audit': False,
-        'gas_refill': True,
-        'scanner': False,
-        'payout': True,
-        'swap_via': 'venue', 'payout_via': 'venue',
-        'pin_env': 'LPBOT_EVM_PROFIT_WALLET_PIN',
-        'rewards': False,
-        'txfees': False,
-        'venues': False,
-        'probe': 'eth_blockNumber',
-        'min_poll_seconds': 60,
-        # polygon-rpc.com answers 403 (2026-10-08); publicnode answers and simulates
-        'public_rpc': 'https://polygon-bor-rpc.publicnode.com', 'rpc_env': 'LPBOT_POLYGON_RPC',
-    },
 }
 
-# Address shapes per chain: base58 on Solana, 0x-hex on EVM chains. The same
-# rules as the wallets and config checks in sql/020.
+# Address shapes per chain: base58 on Solana. The same rules as the wallets
+# and config checks in sql/020.
 ADDRESS = {
     'solana': re.compile(r'[1-9A-HJ-NP-Za-km-z]{32,44}'),
-    'base': re.compile(r'0x[0-9a-fA-F]{40}'),
-    'unichain': re.compile(r'0x[0-9a-fA-F]{40}'),
-    'polygon': re.compile(r'0x[0-9a-fA-F]{40}'),
 }
 
 

@@ -50,8 +50,7 @@ instruction 7 | logs: <line> ; <line> ...`. The failing program is the first
 `Program <id> failed` log line, else the failing instruction's program; the
 last 10 log lines, 160 characters each, at most 1,800 characters, redacted.
 The loop shows the decoded part (books.tidy) and keeps the log lines for the
-events table and Telegram (books.program_logs). An EVM failure adds
-` | revert: <reason>`.
+events table and Telegram (books.program_logs).
 
 ## Output fields the loop reads
 
@@ -91,7 +90,7 @@ approxUsd over LPBOT_MAX_USD; the price is outside [lower, upper].
 
 ## Token-2022 scaled UI amounts (2026-10-01)
 
-Some mints (tokenized stocks: MU, DJT, MSFTx) carry a `scaledUiAmountConfig`
+Some Token-2022 mints (tokenized stocks) carry a `scaledUiAmountConfig`
 multiplier. Every human amount a signer reads or reports, and every cap it is
 given (`maxA`, `maxB`), is in UI units: raw / 10^decimals x the effective
 multiplier (`newMultiplier` once its timestamp has passed; `token2022.mjs`).
@@ -127,16 +126,6 @@ second position. After the first send, catch errors, print the report with
 `sent: true`, `partial: true`, the signatures so far and the error, and exit 1.
 The loop re-reads the chain and believes what it finds.
 
-An EVM signer learns from the chain whether each sent transaction landed
-(chains/evm/landing.mjs): it asks every endpoint for the receipt until one has
-it, and an RPC error on the way (2026-10-13: publicnode answers -32602 for a
-receipt it does not have yet) is "not yet", never a failure. Its report lists
-`receipts`: `{label, hash, status}` per sent transaction, status `success`,
-`reverted` or `unknown` (no endpoint had a receipt in time). A step that landed
-although its send reported an error is named in `recovered`. The loop believes
-the receipts over an error (lp/signers.landed_view): a swap whose receipt says
-success is a swap, not a failure.
-
 ## Prices are B per A
 
 Every price the signer speaks is token B per token A in human units, where A
@@ -144,11 +133,10 @@ and B are the pool's own token order (mint 0 and mint 1 on a Raydium-layout
 pool; tokenX and tokenY on DLMM). GeckoTerminal and DEX front ends may show the
 inverse; the loop and the engine never do.
 
-## A stablecoin as token A (Unichain USDC/HYPE, 2026-10-04)
+## A stablecoin as token A
 
 `quoteUsd` is USD per unit of token B, whatever B is. When token A is the
-stablecoin (USDC/HYPE: `price` is HYPE per USDC), `quoteUsd` = 1/price, and
+stablecoin (`price` is B per stablecoin), `quoteUsd` = 1/price, and
 `positionUsd`, `feesAccrued_USD`, `walletUsd`, `depositUsd` and `approxUsd` are
 dollars, never token-B units. `nativeSide` is null when the gas token is not a
-pool token (ETH on Unichain); `sol` is then the native balance, and `walletUsd`
-may include it at its dollar price, as the Base signer does.
+pool token.

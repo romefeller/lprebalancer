@@ -181,10 +181,5 @@ class Network(unittest.TestCase):
             self.assertIn('/networks/base/', u); self.assertNotIn('solana', u)
         self.assertTrue(urls[2].startswith('https://api.geckoterminal.com/api/v2/simple/networks/base/token_price/'))
 
-    def test_base_usdc_is_a_stablecoin_by_mint_in_any_case(self):
-        self.assertTrue(engine.is_stable({'address': '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913'}))
-        self.assertFalse(engine.is_stable({'address': '0x4200000000000000000000000000000000000006'}))
-
-
 if __name__ == '__main__':
     unittest.main()

@@ -1,15 +1,15 @@
 // Check an owner's pending transaction outside the public server: decode it
 // and diff it against the vault rules and pins of a git commit you trust,
-// with the same decoder the page runs (decode_sol.mjs, decode_evm.mjs).
+// with the same decoder the page runs (decode_sol.mjs).
 //
 //   node onboard/verify.mjs --commit <sha> --paste '<what the page copied>'
 //   node onboard/verify.mjs --commit <sha> --from https://romefeller.app/bot --invite <code>
 //        --name <vault name> --owner <your wallet> --action setup|approve|revoke|close|withdraw
-//        [--token SOL|USDC|ALL --amount <n>|all] [--chain solana|polygon]
-//        setup (Solana): the set-up of a request still waiting for it, as one set;
+//        [--token SOL|USDC|ALL --amount <n>|all]
+//        setup: the set-up of a request still waiting for it, as one set;
 //        [--setup-key <key>] the page's one-time set-up key, which signs the policies
 //        (else a throwaway key stands for it: the set is the same but for that key)
-//   --rpc <url>   Solana: also read the vault from the chain (default: the public endpoint;
+//   --rpc <url>   also read the vault from the chain (default: the public endpoint;
 //                 --rpc none skips it): your wallet must be its only owner (in a set-up,
 //                 the page's set-up key beside it), each policy the transaction names
 //                 must be one of its policies.
@@ -25,7 +25,6 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'module';
 import { decodeSol, decodeSolSet } from './decode_sol.mjs';
-import { decodeEvm } from './decode_evm.mjs';
 import { toRaw } from './units.mjs';
 import * as sq from '../chains/solana/vault/squads.mjs';
 import { isEntry } from '../shared/rpc_policy.mjs';
@@ -49,20 +48,15 @@ export function atCommit(commit, file, git = (args) => execFileSync('git', args,
   return git(['show', `${commit}:${file}`]);
 }
 
-// The pins of `commit`: what decode_sol and decode_evm check against. Pure
-// over the three files' text and the Polygon module's addresses.
-export function pinsOf(rulesText, solanaText, onboardText, polygon) {
+// The pins of `commit`: what decode_sol checks against. Pure over the three
+// files' text.
+export function pinsOf(rulesText, solanaText, onboardText) {
   const rules = JSON.parse(rulesText), solana = JSON.parse(solanaText), cfg = JSON.parse(onboardText);
-  const sol = cfg.chains.solana, poly = cfg.chains.polygon;
+  const sol = cfg.chains.solana;
   return {
     rulesSha256: crypto.createHash('sha256').update(rulesText).digest('hex'),
     solana: { payer: sol.botKeys[0], policyKey: sol.botKeys[1], operator: solana[sol.operatorWallet],
       pools: Object.fromEntries(Object.entries(solana[sol.poolsKey]).map(([v, p]) => [v, [p, ...(solana.vault_extra_pools?.[v] ?? [])]])), rules, solana },
-    polygon: { chainId: polygon.CHAIN_ID, botKey: poly.botKeys[0], npm: polygon.V3.npm, wrapped: { WPOL: polygon.WPOL },
-      tokens: Object.fromEntries(Object.entries(poly.tokens).map(([s, t]) => [s, { address: t.native ? null : polygon[s], decimals: t.decimals }])),
-      // the owner's own vault, as the page's bundle pins it (onboard/web/build.mjs)
-      vault: { ...polygon.VAULT }, router: polygon.V3.router, stables: [...polygon.STABLES], venue: polygon.DEX,
-      pool: { token0: polygon.WPOL, token1: polygon.USDT0, fee: 500 } },
   };
 }
 
@@ -91,10 +85,10 @@ export async function chainProblems(connection, expect) {
 }
 
 // Each transaction checked: {lines, problems} per transaction. A list (a set
-// the wallet approves at once) is checked as a whole.
+// the wallet approves at once) is checked as a whole. Solana only.
 export function check(chain, txs, expectOf, pins) {
-  return txs.map((tx, i) => (chain === 'solana' ? (Array.isArray(tx) ? decodeSolSet : decodeSol)(tx, expectOf(i), { ...pins.solana })
-    : decodeEvm(tx, expectOf(i), pins.polygon)));
+  if (chain !== 'solana') throw new Error(`chain ${chain}: this verifier checks Solana transactions only`);
+  return txs.map((tx, i) => (Array.isArray(tx) ? decodeSolSet : decodeSol)(tx, expectOf(i), { ...pins.solana }));
 }
 
 // The expectation of a Solana set-up, from the server's answer (terms and
@@ -115,9 +109,8 @@ export async function fromServer(f, pins) {
     if (!r.ok) throw new Error(j.error ?? `the server answered ${r.status}`);
     return j;
   };
-  const chain = f.chain ?? 'solana';
+  const chain = 'solana';
   if (f.action === 'setup') {
-    if (chain !== 'solana') throw new Error('--action setup: Solana (a Polygon set-up: paste what the page copied)');
     const setupKey = f['setup-key'] ?? Keypair.generate().publicKey.toBase58();
     const it = await post('setup', { name: f.name, setupKey });
     if (it.done) throw new Error('the set-up is on chain already: nothing to sign');
@@ -134,19 +127,18 @@ export async function fromServer(f, pins) {
   }
   const ctx = answer.context ?? {};
   const kind = f.action;
-  const decimals = chain === 'solana' ? { SOL: 9, USDC: 6 }[f.token] : pins.polygon.tokens[f.token]?.decimals;
+  const decimals = { SOL: 9, USDC: 6 }[f.token];
   const raw = (f.token === 'ALL' || !f.amount || f.amount === 'all') ? 'all' : toRaw(f.amount, decimals).toString();
-  const mint = chain === 'solana' && f.token && f.token !== 'ALL' ? { SOL: pins.solana.solana.native_mint, USDC: pins.solana.solana.usdc_mint }[f.token] : null;
-  const expect = chain === 'solana' ? { kind, owner: f.owner, ...ctx, mint, raw } : { kind, owner: f.owner, safe: ctx.safe, roles: ctx.roles, token: f.token, raw };
+  const mint = f.token && f.token !== 'ALL' ? { SOL: pins.solana.solana.native_mint, USDC: pins.solana.solana.usdc_mint }[f.token] : null;
+  const expect = { kind, owner: f.owner, ...ctx, mint, raw };
   return { chain, txs, expect: () => expect };
 }
 
 export async function main(argv = process.argv.slice(2), { git, connection } = {}) {
   const f = flags(argv);
   if (!f.commit) throw new Error('--commit <the git commit whose rules you trust>');
-  const polygon = await import(path.join(ROOT, 'chains/evm/polygon.mjs'));
   const at = (file) => atCommit(f.commit, file, git);
-  const pins = pinsOf(at('chains/solana/vault/rules.json'), at('chains/solana/solana.json'), at('onboard/onboard.json'), polygon);
+  const pins = pinsOf(at('chains/solana/vault/rules.json'), at('chains/solana/solana.json'), at('onboard/onboard.json'));
   console.log(`rules.json at ${f.commit}: sha256 ${pins.rulesSha256} (the page shows its first 16 characters)`);
   let job;
   if (f.paste) {

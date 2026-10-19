@@ -150,8 +150,7 @@ def profile_args(p, wallet_id, chain):
     return argparse.Namespace(
         profile=p['name'], template=p['template'], wallet=wallet_id, chain=chain, cross_chain=False,
         payout_mint=None, max_usd=None, address=None, secret_env=None, label=None, dex=p['dex'], pool=p['pool'],
-        execute_dexes=','.join(p['execute_dexes']), signer_env=None, deposit_mint=None, swing_open=None,
-        swing_closed=None, calendar='nyse', lead_s=300, profit_wallet=p['profit_wallet'],
+        execute_dexes=','.join(p['execute_dexes']), signer_env=None, deposit_mint=None, profit_wallet=p['profit_wallet'],
         special=p['special'], fee_bps=p['fee_bps'] or None, fee_wallet=p['fee_wallet'])
 
 
@@ -201,12 +200,12 @@ def register(cur, r):
     add_vault.insert_rows(cur, wallet, vault_row, policies)
     cur.execute('select * from wallets where id = %s', (r['wallet_id'],))
     try:
-        _, prow, _ = add_profile.build(profile_args(p, r['wallet_id'], row['chain']), dict(template), p['rec'],
+        _, prow = add_profile.build(profile_args(p, r['wallet_id'], row['chain']), dict(template), p['rec'],
                                        dict(cur.fetchone()), 0, vault=True)
     except add_profile.Refused as e:
         raise Refused(str(e)) from None
     prow = with_settings(prow, p.get('settings') or {}, add_profile.SKIP)
-    add_profile.insert_rows(cur, None, prow, None)
+    add_profile.insert_rows(cur, None, prow)
     # the cap from the deposit the owner signed, until the first one is verified on chain
     if r.get('cap'):
         cap(cur, row['id'], r['cap']['headroom'], usd_of(r['cap']['mint'], row['deposit']))

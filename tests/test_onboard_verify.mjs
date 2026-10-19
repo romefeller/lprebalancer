@@ -7,7 +7,6 @@ import fs from 'node:fs';
 import { createRequire } from 'module';
 import * as sq from '../chains/solana/vault/squads.mjs';
 import { compile } from '../chains/solana/vault/policy.mjs';
-import * as POLYGON from '../chains/evm/polygon.mjs';
 import { ata } from '../onboard/decode_sol.mjs';
 import { atCommit, chainProblems, check, flags, main, pinsOf } from '../onboard/verify.mjs';
 import SOLANA from '../chains/solana/solana.json' with { type: 'json' };
@@ -17,7 +16,7 @@ const { Keypair, PublicKey, Transaction } = require('@solana/web3.js');
 
 const read = (f) => fs.readFileSync(new URL(`../${f}`, import.meta.url), 'utf8');
 const ONBOARD = JSON.parse(read('onboard/onboard.json'));
-const PINS = pinsOf(read('chains/solana/vault/rules.json'), read('chains/solana/solana.json'), read('onboard/onboard.json'), POLYGON);
+const PINS = pinsOf(read('chains/solana/vault/rules.json'), read('chains/solana/solana.json'), read('onboard/onboard.json'));
 const OWNER = Keypair.generate().publicKey, SETTINGS = Keypair.generate().publicKey, VAULT = sq.vaultPda(SETTINGS);
 const VENUE = 'raydium-clmm', POOL = SOLANA.sol_usdc_pools[VENUE];
 const USDC = new PublicKey(SOLANA.usdc_mint), PAYER = new PublicKey(ONBOARD.chains.solana.botKeys[0]);
@@ -39,8 +38,6 @@ test('the pins of a commit: its rules (hashed), pools, the bot\'s keys and the o
   assert.equal(PINS.solana.payer, ONBOARD.chains.solana.botKeys[0]);
   assert.equal(PINS.solana.policyKey, ONBOARD.chains.solana.botKeys[1]);
   assert.deepEqual(PINS.solana.pools[VENUE], [POOL, ...(SOLANA.vault_extra_pools?.[VENUE] ?? [])]);   // the home pool, then the extra ones
-  assert.equal(PINS.polygon.botKey, ONBOARD.chains.polygon.botKeys[0]);
-  assert.equal(PINS.polygon.npm, POLYGON.V3.npm);
   // git show, for a commit id only
   assert.equal(atCommit('abc1234', 'x', (args) => args.join(' ')), 'show abc1234:x');
   for (const bad of ['HEAD', 'main', '--output=x', 'abc', '']) assert.throws(() => atCommit(bad, 'x', () => ''), /commit id/);
@@ -101,7 +98,7 @@ test('the command: a pasted transaction at HEAD, OK; a tampered one, refused', a
   } finally { console.log = log; }
 });
 
-test('the command: the chain is read for a Solana vault, never for an EVM one; what it needs, it asks for', async () => {
+test('the command: the chain is read for a Solana vault, never for another chain; what it needs, it asks for', async () => {
   const log = console.log, out = [];
   console.log = (x) => out.push(String(x));
   const git = (args) => read(args[1].split(':')[1]);
@@ -114,9 +111,8 @@ test('the command: the chain is read for a Solana vault, never for an EVM one; w
     assert.match(out.join('\n'), /CHAIN: the settings account .* does not exist/);
     const never = { getAccountInfo: async () => { throw new Error('read'); } };
     assert.equal(await main(['--commit', 'abcdef1', '--rpc', 'none', '--paste', paste], { git, connection: never }), 0, '--rpc none reads nothing');
-    const evm = JSON.stringify({ chain: 'polygon', tx: { to: ONBOARD.chains.polygon.botKeys[0], data: '0x', value: '0x1' },
-      expect: { kind: 'payment', owner: '0x70997970C51812dc3A010C7d01b50e0d17dc79C8', lamports: '1' } });
-    assert.equal(await main(['--commit', 'abcdef1', '--paste', evm], { git, connection: never }), 0, 'a Safe: no Solana read');
+    const other = JSON.stringify({ chain: 'polygon', tx: approveTx(0), expect });
+    await assert.rejects(main(['--commit', 'abcdef1', '--paste', other], { git, connection: never }), /Solana transactions only/);
   } finally { console.log = log; }
   await assert.rejects(main(['--paste', '{}'], { git }), /^Error: --commit <the git commit whose rules you trust>$/);
   for (const missing of ['from', 'invite', 'name', 'owner', 'action']) {
@@ -124,8 +120,6 @@ test('the command: the chain is read for a Solana vault, never for an EVM one; w
     delete f[missing];
     await assert.rejects(main(['--commit', 'abcdef1', ...Object.entries(f).flat().map((v, i) => (i % 2 ? v : `--${v}`))], { git }), new RegExp(`--${missing} is needed`));
   }
-  assert.equal(PINS.polygon.tokens.POL.address, null, 'the native coin has no token address');
-  assert.equal(PINS.polygon.tokens.WPOL.address, POLYGON.WPOL);
 });
 
 test('a set-up the wallet approves at once: pasted as parts, or read from the server (--action setup), checked as a whole', async () => {
@@ -210,7 +204,6 @@ test('a set-up the wallet approves at once: pasted as parts, or read from the se
     assert.notEqual(sent[0], KEY.toBase58(), 'else a throwaway key stands for it');
     tamper = true;
     assert.equal(await main(from, { git: show }), 1);
-    await assert.rejects(main([...from, '--chain', 'polygon'], { git: show }), /a Polygon set-up: paste what the page copied/);
   } finally { console.log = log; srv?.close(); }
 });
 
@@ -248,11 +241,6 @@ test('the server\'s answer, read as the page reads it: every transaction of an a
     assert.equal(job.expect(0).raw, 'all');
     job = await fromServer(f({ action: 'withdraw', token: 'ALL', amount: 'all' }), PINS);
     assert.deepEqual([job.expect(0).mint, job.expect(0).raw], [null, 'all']);
-    // Polygon: every transaction at once (no index), the Safe and its module from the context
-    answer = () => ({ count: 2, transactions: ['a', 'b'], context: { safe: '0xSafe', roles: '0xRoles' } });
-    job = await fromServer(f({ action: 'withdraw', token: 'WPOL', amount: '1.5', chain: 'polygon' }), PINS);
-    assert.deepEqual([job.chain, job.txs], ['polygon', ['a', 'b']]);
-    assert.deepEqual(job.expect(0), { kind: 'withdraw', owner: OWNER.toBase58(), safe: '0xSafe', roles: '0xRoles', token: 'WPOL', raw: '1500000000000000000' });
     // no context: nothing named
     answer = () => ({ count: 1, transactions: ['a'] });
     job = await fromServer(f({ action: 'revoke' }), PINS);

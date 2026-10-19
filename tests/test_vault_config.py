@@ -130,34 +130,6 @@ class SignerEnvironment(unittest.TestCase):
             with mock.patch.object(config, 'VAULT', vault(policy_bytes=600)):
                 self.assertEqual(config.vault_env('meteora-dlmm')['LPBOT_VAULT_POLICY_BYTES'], '600')
 
-    def test_a_safe_vault_gets_its_safe_role_pools_and_payouts(self):
-        safe = vault(kind='safe', settings='0x5FbDB2315678afecb367f032d93F642f64180aa3', policy_key_env='LPBOT_V_PAYER',
-                     venues={'uniswap-v3-polygon': {'policies': ['0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512'],
-                                                    'pools': ['0x9B08288C3Be4F62bbf8d1C20Ac9C5e6f9467d8B7'],
-                                                    'payouts': ['0x2b35000000000000000000000000000000000142']}})
-        with mock.patch.object(config, 'VAULT', safe):
-            env = config.vault_env('uniswap-v3-polygon')
-            with self.assertRaisesRegex(ValueError, 'no approved policy for orca'):
-                config.vault_env('orca')
-        self.assertEqual(env, {'LPBOT_VAULT_SAFE': '0x5FbDB2315678afecb367f032d93F642f64180aa3',
-                               'LPBOT_VAULT_ROLES': '0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512',
-                               'LPBOT_VAULT_VENUE': 'uniswap-v3-polygon',
-                               'LPBOT_VAULT_POOLS': '0x9B08288C3Be4F62bbf8d1C20Ac9C5e6f9467d8B7',
-                               'LPBOT_VAULT_PAYOUTS': '0x2b35000000000000000000000000000000000142'})
-
-    def test_a_safe_vault_never_adds_idle_cash_to_its_position_a_squads_vault_does(self):
-        status = {'positionMint': '1', 'lowerPrice': 0.1, 'upperPrice': 0.2}
-        with mock.patch.object(config, 'VAULT', vault(kind='safe')), \
-                mock.patch.object(lp.swaps.calm, 'band_share_a', side_effect=AssertionError('nothing is planned')) as plan:
-            self.assertIs(lp.swaps.add_idle({}, status, {'price': 0.15}, 10.0, 0.15), False)
-        plan.assert_not_called()
-        # a Squads vault's rule pins the NFT account to the vault's own: it plans the add as a key wallet does
-        for custody in (vault(), None):
-            with mock.patch.object(config, 'VAULT', custody), \
-                    mock.patch.object(lp.swaps.calm, 'band_share_a', side_effect=ValueError('out of the band')) as plan:
-                self.assertFalse(lp.swaps.add_idle({}, status, {'price': 0.15}, 10.0, 0.15))
-            plan.assert_called_once()
-
     def test_an_unapproved_venue_or_a_missing_key_is_refused(self):
         with mock.patch.object(config, 'VAULT', vault()), \
                 mock.patch.dict(os.environ, {'LPBOT_VAULT_TEST_POLICY_KEY': '/keys/policy.json'}):
@@ -243,10 +215,6 @@ class SignerEnvironment(unittest.TestCase):
             self.assertEqual(seen, {})
             self.assertFalse(lp.signers.counts_as_failure(err))
             self.assertEqual(lp.signers._chain('status'), ({'ok': True}, None))
-        # a Safe vault's swaps are its signer's own business (its role scopes them)
-        with mock.patch.object(config, 'VAULT', vault(kind='safe', venues=venues)), mock.patch.object(config, 'DEX', 'byreal'), \
-                mock.patch.object(config, 'vault_env', lambda dex: {}), mock.patch.object(lp.signers.subprocess, 'run', fake_run):
-            self.assertEqual(lp.signers._chain('rebalance', SOL, USDC, '1', '1'), ({'ok': True}, None))
 
     def test_a_venue_without_a_policy_is_refused_before_spawning(self):
         (out, err), seen = self.run_chain('status', dex='orca')

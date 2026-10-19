@@ -1,26 +1,20 @@
 # Multi-wallet, multi-pool: the design (2026-10-01, deployed 2026-10-02)
 
-Owner's goals, in order:
-1. MU/USDC first (Meteora DLMM `13MEx6gjRadJNUdmToaGSzgeWHLH7FzScUQS9Mc5nYF5`), same rationale as SOL/USDC.
-2. One wallet, many pools, routed by the token that arrives: SOL → SOL/USDC, MU → MU/USDC,
-   DJT → DJT/USDC (Orca `7gkB2D1SqhUYgKrSpDU5cma4tK9efijHouYituABdJcG`),
-   MSFTx → MSFTx/USDC (Raydium CLMM `D6bRhQUcR9B7bPbbqgxpE17MjyUjBtr8hHQCcJoHrrv1`).
+Owner's goals, in order (2026-10-19: the bot is Solana-only; the stock pools, the
+swing profile and the EVM chains were removed):
+1. One wallet, many pools, routed by the token that arrives (SOL → SOL/USDC).
    A deposit is split ~50/50 against USDC and deployed.
-3. Many wallets. Database and code carry wallet and profile everywhere. Generalise always.
-4. Base chain: WETH/USDC on Aerodrome Slipstream (first `0xb2cc224c1c9fee385f8ad6a55b4d94e92359dc59`, tickSpacing
-   100; from 2026-10-02 `0x3fe04a59ebd38cf06080a6f60a98d124eb59392a`, tickSpacing 50, another deployment), new EVM
-   wallet, key on disk outside the repo (mode 0600), never printed. ETH deposit → keep gas, split, open.
-   EVM profit wallet `0x2b35948898e1b4897E7FC5a70e39b213dcfd0142`. Solana profit wallet unchanged.
-5. Stats per wallet and per pool, plus one shared listing with the sums. Active pools only.
-6. The live bot never stops for this work. One restart at the end. Nothing that works today may break.
-7. End-to-end tests, failure paths first. No slop. Security first.
+2. Many wallets. Database and code carry wallet and profile everywhere. Generalise always.
+3. Stats per wallet and per pool, plus one shared listing with the sums. Active pools only.
+4. The live bot never stops for this work. One restart at the end. Nothing that works today may break.
+5. End-to-end tests, failure paths first. No slop. Security first.
 
 ## Design
 
 **Processes.** One process per profile: systemd template `lp-bot@<profile>.service` with
-`LPBOT_PROFILE=<profile>`. Profiles: `sol-usdc` (existing; wallet `sol-lp`, residual owner),
-`mu-usdc`, `djt-usdc`, `msftx-usdc` (wallet `sol-lp`), `base-weth-usdc` (wallet `base-lp`). New ones are
-`pool_pinned`, `regime_enabled`, `rebalance_swap`, payout to the chain's profit wallet in USDC.
+`LPBOT_PROFILE=<profile>`. Profiles: `sol-usdc` (existing; wallet `sol-lp`, residual owner) and the
+ones ops/add_profile.py adds. New ones are `pool_pinned`, `regime_enabled`, `rebalance_swap`, payout to
+the profit wallet in USDC.
 
 **Run directory.** `config.RUN_DIR` = `run/<profile>/` holds `runtime.json`, `events.jsonl`, `HALT`,
 `REBALANCE`, `REOPT`, `MIGRATE`. `ROOT/HALT` halts every profile. Every feed row carries `profile`,
@@ -37,7 +31,7 @@ and the after-read waits until its slot reaches the write's. The write is record
 is sent; a write whose before-read fails is refused, not sent, and every write of the wallet waits while
 an earlier one is unbooked. Claims and mints of disabled profiles still count (fail closed). `wallet()` returns the sleeve view, so capital, caps, deploy-all
 and the swap planner see only the profile's own money. The swap scripts honour
-`LPBOT_SLEEVE={"<mint>": <max human amount>}` (`swap_jupiter.mjs`, the `swap_orca.mjs` fallback, the venue signer on Base).
+`LPBOT_SLEEVE={"<mint>": <max human amount>}` (`swap_jupiter.mjs`, the `swap_orca.mjs` fallback).
 
 **Dormant profiles.** No position and sleeve deployable < `min_deploy_usd`: no open attempt, a light poll
 (every ≥300 s), one `dormant` event on entry, one `deposit_seen` on exit. A deposit of the profile's
@@ -48,33 +42,11 @@ only, and only where `config.CAPS` allows. Sweep and janitor keep every mint of 
 wallet, disabled ones included. Audits reconcile the wallet against the sum of its profiles.
 
 **Signers.** SIGNER_CONTRACT.md holds for every signer. Additions:
-- Token-2022 scaled UI amounts (MU, DJT, MSFTx): every human amount and every USD value the signer
+- Token-2022 scaled UI amounts (tokenized stocks): every human amount and every USD value the signer
   reports is in UI units (raw / 10^decimals × current multiplier, honouring `newMultiplier` once its
   timestamp passes); `price` stays pool-native (B per A, raw-decimal adjusted) AND the signer adds
   `uiPrice` (B per A in UI units) and `multiplierA/B`. Paused mints: refuse writes with `refused: mint
   paused`. Transfer hooks with a program set: refuse writes with `refused: transfer hook`.
-- EVM signer (`signer_aerodrome.mjs`, chain `base`): same commands and fields (`sol` = native ETH balance;
-  native ETH counts as WETH, `nativeSide`), plus `rebalance <mintA> <mintB> <usdA> <usdB> [--execute]` with
-  the `swap_jupiter.mjs` output shape, plus `send <token> <amount> <to> [--execute]` and
-  `balance <token>` in the `payout.mjs` shape. Env: `WALLET_SECRET_PATH` (key file path), `LPBOT_RPC`,
-  `LPBOT_POOL`, `LPBOT_MAX_USD`, `LPBOT_SLIPPAGE_BPS`, `LPBOT_GAS_RESERVE_NATIVE`, `LPBOT_SLEEVE`,
-  `LPBOT_EVM_PROFIT_WALLET_PIN` (send refuses any other recipient). Every signer refuses writes on
-  `HALT` in its directory and on `LPBOT_RUN_DIR/HALT` (`halt_guard.mjs`).
-- EVM gas refill (both EVM signers, sql/041): `refill [--execute]` brings the native coin up to
-  `LPBOT_GAS_REFILL_TO` and no further, from the wallet's wrapped native token (WETH9 `withdraw`),
-  first buying the shortfall with the pool's other token when the wrapped token is short
-  (`chains/evm/gas_refill.mjs`). Only on a pool that holds the wrapped native; never for a vault.
-  Answer: `noop`, or the send report plus `unwrapped` and `unwrappedUsd` from the unwrap's
-  `Withdrawal` event. It is the one write allowed under the gas reserve; `rebalance` is refused
-  under it, as `open` and `increase` are, so a refused open never follows a paid swap.
-- EVM deployments: `evm/addresses.mjs` `DEPLOYMENTS` lists each trusted Slipstream deployment
-  (factory, NPM, router, quoter). The signer takes the pool's `factory()` and `nft()`, accepts the
-  pool only if both match one entry and that factory's `getPool(token0, token1, tickSpacing)` is
-  the pool, and then calls only that entry's NPM, router and quoter. Evidence: `evm/ADDRESSES.md`.
-- `dexes.pool('aerodrome-slipstream', addr)` returns the usual record shape, for a pool of any
-  deployment in `dexes.SLIPSTREAM_DEPLOYMENTS` (the same table).
-- Routing: `SIGNERS['aerodrome-slipstream']`; on Base the swap goes to the venue signer instead of
-  Jupiter, and payout calls go to the venue signer instead of `payout.mjs`.
 
 **Stats.** Every report function takes `profile=None, wallet_id=None` filters; `None` = all
 enabled. Per-profile money: harvests/snapshots/band_profile through `positions.config_name`; payouts by
@@ -92,22 +64,3 @@ checked before the stop; then one restart: stop `lp-bot.service`, backfill pre-0
 `runtime.json`/`events.jsonl` into `run/sol-usdc/`, start every `lp-bot@<profile>`, restart the bridge. A
 trap brings a bot back if any step after the stop fails. Idempotent. Rollback: `git revert` the merge, then
 `./deploy.sh rollback --apply`, which refuses while another profile holds a position or a claim.
-
-## Unichain (2026-10-04)
-
-Chain `unichain` (chain id 130): a row in chains.py like Base's (venue swaps and
-payouts, the same EVM profit-wallet pin, no sweep/janitor/audit/board/rewards/txfees),
-with its endpoint in the row (`public_rpc`, `rpc_env` = `LPBOT_UNICHAIN_RPC`;
-config.public_rpc). The wallet readers are the EVM ones. Venue `uniswap-v3-unichain`:
-`dexes.pool()` reads the pool on chain and accepts it only when its factory is Uniswap's
-v3 factory on Unichain (`0x1f98…0003`) and that factory maps (token0, token1, fee) back
-to it; the signer is `signer_uniswap.mjs`. First profile: `uni-hype-usdc`
-(ops/UNICHAIN_SETUP.md), wallet `uni-lp`, key path `LPBOT_UNICHAIN_KEY_PATH`.
-
-**Stablecoin as token A.** USDC/HYPE is the first profile whose stablecoin is token A.
-The price is HYPE per USDC, so token B's dollar price is 1/price: the signer reports
-`quoteUsd` = 1/price, and where it reports null the loop fills it from the mints
-(rebalancer.stable_quote_usd, engine.stable_quote). The book's hold benchmarks
-(db.daily_line, db.since_start) value the volatile half at its dollar price
-(db.volatile_usd: 1/price when db.stable_first(mints)), and the baseline's base token is
-token B. Every other money figure was already in token-B units times `quoteUsd`.

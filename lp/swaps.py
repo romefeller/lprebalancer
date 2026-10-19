@@ -36,7 +36,7 @@ def can_add():
     owner's Add capital too, goes in by a re-centre. A Squads vault's rule
     pins the position's NFT account to one the vault owns
     (chains/solana/vault/rules.json), so it adds as a key wallet does."""
-    return config.DEX in INCREASE_DEXES and not (config.VAULT and config.VAULT['kind'] == 'safe')
+    return config.DEX in INCREASE_DEXES
 
 
 def adds_open_leftover():
@@ -128,7 +128,7 @@ def deploy_idle(state, status, wbal, rv, price):
     return True
 
 
-INCREASE_DEXES = {'raydium-clmm', 'uniswap-v3-polygon'}  # signers with `increase`: idle cash goes into the open position
+INCREASE_DEXES = {'raydium-clmm'}  # signers with `increase`: idle cash goes into the open position
 INCREASE_RECHECKS, INCREASE_RECHECK_S = 6, 15  # after an errored add: re-reads for ~90 s (blockhash expiry)
 
 
@@ -159,12 +159,6 @@ def add_idle(state, status, wbal, idle, price):
     and three of them must not move the position (audit 2026-10-03). A
     failure moves nothing and is retried at the next allowed deploy. True
     when liquidity was added."""
-    if config.VAULT and config.VAULT['kind'] == 'safe':
-        # A Safe vault's role allows no add: the position manager adds to any
-        # position id, a stranger's too. Its idle cash waits for the re-centre.
-        # (A Squads vault's rule pins the position's NFT account to one the
-        # vault owns: chains/solana/vault/rules.json.)
-        return False
     mint, lo, hi = status['positionMint'], status['lowerPrice'], status['upperPrice']
     try:
         share_a = calm.band_share_a(wbal['price'], lo, hi)

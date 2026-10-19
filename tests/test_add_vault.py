@@ -106,36 +106,6 @@ WPOL_POOL = '0x9B08288C3Be4F62bbf8d1C20Ac9C5e6f9467d8B7'
 EVM_PROFIT = '0x2b35000000000000000000000000000000000142'
 
 
-def safe_connected(**over):
-    c = {'sent': True, 'kind': 'safe', 'chain': 'polygon', 'vault': SAFE, 'settings': SAFE, 'owners': [EVM_OWNER],
-         'threshold': 1, 'venue': 'uniswap-v3-polygon', 'policies': [ROLES], 'pools': [WPOL_POOL],
-         'payouts': [EVM_PROFIT], 'payer': EVM_BOT, 'policyKey': EVM_BOT, 'lookup': None}
-    c.update(over)
-    return c
-
-
-class SafeRows(unittest.TestCase):
-    def test_a_connected_safe_makes_three_rows_on_its_chain(self):
-        w, v, (p,) = add_vault.register_rows(args(policy_key_env='LPBOT_V_PAYER'), safe_connected())
-        self.assertEqual(w, ('v-add', 'polygon', SAFE, 'LPBOT_V_PAYER', 'v-add'))
-        self.assertEqual(v, ('v-add', 'safe', SAFE, [EVM_OWNER], 1, 'LPBOT_V_PAYER', None))
-        self.assertEqual(p, ('v-add', 'uniswap-v3-polygon', [ROLES], [WPOL_POOL], [EVM_PROFIT]))
-
-    def test_what_it_refuses(self):
-        a = args(policy_key_env='LPBOT_V_PAYER')
-        for over, msg in (({'chain': 'solana'}, 'Safe vault on chain'), ({'chain': None}, 'Safe vault on chain'),
-                          ({'kind': 'gnosis'}, 'vault kind'), ({'venue': 'meteora-dlmm'}, 'no vault rules'),
-                          ({'owners': [EVM_BOT.lower()]}, 'bot key'), ({'lookup': SAFE}, 'no lookup table'),
-                          ({'owners': [VAULT]}, 'not addresses'), ({'pools': [POOL]}, 'not addresses')):
-            with self.subTest(over=over), self.assertRaisesRegex(add_vault.Refused, msg):
-                add_vault.register_rows(a, safe_connected(**over))
-        with self.assertRaisesRegex(add_vault.Refused, 'one key'):
-            add_vault.register_rows(args(), safe_connected())
-        # a Solana vault's JSON is never read as an EVM one, nor the other way round
-        with self.assertRaisesRegex(add_vault.Refused, 'no vault rules'):
-            add_vault.register_rows(args(), connected(venues={'uniswap-v3-polygon': venue()}))
-
-
 class Register(unittest.TestCase):
     def setUp(self):
         clean()
@@ -184,18 +154,6 @@ class Register(unittest.TestCase):
         self.assertNotEqual(got, [PROFIT_USDC])
         with self.assertRaisesRegex(add_vault.Refused, 'no vault policy'):
             add_vault.payouts(argparse.Namespace(wallet='v-none', venue='meteora-dlmm', payout=PROFIT, mints=None, apply=True))
-
-    def test_a_safe_vault_is_written_and_its_payouts_are_not_edited(self):
-        with tempfile.NamedTemporaryFile('w', suffix='.json', delete=False) as f:
-            json.dump(safe_connected(), f)
-        self.addCleanup(os.unlink, f.name)
-        with contextlib.redirect_stdout(io.StringIO()):
-            add_vault.register(args(json=f.name, apply=True, policy_key_env='LPBOT_V_PAYER'))
-        v = db.vault_row('v-add')
-        self.assertEqual((v['kind'], v['settings'], v['lookup']), ('safe', SAFE, None))
-        self.assertEqual(db.wallet_row('v-add')['chain'], 'polygon')
-        with self.assertRaisesRegex(add_vault.Refused, 'new owner set-up'):
-            add_vault.payouts(argparse.Namespace(wallet='v-add', venue='uniswap-v3-polygon', payout=EVM_PROFIT, mints=None, apply=True))
 
     def test_payouts_for_a_venue_never_approved_are_refused(self):
         self.write()

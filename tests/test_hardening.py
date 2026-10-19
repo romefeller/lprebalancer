@@ -503,9 +503,3 @@ class SwapMints(unittest.TestCase):
             out, calls, notes = self.run_it(b, rec)
             self.assertEqual(calls, []); self.assertEqual(out, b)
             self.assertEqual(notes[-1][0], 'swap_skipped'); self.assertIn('no mints', notes[-1][1]['reason'])
-
-    def test_evm_addresses_compare_without_case(self):
-        a, b = '0x' + 'ab' * 20, '0x' + 'cd' * 20
-        rec = {'token_a': {'address': a}, 'token_b': {'address': b}}
-        _, calls, _ = self.run_it(self.lopsided(mintA='0x' + 'AB' * 20, mintB=b, nativeSide=None), rec, 'polygon')
-        self.assertTrue(self.swapped(calls))

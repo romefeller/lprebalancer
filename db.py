@@ -1685,43 +1685,6 @@ _GOVERNOR_VIEWS = {}            # profile -> (time, measurement): the band read 
 GOVERNOR_VIEW_S = 600
 
 
-def governor_capital(profile):
-    """The equity governor's inputs (lp/governor.py, sql/054): the book's
-    equity now, as since_start reads it plus the uncounted value, and the
-    money put in as [(ts, usd)], money out negative: the baseline and every
-    flow since_start counts after it. None without a baseline or a snapshot."""
-    sst = since_start(_uncounted_usd(profile), profile)
-    if not sst:
-        return None
-    a = _scope_args([profile])
-    with cursor() as cur:
-        cur.execute("select ts, usd from capital_flows where kind = 'baseline' "
-                    f"and {FLOW_IN} order by (profile is null), ts limit 1", a)
-        base = cur.fetchone()
-        cur.execute(f"""select ts, case when kind in ('deposit', 'internal_in') then usd else -usd end usd
-                        from capital_flows
-                        where kind in ('deposit', 'withdrawal', 'internal_in', 'internal_out')
-                          and ts > %(since)s and {FLOW_IN} order by ts""", dict(a, since=base['ts']))
-        flows = [(r['ts'], float(r['usd'])) for r in cur.fetchall()]
-    return {'equity_usd': float(sst['equity_usd']) + float(sst['uncounted_usd']),
-            'flows': [(base['ts'], float(base['usd']))] + flows}
-
-
-def governor_state(profile):
-    """(paying, switched_at) of the equity governor, as the bot last wrote it."""
-    with cursor() as cur:
-        cur.execute('select governor_paying, governor_switched_at from config where name = %s', (profile,))
-        r = cur.fetchone()
-    return (bool(r['governor_paying']), r['governor_switched_at']) if r else (False, None)
-
-
-def set_governor_state(profile, paying):
-    """Record a switch of the equity governor."""
-    with cursor(commit=True) as cur:
-        cur.execute('update config set governor_paying = %s, governor_switched_at = now(), updated_at = now() '
-                    'where name = %s', (bool(paying), profile))
-
-
 def governor_view(name, cfg, fees_per_day):
     """The payout governor as the book shows it (lp/governor.py, sql/053):
     the profile's closed bands of the last governor_days (fees, re-centre
@@ -1729,8 +1692,6 @@ def governor_view(name, cfg, fees_per_day):
     per day at `fees_per_day`: paid out and reinvested. The band read is
     cached GOVERNOR_VIEW_S. None when it cannot be read."""
     from lp import governor                       # lp.governor imports db
-    if (cfg.get('governor_mode') or 'profit') == 'equity':
-        return _equity_governor_view(name, cfg, fees_per_day)
     days = float(cfg.get('governor_days') or 7)
     keep = float(cfg['governor_keep']) if cfg.get('governor_keep') is not None else 0.2
     cap = float(cfg['governor_cap']) if cfg.get('governor_cap') is not None else 0.5
@@ -1748,36 +1709,6 @@ def governor_view(name, cfg, fees_per_day):
     return {'days': days, 'keep': keep, 'cap': cap, 'bands': m['bands'], 'fees_usd': round(m['fees'], 4),
             'ratio': governor.ratio(m['fees'], m['loss']),
             'loss_usd': round(m['loss'], 4), 'profit_usd': round(m['fees'] + m['loss'], 4), 'share': round(share, 4),
-            'fees_per_day_usd': round(rate, 4) if rate is not None else None,
-            'paid_per_day_usd': round(rate * share, 4) if rate is not None else None,
-            'reinvested_per_day_usd': round(rate * (1 - share), 4) if rate is not None else None}
-
-
-def _equity_governor_view(name, cfg, fees_per_day):
-    """governor_view of the equity mode (sql/054): the state the bot last
-    wrote, the share it pays, the equity against its target, the equity at
-    which it switches, and the paid and reinvested per day at `fees_per_day`.
-    The share is the one the next harvest pays at the equity now. None when
-    it cannot be read."""
-    from lp import governor
-    floor, high = float(cfg['governor_floor']), float(cfg['governor_high'])        # not null (sql/054)
-    enter, exit_, growth = float(cfg['governor_enter_pct']), float(cfg['governor_exit_pct']), float(cfg['governor_growth_pct'])
-    try:
-        m = governor.equity_measure(name, growth)
-        paying, since = governor_state(name)
-    except Exception:
-        return None
-    if not m:
-        return None
-    share, on = governor.equity_share(m['gap_pct'], paying, enter, exit_, floor, high)
-    rate = float(fees_per_day) if fees_per_day is not None else None
-    t = m['target_usd']
-    return {'mode': 'equity', 'state': 'PAY' if on else 'REINVEST', 'share': round(share, 4),
-            'floor': floor, 'high': high, 'enter_pct': enter, 'exit_pct': exit_, 'growth_pct': growth,
-            'equity_usd': round(m['equity_usd'], 2), 'target_usd': round(t, 2), 'put_in_usd': round(m['put_in_usd'], 2),
-            'gap_pct': round(m['gap_pct'], 2), 'gap_usd': round(m['equity_usd'] - t, 2),
-            'enter_at_usd': round(t * (1 + enter / 100), 2), 'exit_at_usd': round(t * (1 + exit_ / 100), 2),
-            'switched_at': since.isoformat() if since else None,
             'fees_per_day_usd': round(rate, 4) if rate is not None else None,
             'paid_per_day_usd': round(rate * share, 4) if rate is not None else None,
             'reinvested_per_day_usd': round(rate * (1 - share), 4) if rate is not None else None}

@@ -1,22 +1,14 @@
-"""Register a profile, its wallet if new, and its swing if any.
+"""Register a profile and its wallet if new.
 
-The profile takes every tuning column of a template profile on the same
-chain (as deploy.sh did for the stock profiles), then its own pool (read
-from the venue: mints, symbols), wallet and switches. A swing profile (both
---swing-open and --swing-closed) gets a rebalancer.swing row and allow_swap;
-the tool prints the systemd drop-in that pins its two pools
-(LPBOT_SWING_POOLS: the profile's process refuses a pair change to any
-other pool). A dry run by default: it prints every row and writes nothing.
-It never touches systemd itself.
+The profile takes every tuning column of a template profile, then its own
+pool (read from the venue: mints, symbols), wallet and switches. A dry run by
+default: it prints every row and writes nothing. It never touches systemd.
 
     LPBOT_DSN=dbname=rebalancer python3 ops/add_profile.py \\
-        --profile sol-swing --template sol-usdc \\
-        --wallet sol-lp2 --address FogqBWLC4y94csrniURTbGrx7ff7jFa4e2qp1GsgyAmM \\
-        --secret-env LPBOT_SOL2_KEY_PATH --label 'SOL swing wallet' \\
+        --profile sol-lp3 --template sol-usdc \\
+        --wallet sol-lp3 --address <address> --secret-env LPBOT_SOL3_KEY_PATH --label 'third SOL wallet' \\
         --dex raydium-clmm --pool 8sLbNZoA1cfnvMJLPfp98ZLAnFSYCFApfJKMbiXNLwxj \\
-        --execute-dexes raydium-clmm,orca --signer-env LPBOT_ORCA_ADAPTIVE=1 --deposit-mint USDC \\
-        --swing-open 'orca 7gkB2D1SqhUYgKrSpDU5cma4tK9efijHouYituABdJcG' \\
-        --swing-closed 'raydium-clmm 8sLbNZoA1cfnvMJLPfp98ZLAnFSYCFApfJKMbiXNLwxj' [--apply]
+        --execute-dexes raydium-clmm,orca --deposit-mint USDC [--apply]
 """
 import argparse
 import pathlib
@@ -33,7 +25,6 @@ import engine  # noqa: E402
 import guards  # noqa: E402
 import rebalancer  # noqa: E402
 import lp.signers  # noqa: E402
-import swing  # noqa: E402
 import wallets  # noqa: E402
 
 # What a new profile never takes from its template: identity, pool, wallet
@@ -46,8 +37,7 @@ VENUES = tuple(d for d in lp.signers.SIGNERS if d not in ('jupiter', 'orca-swap'
 WALLET_ID = re.compile(r'^[a-z0-9][a-z0-9-]{1,40}$')
 SECRET_ENV = re.compile(r'^[A-Z][A-Z0-9_]{2,63}$')
 # An address on each chain the wallets table allows (its wallets_check).
-EVM_ADDRESS = lambda s: isinstance(s, str) and re.fullmatch(r'0x[0-9a-fA-F]{40}', s) is not None
-ADDRESS = {'solana': guards.is_address, 'base': EVM_ADDRESS, 'unichain': EVM_ADDRESS, 'polygon': EVM_ADDRESS}
+ADDRESS = {'solana': guards.is_address}
 
 
 class Refused(ValueError):
@@ -92,7 +82,7 @@ def fee_terms(args, chain, vault):
 
 
 def build(args, template, rec, wallet, others, vault=False):
-    """(wallet row or None, config row, swing row or None) for `args`.
+    """(wallet row or None, config row) for `args`.
     `template` is the template's config row (with its wallet's chain as
     'chain'), `rec` the pool record (dexes.pool), `wallet` the existing
     wallets row or None, `others` how many profiles the wallet holds
@@ -119,7 +109,7 @@ def build(args, template, rec, wallet, others, vault=False):
     elif args.address and args.address != wallet['address']:
         raise Refused(f'wallet {args.wallet} exists with address {wallet["address"]}, not {args.address}')
     a, b = rec['token_a'], rec['token_b']
-    norm = wallets.norm                           # EVM addresses in lower case
+    norm = wallets.norm
     mints = [norm(a['address']), norm(b['address'])]
     stables = {norm(m) for m in engine.STABLE_MINTS}
     if not set(mints) & stables:
@@ -130,19 +120,6 @@ def build(args, template, rec, wallet, others, vault=False):
     execute = [d for d in (args.execute_dexes or args.dex).split(',') if d]
     if args.dex not in execute or any(d not in VENUES for d in execute):
         raise Refused(f'--execute-dexes {execute} must be known venues and include {args.dex}')
-    swing_row = None
-    if bool(args.swing_open) != bool(args.swing_closed):
-        raise Refused('a swing needs both --swing-open and --swing-closed')
-    if args.swing_open:
-        op, cl = pool_spec(args.swing_open, chain), pool_spec(args.swing_closed, chain)
-        if op[1] == cl[1] or args.pool not in (op[1], cl[1]):
-            raise Refused('the swing pools differ, and the profile starts on one of them')
-        if {op[0], cl[0]} - set(execute):
-            raise Refused(f'every swing venue must be in --execute-dexes {execute}')
-        if args.calendar not in swing.CALENDARS:
-            raise Refused(f'unknown calendar {args.calendar!r}; known: {sorted(swing.CALENDARS)}')
-        swing_row = {'profile': args.profile, 'open_dex': op[0], 'open_pool': op[1], 'closed_dex': cl[0],
-                     'closed_pool': cl[1], 'calendar': args.calendar, 'lead_s': args.lead_s}
     special, fee_bps, fee_wallet = fee_terms(args, chain, vault)
     row = {c: v for c, v in template.items() if c not in SKIP | {'chain'}}
     if getattr(args, 'profit_wallet', None):
@@ -164,12 +141,12 @@ def build(args, template, rec, wallet, others, vault=False):
                pair_label=f'{a["symbol"]}/{b["symbol"]}', token_a=a['symbol'], token_b=b['symbol'],
                wallet_id=args.wallet, enabled=True, deposit_mint=deposit, residual_owner=others == 0,
                mints=mints, pool_pinned=True, regime_enabled=True, rebalance_swap=True,
-               allow_swap=swing_row is not None, signer_env=signer_env(args.signer_env) or None,
+               allow_swap=False, signer_env=signer_env(args.signer_env) or None,
                special=special, fee_bps=fee_bps, fee_wallet=fee_wallet)
-    return new_wallet, row, swing_row
+    return new_wallet, row
 
 
-def insert_rows(cur, new_wallet, row, swing_row):
+def insert_rows(cur, new_wallet, row):
     """Write what build() returned with `cur`; the caller commits."""
     keys = list(row)
     # jsonb columns (signer_env and any later one) go in as JSON; a dict is not a SQL value
@@ -177,19 +154,6 @@ def insert_rows(cur, new_wallet, row, swing_row):
     if new_wallet:
         cur.execute('insert into wallets (id, chain, address, secret_env, label) values (%s,%s,%s,%s,%s)', new_wallet)
     cur.execute(f'insert into config ({", ".join(keys)}) values ({", ".join(["%s"] * len(keys))})', vals)
-    if swing_row:
-        cols = list(swing_row)
-        cur.execute(f'insert into swing ({", ".join(cols)}) values ({", ".join(["%s"] * len(cols))})',
-                    [swing_row[c] for c in cols])
-
-
-def drop_in(swing_row):
-    """The systemd drop-in that pins a swing profile's pools. Pure."""
-    return (f'# /etc/systemd/system/lp-bot@{swing_row["profile"]}.service.d/swing.conf\n'
-            f'# The pools a pair-changing move of {swing_row["profile"]} may name (config.SWING_POOLS).\n'
-            # a comma, not a space: systemd splits an unquoted Environment= value at
-            # whitespace, and the second pool would be dropped (2026-10-02)
-            f'[Service]\nEnvironment=LPBOT_SWING_POOLS={swing_row["open_pool"]},{swing_row["closed_pool"]}\n')
 
 
 def parse(argv):
@@ -211,8 +175,6 @@ def parse(argv):
     p.add_argument('--execute-dexes', help='comma list; default: --dex')
     p.add_argument('--signer-env', action='append', help='KEY=VALUE, from config.SIGNER_ENV_ALLOWED')
     p.add_argument('--deposit-mint', help='mint or symbol; default: the non-stable side')
-    p.add_argument('--swing-open'), p.add_argument('--swing-closed')
-    p.add_argument('--calendar', default='nyse'), p.add_argument('--lead-s', type=int, default=300)
     p.add_argument('--apply', action='store_true')
     return p.parse_args(argv)
 
@@ -234,22 +196,18 @@ def main(argv):
     if exists:
         raise SystemExit(f'ERROR: profile {args.profile} exists; nothing written')
     try:
-        new_wallet, row, swing_row = build(args, dict(template), dexes.pool(args.dex, args.pool), wallet, others,
-                                           vault=db.vault_row(args.wallet) is not None)
+        new_wallet, row = build(args, dict(template), dexes.pool(args.dex, args.pool), wallet, others,
+                                vault=db.vault_row(args.wallet) is not None)
     except Refused as e:
         raise SystemExit(f'ERROR: {e}')
     print('wallet:', new_wallet or f'{args.wallet} (exists)')
     print('profile:', {k: row[k] for k in sorted(row)})
-    print('swing:', swing_row)
-    if swing_row:
-        print(drop_in(swing_row))
     if not args.apply:
         print('DRY RUN: pass --apply to write')
         return 0
     with db.cursor(commit=True) as cur:
-        insert_rows(cur, new_wallet, row, swing_row)
-    print(f'written. Next: install the drop-in above (swing), then '
-          f'sudo systemctl enable --now lp-bot@{args.profile}' + (' lp-swing' if swing_row else ''))
+        insert_rows(cur, new_wallet, row)
+    print(f'written. Next: sudo systemctl enable --now lp-bot@{args.profile}')
     return 0
 
 

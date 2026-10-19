@@ -2,12 +2,11 @@
 // except verify() (it hashes and checks a signature, nothing else).
 //
 // The server builds the message from fields it validated, keeps it under a
-// fresh nonce, and the owner's wallet signs exactly that text: Solana with
-// signMessage (ed25519 over the UTF-8 bytes), Polygon with personal_sign
-// (EIP-191). Only the stored message and its fields are ever acted on.
+// fresh nonce, and the owner's wallet signs exactly that text with
+// signMessage (ed25519 over the UTF-8 bytes). Only the stored message and
+// its fields are ever acted on.
 import crypto from 'node:crypto';
 import { createRequire } from 'module';
-import { getAddress, isAddress, recoverMessageAddress } from 'viem';
 import { toRaw, fromRaw } from './units.mjs';
 
 const require = createRequire(import.meta.url);
@@ -29,23 +28,20 @@ export const own = (obj, key) => (Object.hasOwn(obj ?? {}, key) ? obj[key] : und
 // A field as text: a JSON string, trimmed; anything else is empty.
 export const text = (s) => (typeof s === 'string' ? s.trim() : '');
 
-// An owner or payout address on `chain`, in its one canonical spelling. A
-// Solana wallet must be a key (on the curve): a vault or token account
-// pasted by mistake cannot sign and would strand the payouts.
+// An owner or payout address on `chain` (Solana only), in its one canonical
+// spelling. A Solana wallet must be a key (on the curve): a vault or token
+// account pasted by mistake cannot sign and would strand the payouts.
 export function address(chain, s, what) {
+  if (chain !== 'solana') throw new Invalid(`chain ${chain}: Solana only`);
   const v = text(s);
-  if (chain === 'solana') {
-    let k = null;
-    if (SOLANA_ADDRESS.test(v)) { try { k = new PublicKey(v); } catch { k = null; } }
-    if (!k || k.toBase58() !== v) throw new Invalid(`${what}: not a Solana address`);
-    if (!PublicKey.isOnCurve(k.toBytes())) throw new Invalid(`${what}: not a wallet (an account address, not a key)`);
-    return v;
-  }
-  if (!isAddress(v, { strict: false })) throw new Invalid(`${what}: not an address`);
-  return getAddress(v);
+  let k = null;
+  if (SOLANA_ADDRESS.test(v)) { try { k = new PublicKey(v); } catch { k = null; } }
+  if (!k || k.toBase58() !== v) throw new Invalid(`${what}: not a Solana address`);
+  if (!PublicKey.isOnCurve(k.toBytes())) throw new Invalid(`${what}: not a wallet (an account address, not a key)`);
+  return v;
 }
 
-export const sameAddress = (chain, a, b) => chain === 'solana' ? a === b : String(a).toLowerCase() === String(b).toLowerCase();
+export const sameAddress = (chain, a, b) => a === b;
 
 // A decimal as typed: a phone keyboard in many regions (iPhone, pt-BR) has a
 // comma, not a point, so one comma and no point is a decimal comma ("0,18").
@@ -258,22 +254,17 @@ export function signedForms(text, owner, signed = null) {
   return [raw, ...offchainFormats(raw).map(f => offchainShort(text, f))];
 }
 
-// Whether `signature` is `owner`'s over `text`. Solana: a base58 or base64
-// ed25519 signature by the owner's key over the text or over an off-chain
-// message of it (signedForms; `signed` is what the wallet reports it signed).
-// EVM: an EIP-191 signature whose recovered signer is the owner.
+// Whether `signature` is `owner`'s over `text`: a base58 or base64 ed25519
+// signature by the owner's key over the text or over an off-chain message of
+// it (signedForms; `signed` is what the wallet reports it signed). Any chain
+// but Solana: false.
 export async function verify(chain, owner, text, signature, signed = null) {
-  if (chain === 'solana') {
-    const sig = decodeSignature(signature);
-    if (sig.length !== 64) return false;
-    const key = crypto.createPublicKey({ format: 'jwk', key: { kty: 'OKP', crv: 'Ed25519', x: Buffer.from(new PublicKey(owner).toBytes()).toString('base64url') } });
-    if (signed !== null && !/^[A-Za-z0-9+/]+={0,2}$/.test(String(signed))) return false;
-    return signedForms(text, owner, signed).some(m => crypto.verify(null, m, key, sig));
-  }
-  if (!/^0x[0-9a-fA-F]{130}$/.test(String(signature))) return false;
-  try {
-    return (await recoverMessageAddress({ message: text, signature })).toLowerCase() === owner.toLowerCase();
-  } catch { return false; }
+  if (chain !== 'solana') return false;
+  const sig = decodeSignature(signature);
+  if (sig.length !== 64) return false;
+  const key = crypto.createPublicKey({ format: 'jwk', key: { kty: 'OKP', crv: 'Ed25519', x: Buffer.from(new PublicKey(owner).toBytes()).toString('base64url') } });
+  if (signed !== null && !/^[A-Za-z0-9+/]+={0,2}$/.test(String(signed))) return false;
+  return signedForms(text, owner, signed).some(m => crypto.verify(null, m, key, sig));
 }
 
 // A signature's 64 bytes from base58 or base64, or no bytes.

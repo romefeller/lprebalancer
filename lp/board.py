@@ -12,7 +12,6 @@ import health
 import wallets
 from venues import solana_state
 from venues.meteora_dlmm import pools as meteora_pools
-from venues.uniswap_v3 import pools as uniswap_pools
 from lp import books, capital, harvest, moves, paths, regime, signers, swaps, tuning
 
 FAILOVER_MIN_RATIO = 0.8          # a failover target earns at least this share of the held venue
@@ -272,12 +271,8 @@ def venue_candidates():
 def sample_fee_growth(state, status=None):
     """Every VENUE_SAMPLE_S: one RPC call reads the fee counters of the held
     pool and every same-pair candidate, stores one sample each, and refreshes
-    the ranking the book shows. Only where the chain has the counters. On a
-    Uniswap v3 venue (Unichain, Polygon) the held pool's own counters are
-    sampled, so the hot pause has its fee side (2026-10-08)."""
+    the ranking the book shows. Only where the chain has the counters."""
     if not config.CAPS.get('venues'):
-        if config.DEX in uniswap_pools.UNISWAP_V3:
-            sample_v3_fee_growth(state)
         return
     if time.time() - state.get('last_fee_sample', 0) < config.VENUE_SAMPLE_S:
         return
@@ -296,25 +291,6 @@ def sample_fee_growth(state, status=None):
             venue_view(status['price'], status['quoteUsd'])
     except Exception as e:
         books.notify('venue_sample_failed', reason=books.tidy(e))
-
-
-def sample_v3_fee_growth(state):
-    """The held Uniswap v3 pool's fee counters into fee_growth, every
-    VENUE_SAMPLE_S, under the profile's pool key (the tape's and the hot
-    pause's). A failed read is said once per kind of error and retried at
-    the next sample; it never stops the poll."""
-    if time.time() - state.get('last_fee_sample', 0) < config.VENUE_SAMPLE_S:
-        return
-    state['last_fee_sample'] = time.time(); paths.save(state)
-    try:
-        st = uniswap_pools.uniswap_v3_fee_state(config.POOL, dex=config.DEX)
-        db.record_fee_state(config.DEX, config.POOL, st)
-        state.pop('fee_sample_failed_told', None)
-    except Exception as e:
-        why = books.tidy(e)
-        if state.get('fee_sample_failed_told') != why:
-            state['fee_sample_failed_told'] = why; paths.save(state)
-            books.notify('venue_sample_failed', reason=why)
 
 
 def venue_income(pool, usd_a, usd_b, band=1.01, hours=24):

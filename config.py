@@ -66,10 +66,6 @@ CUSTODY = 'vault' if VAULT else 'key'
 DEPOSIT_MINT = _CFG.get('deposit_mint')
 RESIDUAL_OWNER = bool(_CFG.get('residual_owner')) or not WALLET_ID
 MIN_DEPLOY_USD = float(_CFG.get('min_deploy_usd') or 5.0)
-# Native coin kept for gas; the rest is wrapped into the pool's token each poll,
-# on a chain whose wrapped native is a pool token (chains.py 'wrapped_native':
-# Polygon's WPOL). 0 or unset: never wrap (sql/035).
-NATIVE_KEEP = _env('LPBOT_NATIVE_KEEP', float, float(_CFG.get('native_keep') or 0))
 db.set_context(PROFILE, WALLET_ID)
 
 # Per-profile runtime files: state, feed and the operator triggers. A HALT
@@ -114,12 +110,6 @@ MAX_USD = _env('LPBOT_MAX_USD', float, float(_CFG['max_usd']))
 # Native SOL never spent, whatever the pool holds. A wallet that cannot pay a
 # fee cannot close its own position.
 GAS_RESERVE_SOL = _env('LPBOT_GAS_RESERVE_SOL', float, float(_CFG['gas_reserve_sol']))
-# Native coin the gas is refilled to from the pool's wrapped native token, on an
-# EVM chain whose wrapped native is a pool token (sql/041, capital.refill_gas).
-# Never above native_keep when that is on: the wrap would take the refill back.
-# 0 or unset: never refill.
-_REFILL_TO = _env('LPBOT_GAS_REFILL_TO', float, float(_CFG.get('gas_refill_to') or 0))
-GAS_REFILL_TO = min(_REFILL_TO, NATIVE_KEEP) if NATIVE_KEEP > 0 else _REFILL_TO
 # Each token's deposit cap as a fraction of capital. A centred band takes about
 # half of each; the margin over 0.5 absorbs price movement between quote and fill.
 SIDE_CAP_FRACTION = _env('LPBOT_SIDE_CAP', float, float(_CFG['side_cap_fraction']))
@@ -171,8 +161,6 @@ MIGRATE_MIN_GAIN = _env('LPBOT_MIGRATE_MIN_GAIN', float, float(_CFG.get('migrate
 # DEXes the bot may actually open positions on: the ones with a signer.
 EXECUTE_DEXES = tuple(_env('LPBOT_EXECUTE_DEXES', _list, list(_CFG.get('execute_dexes') or ['orca'])))
 # A vault acts only where its owners approved a policy.
-if VAULT and (VAULT['kind'] == 'safe') != (CHAIN != 'solana'):
-    raise SystemExit(f'profile {PROFILE}: a {VAULT["kind"]} vault cannot serve chain {CHAIN}')
 if VAULT and not set(EXECUTE_DEXES) <= set(VAULT['venues']):
     raise SystemExit(f'profile {PROFILE}: execute_dexes {sorted(EXECUTE_DEXES)} include venues the vault has no '
                      f'approved policy for (approved: {sorted(VAULT["venues"])})')
@@ -183,10 +171,9 @@ POOL_PINNED = _env('LPBOT_POOL_PINNED', lambda s: s.lower() in ('1', 'true', 'ye
 # it may, migration is limited to pools of the pair the wallet already holds.
 ALLOW_SWAP = _env('LPBOT_ALLOW_SWAP', lambda s: s.lower() in ('1', 'true', 'yes'),
                   bool(_CFG.get('allow_swap')))
-# The pools a pair-changing operator move may name (the swing, swing.py):
-# from the service environment, never the database, so a database write
-# alone cannot swap the capital into another token (security review,
-# 2026-09-26). Empty: no pair-changing operator move.
+# The pools a pair-changing operator move may name: from the service
+# environment, never the database, so a database write alone cannot swap the
+# capital into another token (security review, 2026-09-26). Empty: none.
 SWING_POOLS = tuple(p for p in os.environ.get('LPBOT_SWING_POOLS', '').replace(',', ' ').split() if p)
 
 # A voluntary move (reband, pool move) waits for a quiet hour, one whose
@@ -320,24 +307,13 @@ PAYOUT_MINT = _env('LPBOT_PAYOUT_MINT', str, _CFG.get('payout_mint') or '')
 # The payout governor (sql/053, owner 2026-10-18): each harvest pays out the
 # share of its fees that the profile's closed bands of the last GOVERNOR_DAYS
 # earned above their re-centre loss, minus GOVERNOR_KEEP of that profit
-# (kept, so the LP grows), never above GOVERNOR_CAP (lp/governor.py). Off:
-# every payout-token fee is paid, as before.
+# (kept, so the LP grows), never above GOVERNOR_CAP (1.0 since sql/058: no
+# cap; the payout follows R, lp/governor.py). Off: every payout-token fee is
+# paid, as before.
 PAYOUT_GOVERNOR = bool(_CFG.get('payout_governor'))
 GOVERNOR_DAYS = float(_CFG.get('governor_days') or 7)
 GOVERNOR_KEEP = float(_CFG['governor_keep']) if _CFG.get('governor_keep') is not None else 0.2
 GOVERNOR_CAP = float(_CFG['governor_cap']) if _CFG.get('governor_cap') is not None else 0.5
-# The equity governor (sql/054, owner 2026-10-18): GOVERNOR_MODE 'equity' pays
-# GOVERNOR_HIGH of each harvest while the equity is ahead of its target, else
-# GOVERNOR_FLOOR. It starts paying HIGH at GOVERNOR_ENTER_PCT above the target
-# and goes back at GOVERNOR_EXIT_PCT or less. The target is the money put in,
-# grown GOVERNOR_GROWTH_PCT per 30 days. 'profit' is the 053 rule above. The
-# state (paying or not) is read from the database at each harvest.
-GOVERNOR_MODE = _CFG.get('governor_mode') or 'profit'
-GOVERNOR_FLOOR = float(_CFG['governor_floor']) if _CFG.get('governor_floor') is not None else 0.05
-GOVERNOR_HIGH = float(_CFG['governor_high']) if _CFG.get('governor_high') is not None else 0.3
-GOVERNOR_ENTER_PCT = float(_CFG['governor_enter_pct']) if _CFG.get('governor_enter_pct') is not None else 5.0
-GOVERNOR_EXIT_PCT = float(_CFG['governor_exit_pct']) if _CFG.get('governor_exit_pct') is not None else 2.0
-GOVERNOR_GROWTH_PCT = float(_CFG['governor_growth_pct']) if _CFG.get('governor_growth_pct') is not None else 2.0
 # An instance of the operator's own pays nothing; any other pays fee_bps of
 # its payout-token fees to fee_wallet at each harvest. Only a vault instance
 # can pay one: the chain then lets payouts reach the approved wallets only.
@@ -363,7 +339,7 @@ def policy():
 def public_rpc(chain, caps, env=os.environ):
     """The public endpoint of `chain`: SOLANA_RPC_URL or mainnet-beta on
     Solana; on another chain the row's rpc_env, else its public_rpc
-    (chains.py; LPBOT_BASE_RPC on Base). Pure."""
+    (chains.py). Pure."""
     if chain == 'solana':
         return env.get('SOLANA_RPC_URL') or 'https://api.mainnet-beta.solana.com'
     return env.get(caps['rpc_env']) or caps['public_rpc']
@@ -397,7 +373,7 @@ WALLET = _env('LPBOT_WALLET', str, os.environ.get(WALLET_SECRET_ENV, ''))
 
 def vault_env(dex):
     """What a signer needs to act for this profile's vault on `dex`
-    (chains/solana/vault/account.mjs, chains/evm/vault/account.mjs), or {}
+    (chains/solana/vault/account.mjs), or {}
     without a vault. Raises ValueError for a venue the owners approved no
     policy for: nothing may be signed there. Pure over VAULT and the
     environment."""
@@ -406,10 +382,6 @@ def vault_env(dex):
     v = VAULT['venues'].get(dex)
     if not v:
         raise ValueError(f'the vault has no approved policy for {dex} (approved: {sorted(VAULT["venues"]) or "none"})')
-    if VAULT['kind'] == 'safe':
-        # One key on an EVM chain: the wallet's own sends through the Roles module.
-        return {'LPBOT_VAULT_SAFE': VAULT['settings'], 'LPBOT_VAULT_ROLES': v['policies'][0], 'LPBOT_VAULT_VENUE': dex,
-                'LPBOT_VAULT_POOLS': ','.join(v['pools']), 'LPBOT_VAULT_PAYOUTS': ','.join(v['payouts'])}
     key_path = os.environ.get(VAULT['policy_key_env'], '')
     if not key_path:
         raise ValueError(f'{VAULT["policy_key_env"]} (the path of the vault\'s policy key) is not set')
@@ -450,7 +422,6 @@ def summary():
         'capital_usd': CAPITAL_USD,
         'max_usd': MAX_USD,
         'gas_reserve_sol': GAS_RESERVE_SOL,
-        'gas_refill_to': GAS_REFILL_TO or None,
         'bands': [f'+/-{(b - 1) * 100:.0f}%' for b in BANDS],
         'max_modelled_rebalances_per_day': MAX_REBALANCES_PER_DAY_MODELLED,
         'poll_seconds': POLL_SECONDS,

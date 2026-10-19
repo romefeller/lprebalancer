@@ -6,8 +6,8 @@
 //   node build.mjs --pins <file.json> --out <bundle.js>      # tests: other bot keys
 //
 // The bundle carries the PINS: the bot's public keys, the operator's wallets,
-// the approved pools and token addresses (onboard.json, solana.json, the
-// Polygon module) and the vault rules (rules.json), with the SHA-256 of
+// the approved pools and token addresses (onboard.json, solana.json) and the
+// vault rules (rules.json), with the SHA-256 of
 // rules.json. The page checks every transaction against these, never against
 // what the server says. Exact versions (package-lock.json); the output is
 // deterministic for one checkout, so a reviewer can rebuild and compare.
@@ -28,8 +28,7 @@ export async function pins(over = {}) {
   const cfg = JSON.parse(fs.readFileSync(path.join(ONBOARD, 'onboard.json'), 'utf8'));
   const solana = JSON.parse(fs.readFileSync(path.join(ROOT, 'chains/solana/solana.json'), 'utf8'));
   const rulesBytes = fs.readFileSync(path.join(ROOT, 'chains/solana/vault/rules.json'));
-  const P = await import(path.join(ROOT, 'chains/evm/polygon.mjs'));
-  const sol = cfg.chains.solana, poly = cfg.chains.polygon;
+  const sol = cfg.chains.solana;
   const out = {
     rulesSha256: crypto.createHash('sha256').update(rulesBytes).digest('hex'),
     site: cfg.site,
@@ -38,17 +37,8 @@ export async function pins(over = {}) {
       pools: Object.fromEntries(Object.entries(solana[sol.poolsKey]).map(([v, p]) => [v, [p, ...(solana.vault_extra_pools?.[v] ?? [])]])),
       tokens: Object.fromEntries(Object.entries(sol.tokens).map(([s, t]) => [s, { mint: solana[t.mintKey], decimals: t.decimals, native: Boolean(t.native) }])),
     },
-    polygon: {
-      chainId: P.CHAIN_ID, botKey: poly.botKeys[0], operator: poly.operatorWallet, npm: P.V3.positionManager ?? P.V3.npm ?? P.V3.nonfungiblePositionManager,
-      wrapped: { WPOL: P.WPOL },
-      // the owner's own vault (decode_evm.mjs createVault): the Safe and Zodiac contracts, the router
-      // and stables the rules name, and the one pool (onboard.json's, WPOL/USDT0 at 0.05%)
-      vault: { ...P.VAULT }, router: P.V3.router, stables: [...P.STABLES], venue: P.DEX,
-      pool: { token0: P.WPOL, token1: P.USDT0, fee: 500 },
-      tokens: Object.fromEntries(Object.entries(poly.tokens).map(([s, t]) => [s, { address: t.native ? null : P[s], decimals: t.decimals, native: Boolean(t.native) }])),
-    },
   };
-  return { ...out, ...over, solana: { ...out.solana, ...(over.solana ?? {}) }, polygon: { ...out.polygon, ...(over.polygon ?? {}) } };
+  return { ...out, ...over, solana: { ...out.solana, ...(over.solana ?? {}) } };
 }
 
 // Bare imports resolve from onboard/web/node_modules only (the versions this

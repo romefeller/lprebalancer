@@ -4,7 +4,7 @@ const n = (x, d = 2) => (x === undefined || x === null || Number.isNaN(Number(x)
 const sign = (x) => (x === undefined || x === null ? '—' : (Number(x) >= 0 ? '+' : '') + n(x));
 
 // --- the price as the owner reads it ---------------------------------------------------
-// Every price the bot speaks is token B per token A. On USDC/HYPE (Unichain) token A is the
+// Every price the bot speaks is token B per token A. On USDC/HYPE token A is the
 // stable, so that price is HYPE per USDC (0.011): the book shows the volatile token in
 // dollars instead (HYPE $90.62), band edges and moves turned the same way. Pairs with the
 // stable as token B (SOL/USDC, WETH/USDC) are shown as before.
@@ -64,11 +64,10 @@ export function equityLine(r) {
 }
 
 // The P&L in its two parts: what the LP kept (equity against the money put
-// in: the payout governor's measure, sql/054) and what was paid out (payouts
-// and gas refills). Empty without the payout figures.
+// in) and what was paid out. Empty without the payout figures.
 export function pnlParts(s) {
   if (s.paid_out_usd == null) return '';
-  const out = Number(s.paid_out_usd) + Number(s.gas_refill_usd ?? 0);
+  const out = Number(s.paid_out_usd);
   return ` (in LP ${sign(Number(s.profit_usd) - out)} · paid out ${sign(out)})`;
 }
 
@@ -192,7 +191,7 @@ export function redact(text, secrets = secretValues()) {
 // The daily PORTFOLIO (stats.portfolio()): every active pool by wallet (named
 // by id and address tag), the wallet subtotals, the TOTAL in dollars (token
 // amounts never add across pools), and the dormant and disabled profiles by
-// name. A profile that held several pools (sol-swing) lists each one's fees.
+// name. A profile that held several pools lists each one's fees.
 export function portfolioText(p) {
   const d = (x, k = 2) => (x == null ? '—' : `$${n(x, k)}`);
   const pct = (x) => (x == null ? '—' : `${n(x, 0)}%`);

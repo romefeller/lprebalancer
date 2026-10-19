@@ -52,19 +52,7 @@ class ReadBalances(unittest.TestCase):
     def test_no_mints_reads_nothing_and_is_at_the_head(self):
         with mock.patch.object(wallets, '_rpc', Rpc()):
             self.assertEqual(wallets.read_balances('solana', 'u', 'o', [], SOL), ({}, 0))
-        with mock.patch.object(wallets, '_rpc', Rpc(eth_blockNumber=['0x4d'])):
-            self.assertEqual(wallets.read_balances('base', 'u', '0x' + 'ab' * 20, [], SOL), ({}, 77))
-
-    def test_a_head_read_is_tried_again_once(self):
-        rpc = Rpc(eth_blockNumber=[OSError('x'), '0x4d'])
-        with mock.patch.object(wallets, '_rpc', rpc):
-            self.assertEqual(wallets.read_balances('base', 'u', '0x' + 'ab' * 20, [], SOL), ({}, 77))
-        with mock.patch.object(wallets, '_rpc', Rpc(eth_blockNumber=[OSError('x'), OSError('y')])):
-            self.assertIsNone(wallets.read_balances('base', 'u', '0x' + 'ab' * 20, [], SOL))
-        rpc = Rpc(eth_blockNumber=[OSError('x'), OSError('y'), OSError('z'), '0x1'])
-        with mock.patch.object(wallets, '_rpc', rpc):
-            self.assertEqual(wallets.read_balances('base', 'u', '0x' + 'ab' * 20, [], SOL, tries=4), ({}, 1))
-
+        self.assertIsNone(wallets.read_balances('base', 'u', '0x' + 'ab' * 20, [], SOL))   # no reader: no chain
 
 class WriteSlot(unittest.TestCase):
     def status(self, slot, how='confirmed'):
@@ -78,22 +66,6 @@ class WriteSlot(unittest.TestCase):
         for unknown in (None, self.status(5, 'processed'), {'slot': 5}):
             with mock.patch.object(wallets, '_rpc', Rpc(getSignatureStatuses=[{'value': [self.status(5), unknown]}])):
                 self.assertIsNone(wallets.write_slot('solana', 'u', ['a', 'b']), unknown)
-
-    def test_evm_every_receipt_and_the_latest_block(self):
-        rpc = Rpc(eth_getTransactionReceipt=[{'blockNumber': '0x20'}, {'blockNumber': '0x10'}])
-        with mock.patch.object(wallets, '_rpc', rpc):
-            self.assertEqual(wallets.write_slot('base', 'u', ['0xa', '0xb']), 32)
-        self.assertEqual([c[2] for c in rpc.calls], [10, 10])
-        for missing in (None, {}, {'blockNumber': None}):
-            with mock.patch.object(wallets, '_rpc', Rpc(eth_getTransactionReceipt=[{'blockNumber': '0x1'}, missing])):
-                self.assertIsNone(wallets.write_slot('base', 'u', ['0xa', '0xb']), missing)
-
-    def test_the_timeout_is_passed_on(self):
-        rpc = Rpc(eth_getTransactionReceipt=[{'blockNumber': '0x1'}])
-        with mock.patch.object(wallets, '_rpc', rpc):
-            wallets.write_slot('base', 'u', ['0xa'], timeout=3)
-        self.assertEqual(rpc.calls[0][2], 3)
-
 
 class SettleState(unittest.TestCase):
     def test_a_wallet_never_written_is_at_slot_0(self):

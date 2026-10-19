@@ -90,7 +90,7 @@ class Exit(unittest.TestCase):
         with mock.patch.object(loop.config, 'VAULT', None), mock.patch.object(loop.db, 'owner_exit_pending') as read:
             self.assertIsNone(loop.owner_exit())
         read.assert_not_called()
-        with mock.patch.object(loop.config, 'VAULT', {'kind': 'safe'}), \
+        with mock.patch.object(loop.config, 'VAULT', {'kind': 'squads'}), \
                 mock.patch.object(loop.db, 'owner_exit_pending', side_effect=RuntimeError('db down')):
             self.assertIsNone(loop.owner_exit(), 'an unreadable request is no request')
 

@@ -56,16 +56,13 @@ class Leftover(Hook):
         return out, added, moves, st, books
 
     def test_which_profiles_add_the_leftover(self):
-        for dex, swing, want in (('raydium-clmm', (), True), ('uniswap-v3-polygon', (), True),
-                                 ('raydium-clmm', ('A', 'B'), False), ('orca', (), False),
-                                 ('uniswap-v3-unichain', (), False), ('aerodrome-slipstream', (), False)):
+        for dex, swing, want in (('raydium-clmm', (), True), ('raydium-clmm', ('A', 'B'), False), ('orca', (), False)):
             with mock.patch.object(config, 'DEX', dex), mock.patch.object(config, 'SWING_POOLS', swing):
                 self.assertIs(lp.swaps.adds_open_leftover(), want, (dex, swing))
         for dex in lp.swaps.INCREASE_DEXES:
-            for kind, want in (('safe', False), ('squads', True)):
-                with mock.patch.object(config, 'DEX', dex), mock.patch.object(config, 'SWING_POOLS', ()), \
-                        mock.patch.object(config, 'VAULT', {'kind': kind}):
-                    self.assertIs(lp.swaps.adds_open_leftover(), want, f'{dex} from a {kind} vault')
+            with mock.patch.object(config, 'DEX', dex), mock.patch.object(config, 'SWING_POOLS', ()), \
+                    mock.patch.object(config, 'VAULT', {'kind': 'squads'}):
+                self.assertIs(lp.swaps.adds_open_leftover(), True, f'{dex} from a squads vault')
 
     def test_sol_usdc_adds_the_open_leftover(self):
         out, added, moves, st, _ = self.go_dex('raydium-clmm')
@@ -74,10 +71,6 @@ class Leftover(Hook):
         self.assertEqual(len(added), 1)
         self.assertAlmostEqual(added[0][3], 0.10 * 119.5 + 9.0, places=1)   # the leftover above the reserve
         self.assertEqual(st['idle_baseline'], {'mint': 'M', 'usd': 0.0})   # nothing excused
-
-    def test_polygon_adds_it_too(self):
-        out, added, _, _, _ = self.go_dex('uniswap-v3-polygon')
-        self.assertTrue(out); self.assertEqual(len(added), 1)
 
     def test_the_swing_and_venues_without_increase_keep_it_excused(self):
         for dex, swing in (('raydium-clmm', ('A', 'B')), ('orca', ()), ('meteora-dlmm', ())):

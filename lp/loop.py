@@ -204,7 +204,6 @@ def main():
             housekeeping.flows_now()
             flows_booked = True
         books.portfolio_report(state)
-        capital.native_upkeep(state, position=status.get('positionMint'))
 
         if not status.get('positionMint'):
             if paths.MIGRATE.exists():

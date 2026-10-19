@@ -1,7 +1,7 @@
 {
   "name": "lp-rebalancer",
   "private": true,
-  "description": "Node dependencies of the LP bot: Solana and EVM signers, swaps, payout, Telegram bridge. Versions are pinned to what the live server runs.",
+  "description": "Node dependencies of the LP bot: Solana signers, swaps, payout, Telegram bridge. Versions are pinned to what the live server runs.",
   "license": "UNLICENSED",
   "dependencies": {
     "@byreal-io/byreal-clmm-sdk": "0.2.2",

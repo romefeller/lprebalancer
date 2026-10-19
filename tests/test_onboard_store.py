@@ -196,23 +196,6 @@ class Store(unittest.TestCase):
         self.assertEqual((out['special'], out['fee_bps'], out['profit_wallet']), (True, 0, OPERATOR))
         self.assertIsNone(row("select fee_wallet from config where name = 'ob-one'")['fee_wallet'])
 
-    def test_a_polygon_safe(self):
-        i = begin('ob-poly', chain='polygon', owner=EVM_OWNER, token='USDT0', amount='25', deposit='25', gas='4', payer=EVM_OPERATOR,
-                  profit_wallet=EVM_OWNER, fee_wallet=EVM_OPERATOR)
-        conn = {'sent': True, 'kind': 'safe', 'chain': 'polygon', 'venue': 'uniswap-v3-polygon', 'vault': EVM_SAFE, 'settings': EVM_SAFE,
-                'owners': [EVM_OWNER], 'threshold': 1, 'policies': [EVM_ROLES], 'pools': [EVM_POOL],
-                'payouts': [EVM_OWNER, EVM_OPERATOR], 'payer': EVM_OPERATOR, 'policyKey': EVM_OPERATOR, 'lookup': None}
-        rec = {'token_a': {'address': WPOL, 'symbol': 'WPOL'}, 'token_b': {'address': USDT0, 'symbol': 'USDT0'}}
-        store.run('register', {'id': i, 'wallet_id': 'ob-poly-vault', 'label': 'ob-poly', 'secret_env': 'LPBOT_VAULT_EVM_KEY_PATH',
-                               'policy_key_env': 'LPBOT_VAULT_EVM_KEY_PATH', 'connected': conn,
-                               'profile': {'name': 'ob-poly', 'template': 'ob-tpl-poly', 'dex': 'uniswap-v3-polygon', 'pool': EVM_POOL,
-                                           'execute_dexes': ['uniswap-v3-polygon'], 'rec': rec, 'profit_wallet': EVM_OWNER,
-                                           'special': False, 'fee_bps': 1000, 'fee_wallet': EVM_OPERATOR}})
-        self.assertEqual(db.vault_row('ob-poly-vault')['kind'], 'safe')
-        c = row("select * from config where name = 'ob-poly'")
-        self.assertEqual((c['payout_mint'], c['deposit_mint'], c['profit_wallet'], c['fee_wallet']), (USDT0, WPOL, EVM_OWNER, EVM_OPERATOR))
-        self.assertEqual(store.run('owned', {'owner': EVM_OWNER.lower()}), {'count': 1}, 'an EVM owner in any case')
-
     def test_nothing_is_written_when_any_part_is_refused(self):
         cases = [({'conn': connected(owners=[PROFIT])}, 'not the signer'),
                  ({'conn': connected(owners=[OWNER, PROFIT])}, 'not the signer'),

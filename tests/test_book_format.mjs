@@ -130,7 +130,7 @@ test('a cooled breaker reads yellow and probing', () => {
   assert.equal(healthLine([{ key: 'swap', state: 'probing', fails: 3, wait_s: 0 }]), '🩺 health   🟡 swap 3x probing');
 });
 
-// A pool whose token A is the stable (Unichain USDC/HYPE): prices are HYPE per USDC; the book
+// A pool whose token A is the stable (USDC/HYPE): prices are HYPE per USDC; the book
 // shows HYPE in dollars, band edges swapped, moves turned the same way. SOL/USDC unchanged.
 import { pricedView, shownPrice, shownBand, shownMovePct, shownSide } from '../book_format.mjs';
 const H = { ...R, token_a: 'USDC', token_b: 'HYPE', last_price: 1 / 90.5 };
@@ -166,8 +166,8 @@ test('stable token A: prices invert, band edges swap, moves and sides turn; zero
 });
 
 test('the P&L shows what the LP kept and what was paid out', () => {
-  const s = { profit_usd: -59.5, paid_out_usd: 35.12, gas_refill_usd: 0.1 };
+  const s = { profit_usd: -59.5, paid_out_usd: 35.12 };
   assert.equal(equityLine({ equity_usd: 1357.55, last_price: 190, since_start: s }),
-    'equity      $1357.55 · SOL $190.00   P&L -59.50 since start (in LP -94.72 · paid out +35.22) · includes pending fees');
+    'equity      $1357.55 · SOL $190.00   P&L -59.50 since start (in LP -94.62 · paid out +35.12) · includes pending fees');
   assert.equal(pnlParts({ profit_usd: 1 }), '');
 });

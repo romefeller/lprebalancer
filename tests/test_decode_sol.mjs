@@ -352,9 +352,8 @@ test('approve at the vault\'s policy size: passes, fits a Tangem card; another s
 test('the page and the offline verifier pin the same pools: each venue\'s home pool, then its extra ones', async () => {
   const fs = await import('node:fs');
   const { pinsOf } = await import('../onboard/verify.mjs');
-  const polygon = await import('../chains/evm/polygon.mjs');
   const read = (f) => fs.readFileSync(new URL(f, import.meta.url), 'utf8');
-  const p = pinsOf(read('../chains/solana/vault/rules.json'), read('../chains/solana/solana.json'), read('../onboard/onboard.json'), polygon);
+  const p = pinsOf(read('../chains/solana/vault/rules.json'), read('../chains/solana/solana.json'), read('../onboard/onboard.json'));
   for (const [v, home] of Object.entries(SOLANA.sol_usdc_pools)) {
     assert.deepEqual(p.solana.pools[v], [home, ...(SOLANA.vault_extra_pools[v] ?? [])], v);
   }

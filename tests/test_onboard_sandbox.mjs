@@ -33,20 +33,19 @@ test('the unit runs as lp-onboard in a sandbox, with only the keys and variables
     ['BindReadOnlyPaths', LIVE], ['WorkingDirectory', LIVE], ['UMask', '0077']]) assert.equal(one(k), v, k);
   assert.deepEqual(all('SystemCallFilter'), ['@system-service', '~@privileged @resources']);
   assert.equal(all('ReadWritePaths').length, 0, 'it writes only its StateDirectory');
-  // the keys: three credentials, none of the bot's own wallets
+  // the keys: two credentials, none of the bot's own wallets
   assert.deepEqual(all('LoadCredential').sort(), [
-    'evm.secret:/home/ubuntu/.kamino-keys/vault-test/evm.secret',
     'payer.json:/home/ubuntu/.kamino-keys/vault-test/payer.json',
     'policy.json:/home/ubuntu/.kamino-keys/vault-test/policy.json']);
   // the environment: one root file that setup_sandbox.sh writes, never the shared ones
   assert.deepEqual(all('EnvironmentFile'), ['/etc/lp-onboard/env']);
   const env = Object.fromEntries(all('Environment').map(v => v.replace(/^"|"$/g, '')).map(v => [v.slice(0, v.indexOf('=')), v.slice(v.indexOf('=') + 1)]));
-  assert.deepEqual(Object.keys(env).sort(), ['LPBOT_DSN', 'LPBOT_ONBOARD_START', 'LPBOT_VAULT_EVM_KEY_PATH', 'LPBOT_VAULT_SOL_PAYER_PATH',
+  assert.deepEqual(Object.keys(env).sort(), ['LPBOT_DSN', 'LPBOT_ONBOARD_START', 'LPBOT_VAULT_SOL_PAYER_PATH',
     'LPBOT_VAULT_SOL_POLICY_PATH', 'PATH', 'PYTHONDONTWRITEBYTECODE', 'SOLANA_RPC_URL']);
   assert.equal(env.LPBOT_VAULT_SOL_PAYER_PATH, '%d/payer.json');
   // the variables the server's config names for the keys are the ones set here
   const cfg = JSON.parse(read('onboard/onboard.json'));
-  assert.ok(env[cfg.chains.solana.payerKeyEnv] && env[cfg.chains.solana.policyKeyEnv] && env[cfg.chains.polygon.keyEnv]);
+  assert.ok(env[cfg.chains.solana.payerKeyEnv] && env[cfg.chains.solana.policyKeyEnv]);
   assert.doesNotMatch(read('ops/lp-onboard.service').replace(/^#.*$/gm, ''), /sudo|kamino-keys\/env|onboard\.env|MemoryDenyWriteExecute/);
   // the spool the page writes is the one the path unit watches and the helper reads
   const spool = '/var/lib/lp-onboard/start';

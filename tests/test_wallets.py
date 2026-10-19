@@ -576,31 +576,6 @@ class Reads(unittest.TestCase):
             wallets._rpc = saved
         self.assertEqual(calls, ['getTokenAccountsByOwner', 'getBalance'])
 
-    def test_the_evm_reader_counts_native_eth_as_weth(self):
-        weth, owner = '0x4200000000000000000000000000000000000006', '0x' + 'ab' * 20
-
-        seen = []
-
-        def rpc(url, method, params, timeout):
-            if method == 'eth_blockNumber':
-                return hex(500)
-            if method == 'eth_getBalance':
-                assert params[1] == hex(500)
-                return hex(2 * 10 ** 18)
-            data = params[0]['data']
-            assert params[1] == hex(500)                                   # every read pinned to one block
-            seen.append(data)
-            return hex(18) if data == '0x313ce567' else hex(5 * 10 ** 17)
-        saved = wallets._rpc
-        wallets._rpc = rpc
-        try:
-            self.assertEqual(wallets.read_balances('base', 'u', owner, [weth], weth), ({weth: 2.5}, 500))
-        finally:
-            wallets._rpc = saved
-        # balanceOf(owner): the selector and the owner left-padded to 32 bytes
-        self.assertEqual(seen, ['0x313ce567', '0x70a08231' + '0' * 24 + 'ab' * 20])
-
-
 if __name__ == '__main__':
     unittest.main()
 

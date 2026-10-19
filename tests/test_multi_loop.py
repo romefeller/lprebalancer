@@ -62,13 +62,10 @@ BASE_WALLET, BASE_ADDRESS = 'e2e-base', '0x' + 'ab' * 20
 POOLS = {
     SOL_POOL: {'dex': 'raydium-clmm', 'a': SOL, 'b': USDC, 'sa': 'SOL', 'sb': 'USDC', 'price': 150.0, 'native': 'A'},
     MU_POOL: {'dex': 'meteora-dlmm', 'a': MU, 'b': USDC, 'sa': 'MU', 'sb': 'USDC', 'price': 10.0, 'native': None},
-    BASE_POOL: {'dex': 'aerodrome-slipstream', 'a': WETH, 'b': BUSDC, 'sa': 'WETH', 'sb': 'USDC', 'price': 2500.0,
-                'native': 'A'},
 }
 PROFILES = {
     'e2e-sol': dict(pool=SOL_POOL, wallet=WALLET, deposit=SOL, residual=True, chain='solana'),
     'e2e-mu': dict(pool=MU_POOL, wallet=WALLET, deposit=MU, residual=False, chain='solana'),
-    'e2e-base': dict(pool=BASE_POOL, wallet=BASE_WALLET, deposit=WETH, residual=True, chain='base'),
 }
 USD = {SOL: 150.0, USDC: 1.0, MU: 10.0, WETH: 2500.0, BUSDC: 1.0, JITO: 160.0}
 NATIVE = {SOL, WETH}
@@ -117,9 +114,9 @@ class FakeChain:
     def balance(self, pool):
         p = POOLS[pool]
         a, b = self.wallet[p['a']], self.wallet[p['b']]
-        native = self.wallet[SOL if p['dex'] != 'aerodrome-slipstream' else WETH]
+        native = self.wallet[SOL]
         gas_usd = 0.0 if p['native'] else native * 150.0
-        return {'owner': ADDRESS if p['dex'] != 'aerodrome-slipstream' else BASE_ADDRESS, 'sol': native,
+        return {'owner': ADDRESS, 'sol': native,
                 'pool': pool, 'dex': p['dex'], 'tokenA': p['sa'], 'tokenB': p['sb'], 'price': p['price'],
                 'quoteUsd': 1.0, 'balanceA': a, 'balanceB': b, 'nativeSide': p['native'],
                 'walletUsd': round(a * p['price'] + b + gas_usd, 4)}
@@ -234,8 +231,6 @@ def setup_db():
     with db.cursor(commit=True) as cur:
         cur.execute('insert into wallets (id, chain, address, secret_env) values (%s,%s,%s,%s)',
                     (WALLET, 'solana', ADDRESS, 'WALLET_SECRET_PATH'))
-        cur.execute('insert into wallets (id, chain, address, secret_env) values (%s,%s,%s,%s)',
-                    (BASE_WALLET, 'base', BASE_ADDRESS, 'LPBOT_EVM_KEY_PATH'))
         for name, p in PROFILES.items():
             cur.execute("insert into config (name, pool, pair_label, capital_usd, max_usd, wallet_id, enabled, "
                         "deposit_mint, residual_owner, dex, pool_pinned) "
@@ -246,8 +241,8 @@ def setup_db():
 def teardown_db():
     names = list(PROFILES)
     with db.cursor(commit=True) as cur:
-        cur.execute('delete from wallet_claims where wallet_id in (%s, %s)', (WALLET, BASE_WALLET))
-        cur.execute('delete from wallet_settle where wallet_id in (%s, %s)', (WALLET, BASE_WALLET))
+        cur.execute('delete from wallet_claims where wallet_id = %s', (WALLET,))
+        cur.execute('delete from wallet_settle where wallet_id = %s', (WALLET,))
         cur.execute('delete from snapshots where mint in (select mint from positions where config_name = any(%s))', (names,))
         cur.execute('delete from band_profile where mint in (select mint from positions where config_name = any(%s))', (names,))
         cur.execute('delete from positions where config_name = any(%s)', (names,))
@@ -770,16 +765,15 @@ class Loop(Fixture):
     def test_one_portfolio_a_day_from_the_first_wallets_residual_owner(self):
         sent = []
         with mock.patch.object(stats, 'portfolio', lambda: sent.append(1) or {'total': {'equity_usd': 1.0}}), \
-                mock.patch.object(db, 'wallets', lambda: [{'id': WALLET}, {'id': BASE_WALLET}]):
-            for name in ('e2e-sol', 'e2e-mu'):               # e2e-lp sorts after e2e-base
-                with self.as_profile(name):
-                    self.assertIsNone(lp.books.portfolio_report({}))
-            with self.as_profile('e2e-base'):
+                mock.patch.object(db, 'wallets', lambda: [{'id': WALLET}, {'id': 'e2e-zz'}]):
+            with self.as_profile('e2e-mu'):                   # not the residual owner: no report
+                self.assertIsNone(lp.books.portfolio_report({}))
+            with self.as_profile('e2e-sol'):                  # e2e-lp sorts first: its residual owner reports
                 state = {}
                 self.assertEqual(lp.books.portfolio_report(state), {'total': {'equity_usd': 1.0}})
                 self.assertIsNone(lp.books.portfolio_report(state))     # once a day
         self.assertEqual(sent, [1])
-        self.assertEqual(self.events('e2e-base'), ['PORTFOLIO'])
+        self.assertEqual(self.events('e2e-sol'), ['PORTFOLIO'])
 
     def test_reads_are_not_locked_and_book_nothing(self):
         with wallets.wallet_lock(WALLET, wait_s=1):
@@ -790,63 +784,12 @@ class Loop(Fixture):
 
     # --- Base -------------------------------------------------------------------------------------
 
-    def test_base_swaps_and_pays_through_the_venue_signer(self):
-        self.chain.wallet[WETH] = 0.1                                   # $250 of ETH, gas kept
-        self.poll('e2e-base')
-        swap = self.chain.of('e2e-base', 'rebalance')
-        self.assertEqual(len(swap), 1)
-        self.assertEqual(swap[0]['dex'], 'aerodrome-slipstream')
-        self.assertEqual(json.loads(swap[0]['env']['LPBOT_SLEEVE']), {WETH: 0.1, BUSDC: 0.0})
-        self.assertEqual(self.chain.of('e2e-base', 'open')[0]['dex'], 'aerodrome-slipstream')
-        self.assertIn(BASE_POOL, self.chain.positions)
-        self.chain.wallet[BUSDC] += 3.0                                 # a harvest's USDC fees
-        with self.as_profile('e2e-base'), \
-                mock.patch.object(config, 'PAYOUT_ENABLED', True), mock.patch.object(config, 'PROFIT_WALLET', EVM_PROFIT), \
-                mock.patch.object(config, 'PAYOUT_MINT', BUSDC), \
-                mock.patch.dict('os.environ', {'LPBOT_EVM_PROFIT_WALLET_PIN': EVM_PROFIT, 'LPBOT_PROFIT_WALLET_PIN': ''}):
-            state = lp.paths.load()
-            lp.harvest.distribute(state, 'POSB', 0.0, 3.0)
-        send = self.chain.of('e2e-base', 'send')
-        self.assertEqual(len(send), 1)
-        self.assertEqual(send[0]['dex'], 'aerodrome-slipstream')
-        self.assertEqual(send[0]['args'][1:4], (BUSDC, '3.000000000', EVM_PROFIT))
-
-    def test_base_compares_addresses_in_any_letter_case(self):
-        # The pool record and the pin in EIP-55 case, the database in lower case:
-        # the same token and the same wallet, so the USDC fees are paid.
-        self.chain.wallet.update({BUSDC: 3.0, WETH: 0.06})
-        rec = pool_record_for(BASE_POOL)
-        rec['token_b'] = dict(rec['token_b'], address='0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913')
-        with self.as_profile('e2e-base'), mock.patch.object(lp.capital, 'pool_record', lambda: rec), \
-                mock.patch.object(config, 'PAYOUT_ENABLED', True), \
-                mock.patch.object(config, 'PROFIT_WALLET', EVM_PROFIT.lower()), \
-                mock.patch.object(config, 'PAYOUT_MINT', BUSDC), \
-                mock.patch.dict('os.environ', {'LPBOT_EVM_PROFIT_WALLET_PIN': EVM_PROFIT}):
-            self.assertTrue(lp.capital.profit_wallet_pinned())
-            self.assertEqual(lp.capital.pool_tokens()[1][0], BUSDC)
-            parts = lp.harvest.distribute(lp.paths.load(), 'POSB', 0.0, 3.0)
-        self.assertEqual([p['kind'] for p in parts], ['paid'])
-        self.assertEqual(self.chain.of('e2e-base', 'send')[0]['args'][1], BUSDC)
-
-    def test_base_payout_refuses_a_destination_off_the_evm_pin(self):
-        self.chain.wallet.update({BUSDC: 3.0, WETH: 0.06})             # gas above the reserve
-        with self.as_profile('e2e-base'), \
-                mock.patch.object(config, 'PAYOUT_ENABLED', True), mock.patch.object(config, 'PROFIT_WALLET', EVM_PROFIT), \
-                mock.patch.object(config, 'PAYOUT_MINT', BUSDC), \
-                mock.patch.dict('os.environ', {'LPBOT_EVM_PROFIT_WALLET_PIN': '0x' + '11' * 20,
-                                               'LPBOT_PROFIT_WALLET_PIN': EVM_PROFIT}):
-            state = lp.paths.load()
-            lp.harvest.distribute(state, 'POSB', 0.0, 3.0)
-            self.assertAlmostEqual(state['payout_owed'][BUSDC], 3.0)
-        self.assertEqual(self.chain.of('e2e-base', 'send'), [])
-        self.assertIn('payout_refused', self.events('e2e-base'))
-
     def test_without_its_script_the_venue_signer_is_no_signer(self):
-        with self.as_profile('e2e-base'), \
-                mock.patch.dict(lp.signers.SIGNERS, {'aerodrome-slipstream': str(self.tmp / 'signer_aerodrome.mjs')}), \
+        with self.as_profile('e2e-mu'), \
+                mock.patch.dict(lp.signers.SIGNERS, {'meteora-dlmm': str(self.tmp / 'signer_meteora.mjs')}), \
                 mock.patch.object(lp.signers, '_chain', REAL_CHAIN):
-            out, err = lp.signers.chain('balance', BASE_POOL)
-        self.assertEqual((out, err), (None, 'no signer for aerodrome-slipstream'))
+            out, err = lp.signers.chain('balance', MU_POOL)
+        self.assertEqual((out, err), (None, 'no signer for meteora-dlmm'))
 
     def test_the_sleeve_reaches_the_orca_fallback_swap(self):
         self.chain.wallet.update({SOL: 2.0, USDC: 40.0})
@@ -872,7 +815,8 @@ class Loop(Fixture):
     def test_alone_on_its_wallet_a_profile_moves_as_a_pre_020_profile(self):
         def run(wallet_id):
             self.chain = FakeChain(**{SOL: 2.0, USDC: 30.0})
-            with mock.patch.object(lp.signers, '_chain', self.chain):
+            with mock.patch.object(lp.signers, '_chain', self.chain), \
+                    mock.patch.object(lp.books, 'portfolio_report', lambda state: None):   # the owner's daily report is not the point
                 with db.cursor(commit=True) as cur:
                     # alone: no other profile on the wallet (a disabled one would still count)
                     cur.execute("update config set wallet_id = null where name = 'e2e-mu'")
@@ -912,9 +856,6 @@ class Parts(Fixture):
             self.assertEqual(lp.paths.halted(), 'everyone')               # the global one first
 
     def test_chores_need_the_residual_owner_and_the_chain(self):
-        with self.as_profile('e2e-base'):
-            self.assertEqual([lp.signers.housekeeper(k) for k in ('sweep', 'janitor', 'audit', 'scanner')],
-                             [False] * 4)                                    # the owner, on a chain without them
         with self.as_profile('e2e-mu'):
             self.assertFalse(lp.signers.housekeeper('sweep'))                # not the owner
         with self.as_profile('e2e-sol'):
@@ -922,7 +863,6 @@ class Parts(Fixture):
 
     def test_stable_mints_by_address_in_any_case(self):
         self.assertTrue(lp.capital.is_stable_mint(USDC))
-        self.assertTrue(lp.capital.is_stable_mint('0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913'))
         self.assertFalse(lp.capital.is_stable_mint(MU))
         self.assertIs(lp.capital.is_stable_mint(SOL), False)
 
@@ -1099,14 +1039,14 @@ class Parts(Fixture):
 
     def test_no_portfolio_without_a_wallet_or_from_another_owner(self):
         with mock.patch.object(stats, 'portfolio', side_effect=AssertionError):
-            with self.as_profile('e2e-base'):
+            with self.as_profile('e2e-sol'):
                 with mock.patch.object(config, 'WALLET_ID', None):
                     self.assertIsNone(lp.books.portfolio_report({}))
                 with mock.patch.object(config, 'RESIDUAL_OWNER', False):
                     self.assertIsNone(lp.books.portfolio_report({}))
                 with mock.patch.object(db, 'wallets', lambda: []):
                     self.assertIsNone(lp.books.portfolio_report({}))
-        self.assertEqual(self.events('e2e-base'), [])                        # no portfolio_failed either
+        self.assertEqual(self.events('e2e-sol'), [])                         # no portfolio_failed either
 
     # the baseline: once, in the units of the book
     def baseline_row(self, profile):

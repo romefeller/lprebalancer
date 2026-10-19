@@ -115,9 +115,7 @@ export async function tailAll(state, root, sendRow, save = () => {}) {
 
 // A harvest whose payout the gas rule held (fees.py): the LP wallet's SOL
 // was under the reserve, so the payout-token fees were reinvested, not sent.
-// Says how far under, what stayed, and whether a SOL fee refilled gas: a pool
-// without SOL (DJT/USDC) cannot refill it, and holds every payout until gas
-// is topped up or the wallet is back on a SOL pool.
+// Says how far under, what stayed, and whether a SOL fee refilled gas.
 export function payoutHeld(row) {
   const n = (x, d = 2) => (x === undefined || x === null ? '—' : Number(x).toFixed(d));
   const reserve = row.gas_reserve != null ? ` under the ${row.gas_reserve} SOL reserve` : ' under the reserve';
@@ -194,7 +192,7 @@ export function render(row) {
   // position closes; the total only ever goes up.
   const book = (r) => {
     const A = r.token_a ?? 'A', B = r.token_b ?? 'B';
-    // The A side. A book that held two A tokens (sol-swing: SOL and DJT) has
+    // The A side. A book that held two A tokens has
     // no single amount; each token is shown on its own (db.fees_a_by_token).
     const side = (x, kind) => aSide(x, A, r.fees_a_by_token?.[kind], tok);
     return [
@@ -234,22 +232,11 @@ export function render(row) {
   // The payout governor (sql/053): what each harvest pays out now, from the
   // last days' closed bands (fees minus their re-centre loss), and what that
   // means per day at the 24h fee rate.
-  // Equity mode (sql/054): the state, the equity against its target, and the
-  // equity at which the share switches.
   function payoutBlock(g) {
     if (!g) return [];
     const pct = (x) => `${n(Number(x) * 100, 1)}%`;
     const expected = g.fees_per_day_usd != null ? [
       `expected    $${n(g.paid_per_day_usd, 2)}/day paid · $${n(g.reinvested_per_day_usd, 2)}/day reinvested (fees $${n(g.fees_per_day_usd, 2)}/day, 24h)`] : [];
-    if (g.mode === 'equity') {
-      const pay = g.state === 'PAY';
-      return [`━━ 💸 PAYOUT ━━`,
-        `governor    ${g.state} · pays ${pct(g.share)} of each harvest${g.switched_at ? ` since ${String(g.switched_at).slice(5, 16).replace('T', ' ')}Z` : ''}`,
-        `equity      $${n(g.equity_usd, 2)} · target $${n(g.target_usd, 2)} (put in $${n(g.put_in_usd, 2)} +${n(g.growth_pct, 1)}%/30d) · ${g.gap_usd >= 0 ? "+" : "-"}$${n(Math.abs(g.gap_usd), 2)} (${g.gap_pct >= 0 ? '+' : ''}${n(g.gap_pct, 1)}%)`,
-        pay ? `switch      back to ${pct(g.floor)} at equity ≤ $${n(g.exit_at_usd, 2)} (target +${n(g.exit_pct, 1)}%)`
-            : `switch      ${pct(g.high)} from equity ≥ $${n(g.enter_at_usd, 2)} (target +${n(g.enter_pct, 1)}%) · $${n(g.enter_at_usd - g.equity_usd, 2)} to go`,
-        ...expected];
-    }
     // sql/058: the payout follows R = fees / re-centre loss of the window; no cap unless one is set
     const r = g.ratio != null ? `R ${n(g.ratio, 2)}` : 'R — (no loss to divide by)';
     return [`━━ 💸 PAYOUT ━━`,
@@ -443,28 +430,11 @@ export function render(row) {
       if (row.gas_low) return payoutHeld(row) + '\n' + split;
       const sent = (row.sent ?? []).map(x => `${x.amount} ${x.symbol} ($${n(x.usd, 4)}) → profit wallet\n${x.signature}`).join('\n');
       const g = row.governor;
-      const gov = g?.mode === 'equity' && g.share != null
-        ? `\ngovernor ${g.paying ? 'PAY' : 'REINVEST'} ${n(g.share * 100, 1)}% · equity ${g.gap_pct >= 0 ? '+' : ''}${n(g.gap_pct, 1)}% vs target`
-        : g?.mode === 'profit' && g.share != null
-          ? `\ngovernor R ${g.ratio != null ? n(g.ratio, 2) : '—'} (fees $${n(g.fees, 2)} ÷ re-centre loss $${n(-g.loss, 2)}, ${n(g.days, 0)}d, ${g.bands ?? '—'} bands)`
-            + ` → paid ${n(g.share * 100, 1)}% of this harvest` : '';
+      const gov = g?.mode === 'profit' && g.share != null
+        ? `\ngovernor R ${g.ratio != null ? n(g.ratio, 2) : '—'} (fees $${n(g.fees, 2)} ÷ re-centre loss $${n(-g.loss, 2)}, ${n(g.days, 0)}d, ${g.bands ?? '—'} bands)`
+          + ` → paid ${n(g.share * 100, 1)}% of this harvest` : '';
       return 'PAYOUT\n' + (sent || 'nothing sent this harvest') + '\n' + split + gov;
     }
-    case 'GOVERNOR':
-      return `PAYOUT GOVERNOR → ${row.state} · pays ${n(row.share * 100, 1)}% of each harvest\n`
-        + `equity $${n(row.equity_usd, 2)} · target $${n(row.target_usd, 2)} · ${row.gap_pct >= 0 ? '+' : ''}${n(row.gap_pct, 1)}%`
-        + (row.state === 'PAY' ? ` (≥ +${n(row.enter_pct, 1)}%)` : ` (≤ +${n(row.exit_pct, 1)}%)`);
-    case 'WRAP':
-      return `WRAP · ${row.amount} ${row.symbol} into the pool token · ${row.kept} ${row.symbol} kept for gas\n${row.signature ?? ''}`;
-    case 'wrap_failed':
-      return `WRAP FAILED · ${row.amount} ${row.symbol} stays native · ${row.reason}`;
-    case 'deposit_unbooked':
-      return `DEPOSIT NOT BOOKED · ${row.amount} ${row.symbol} wrapped, P&L counts it as profit · ${row.reason}\n${row.signature ?? ''}`;
-    case 'GAS_REFILL':
-      return `GAS REFILL · ${row.unwrapped} ${row.symbol} ($${n(row.usd, 4)}) unwrapped for gas · ${row.native_before} → target ${row.target} ${row.symbol}`
-        + (row.sold ? ` · bought with ${row.sold.amount} ${row.sold.symbol}` : '') + `\n${row.signature ?? ''}`;
-    case 'gas_refill_failed':
-      return `GAS REFILL FAILED · ${row.native} ${row.symbol}, target ${row.target} · ${row.reason}`;
     case 'REWARD_PAYOUT':
       return `REWARDS${row.gas_low ? ' · gas low, swapped to SOL for gas' : ''}\n`
         + (row.rewards ?? []).map(x => `$${n(x.usd, 4)} → ${x.to}${x.signature ? `\n${x.signature}` : ''}`).join('\n');
@@ -514,7 +484,7 @@ export function render(row) {
     case 'DAILY':
       return `DAILY ${row.day} · ${row.recentres} re-centres${row.idle_redeploys ? ` (${row.idle_redeploys} idle redeploys)` : ''}`
         + ` · fees earned $${n(row.fees_earned_usd ?? row.fees_usd)}${row.fees_earned_usd != null ? ` (harvested $${n(row.fees_usd)})` : ''}`
-        // a day across pairs (sol-swing) has no hold benchmark and no one price
+        // a day across pairs has no hold benchmark and no one price
         + ` · vs 50/50 hold ${row.vs_hold_usd == null ? '—' : sign(row.vs_hold_usd)}`
         // deposits, withdrawals and rent moved to other profiles: capital, not P&L
         + (Number(row.net_flows_usd) ? ` · capital moved ${sign(row.net_flows_usd)}` : '')

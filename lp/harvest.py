@@ -222,12 +222,7 @@ def distribute(state, position, fee_a, fee_b):
     if gov is not None:
         gov = {k: (round(v, 4) if isinstance(v, float) else v) for k, v in gov.items()}
         gov.update(share=round(share, 4))
-        if gov.get('mode') != 'equity':
-            gov.update(days=config.GOVERNOR_DAYS, keep=config.GOVERNOR_KEEP)
-        elif gov.pop('switched', False):
-            books.notify('GOVERNOR', state='PAY' if gov['paying'] else 'REINVEST', share=gov['share'],
-                         gap_pct=gov.get('gap_pct'), equity_usd=gov.get('equity_usd'), target_usd=gov.get('target_usd'),
-                         enter_pct=config.GOVERNOR_ENTER_PCT, exit_pct=config.GOVERNOR_EXIT_PCT)
+        gov.update(days=config.GOVERNOR_DAYS, keep=config.GOVERNOR_KEEP)
     books.notify('PAYOUT', sent=sent, split=summary, governor=gov, gas_low=not config.VAULT and sol_before < config.GAS_RESERVE_SOL,
                  sol_before=round(sol_before, 6), gas_reserve=config.GAS_RESERVE_SOL, held=held, to=config.PROFIT_WALLET,
                  parts=[{k: (round(v, 6) if isinstance(v, float) else v) for k, v in x.items()} for x in parts])

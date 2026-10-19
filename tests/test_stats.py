@@ -677,29 +677,32 @@ class CombineExact(unittest.TestCase):
 
 
 class OtherWallet(unittest.TestCase):
-    """A second wallet (base-lp, chain base) with its own residual owner."""
+    """A second Solana wallet (lp2) with its own residual owner."""
 
     def setUp(self):
         reset_ledger()
         multi_wallet()
         with db.cursor(commit=True) as cur:
-            cur.execute("insert into wallets (id, chain, address, secret_env, label) values ('base-lp', 'base', "
-                        "'0x2b35948898e1b4897E7FC5a70e39b213dcfd0142', 'LPBOT_EVM_KEY_PATH', null) on conflict (id) do "
+            cur.execute("delete from config where name = 'lp2-sol-usdc'")
+            cur.execute("insert into wallets (id, chain, address, secret_env, label) values ('lp2', 'solana', "
+                        "'FogqBWLC4y94csrniURTbGrx7ff7jFa4e2qp1GsgyAmM', 'LPBOT_SOL2_KEY_PATH', null) on conflict (id) do "
                         "update set chain = excluded.chain, label = excluded.label")
             cur.execute("insert into config (name, pool, pair_label, token_a, token_b, capital_usd, max_usd, dex, "
-                        "wallet_id, enabled, residual_owner, deposit_mint) values ('base-weth-usdc', "
-                        "'0xb2cc224c1c9fee385f8ad6a55b4d94e92359dc59', 'WETH/USDC', 'WETH', 'USDC', 100, 140, "
-                        "'aerodrome-slipstream', 'base-lp', true, true, '0x4200000000000000000000000000000000000006')")
+                        "wallet_id, enabled, residual_owner, deposit_mint) values ('lp2-sol-usdc', "
+                        "'3ucNos4NbumPLZNWztqGHNFFgkHeRMBQAVemeeomsUxv', 'SOL/USDC', 'SOL', 'USDC', 100, 140, "
+                        "'raydium-clmm', 'lp2', true, true, 'So11111111111111111111111111111111111111112')")
             cur.execute("select key, value from audit_state where key in "
-                        "('uncounted_usd', 'sol-lp|uncounted_usd', 'base-lp|uncounted_usd')")
+                        "('uncounted_usd', 'sol-lp|uncounted_usd', 'lp2|uncounted_usd')")
             self.audit = {r['key']: r['value'] for r in cur.fetchall()}
             cur.execute("delete from audit_state where key in "
-                        "('uncounted_usd', 'sol-lp|uncounted_usd', 'base-lp|uncounted_usd')")
+                        "('uncounted_usd', 'sol-lp|uncounted_usd', 'lp2|uncounted_usd')")
 
     def tearDown(self):
         with db.cursor(commit=True) as cur:
+            cur.execute("delete from config where name = 'lp2-sol-usdc'")
+            cur.execute("delete from wallets where id = 'lp2'")
             cur.execute("delete from audit_state where key in "
-                        "('uncounted_usd', 'sol-lp|uncounted_usd', 'base-lp|uncounted_usd')")
+                        "('uncounted_usd', 'sol-lp|uncounted_usd', 'lp2|uncounted_usd')")
             for k, v in self.audit.items():
                 cur.execute('insert into audit_state (key, value) values (%s, %s)', (k, v))
         reset_ledger()
@@ -713,34 +716,34 @@ class OtherWallet(unittest.TestCase):
 
     def test_each_profile_in_its_own_wallet(self):
         with context():
-            self.assertEqual(db.book_scope(wallet_id='base-lp'), ['base-weth-usdc'])
-            self.assertEqual(db.book_scope('base-weth-usdc', 'base-lp'), ['base-weth-usdc'])
-            self.assertEqual(db.book_scope('mu-usdc', 'base-lp'), [])      # mu-usdc is on sol-lp
-            self.assertEqual(db.book_scope('base-weth-usdc', 'sol-lp'), [])
+            self.assertEqual(db.book_scope(wallet_id='lp2'), ['lp2-sol-usdc'])
+            self.assertEqual(db.book_scope('lp2-sol-usdc', 'lp2'), ['lp2-sol-usdc'])
+            self.assertEqual(db.book_scope('mu-usdc', 'lp2'), [])      # mu-usdc is on sol-lp
+            self.assertEqual(db.book_scope('lp2-sol-usdc', 'sol-lp'), [])
             with db.cursor(commit=True) as cur:
-                cur.execute("update config set enabled = false where name = 'base-weth-usdc'")
+                cur.execute("update config set enabled = false where name = 'lp2-sol-usdc'")
             # a disabled profile still belongs to its wallet: its own book is readable
-            self.assertEqual(db.book_scope('base-weth-usdc', 'base-lp'), ['base-weth-usdc'])
-            self.assertEqual(db.book_scope(wallet_id='base-lp'), [])
+            self.assertEqual(db.book_scope('lp2-sol-usdc', 'lp2'), ['lp2-sol-usdc'])
+            self.assertEqual(db.book_scope(wallet_id='lp2'), [])
 
     def test_the_portfolio_names_each_wallet_and_its_chain(self):
         position('S1', 'sol-usdc')
         snap('S1', 1, 0.0, 100.0)
-        position('B1', 'base-weth-usdc')
+        position('B1', 'lp2-sol-usdc')
         snap('B1', 1, 0.0, 50.0)
         p = stats.portfolio()
         self.assertEqual([(w['wallet_id'], w['chain'], w['label'], w['pools']) for w in p['wallets']],
-                         [('base-lp', 'base', None, ['base-weth-usdc']), ('sol-lp', 'solana', 'LP wallet', ['sol-usdc'])])
+                         [('lp2', 'solana', None, ['lp2-sol-usdc']), ('sol-lp', 'solana', 'LP wallet', ['sol-usdc'])])
         self.assertEqual(p['total']['equity_usd'], 150.0)
         self.assertEqual(p['wallets'][0]['subtotal']['equity_usd'], 50.0)
         self.assertIn('subtotal sol-lp ', stats.render(p))
         self.assertEqual([w['wallet_tag'] for w in p['wallets']],
-                         ['0x2b359488', db.wallet_tag(db.wallet_row('sol-lp')['address'])])
-        self.assertIn('WALLET base-lp 0x2b359488 (base)', stats.render(p))
+                         ['FogqBWLC4y', db.wallet_tag(db.wallet_row('sol-lp')['address'])])
+        self.assertIn('WALLET lp2 FogqBWLC4y (solana)', stats.render(p))
         self.assertEqual([r['wallet_tag'] for r in p['pools']], [w['wallet_tag'] for w in p['wallets']])
-        # the EVM tag in any case, the id, the whole address: one wallet
-        for key in ('0x2B359488', 'base-lp', '0x2b35948898e1b4897E7FC5a70e39b213dcfd0142'):
-            self.assertEqual([r['profile'] for r in stats.portfolio(key)['pools']], ['base-weth-usdc'], key)
+        # the tag, the id, the whole address: one wallet
+        for key in ('FogqBWLC4y', 'lp2', 'FogqBWLC4y94csrniURTbGrx7ff7jFa4e2qp1GsgyAmM'):
+            self.assertEqual([r['profile'] for r in stats.portfolio(key)['pools']], ['lp2-sol-usdc'], key)
 
     def test_a_wallet_not_yet_registered_is_on_solana(self):
         drop_extra()
@@ -763,17 +766,17 @@ class OtherWallet(unittest.TestCase):
         self.assertIn('WALLET sol-lp (solana)', out.getvalue())
 
     def test_the_wallets_dust_belongs_to_its_residual_owner(self):
-        self.assertEqual(db._uncounted_usd('base-weth-usdc'), 0.0)                      # nothing kept yet
+        self.assertEqual(db._uncounted_usd('lp2-sol-usdc'), 0.0)                      # nothing kept yet
         self.audit_value('uncounted_usd', '0.3')                                          # a pre-020 key
         self.assertEqual(db._uncounted_usd('sol-usdc'), 0.3)                              # the legacy wallet reads it
-        self.assertEqual(db._uncounted_usd('base-weth-usdc'), 0.0)                        # another wallet does not
+        self.assertEqual(db._uncounted_usd('lp2-sol-usdc'), 0.0)                        # another wallet does not
         self.assertEqual(db._uncounted_usd('nobody'), 0.3)                                # no config row: pre-020
         self.audit_value('sol-lp|uncounted_usd', '0.5')
         self.assertEqual(db._uncounted_usd('sol-usdc'), 0.5)                              # the wallet's own key first
-        self.audit_value('base-lp|uncounted_usd', '')
-        self.assertEqual(db._uncounted_usd('base-weth-usdc'), 0.0)
-        self.audit_value('base-lp|uncounted_usd', '1.25')
-        self.assertEqual(db._uncounted_usd('base-weth-usdc'), 1.25)
+        self.audit_value('lp2|uncounted_usd', '')
+        self.assertEqual(db._uncounted_usd('lp2-sol-usdc'), 0.0)
+        self.audit_value('lp2|uncounted_usd', '1.25')
+        self.assertEqual(db._uncounted_usd('lp2-sol-usdc'), 1.25)
         got = db._uncounted_usd('mu-usdc')                                                # not the residual owner
         self.assertIsInstance(got, float)
         self.assertEqual(got, 0.0)

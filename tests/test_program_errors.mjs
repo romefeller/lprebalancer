@@ -256,22 +256,6 @@ test('integration: a transport error passes as it was, with no extra read', asyn
   assert.equal(await enrichError('text'), 'text');
 });
 
-// --- the EVM signers: the revert reason in the one error line -------------------
-
-test('EVM signers: the first line of a viem error and its revert reason, bounded', async () => {
-  for (const file of ['../venues/uniswap_v3/signer.mjs', '../venues/aerodrome/signer.mjs']) {
-    const { errorLine } = await import(file);
-    const viem = Object.assign(new Error('long'), { shortMessage: 'The contract function "mint" reverted.\nDocs: x',
-      cause: { cause: { reason: 'Price slippage check' } } });
-    assert.equal(errorLine(viem), 'The contract function "mint" reverted. | revert: Price slippage check', file);
-    assert.equal(errorLine({ shortMessage: 'reverted', cause: { data: { errorName: 'Panic', args: [17n] } } }), 'reverted | revert: Panic(17)');
-    assert.equal(errorLine(new Error('fetch failed\nmore')), 'fetch failed', 'no reason: the first line once');
-    assert.equal(errorLine({ shortMessage: 'execution reverted: STF', cause: { reason: 'STF' } }), 'execution reverted: STF', 'never twice');
-    assert.equal(errorLine({ shortMessage: 'x'.repeat(500) }).length, 300);
-    assert.equal(errorLine({ shortMessage: 'x'.repeat(500) }, 1000).length, 500);
-  }
-});
-
 // --- every Solana signer's send path carries the program's words -------------------
 
 const LONG_LOGS = [...Array.from({ length: 12 }, (_, i) => `Program log: step ${i} ${'y'.repeat(60)}`),

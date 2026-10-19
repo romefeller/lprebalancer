@@ -30,15 +30,14 @@ UNIT=/etc/systemd/system/lp-onboard.service
 BACKUP=/etc/systemd/system/lp-onboard.service.pre-sandbox
 NEXT=/etc/systemd/system/lp-onboard-next.service
 ENVF=/etc/lp-onboard/env
-WITHHELD='TELEGRAM_BOT_TOKEN|TELEGRAM_CHAT_ID|JUPITER_API_KEY|ALCHEMY_RPC_KEY|KAMINO_RPC_KEY|WALLET_SECRET_PATH|LPBOT_SOL2_KEY_PATH|LPBOT_EVM_KEY_PATH|LPBOT_POLYGON_KEY_PATH|LPBOT_UNICHAIN_KEY_PATH'
+WITHHELD='TELEGRAM_BOT_TOKEN|TELEGRAM_CHAT_ID|JUPITER_API_KEY|ALCHEMY_RPC_KEY|KAMINO_RPC_KEY|WALLET_SECRET_PATH|LPBOT_SOL2_KEY_PATH'
 
 say() { printf '== %s\n' "$*"; }
 die() { printf 'FAILED: %s\n' "$*" >&2; exit 1; }
 [ "$(id -u)" = 0 ] || die "run as root (sudo)"
 
-serving() {   # port: the page answers with both chains
-  curl -fsS --max-time 10 "http://127.0.0.1:$1/bot/api/config" 2>/dev/null | grep -q '"solana"' \
-    && curl -fsS --max-time 10 "http://127.0.0.1:$1/bot/api/config" 2>/dev/null | grep -q '"polygon"'
+serving() {   # port: the page answers with the Solana chain
+  curl -fsS --max-time 10 "http://127.0.0.1:$1/bot/api/config" 2>/dev/null | grep -q '"solana"'
 }
 
 wait_serving() {   # unit port
@@ -105,7 +104,7 @@ esac
 
 for f in "$REPO/ops/lp-onboard.service" "$REPO/ops/onboard/lp-onboard-start.sh" "$REPO/ops/onboard/lp-onboard-start.path" \
          "$REPO/ops/onboard/lp-onboard-start.service" "$KEYS/vault-test/payer.json" "$KEYS/vault-test/policy.json" \
-         "$KEYS/vault-test/evm.secret" "$KEYS/env" "$KEYS/onboard.env"; do
+         "$KEYS/env" "$KEYS/onboard.env"; do
   [ -e "$f" ] || die "missing $f"
 done
 
@@ -126,7 +125,7 @@ grant connect on database rebalancer to "lp-onboard";
 grant usage on schema rebalancer to "lp-onboard";
 grant select on all tables in schema rebalancer to "lp-onboard";
 grant insert, update on rebalancer.onboard, rebalancer.wallets, rebalancer.vaults, rebalancer.vault_policies,
-  rebalancer.config, rebalancer.swing to "lp-onboard";
+  rebalancer.config to "lp-onboard";
 grant usage, select on sequence rebalancer.onboard_id_seq, rebalancer.config_id_seq to "lp-onboard";
 -- the owner's page (sql/040): the deposits it reads back from the chain, the exits owners sign
 grant insert on rebalancer.onboard_deposits, rebalancer.owner_requests to "lp-onboard";
@@ -137,10 +136,10 @@ SQL
 runuser -u postgres -- psql -d rebalancer -v ON_ERROR_STOP=1 -q \
   -c 'alter default privileges for role ubuntu in schema rebalancer grant select on tables to "lp-onboard"'
 
-say "3. $ENVF (LPBOT_RPC, LPBOT_POLYGON_RPC, LPBOT_ONBOARD_INVITE_SHA256, LPBOT_ONBOARD_WC_PROJECT_ID)"
+say "3. $ENVF (LPBOT_RPC, LPBOT_ONBOARD_INVITE_SHA256, LPBOT_ONBOARD_WC_PROJECT_ID)"
 install -d -m 0750 -o root -g root /etc/lp-onboard
 (umask 077
- { grep -E '^LPBOT_(POLYGON_)?RPC=' "$KEYS/env" || true; grep -E '^LPBOT_ONBOARD_(INVITE_SHA256|WC_PROJECT_ID)=' "$KEYS/onboard.env" || true; } > "$ENVF.new")
+ { grep -E '^LPBOT_RPC=' "$KEYS/env" || true; grep -E '^LPBOT_ONBOARD_(INVITE_SHA256|WC_PROJECT_ID)=' "$KEYS/onboard.env" || true; } > "$ENVF.new")
 chmod 600 "$ENVF.new"; mv "$ENVF.new" "$ENVF"
 grep -q '^LPBOT_ONBOARD_INVITE_SHA256=' "$ENVF" || say "warning: no invite hashes: the page refuses every request"
 grep -q '^LPBOT_RPC=' "$ENVF" || say "warning: no LPBOT_RPC: the page reads Solana from the public endpoint"

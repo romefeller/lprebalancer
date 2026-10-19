@@ -36,7 +36,6 @@ test('the helper: a run directory that is not a plain absolute path refuses', ()
 const SOL = 'So11111111111111111111111111111111111111112';
 const USDC = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
 const POOL = 'Czfq3xZZDmsdGdUyrNLtRhGc47cXcZtLG4crryfu44zE';
-const EVM = '0x' + 'ab'.repeat(20);
 const WRITES = {
   'venues/orca/signer.mjs': ['open', POOL, '1', '2', '1', '1', '--execute'],
   'venues/meteora_dlmm/signer.mjs': ['open', POOL, '1', '2', '1', '1', '--execute'],
@@ -47,7 +46,6 @@ const WRITES = {
   'venues/orca/swap.mjs': ['rebalance', SOL, USDC, '1', '1', '--execute'],
   'chains/solana/payout.mjs': ['send', USDC, '1', USDC, '--execute'],
   'chains/solana/janitor.mjs': ['close-empty', '--execute'],
-  'venues/aerodrome/signer.mjs': ['open', EVM, '1', '2', '1', '1', '--execute'],
 };
 
 for (const [script, args] of Object.entries(WRITES)) {
@@ -68,7 +66,6 @@ for (const [script, args] of Object.entries(WRITES)) {
 // The global HALT: the bot root's HALT stops every write script, wherever the
 // script lives in the tree. Run on a copy of the tree, never on the live one:
 // a HALT written there would stop the real bot.
-const WRITES_ALL = { ...WRITES, 'venues/uniswap_v3/signer.mjs': ['open', EVM, '1', '2', '1', '1', '--execute'] };
 const SKIP_IN_COPY = new Set(['node_modules', 'run', 'tests', '__pycache__']);
 
 function treeCopy() {
@@ -85,10 +82,10 @@ function treeCopy() {
 test('the bot root HALT refuses every write script', () => {
   const copy = treeCopy();
   fs.writeFileSync(path.join(copy, 'HALT'), 'operator: every profile');
-  for (const [script, args] of Object.entries(WRITES_ALL)) {
+  for (const [script, args] of Object.entries(WRITES)) {
     const r = spawnSync('node', [path.join(copy, script), ...args], {
       encoding: 'utf8', timeout: 60_000,
-      env: { PATH: process.env.PATH, WALLET_SECRET_PATH: '/nonexistent/key', LPBOT_CHAIN: 'polygon',
+      env: { PATH: process.env.PATH, WALLET_SECRET_PATH: '/nonexistent/key',
              SOLANA_RPC_URL: 'http://127.0.0.1:9', LPBOT_RPC: 'http://127.0.0.1:9', LPBOT_POOL: POOL,
              LPBOT_PROFIT_WALLET: USDC, LPBOT_PROFIT_WALLET_PIN: USDC },
     });

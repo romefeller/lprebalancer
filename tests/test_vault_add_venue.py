@@ -67,10 +67,6 @@ class Pure(unittest.TestCase):
             with self.assertRaises(add_vault.Refused, msg=str(bad)) as e:
                 add_vault.venue_row(v, bad)
             self.assertIn(why, str(e.exception))
-        with self.assertRaises(add_vault.Refused):
-            add_vault.venue_row(dict(v, kind='safe'), staged)
-        with self.assertRaises(add_vault.Refused):                         # a Safe's own venue is no Squads venue either
-            add_vault.venue_row(dict(v, kind='safe'), dict(staged, venue='uniswap-v3-polygon'))
 
 
 class Migration(unittest.TestCase):
@@ -379,8 +375,7 @@ class MoveWaits(unittest.TestCase):
         self.assertEqual(self.ask(VAULT, answer=(None, 'all RPC endpoints failed'))[0], 'all RPC endpoints failed')
 
     def test_no_vault_a_safe_or_the_pool_it_is_on_asks_nothing(self):
-        for vault, dex, pool in ((None, 'meteora-dlmm', 'HELD'), (dict(VAULT, kind='safe'), 'meteora-dlmm', 'HELD'),
-                                 (VAULT, 'raydium-clmm', RAY_POOL)):
+        for vault, dex, pool in ((None, 'meteora-dlmm', 'HELD'), (VAULT, 'raydium-clmm', RAY_POOL)):
             why, calls = self.ask(vault, dex=dex, pool=pool, answer=(None, AWAITING))
             self.assertEqual((why, calls), (None, []), (vault and vault['kind'], dex))
 
@@ -471,8 +466,6 @@ class PoolRow(unittest.TestCase):
         for b in bad:
             with self.assertRaises(add_vault.Refused, msg=str(b)[:120]):
                 add_vault.pool_row(self.V, b)
-        with self.assertRaises(add_vault.Refused):
-            add_vault.pool_row(dict(self.V, kind='safe'), self.staged())
 
 
 if __name__ == '__main__':

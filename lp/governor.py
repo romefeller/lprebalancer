@@ -18,12 +18,6 @@ Concentrated-liquidity venues only (value per unit of liquidity known); a
 band on another venue, or without liquidity snapshots, is left out of both
 fees and loss. No measurable band: nothing is paid (the fees are reinvested).
 Values are in quote units: on SOL/USDC that is dollars.
-
-The equity mode (sql/054, owner 2026-10-18) replaces the share above with two
-states: each harvest pays GOVERNOR_HIGH while the equity is ahead of its
-target, else GOVERNOR_FLOOR (equity_share). The target is the money put in,
-grown GOVERNOR_GROWTH_PCT per 30 days (target_usd). The equity counts SOL's
-price, so a fall in SOL holds the floor until fees make it up.
 """
 import math
 
@@ -146,58 +140,8 @@ def measure(profile, days):
     return out
 
 
-def equity_share(gap_pct, paying, enter_pct, exit_pct, floor, high):
-    """(share, paying) of the equity mode: `high` while paying, else `floor`.
-    Paying starts at `gap_pct` >= `enter_pct` (the equity's lead on its
-    target, in %) and stops at `gap_pct` <= `exit_pct`; between the two the
-    state stays as it was. Pure."""
-    on = gap_pct > exit_pct if paying else gap_pct >= enter_pct
-    return (high if on else floor), on
-
-
-def target_usd(flows, now, growth_pct):
-    """The equity target: each (ts, usd) put in (money out negative), grown
-    `growth_pct` per 30 days from its own ts to `now`. Pure."""
-    g = 1 + growth_pct / 100
-    return sum(usd * g ** (max((now - ts).total_seconds(), 0.0) / 86400 / 30) for ts, usd in flows)
-
-
-def equity_measure(profile, growth_pct):
-    """{'equity_usd', 'target_usd', 'put_in_usd', 'gap_pct'} of `profile` now
-    (db.governor_capital), or None without a book or a positive target."""
-    cap = db.governor_capital(profile)
-    if not cap:
-        return None
-    target = target_usd(cap['flows'], db.now(), growth_pct)
-    if target <= 0:
-        return None
-    return {'equity_usd': cap['equity_usd'], 'target_usd': target,
-            'put_in_usd': sum(usd for _, usd in cap['flows']),
-            'gap_pct': (cap['equity_usd'] / target - 1) * 100}
-
-
-def equity_share_now():
-    """(share, measurement) of the equity mode for this profile now. A
-    switch is written to the database and named in the measurement
-    ('switched'). No measurement or an error pays the floor."""
-    try:
-        m = equity_measure(config.PROFILE, config.GOVERNOR_GROWTH_PCT)
-        paying, _ = db.governor_state(config.PROFILE)
-    except Exception as e:
-        return config.GOVERNOR_FLOOR, {'mode': 'equity', 'error': f'{type(e).__name__}: {e}'}
-    if not m:
-        return config.GOVERNOR_FLOOR, {'mode': 'equity', 'error': 'no equity or target to read'}
-    share, on = equity_share(m['gap_pct'], paying, config.GOVERNOR_ENTER_PCT, config.GOVERNOR_EXIT_PCT,
-                             config.GOVERNOR_FLOOR, config.GOVERNOR_HIGH)
-    if on != paying:
-        db.set_governor_state(config.PROFILE, on)
-    return share, dict(m, mode='equity', paying=on, switched=on != paying)
-
-
 def share_now():
     """(payout share, measurement) for this profile now. Errors pay nothing."""
-    if config.GOVERNOR_MODE == 'equity':
-        return equity_share_now()
     try:
         m = measure(config.PROFILE, config.GOVERNOR_DAYS)
     except Exception as e:

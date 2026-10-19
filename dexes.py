@@ -7,9 +7,6 @@ below turns that into one record the engine can score without knowing where the
 pool lives:
 
     dex             'orca' | 'raydium-clmm' | 'byreal' | 'pancakeswap-v3-solana' | 'meteora-dlmm'
-                    | 'aerodrome-slipstream' (Base; single-pool lookup only, never on the board)
-                    | 'uniswap-v3-unichain' (Unichain; single-pool lookup only, never on the board)
-                    | 'uniswap-v3-polygon' (Polygon; single-pool lookup only, never on the board)
     kind            'clmm' (ticks) | 'dlmm' (bins)
     address, pair
     token_a/token_b {address, symbol, name, decimals}
@@ -36,13 +33,11 @@ SolFi and Lifinity take no outside liquidity.
 """
 import concurrent.futures as cf
 
-from venues.aerodrome import pools as aerodrome_pools
 from venues.byreal import pools as byreal_pools
 from venues.meteora_dlmm import pools as meteora_pools
 from venues.orca import pools as orca_pools
 from venues.pancakeswap_v3 import pools as pancake_pools
 from venues.raydium_clmm import pools as raydium_pools
-from venues.uniswap_v3 import pools as uniswap_pools
 
 # Every DEX the board scans, with the adapter that lists it. The config's
 # `dexes` column names entries of this table.
@@ -50,13 +45,10 @@ KNOWN = ('orca', 'raydium-clmm', 'byreal', 'pancakeswap-v3-solana', 'meteora-dlm
 
 ADAPTERS = {'orca': orca_pools.orca, 'raydium-clmm': raydium_pools.raydium, 'byreal': byreal_pools.byreal,
             'pancakeswap-v3-solana': pancake_pools.pancakeswap, 'meteora-dlmm': meteora_pools.meteora_dlmm}
-# One pool by address. The EVM venues are here only: never on the Solana board.
+# One pool by address.
 SINGLE = {'orca': orca_pools.orca_pool, 'raydium-clmm': raydium_pools.raydium_pool,
           'byreal': byreal_pools.byreal_pool, 'pancakeswap-v3-solana': pancake_pools.pancakeswap_pool,
-          'meteora-dlmm': meteora_pools.meteora_dlmm_pool,
-          'aerodrome-slipstream': aerodrome_pools.slipstream_pool,
-          'uniswap-v3-unichain': uniswap_pools.uniswap_v3_pool,
-          'uniswap-v3-polygon': uniswap_pools.uniswap_v3_polygon_pool}
+          'meteora-dlmm': meteora_pools.meteora_dlmm_pool}
 
 
 def fetch_all(dexes=KNOWN, limit=50, timeout=120):

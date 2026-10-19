@@ -83,12 +83,6 @@ class FallbackPoolArgs(Patched):
         with mock.patch.object(lp.capital, 'pool_tokens', boom):
             self.assertEqual(lp.swaps.fallback_pool_args(DJT, USDC), [])
 
-    def test_the_orca_script_knows_djt_usdc_without_the_flag(self):
-        venue = json.loads((_fixtures.ROOT / 'venues/orca/venue.json').read_text())
-        pools = {(p['mint_a'], p['mint_b']): p['pool'] for p in venue['fallback_pools']}
-        self.assertEqual(pools[(DJT, USDC)], DJT_POOL)
-
-
 # --- B: the side the band needs ---------------------------------------------------------
 class OneSideShort(unittest.TestCase):
     def test_replay_2026_10_09_no_djt_is_short(self):

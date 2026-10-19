@@ -693,8 +693,8 @@ python3 db.py --pool sol-usdc       # the full book of one pool
 
 Every report names a wallet by its id and the first 10 characters of its
 address (`WALLET sol-lp 83HxMUUC7c`, Telegram's `[SOL/USDC · 83HxMUUC7c]`): two
-wallets can run the same pair. A profile that moves between pools (sol-swing)
-lists each pool it held under it (`db.by_pool`, keyed on each position's
+wallets can run the same pair. A profile that moved between pools lists each
+pool it held under it (`db.by_pool`, keyed on each position's
 pool); its token amounts and hold benchmarks are blank on a side whose token
 changed, its dollars add as for any pool.
 

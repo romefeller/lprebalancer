@@ -26,9 +26,6 @@ SIGNERS = {'orca': str(paths.ROOT / 'venues/orca/signer.mjs'),
            'raydium-clmm': str(paths.ROOT / 'venues/raydium_clmm/signer.mjs'),
            'byreal': str(paths.ROOT / 'venues/byreal/signer.mjs'),
            'pancakeswap-v3-solana': str(paths.ROOT / 'venues/pancakeswap_v3/signer.mjs'),
-           'aerodrome-slipstream': str(paths.ROOT / 'venues/aerodrome/signer.mjs'),   # Base
-           'uniswap-v3-unichain': str(paths.ROOT / 'venues/uniswap_v3/signer.mjs'),   # Unichain
-           'uniswap-v3-polygon': str(paths.ROOT / 'venues/uniswap_v3/signer.mjs'),    # Polygon, LPBOT_CHAIN=polygon
            'jupiter': str(paths.ROOT / 'venues/jupiter/swap.mjs'),                    # swaps, not positions
            'orca-swap': str(paths.ROOT / 'venues/orca/swap.mjs'),                     # the fallback swap
            'payout': str(paths.ROOT / 'chains/solana/payout.mjs'),                    # to the profit wallet only
@@ -302,8 +299,8 @@ def signatures_of(out):
 
 def landed_view(out, step):
     """What the chain's receipts in a signer's answer say of an operation
-    whose last step is labelled `step` (the EVM signers' `receipts`:
-    label, hash, status per sent transaction; chains/evm/landing.mjs).
+    whose last step is labelled `step` (a signer's `receipts`: label, hash,
+    status per sent transaction).
     'landed' when every sent transaction landed with status success and
     one of them is `step`: the operation happened, whatever error came with
     it. 'unsent' when every sent transaction landed with status success but
@@ -460,13 +457,9 @@ def _chain(*args, dex=None, timeout=tuning.SIGNER_TIMEOUT_S, extra_env=None):
         guards.inside(pathlib.Path(script), paths.ROOT)
     except guards.Refused as e:
         return None, f'refused: {e}'
-    # The whole service environment passes through (LPBOT_PROFIT_WALLET_PIN,
-    # LPBOT_EVM_PROFIT_WALLET_PIN: the signers check the pin themselves).
-    # The gas reserve is in the chain's native token: _SOL for the Solana
-    # scripts, _NATIVE for every signer that is not Solana's. LPBOT_RUN_DIR:
-    # a signer refuses writes on this profile's HALT as on the global one.
-    # LPBOT_CHAIN: the EVM Uniswap signer serves Unichain and Polygon and picks
-    # its chain module by it (chains/evm/chains.mjs).
+    # The whole service environment passes through (LPBOT_PROFIT_WALLET_PIN:
+    # the signers check the pin themselves). LPBOT_RUN_DIR: a signer refuses
+    # writes on this profile's HALT as on the global one.
     # The profile's own signer gets its opt-ins (config.SIGNER_ENV); no other
     # script does.
     own = config.SIGNER_ENV if (dex or config.DEX) == config.DEX else {}
@@ -492,8 +485,6 @@ def _chain(*args, dex=None, timeout=tuning.SIGNER_TIMEOUT_S, extra_env=None):
                LPBOT_MAX_USD=str(config.MAX_USD),
                LPBOT_SLIPPAGE_BPS=str(config.SLIPPAGE_BPS),
                LPBOT_GAS_RESERVE_SOL=str(config.GAS_RESERVE_SOL),
-               LPBOT_GAS_RESERVE_NATIVE=str(config.GAS_RESERVE_SOL),
-               LPBOT_GAS_REFILL_TO=str(config.GAS_REFILL_TO),
                LPBOT_RUN_DIR=str(paths.RUN),
                LPBOT_CHAIN=config.CHAIN,
                LPBOT_PROFIT_WALLET=config.PROFIT_WALLET, **vault, **fee, **(extra_env or {}))
@@ -593,11 +584,9 @@ def mint_refusal(err):
 
 # Refusals that say nothing about the venue and need only time: the wallet's
 # lock was busy or unreachable, the claims could not be measured, a HALT.
-# A gas price over LPBOT_EVM_MAX_GWEI holds too: the EVM signer sent nothing, and three
-# refused reopens in a spike must not write HALT (edge test, 2026-10-10).
-WAIT_REFUSAL = re.compile(r'^refused: (wallet \S+ lock|claims unmeasurable|halted|max fee \d+ wei/gas exceeds)')
-# The vault's owners took the bot's rights back (chains/solana/vault/account.mjs,
-# chains/evm/vault/account.mjs): nothing the bot sends can act any more.
+WAIT_REFUSAL = re.compile(r'^refused: (wallet \S+ lock|claims unmeasurable|halted)')
+# The vault's owners took the bot's rights back (chains/solana/vault/account.mjs):
+# nothing the bot sends can act any more.
 REVOKED = re.compile(r'owners revoked the bot')
 
 
