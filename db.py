@@ -1746,6 +1746,7 @@ def governor_view(name, cfg, fees_per_day):
     share = governor.payout_share(m['fees'], m['loss'], keep, cap)
     rate = float(fees_per_day) if fees_per_day is not None else None
     return {'days': days, 'keep': keep, 'cap': cap, 'bands': m['bands'], 'fees_usd': round(m['fees'], 4),
+            'ratio': governor.ratio(m['fees'], m['loss']),
             'loss_usd': round(m['loss'], 4), 'profit_usd': round(m['fees'] + m['loss'], 4), 'share': round(share, 4),
             'fees_per_day_usd': round(rate, 4) if rate is not None else None,
             'paid_per_day_usd': round(rate * share, 4) if rate is not None else None,

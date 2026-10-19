@@ -6,6 +6,7 @@ Over the profile's bands closed in the last GOVERNOR_DAYS:
 
     profit share = (fees + loss) / fees        (loss <= 0)
     payout share = profit share x (1 - GOVERNOR_KEEP), inside [0, GOVERNOR_CAP]
+    (GOVERNOR_CAP 1.0 since sql/058: no cap, the payout follows R = fees / loss)
 
 The loss of a band is its LP value at the close minus the value, at the close
 price, of the tokens its liquidity held when it went in (each later increase
@@ -76,6 +77,15 @@ def band_loss(lower, upper, open_price, close_price, liquidity_steps, scale):
         hold += scale * l * (x * close_price + y)
     x, y = amounts(close_price, lower, upper)
     return scale * prev * (x * close_price + y) - hold
+
+
+def ratio(fees, loss):
+    """R of a window: its fees over its re-centre loss (fees / -loss), the
+    figure every payout is shown with (sql/058). None without fees or without
+    a loss to divide by (a window that lost nothing has no finite R). Pure."""
+    if not fees or fees <= 0 or loss is None or loss >= 0:
+        return None
+    return round(fees / -loss, 3)
 
 
 def payout_share(fees, loss, keep, cap):
@@ -192,4 +202,6 @@ def share_now():
         m = measure(config.PROFILE, config.GOVERNOR_DAYS)
     except Exception as e:
         return 0.0, {'error': f'{type(e).__name__}: {e}'}
-    return payout_share(m['fees'], m['loss'], config.GOVERNOR_KEEP, config.GOVERNOR_CAP), m
+    share = payout_share(m['fees'], m['loss'], config.GOVERNOR_KEEP, config.GOVERNOR_CAP)
+    return share, dict(m, mode='profit', ratio=ratio(m['fees'], m['loss']), share=round(share, 4),
+                       days=config.GOVERNOR_DAYS, keep=config.GOVERNOR_KEEP, cap=config.GOVERNOR_CAP)

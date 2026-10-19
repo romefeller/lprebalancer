@@ -59,6 +59,13 @@ class Share(unittest.TestCase):
         self.assertAlmostEqual(governor.payout_share(25.9, -14.8, 0.2, 0.5), 0.8 * 11.1 / 25.9, places=9)
         self.assertAlmostEqual(governor.payout_share(115.3, -115.0, 0.2, 0.5), 0.8 * 0.3 / 115.3, places=9)
 
+    def test_ratio_is_fees_over_loss(self):
+        self.assertEqual(governor.ratio(43.91, -46.78), round(43.91 / 46.78, 3))
+        self.assertEqual(governor.ratio(30.0, -10.0), 3.0)
+        self.assertIsNone(governor.ratio(0, -5)); self.assertIsNone(governor.ratio(10, 0)); self.assertIsNone(governor.ratio(10, 2))
+        self.assertIsNone(governor.ratio(10, None))
+        self.assertAlmostEqual(governor.payout_share(30, -10, 0.5, 1.0), (1 - 1 / 3) * 0.5)   # no cap: follows R
+
     def test_a_losing_window_pays_nothing_and_the_cap_holds(self):
         self.assertEqual(governor.payout_share(10, -20, 0.2, 0.5), 0.0)
         self.assertEqual(governor.payout_share(0, 0, 0.2, 0.5), 0.0)
@@ -217,7 +224,14 @@ class EquityBook(unittest.TestCase):
         with mock.patch.multiple(config, PROFILE='sol-usdc', GOVERNOR_MODE='profit', GOVERNOR_DAYS=7,
                                  GOVERNOR_KEEP=0.2, GOVERNOR_CAP=0.5), \
                 mock.patch.object(governor, 'measure', lambda p, d: {'fees': 10.0, 'loss': -5.0}):
-            self.assertEqual(governor.share_now(), (0.4, {'fees': 10.0, 'loss': -5.0}))
+            self.assertEqual(governor.share_now(), (0.4, {'fees': 10.0, 'loss': -5.0, 'mode': 'profit', 'ratio': 2.0,
+                                                          'share': 0.4, 'days': 7, 'keep': 0.2, 'cap': 0.5}))
+        # sql/058: no cap, the payout follows R; keep 0.5 pays half of the profit share
+        with mock.patch.multiple(config, PROFILE='sol-usdc', GOVERNOR_MODE='profit', GOVERNOR_DAYS=7,
+                                 GOVERNOR_KEEP=0.5, GOVERNOR_CAP=1.0), \
+                mock.patch.object(governor, 'measure', lambda p, d: {'fees': 30.0, 'loss': -10.0}):
+            share, m = governor.share_now()
+        self.assertAlmostEqual(share, (1 - 10 / 30) * 0.5); self.assertEqual((m['ratio'], m['cap']), (3.0, 1.0))
         with mock.patch.multiple(config, PROFILE='sol-usdc', GOVERNOR_MODE='profit'), \
                 mock.patch.object(governor, 'measure', side_effect=RuntimeError('x')):
             share, m = governor.share_now()

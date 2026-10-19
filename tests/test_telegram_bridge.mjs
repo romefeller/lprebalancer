@@ -733,10 +733,16 @@ test('the PAYOUT block of the equity governor shows the state, the target and th
   assert.ok(!pay.includes('undefined') && !text.includes('undefined'));
 });
 
-test('the 053 PAYOUT block is unchanged', () => {
-  const text = render({ event: 'in_band', price: 190, governor: { share: 0.07, keep: 0.2, cap: 0.5, days: 7, bands: 30,
-    fees_usd: 40, loss_usd: -35, profit_usd: 5, fees_per_day_usd: 10, paid_per_day_usd: 0.7, reinvested_per_day_usd: 9.3 } });
-  assert.ok(text.includes('governor    pays 7.0% of each harvest · keeps 20.0% of the profit · cap 50.0%'));
+test('the 053 PAYOUT block shows R, the share, the keep and the cap or its absence (sql/058)', () => {
+  const g = { share: 0.07, keep: 0.2, cap: 0.5, days: 7, bands: 30, ratio: 1.143,
+    fees_usd: 40, loss_usd: -35, profit_usd: 5, fees_per_day_usd: 10, paid_per_day_usd: 0.7, reinvested_per_day_usd: 9.3 };
+  const text = render({ event: 'in_band', price: 190, governor: g });
+  assert.ok(text.includes('governor    R 1.14 (fees ÷ re-centre loss, last 7d) → pays 7.0% of each harvest · keeps 20.0% of the profit · cap 50.0%'), text);
+  const free = render({ event: 'in_band', price: 190, governor: { ...g, cap: 1.0, ratio: null, share: 0 } });
+  assert.ok(free.includes('governor    R — (no loss to divide by) (fees ÷ re-centre loss, last 7d) → pays 0.0% of each harvest · keeps 20.0% of the profit · no cap'), free);
+  const payout = render({ event: 'PAYOUT', gas_low: false, sent: [], split: { paid: 0.3, reinvested: 0.7, gas: 0 },
+    governor: { mode: 'profit', share: 0.115, ratio: 1.3, fees: 43.91, loss: -33.78, days: 7, bands: 40 } });
+  assert.ok(payout.endsWith('\ngovernor R 1.30 (fees $43.91 ÷ re-centre loss $33.78, 7d, 40 bands) → paid 11.5% of this harvest'), payout);
   assert.ok(text.includes('expected    $0.70/day paid · $9.30/day reinvested (fees $10.00/day, 24h)'));
 });
 

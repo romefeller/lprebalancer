@@ -250,8 +250,11 @@ export function render(row) {
             : `switch      ${pct(g.high)} from equity ≥ $${n(g.enter_at_usd, 2)} (target +${n(g.enter_pct, 1)}%) · $${n(g.enter_at_usd - g.equity_usd, 2)} to go`,
         ...expected];
     }
+    // sql/058: the payout follows R = fees / re-centre loss of the window; no cap unless one is set
+    const r = g.ratio != null ? `R ${n(g.ratio, 2)}` : 'R — (no loss to divide by)';
     return [`━━ 💸 PAYOUT ━━`,
-      `governor    pays ${pct(g.share)} of each harvest · keeps ${pct(g.keep)} of the profit · cap ${pct(g.cap)}`,
+      `governor    ${r} (fees ÷ re-centre loss, last ${n(g.days, 0)}d) → pays ${pct(g.share)} of each harvest`
+        + ` · keeps ${pct(g.keep)} of the profit${Number(g.cap) < 1 ? ` · cap ${pct(g.cap)}` : ' · no cap'}`,
       `last ${n(g.days, 0)}d     ${g.bands} bands: fees $${n(g.fees_usd, 2)} · re-centre loss ${sign(g.loss_usd)} · profit ${sign(g.profit_usd)}`,
       ...expected,
     ];
@@ -441,7 +444,10 @@ export function render(row) {
       const sent = (row.sent ?? []).map(x => `${x.amount} ${x.symbol} ($${n(x.usd, 4)}) → profit wallet\n${x.signature}`).join('\n');
       const g = row.governor;
       const gov = g?.mode === 'equity' && g.share != null
-        ? `\ngovernor ${g.paying ? 'PAY' : 'REINVEST'} ${n(g.share * 100, 1)}% · equity ${g.gap_pct >= 0 ? '+' : ''}${n(g.gap_pct, 1)}% vs target` : '';
+        ? `\ngovernor ${g.paying ? 'PAY' : 'REINVEST'} ${n(g.share * 100, 1)}% · equity ${g.gap_pct >= 0 ? '+' : ''}${n(g.gap_pct, 1)}% vs target`
+        : g?.mode === 'profit' && g.share != null
+          ? `\ngovernor R ${g.ratio != null ? n(g.ratio, 2) : '—'} (fees $${n(g.fees, 2)} ÷ re-centre loss $${n(-g.loss, 2)}, ${n(g.days, 0)}d, ${g.bands ?? '—'} bands)`
+            + ` → paid ${n(g.share * 100, 1)}% of this harvest` : '';
       return 'PAYOUT\n' + (sent || 'nothing sent this harvest') + '\n' + split + gov;
     }
     case 'GOVERNOR':
