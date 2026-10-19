@@ -19,6 +19,7 @@ R_SHADOW_OUT = 1.0               # shadow OUT below this ratio ...
 R_SHADOW_IN = 1.5                # ... and back IN above this one (hysteresis)
 MOMENT_BAD_RATIO = 0.8           # a BAD fee moment: fees under this x the in-band loss over the shadow hours (sql/057)
 MOMENT_REF_S = 600               # the 7-day percentiles behind the moment labels are re-read this often
+MOMENT_MIN_REF = 288             # no GREAT/BAD label before this many reference polls (a day): a thin p90 labels noise
 PENDING_REOPEN_MAX_S = DAY_S     # a CALM reopen intent older than this is dropped
 PENDING_REOPEN_WIDE_S = 1800     # after this without fresh data, reopen at the widest width
 BALANCED_SIDE_SHARE = 0.97       # a side holding this share of its target needs no swap

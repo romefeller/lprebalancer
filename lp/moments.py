@@ -106,7 +106,9 @@ def record(state, status, rv, metrics):
         ref = {}
     rv['moment_ref'] = ref
     sigma = (metrics or {}).get('rms_1h_pct')
-    label = classify(hv['fee_pct_1h'], ref.get('fee_p90'), rv.get('fee_loss_3h'), sigma, ref.get('sigma_p90'))
+    # a day of reference polls before any label: a 90th percentile of a few rows labels noise
+    ok = ref if ref.get('n', 0) >= tuning.MOMENT_MIN_REF else {}
+    label = classify(hv['fee_pct_1h'], ok.get('fee_p90'), rv.get('fee_loss_3h'), sigma, ok.get('sigma_p90'))
     rv['moment'] = label
     cur = state.get('moment')
     now = time.time()

@@ -102,11 +102,11 @@ class HourView(unittest.TestCase):
 
 
 class Spells(unittest.TestCase):
-    def polls(self, seq, state=None):
+    def polls(self, seq, state=None, n_ref=500):
         """seq: (fee_pct_1h, fee_loss_3h, sigma) per poll with a fixed reference."""
         state = {} if state is None else state
         events, books_sent, labels = [], [], []
-        ref = {'fee_med': 0.04, 'fee_p90': 0.07, 'sigma_med': 0.3, 'sigma_p90': 0.6, 'n': 500, 'days': 7}
+        ref = {'fee_med': 0.04, 'fee_p90': 0.07, 'sigma_med': 0.3, 'sigma_p90': 0.6, 'n': n_ref, 'days': 7}
         status = {'whirlpool': POOL, 'price': 100.0, 'quoteUsd': 1.0}
         with mock.patch.object(lp.paths, 'save', lambda s: None), \
                 mock.patch.object(db, 'event', lambda k, d: events.append((k, d))), \
@@ -130,6 +130,12 @@ class Spells(unittest.TestCase):
         self.assertEqual(sent[0][1]['sigma_1h_pct'], 0.3); self.assertEqual(sent[1][1]['next'], None)
         self.assertNotIn('moment', state)
         self.assertEqual((rv['moment'], rv['fee_pct_1h'], rv['moment_ref']['fee_p90']), (None, 0.05, 0.07))
+
+    def test_a_thin_reference_labels_nothing(self):
+        labels, events, sent, state, rv = self.polls([(0.09, 1.5, 0.3), (0.02, 0.5, 0.9)], n_ref=100)
+        self.assertEqual(labels, [None, None]); self.assertEqual(events, []); self.assertEqual(sent, [])
+        self.assertEqual(rv['moment_ref']['n'], 100)                       # the book still shows it building
+        self.assertEqual(tuning.MOMENT_MIN_REF, 288)
 
     def test_great_to_bad_ends_one_spell_and_starts_the_next(self):
         labels, events, sent, state, _ = self.polls([(0.08, 1.5, 0.3), (0.02, 0.5, 0.9)])
