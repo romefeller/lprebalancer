@@ -80,7 +80,7 @@ class Maths(unittest.TestCase):
 
 
 class Theta(unittest.TestCase):
-    """The factor-scaled touch threshold (sql/046: base 0.60, ceiling 0.96)."""
+    """The factor-scaled touch threshold (sql/046 ceiling 0.96; sql/055 base back to 0.25)."""
 
     def test_base_060_scales_up_to_the_ceiling(self):
         with mock.patch.object(config, 'REGIME_THRESHOLD', 0.60):
@@ -98,6 +98,18 @@ class Theta(unittest.TestCase):
                 a, b = lp.regime.regime_theta(min(f1, f2)), lp.regime.regime_theta(max(f1, f2))
             self.assertTrue(0.05 <= a <= 0.96 and 0.05 <= b <= 0.96)
             self.assertLessEqual(a, b + 1e-12)
+
+    def test_hot_is_reachable_at_the_profile_threshold(self):
+        # sql/055: at theta 0.60 a typical HOT hour (P(touch +-2% in 2h) = 0.343, the median
+        # of the HOT polls under 0.25) read as WARM, and the every-HOT pause never fired.
+        # At the highest liquidity factor seen (1.25) such an hour must still pick > +-2%.
+        probs = [0.67, 0.517, 0.403, 0.343, 0.147, 0.095, 0.04, 0.014]
+        widths = [1.01, 1.0125, 1.015, 1.02, 1.025, 1.03, 1.04, 1.05]
+        base = float(db.load_config('sol-usdc')['regime_threshold'])
+        with mock.patch.object(config, 'REGIME_THRESHOLD', base):
+            theta = lp.regime.regime_theta(1.25)
+        choice = next((k for k, p in zip(widths, probs) if p <= theta), widths[-1])
+        self.assertGreater(choice, calm.WARM_MAX, f'theta {theta:.3f} makes a HOT hour WARM')
 
     def test_a_looser_threshold_never_picks_a_wider_band(self):
         # the narrowest width with P(touch) <= theta: a larger theta can only narrow it
