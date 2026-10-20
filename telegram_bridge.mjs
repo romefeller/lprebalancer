@@ -242,7 +242,8 @@ export function render(row) {
     const r = g.ratio != null ? `R ${n(g.ratio, 2)}` : 'R — (no loss to divide by)';
     return [`━━ 💸 PAYOUT ━━`,
       `governor    ${r} (fees ÷ re-centre loss, last ${n(g.days, 0)}d) → pays ${pct(g.share)} of each harvest`
-        + ` · keeps ${pct(g.keep)} of the profit${Number(g.cap) < 1 ? ` · cap ${pct(g.cap)}` : ' · no cap'}`,
+        // the share kept and the cap only when set (sql/060: keep 0, no cap)
+        + `${Number(g.keep) > 0 ? ` · keeps ${pct(g.keep)} of the profit` : ''}${Number(g.cap) < 1 ? ` · cap ${pct(g.cap)}` : ''}`,
       `last ${n(g.days, 0)}d     ${g.bands} bands: fees $${n(g.fees_usd, 2)} · re-centre loss ${sign(g.loss_usd)} · profit ${sign(g.profit_usd)}`,
       ...expected,
     ];

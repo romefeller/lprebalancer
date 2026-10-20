@@ -700,7 +700,10 @@ test('the 053 PAYOUT block shows R, the share, the keep and the cap or its absen
   const text = render({ event: 'in_band', price: 190, governor: g });
   assert.ok(text.includes('governor    R 1.14 (fees ÷ re-centre loss, last 7d) → pays 7.0% of each harvest · keeps 20.0% of the profit · cap 50.0%'), text);
   const free = render({ event: 'in_band', price: 190, governor: { ...g, cap: 1.0, ratio: null, share: 0 } });
-  assert.ok(free.includes('governor    R — (no loss to divide by) (fees ÷ re-centre loss, last 7d) → pays 0.0% of each harvest · keeps 20.0% of the profit · no cap'), free);
+  assert.ok(free.includes('governor    R — (no loss to divide by) (fees ÷ re-centre loss, last 7d) → pays 0.0% of each harvest · keeps 20.0% of the profit'), free);
+  const live = render({ event: 'in_band', price: 190, governor: { ...g, keep: 0, cap: 1.0, ratio: 1.059, share: 0.0557 } });
+  assert.ok(live.includes('governor    R 1.06 (fees ÷ re-centre loss, last 7d) → pays 5.6% of each harvest\n'), live);
+  assert.ok(!live.includes('of the profit') && !live.includes('cap'), live);
   const payout = render({ event: 'PAYOUT', gas_low: false, sent: [], split: { paid: 0.3, reinvested: 0.7, gas: 0 },
     governor: { mode: 'profit', share: 0.115, ratio: 1.3, fees: 43.91, loss: -33.78, days: 7, bands: 40 } });
   assert.ok(payout.endsWith('\ngovernor R 1.30 (fees $43.91 ÷ re-centre loss $33.78, 7d, 40 bands) → paid 11.5% of this harvest'), payout);
