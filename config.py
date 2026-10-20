@@ -243,6 +243,12 @@ HOT_PAUSE_MAX_S = float(_CFG.get('hot_pause_max_hours') or 12) * 3600
 HOT_PAUSE_COOLDOWN_S = int(_CFG.get('hot_pause_cooldown_minutes') or 60) * 60
 # The pools the HOT pause guards (sql/033); empty: every pool the profile holds.
 HOT_PAUSE_POOLS = frozenset(_CFG.get('hot_pause_pools') or ())
+# The pool a vault swaps in, when not the held one (sql/060, owner 2026-10-20):
+# a vault has no router, and tang0's swaps of half its equity in the shallow
+# held pool cost 30-50 bp each. A deeper pool of the same pair that the
+# owners approved takes them at its fee. Used only when the vault approves it
+# (swaps.vault_swap_pool). None: the held pool.
+SWAP_POOL = _CFG.get('swap_pool') or None
 # Pause in every HOT moment, without the fee check (sql/053, owner
 # 2026-10-18): the band waits 50/50 whenever the regime calls the market HOT.
 # Audited on 8sLb, 333 h by the bot's own label: fees / in-band loss was

@@ -342,6 +342,19 @@ def impact_refused(out, err):
         and re.search(r'price impact [0-9.]+% exceeds', str(err)) is not None
 
 
+def vault_swap_pool(swap_dex):
+    """The pool a vault's swap goes through: config.SWAP_POOL when this
+    profile is a vault, the swap runs on its own venue signer, and the owners
+    approved that pool on the venue; else None (the held pool). sql/060:
+    tang0's in-pool swaps moved 8sLb 30-50 bp; 3ucN, approved on its vault,
+    is about 400 times deeper."""
+    pool = config.SWAP_POOL
+    if not pool or not config.VAULT or swap_dex != config.DEX or pool == config.POOL:
+        return None
+    approved = (config.VAULT.get('venues') or {}).get(config.DEX) or {}
+    return pool if pool in (approved.get('pools') or []) else None
+
+
 def piece_targets(usd_a, usd_b, target_a, target_b, piece):
     """The rebalance targets (dollars of each side) that make `piece` of the
     move from (usd_a, usd_b) to (target_a, target_b). Pure."""
@@ -429,6 +442,9 @@ def balance_wallet(state, bal, rec, share_a=None):
         # venue signer).
         env = dict(env or {}, LPBOT_SLEEVE=json.dumps(wallets.sleeve_caps(bal, mint_a, mint_b)))
     swap_dex = signers.route('swap')
+    deep = vault_swap_pool(swap_dex)
+    if deep:
+        env = dict(env or {}, LPBOT_POOL=deep)          # the venue signer swaps there; the band stays put
     out, err = signers.chain('rebalance', mint_a, mint_b, target_a, target_b, '--execute', dex=swap_dex, extra_env=env,
                              record=False)
     limited = re.search(r'Jupiter (rate limited|429)', str(err))        # an RPC limit rotates endpoints instead

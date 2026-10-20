@@ -487,7 +487,8 @@ def _chain(*args, dex=None, timeout=tuning.SIGNER_TIMEOUT_S, extra_env=None):
                LPBOT_GAS_RESERVE_SOL=str(config.GAS_RESERVE_SOL),
                LPBOT_RUN_DIR=str(paths.RUN),
                LPBOT_CHAIN=config.CHAIN,
-               LPBOT_PROFIT_WALLET=config.PROFIT_WALLET, **vault, **fee, **(extra_env or {}))
+               LPBOT_PROFIT_WALLET=config.PROFIT_WALLET, **vault, **fee)
+    env.update(extra_env or {})        # the caller's wins (sql/060: a vault's swap pool over LPBOT_POOL)
     try:
         r = subprocess.run(['node', script, *args], capture_output=True,
                            text=True, timeout=timeout, env=env)
