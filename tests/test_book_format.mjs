@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { equityLine, pnlParts, lpLine, sinceStartLine, shareAgrees } from '../book_format.mjs';
+import { equityLine, erosionLine, pnlParts, lpLine, sinceStartLine, shareAgrees } from '../book_format.mjs';
 
 const R = { equity_usd: 240.0, pnl_usd: 3.52, last_price: 118.0905, lp_usd: 221.24, deployed_pct: 92.2, wallet_usd: 18.73,
   since_start: { since: '2026-09-22T19:56:24+00:00', start_usd: 248.096, start_sol: 2.102865, value_usd: 242.4247,
@@ -170,4 +170,13 @@ test('the P&L shows what the LP kept and what was paid out', () => {
   assert.equal(equityLine({ equity_usd: 1357.55, last_price: 190, since_start: s }),
     'equity      $1357.55 · SOL $190.00   P&L -59.50 since start (in LP -94.62 · paid out +35.12) · includes pending fees');
   assert.equal(pnlParts({ profit_usd: 1 }), '');
+});
+
+test('the erosion line: the LP against a 50/50 hold, SOL price excluded (2026-10-20)', () => {
+  const base = { since_start: { vs_hold_50_50_usd: 12.5, paid_out_usd: 42.16 } };
+  assert.equal(erosionLine(base), 'erosion     none · +12.50 vs a 50/50 hold since start (SOL price excluded) · paid out $42.16');
+  assert.equal(erosionLine({ since_start: { vs_hold_50_50_usd: -21, paid_out_usd: null } }),
+    'erosion     yes · -21.00 vs a 50/50 hold since start (SOL price excluded)');
+  assert.equal(erosionLine({ since_start: { vs_hold_50_50_usd: null } }), null);
+  assert.equal(erosionLine({}), null);
 });

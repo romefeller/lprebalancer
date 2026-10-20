@@ -63,6 +63,18 @@ export function equityLine(r) {
   return `equity      $${n(r.equity_usd)}${sol}   P&L ${sign(r.pnl_usd)} · includes pending fees`;
 }
 
+// Erosion with SOL's price taken out (owner, 2026-10-20): the value (equity
+// plus what was paid out) against holding the same money 50/50 from the day
+// each dollar came in. Ahead: the LP's work earned that much over its loss.
+// Behind: the LP eroded it. Null without the benchmark.
+export function erosionLine(r) {
+  const s = r.since_start;
+  if (!s || s.vs_hold_50_50_usd == null) return null;
+  const x = Number(s.vs_hold_50_50_usd);
+  const paid = s.paid_out_usd != null ? ` · paid out $${n(s.paid_out_usd)}` : '';
+  return `erosion     ${x >= 0 ? 'none' : 'yes'} · ${sign(x)} vs a 50/50 hold since start (SOL price excluded)${paid}`;
+}
+
 // The P&L in its two parts: what the LP kept (equity against the money put
 // in) and what was paid out. Empty without the payout figures.
 export function pnlParts(s) {

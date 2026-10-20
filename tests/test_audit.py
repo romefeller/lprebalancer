@@ -242,7 +242,9 @@ class SinceStart(unittest.TestCase):
         s = db.since_start(0.0)
         self.assertAlmostEqual(s['start_usd'], 248.096041 + 80.0, places=3)
         self.assertAlmostEqual(s['hold_start_assets_usd'], (2.102865244 + 0.5) * 119.2097 + 20.0, places=3)
-        self.assertAlmostEqual(s['hold_50_50_usd'], 248.096041 * (0.5 + 0.5 * 119.2097 / 117.98) + 80.0, places=3)
+        # the deposit held 50/50 from its own price, 120 (2026-10-20), not at its dollar value
+        self.assertAlmostEqual(s['hold_50_50_usd'], 248.096041 * (0.5 + 0.5 * 119.2097 / 117.98)
+                               + 80.0 * (0.5 + 0.5 * 119.2097 / 120.0), places=3)
 
     def test_a_withdrawal_lowers_them(self):
         db.record_flow('2026-09-25 00:00+00', 'withdrawal', 0.1, 0.0, 12.0, 120.0, 'WD1', 'test')
@@ -514,3 +516,26 @@ class Hooks(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class HoldFiftyFifty(unittest.TestCase):
+    """db.hold_50_50: every flow held 50/50 from its own price (2026-10-20)."""
+
+    def test_flows_are_exposed_from_their_own_price(self):
+        # tang0: $19.42 baseline at 107.03, $1,452 deposit at 107.02, SOL now 105
+        got = db.hold_50_50(19.42, 107.03, 105.0, [(1, 1452.0, 107.02, False)], False)
+        want = 19.42 * (0.5 + 0.5 * 105 / 107.03) + 1452.0 * (0.5 + 0.5 * 105 / 107.02)
+        self.assertAlmostEqual(got, want, places=9)
+        self.assertLess(got, 19.42 + 1452.0)                       # SOL fell: the hold lost too
+
+    def test_withdrawals_fixed_and_unpriced_flows(self):
+        self.assertAlmostEqual(db.hold_50_50(100.0, 100.0, 110.0, [(-1, 20.0, 100.0, False)], False),
+                               100 * 1.05 - 20 * 1.05)
+        self.assertAlmostEqual(db.hold_50_50(100.0, 100.0, 110.0, [(1, 5.0, 100.0, True), (1, 3.0, None, False)], False),
+                               105.0 + 8.0)                          # fixed and unpriced: dollars
+        self.assertAlmostEqual(db.hold_50_50(100.0, 0.0, 110.0, [], False), 100.0)   # no start price: dollars
+
+    def test_a_stable_token_a_inverts_the_price(self):
+        # USDC/HYPE: pool price is HYPE per USDC, so the volatile price is 1/price
+        got = db.hold_50_50(100.0, 40.0, 50.0, [(1, 10.0, 1 / 45.0, False)], True)
+        self.assertAlmostEqual(got, 100 * (0.5 + 0.5 * 50 / 40) + 10 * (0.5 + 0.5 * 50 / 45), places=9)

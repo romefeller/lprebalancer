@@ -1438,6 +1438,15 @@ def since_start(extra_usd=0.0, profile=None, wallet_id=None):
                               where kind in ('deposit', 'withdrawal', 'internal_in', 'internal_out')
                                 and ts > %(since)s and {FLOW_IN}) f""", dict(a, since=base['ts']))
         fl = cur.fetchone()
+        # Each flow at its own price, for the 50/50 benchmark (owner 2026-10-20:
+        # judge erosion without SOL's price). An internal flow with no token A
+        # amount, or one without a price, counts at its dollar value.
+        cur.execute(f"""select case when kind in ('deposit', 'internal_in') then 1 else -1 end sgn, usd, price,
+                               kind like 'internal%%' and coalesce((amounts->>%(mint)s::text)::numeric, sol) = 0 fixed
+                        from capital_flows
+                        where kind in ('deposit', 'withdrawal', 'internal_in', 'internal_out')
+                          and ts > %(since)s and {FLOW_IN}""", dict(a, since=base['ts']))
+        flows_50 = [(r['sgn'], float(r['usd'] or 0), r['price'], bool(r['fixed'])) for r in cur.fetchall()]
         cur.execute("select coalesce(sum(usd), 0) u from payouts where kind in ('paid', 'uncertain', 'fee') "
                     f"and ts >= %(since)s and {PAYOUT_IN}", dict(a, since=base['ts']))
         paid = float(cur.fetchone()['u'])
@@ -1457,7 +1466,7 @@ def since_start(extra_usd=0.0, profile=None, wallet_id=None):
     value = equity_now + float(extra_usd or 0.0) + paid + refill      # refill: see daily_line
     hold = ((float(base['sol']) + float(fl['net_sol'])) * v1 + float(base['usdc']) + float(fl['net_usdc'])
             + float(fl['net_fixed_usd']))
-    hold_50 = float(base['usd']) * (0.5 + 0.5 * v1 / v0) + float(fl['net_usd'])
+    hold_50 = hold_50_50(float(base['usd']), v0, v1, flows_50, stable_a)
     days = (last['ts'] - base['ts']).total_seconds() / 86400
     out = {'since': base['ts'].isoformat(), 'days': round(days, 2),
            'start_usd': round(start, 4), 'start_sol': round(float(base['sol']) + float(fl['net_sol']), 6),
@@ -1481,6 +1490,23 @@ def since_start(extra_usd=0.0, profile=None, wallet_id=None):
             out.update({'hold_start_assets_usd': round(h['hold'], 4), 'vs_hold_start_assets_usd': round(value - h['hold'], 4),
                         'hold_50_50_usd': round(h['hold_50'], 4), 'vs_hold_50_50_usd': round(value - h['hold_50'], 4),
                         'price_start': p0, 'price_now': round(h['price_now'], 4)})
+    return out
+
+
+def hold_50_50(base_usd, v0, v1, flows, stable_a):
+    """The 50/50 benchmark: the baseline, and every later flow at its own
+    price, each held half in the volatile token and half in dollars until now.
+    `v0`/`v1` are the volatile token's dollar price at the baseline and now;
+    `flows` is [(sign, usd, pool price, fixed)]. A fixed flow, or one without
+    a price, counts at its dollar value. Before 2026-10-20 every flow counted
+    at its dollar value: tang0's $1,452 deposit at $107 read $21 too kindly.
+    Pure."""
+    def grown(usd, v):
+        return usd * (0.5 + 0.5 * v1 / v) if v and v > 0 else usd
+    out = grown(base_usd, v0)
+    for sgn, usd, price, fixed in flows:
+        v = None if fixed or not price else volatile_usd(price, stable_a)
+        out += sgn * grown(usd, v)
     return out
 
 
