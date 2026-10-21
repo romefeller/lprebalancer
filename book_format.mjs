@@ -75,6 +75,17 @@ export function erosionLine(r) {
   return `erosion     ${x >= 0 ? 'none' : 'yes'} · ${sign(x)} vs a 50/50 hold since start (SOL price excluded)${paid}`;
 }
 
+// The price level (owner, 2026-10-21): the price at which the equity would
+// equal the start capital. The book re-centres about 50/50, so its value moves
+// as the square root of the price: level = price now x (start / equity)^2.
+// Lower is better. Null without the start capital, the equity or a price.
+export function priceLevelLine(r) {
+  const s = r.since_start;
+  const px = shownPrice(r, s?.price_now), start = Number(s?.start_usd), eq = Number(s?.equity_usd);
+  if (px == null || !(start > 0) || !(eq > 0)) return null;
+  return `price level ${pricedView(r).symbol} $${n(px * (start / eq) ** 2)} · equity = start capital at this price`;
+}
+
 // The P&L in its two parts: what the LP kept (equity against the money put
 // in) and what was paid out. Empty without the payout figures.
 export function pnlParts(s) {

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { equityLine, erosionLine, pnlParts, lpLine, sinceStartLine, shareAgrees } from '../book_format.mjs';
+import { equityLine, erosionLine, priceLevelLine, pnlParts, lpLine, sinceStartLine, shareAgrees } from '../book_format.mjs';
 
 const R = { equity_usd: 240.0, pnl_usd: 3.52, last_price: 118.0905, lp_usd: 221.24, deployed_pct: 92.2, wallet_usd: 18.73,
   since_start: { since: '2026-09-22T19:56:24+00:00', start_usd: 248.096, start_sol: 2.102865, value_usd: 242.4247,
@@ -179,4 +179,12 @@ test('the erosion line: the LP against a 50/50 hold, SOL price excluded (2026-10
     'erosion     yes · -21.00 vs a 50/50 hold since start (SOL price excluded)');
   assert.equal(erosionLine({ since_start: { vs_hold_50_50_usd: null } }), null);
   assert.equal(erosionLine({}), null);
+});
+
+test('the price level: the price at which the equity equals the start capital (2026-10-21)', () => {
+  const s = { start_usd: 2459.66, equity_usd: 2364.51, price_now: 108.26 };
+  assert.equal(priceLevelLine({ since_start: s }), 'price level SOL $117.15 · equity = start capital at this price');
+  assert.equal(priceLevelLine({ since_start: { ...s, price_now: null } }), null);
+  assert.equal(priceLevelLine({ since_start: { ...s, start_usd: null } }), null);
+  assert.equal(priceLevelLine({}), null);
 });

@@ -13,7 +13,7 @@
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { equityLine, erosionLine, pricedView, shownPrice, shownBand, shownMovePct, shownSide, lpLine, sinceStartLine, splitMessage, emojiFor, healthLine, poolLabel, redact,
+import { equityLine, erosionLine, priceLevelLine, pricedView, shownPrice, shownBand, shownMovePct, shownSide, lpLine, sinceStartLine, splitMessage, emojiFor, healthLine, poolLabel, redact,
   portfolioText, walletName } from './book_format.mjs';
 
 const SELF = fileURLToPath(import.meta.url);
@@ -207,7 +207,7 @@ export function render(row) {
       ...payoutBlock(r.governor),
       `━━ 📒 BOOK ━━`,
       equityLine(r),
-      ...[erosionLine(r)].filter(Boolean),
+      ...[erosionLine(r), priceLevelLine(r)].filter(Boolean),
       ...[lpLine(r), sinceStartLine(r), healthLine(r.health)].filter(Boolean),
       `rate        ${r.fees_per_day_usd != null ? '$' + n(r.fees_per_day_usd, 4) + '/day' : '— (needs an hour)'}`
         + `${r.apr_pct != null ? `   APR ${n(r.apr_pct, 1)}%` : ''} since start`,
