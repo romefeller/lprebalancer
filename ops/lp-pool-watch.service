@@ -1,0 +1,14 @@
+[Unit]
+Description=Pool watch: Uniswap v3 fee counters of the watched ETH and POL pools into fee_growth (research, moves no money)
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=ubuntu
+WorkingDirectory=/home/ubuntu/agent-fin/lp_bot
+Environment=LPBOT_DSN=dbname=rebalancer
+# Public RPCs only; no key and no wallet is read
+ExecStart=/usr/bin/python3 ops/pool_watch.py sample
+TimeoutStartSec=120
+NoNewPrivileges=true
