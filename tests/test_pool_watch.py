@@ -51,5 +51,31 @@ class PoolStats(unittest.TestCase):
         self.assertAlmostEqual(s['hours'], 4 * 10 / 60, places=6)
 
 
+class Hourly(unittest.TestCase):
+    def test_hours_sum_to_the_window_and_split_at_the_hour(self):
+        rows = PoolStats.rows(None, 2e-6 * pw.Q64, [0.001, -0.002, 0.0015] * 6)     # 10-min samples over 3 hours
+        h = pw.hourly(rows)
+        self.assertEqual(sorted(k.hour for k in h), [0, 1, 2, 3])
+        # an interval counts in the hour it ends in: 00:10..00:50 in hour 0, 01:00..01:50 in hour 1
+        self.assertEqual((h[rows[0]['ts']][2], h[rows[6]['ts']][2]), (3000, 3600))
+        tot = pw.stats(*(sum(v[i] for v in h.values()) for i in range(3)))
+        s = pw.pool_stats(rows)
+        for k in ('r', 'fee_pct_day', 'vol_pct_year', 'hours'):
+            self.assertAlmostEqual(tot[k], s[k], places=9)
+
+    def test_stats_edges(self):
+        self.assertIsNone(pw.stats(1.0, 0.0, 0))
+        self.assertIsNone(pw.stats(1.0, 0.0, 600)['r'])     # no price move: no R
+
+    def test_sol_stable_and_labels(self):
+        usdc, usd1 = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', 'USD1ttGY1N17NEEHLmELoaybftRBUSErhqYiQzvEmuB'
+        self.assertTrue(pw.sol_stable(pw.SOL, usdc))
+        self.assertTrue(pw.sol_stable(usd1, pw.SOL))
+        self.assertFalse(pw.sol_stable(pw.SOL, 'J1toso1uCk3RLmjorhTtrVwY9HJ7X8V9yYac6Y7kGCPn'))
+        self.assertFalse(pw.sol_stable(usdc, pw.USDC_ETH))
+        self.assertEqual(pw.label('x', pw.SOL, usd1), 'SOL/USD1')
+        self.assertEqual(pw.label(pw.CONTROL[2], None, None), pw.CONTROL[3])
+
+
 if __name__ == '__main__':
     unittest.main()
