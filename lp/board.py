@@ -216,8 +216,23 @@ def consider_migration(state, status, current_best):
     return True
 
 
-# Board-shaped rows of the home pools, by address: one API read each per run.
+# Board-shaped rows of the home and pivot pools, by address: one API read each per run.
 _HOME_ROWS = {}
+
+
+def pool_row(dex, address):
+    """A board-shaped row of one pool from its DEX API, cached; None when the
+    API cannot read it (tried again at the next call)."""
+    if address not in _HOME_ROWS:
+        try:
+            rec = dexes.pool(dex, address)
+        except Exception:
+            rec = None
+        if not rec:
+            return None
+        _HOME_ROWS[address] = {'dex': dex, 'address': address, 'pair': rec['pair'], 'token_a': rec['token_a'],
+                               'token_b': rec['token_b'], 'net_day_pct': None, 'band_pct': None}
+    return _HOME_ROWS[address]
 
 
 def home_rows(mints):
@@ -229,27 +244,25 @@ def home_rows(mints):
     cannot read is left out and tried again at the next call."""
     if mints != {chains.SOLANA['native_mint'], chains.SOLANA['usdc_mint']}:
         return []
-    out = []
-    for dex, address in chains.SOLANA['sol_usdc_pools'].items():
-        if dex not in solana_state.FEE_LAYOUT_DEXES:
-            continue
-        if address not in _HOME_ROWS:
-            try:
-                rec = dexes.pool(dex, address)
-            except Exception:
-                rec = None
-            if not rec:
-                continue
-            _HOME_ROWS[address] = {'dex': dex, 'address': address, 'pair': rec['pair'], 'token_a': rec['token_a'],
-                                   'token_b': rec['token_b'], 'net_day_pct': None, 'band_pct': None}
-        out.append(_HOME_ROWS[address])
-    return out
+    return [r for r in (pool_row(d, a) for d, a in chains.SOLANA['sol_usdc_pools'].items()
+                        if d in solana_state.FEE_LAYOUT_DEXES) if r]
+
+
+def pivot_rows():
+    """Board-shaped rows of the pivot pools (solana.json) when the held pool
+    is one of them: SOL/stablecoin pools the bot may move between although
+    the stablecoin differs (8sLb and SOL/USD1, owner 2026-10-29)."""
+    pools = [(d, a) for d, lst in chains.SOLANA.get('pivot_pools', {}).items() for a in lst
+             if d in solana_state.FEE_LAYOUT_DEXES]
+    if config.POOL not in {a for _, a in pools}:
+        return []
+    return [r for r in (pool_row(d, a) for d, a in pools) if r]
 
 
 def venue_candidates():
     """(dex, address, pair row) of the held pool, every screened pool of the
-    same pair on the latest board, and the home pools of that pair
-    (home_rows), on a venue whose counters we read."""
+    same pair on the latest board, the home pools of that pair (home_rows)
+    and the pivot pools (pivot_rows), on a venue whose counters we read."""
     run, rows = db.latest_scan(max_age_seconds=config.SCAN_INTERVAL * 3)
     try:
         mints = {m for m, _ in capital.pool_tokens()}
@@ -263,7 +276,7 @@ def venue_candidates():
         if mints and not config.ALLOW_SWAP and pair != mints:
             continue
         out[r['address']] = (r['dex'], r['address'], r)
-    for r in home_rows(mints):
+    for r in home_rows(mints) + pivot_rows():
         out.setdefault(r['address'], (r['dex'], r['address'], r))
     return list(out.values())
 
@@ -307,7 +320,8 @@ def venue_income(pool, usd_a, usd_b, band=1.01, hours=24):
     inc = solana_state.band_income(first, last, secs, band, usd_a, usd_b, rw_usd)
     if not inc:
         return None
-    return dict(inc, total_pct_day=inc['fee_pct_day'] + inc['reward_pct_day'], hours=round(secs / tuning.HOUR_S, 1))
+    return dict(inc, total_pct_day=inc['fee_pct_day'] + inc['reward_pct_day'], hours=round(secs / tuning.HOUR_S, 1),
+                active_l=int(last.get('liquidity') or 0))
 
 
 def venue_view(price, quote_usd=1.0):
@@ -324,13 +338,49 @@ def venue_view(price, quote_usd=1.0):
     return out
 
 
+# Kept fees (owner 2026-10-29: "if SOL/USD1 beats 8sLb, pivot"): a pool's
+# +/-1% fees times 1 - 1/R, R over PIVOT_R_DAYS of pool_hourly, the payout
+# basis. The fee counters already carry every other LP's share (a big LP
+# joining 8sLb on 10-27 halved them); our own entry dilutes the target too.
+PIVOT_R_DAYS = 7
+PIVOT_R_MIN_HOURS = 72          # of pool_hourly behind an R the board acts on
+PIVOT_MIN_ABS = 0.10            # kept %/day a move must add, whatever the ratio: R near 1 is noise
+
+
+def entry_share(active_l, value_per_l, capital_usd):
+    """The share of a pool's fees left to the others' liquidity once ours
+    joins it: L / (L + ours), ours = capital / (USD per unit of L in the
+    band). 1.0 when unknown. Pure."""
+    if active_l is None or (value_per_l or 0) <= 0:
+        return 1.0
+    ours = max(capital_usd or 0, 0) / value_per_l
+    return active_l / (active_l + ours) if active_l + ours > 0 else 1.0
+
+
+def kept_pct_day(fee_pct_day, r, entry=1.0):
+    """Fees a band keeps after its in-band loss, %/day: fees x entry x (1 - 1/R).
+    None without R. Pure."""
+    return None if not r else fee_pct_day * entry * (1 - 1 / r)
+
+
+def beats(held, top, min_gain, min_abs=PIVOT_MIN_ABS):
+    """Whether kept fees `top` beat `held` by min_gain and by min_abs %/day;
+    `top` must keep something. A held pool that keeps nothing is beaten by
+    any pool that keeps min_abs more. Pure."""
+    if top is None or held is None or top <= 0 or top - held < min_abs:
+        return False
+    return held <= 0 or top / held - 1 >= min_gain
+
+
 def calm_board_check(state, status):
-    """The pool review while calm mode holds the tight band. The hourly ladder
-    says nothing about a +/-1% band, but fee (and reward) density does: at any
-    band, a dollar at the active price earns in proportion to it. Moves to the
-    densest eligible pool, still tight, when it beats the held one by
-    migrate_min_gain. Returns True when a move started."""
-    if config.POOL_PINNED or status.get('quoteUsd') is None:
+    """The pool review while the bot holds a tight band. Ranks the held pool
+    and every eligible one on kept fees at +/-1% from on-chain counters
+    (kept_pct_day): fees over 24 hours, then over VENUE_RECENT_HOURS, both
+    times 1 - 1/R. Moves, still tight, when the best beats the held one on
+    both (beats). A pinned profile only says what it would do. A vault
+    cannot change stablecoin (its policies hold one payout token): it says
+    so and stays. Returns True when a move started."""
+    if status.get('quoteUsd') is None:
         return False
     # On-chain evidence first: the board's density put PancakeSwap 18% above
     # Raydium and live it earned half (2026-09-26). A move needs at least
@@ -346,17 +396,42 @@ def calm_board_check(state, status):
     if not held_v or held_v['hours'] < config.VENUE_MIN_HOURS:
         books.notify('board_checked', verdict=f'on-chain income: under {config.VENUE_MIN_HOURS}h of evidence on the held pool; staying')
         return False
-    if not ok:
-        books.notify('board_checked', held=f"{config.DEX} {held_v['total_pct_day']:.2f}%/d on chain",
+    rs = {}
+
+    def r_of(address):
+        if address not in rs:
+            got = db.pool_r(address, PIVOT_R_DAYS)
+            rs[address] = got[0] if got and got[1] >= PIVOT_R_MIN_HOURS else None
+        return rs[address]
+
+    cap = float(status.get('positionUsd') or config.CAPITAL_USD)
+
+    def kept(v, inc):
+        e = 1.0 if v['held'] else entry_share(inc.get('active_l'), inc.get('value_per_l_usd'), cap)
+        return kept_pct_day(inc['total_pct_day'], r_of(v['address']), e)
+
+    def txt(v, k):
+        r = r_of(v['address'])
+        return (f"{v['dex']} {v['pair']} {v['total_pct_day']:.2f}%/d at ±1% on chain ({v['hours']}h), "
+                f"R{PIVOT_R_DAYS}d {'?' if r is None else f'{r:.2f}'}, kept {'?' if k is None else f'{k:.2f}'}%/d")
+
+    held_k = kept(held_v, held_v)
+    held_txt = txt(held_v, held_k)
+    if held_k is None:
+        books.notify('board_checked', held=held_txt,
+                     verdict=f'no {PIVOT_R_DAYS}-day R ({PIVOT_R_MIN_HOURS}h) on the held pool; staying')
+        return False
+    scored = sorted(((k, v) for k, v in ((kept(v, v), v) for v in ok) if k is not None), key=lambda x: -x[0])
+    if not scored:
+        books.notify('board_checked', held=held_txt,
                      verdict='on-chain income: no other pool with enough evidence; staying')
         return False
-    top = ok[0]
-    gain = top['total_pct_day'] / max(held_v['total_pct_day'], 1e-9) - 1
-    held_txt = f"{config.DEX} {config.PAIR_LABEL} {held_v['total_pct_day']:.2f}%/d at ±1% on chain ({held_v['hours']}h)"
-    best_txt = f"{top['dex']} {top['pair']} {top['total_pct_day']:.2f}%/d at ±1% on chain ({top['hours']}h)"
-    if gain < config.MIGRATE_MIN_GAIN:
+    top_k, top = scored[0]
+    best_txt = txt(top, top_k)
+    if not beats(held_k, top_k, config.MIGRATE_MIN_GAIN):
         books.notify('board_checked', held=held_txt, best=best_txt,
-                     verdict=f'on-chain: {gain * 100:.0f}% more income is under the {config.MIGRATE_MIN_GAIN * 100:.0f}% threshold')
+                     verdict=f'kept fees: under {config.MIGRATE_MIN_GAIN * 100:.0f}% and '
+                             f'{PIVOT_MIN_ABS:.2f}%/d more; staying')
         return False
     # 24 hours mix calm and HOT hours, and the bot holds a tight band only
     # in calm ones. 3ucNos won 24 hours on its HOT bursts and paid half of
@@ -369,20 +444,28 @@ def calm_board_check(state, status):
         books.notify('board_checked', held=held_txt, best=best_txt,
                      verdict=f'on-chain: no income over the last {config.VENUE_RECENT_HOURS}h on both pools; staying')
         return False
-    recent = top_r['total_pct_day'] / max(held_r['total_pct_day'], 1e-9) - 1
-    if recent < config.MIGRATE_MIN_GAIN:
+    # The recent hours confirm the direction only: quiet hours shrink both.
+    if not beats(kept(held_v, held_r), kept(top, top_r), config.MIGRATE_MIN_GAIN, min_abs=0.0):
         books.notify('board_checked', held=held_txt, best=best_txt,
-                     verdict=f'on-chain: {gain * 100:.0f}% more over 24h but {recent * 100:.0f}% over the last '
-                             f'{config.VENUE_RECENT_HOURS}h, under the {config.MIGRATE_MIN_GAIN * 100:.0f}% threshold')
+                     verdict=f'kept fees: ahead over 24h but not over the last {config.VENUE_RECENT_HOURS}h; staying')
         return False
     best = top['row']
-    books.notify('MIGRATE', held=held_txt, best=best_txt, gain_pct=round(gain * 100),
+    pair_change = {wallets.norm(best['token_a']['address']), wallets.norm(best['token_b']['address'])} != \
+        {m for m, _ in capital.pool_tokens()}
+    if config.POOL_PINNED or (pair_change and config.VAULT):
+        books.notify('board_checked', held=held_txt, best=best_txt, shadow=True,
+                     verdict=('pool pinned' if config.POOL_PINNED else
+                              "a vault cannot change stablecoin: its owners approve one payout token")
+                     + f': would move to {best["dex"]} {best["address"]}; staying')
+        return False
+    books.notify('MIGRATE', held=held_txt, best=best_txt, gain_pct=round((top_k / held_k - 1) * 100) if held_k > 0 else None,
                  pool=best['address'], dex=best['dex'], calm=True)
-    db.event('MIGRATE', f'on-chain: {config.DEX} {config.POOL} -> {best["dex"]} {best["address"]} '
+    db.event('MIGRATE', f'on-chain kept fees: {config.DEX} {config.POOL} -> {best["dex"]} {best["address"]} '
                         f'({held_txt} -> {best_txt})')
     k = (regime.regime_choice_now(best['address'], status['price'], best.get('pair')) or config.REGIME_WIDTHS[0]) \
         if config.REGIME_ENABLED else config.CALM_BAND
-    moves.rebalance(state, status, 'moved to the pool that earns more on chain', target=best, band=k, calm_move=True)
+    moves.rebalance(state, status, 'moved to the pool that keeps more fees on chain', target=best, band=k,
+                    calm_move=True)
     return True
 
 
@@ -485,13 +568,25 @@ def repoint_with_leftovers(state, target):
     books.notify('REPOINTED', dex=config.DEX, pool=config.POOL, pair=config.PAIR_LABEL, left_behind=rest)
 
 
+def payout_mint_for(current, mint_a, mint_b):
+    """The payout token after a move to the mint_a/mint_b pool: the pool's
+    stablecoin when the current one is a stablecoin the pool lacks (USDC to
+    USD1 and back: payouts in the pool's own fees, no swap), else None
+    (unchanged). Pure."""
+    if not current or not capital.is_stable_mint(current) or wallets.norm(current) in (mint_a, mint_b):
+        return None
+    return next((m for m in (mint_b, mint_a) if capital.is_stable_mint(m)), None)
+
+
 def repoint(target):
     """Point the profile at the target pool and reload the configuration, so
     everything the loop reads from `config` is the new pool's."""
     guards.migration_target(target, execute_dexes=config.EXECUTE_DEXES, signers=signers.SIGNERS,
                             known=dexes.KNOWN)
+    mints = [wallets.norm(target['token_a']['address']), wallets.norm(target['token_b']['address'])]
     db.repoint(config.PROFILE, target['dex'], target['address'], target['pair'],
-               target['token_a']['symbol'], target['token_b']['symbol'])
+               target['token_a']['symbol'], target['token_b']['symbol'],
+               mints=mints, payout_mint=payout_mint_for(config.PAYOUT_MINT, *mints))
     config.reload()
     assert config.DEX == target['dex'] and config.POOL == target['address'], \
         'config did not reload to the target pool'

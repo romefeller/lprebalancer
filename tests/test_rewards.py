@@ -97,6 +97,8 @@ class CalmReview(unittest.TestCase):
                 mock.patch.object(lp.board, 'venue_income', lambda a, ua, ub, band=1.01, hours=24: recent.get(a)), \
                 mock.patch.object(lp.books, 'notify', lambda ev, **kw: sent.append((ev, kw))), \
                 mock.patch.object(db, 'event', lambda *a: None), \
+                mock.patch.object(db, 'pool_r', lambda a, days=7: (1.5, 168.0)), \
+                mock.patch.object(lp.capital, 'pool_tokens', lambda: ((SOL, 'SOL'), (USDC, 'USDC'))), \
                 mock.patch.object(lp.moves, 'rebalance', lambda *a, **k: moved.append(k)), \
                 mock.patch.object(lp.regime, 'regime_choice_now', lambda pool, price, pair=None: 1.0125), \
                 mock.patch.object(config, 'POOL', 'HELD'), \

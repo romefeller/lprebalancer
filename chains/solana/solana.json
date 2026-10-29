@@ -7,7 +7,8 @@
     "USDC": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
     "USDT": "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",
     "PYUSD": "2b1kV6DkPAnxd5ixfnxCpjxmKwqjjaYmCZfHsFu24GXo",
-    "USDS": "USDSwr9ApdHk5bvJKMjzff41FfuX8bSxdKcR81vTwcA"
+    "USDS": "USDSwr9ApdHk5bvJKMjzff41FfuX8bSxdKcR81vTwcA",
+    "USD1": "USD1ttGY1N17NEEHLmELoaybftRBUSErhqYiQzvEmuB"
   },
   "operator_profit_wallet": "8funmDkPNBtjqfNkBEoBF16eBfyQ4vMAFrs4Nyys5D1h",
   "sol_usdc_pools": {
@@ -15,6 +16,10 @@
     "raydium-clmm": "8sLbNZoA1cfnvMJLPfp98ZLAnFSYCFApfJKMbiXNLwxj",
     "orca": "Czfq3xZZDmsdGdUyrNLtRhGc47cXcZtLG4crryfu44zE",
     "byreal": "9GTj99g9tbz9U6UYDsX6YeRTgUnkYG6GTnHv3qLa5aXq"
+  },
+  "pivot_pools_about": "SOL/stablecoin pools a key wallet may move between although the stablecoin differs (owner 2026-10-29: SOL/USD1 when it keeps more fees than 8sLb). The move sells the old stablecoin through Jupiter; payouts follow the pool's stablecoin. A vault cannot: its policies hold one payout token.",
+  "pivot_pools": {
+    "raydium-clmm": ["8sLbNZoA1cfnvMJLPfp98ZLAnFSYCFApfJKMbiXNLwxj", "AQAGYQsdU853WAKhXM79CgNdoyhrRwXvYHX6qrDyC1FS"]
   },
   "vault_extra_pools_about": "More SOL/USDC pools an owner's vault may approve per venue, after its sol_usdc_pools one (2026-10-17: Raydium 3ucNos for tang0, cli.mjs add-pool). The owner page pins these too.",
   "vault_extra_pools": {

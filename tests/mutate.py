@@ -94,6 +94,9 @@ TARGETS = {
                   NODE_TESTS('test_swap_orca.mjs')),
     'resilience_signers': ('lp/signers.py', ['health_key', 'counts_as_failure', 'chain'], PY_TESTS('test_health', 'test_deploy_idle', 'test_edges_0930', 'test_multi_loop', 'test_scaled', 'test_review_edges',
                             'test_increase_idle', 'test_replay')),
+    'pivot': ('lp/board.py', ['entry_share', 'kept_pct_day', 'beats', 'calm_board_check', 'payout_mint_for', 'pivot_rows'],
+              PY_TESTS('test_pivot', 'test_venues', 'test_rewards.CalmReview')),
+    'pivot_db': ('db.py', ['pool_r', 'repoint'], PY_TESTS('test_pivot.Ledger', 'test_db')),
     'resilience_board': ('lp/board.py', ['failover_pick', 'venue_failover'], PY_TESTS('test_health', 'test_deploy_idle', 'test_edges_0930', 'test_multi_loop', 'test_scaled', 'test_review_edges',
                             'test_increase_idle', 'test_replay')),
     'resilience_regime': ('lp/regime.py', ['voluntary_move_allowed'], PY_TESTS('test_health', 'test_deploy_idle', 'test_edges_0930', 'test_multi_loop', 'test_scaled', 'test_review_edges',
@@ -393,7 +396,7 @@ TARGETS = {
                       NODE_TESTS('test_book_format.mjs', 'test_telegram_bridge.mjs')),
 }
 
-SQL_TARGETS = {'deposit_db', 'unichain_quote', 'band_profile', 'daily', 'capital_db', 'book_scope', 'book_sums', 'stats_sum', 'wallets_db', 'wallet_names', 'db_stats', 'liq_window', 'pause_db', 'macro_db'}
+SQL_TARGETS = {'pivot_db', 'deposit_db', 'unichain_quote', 'band_profile', 'daily', 'capital_db', 'book_scope', 'book_sums', 'stats_sum', 'wallets_db', 'wallet_names', 'db_stats', 'liq_window', 'pause_db', 'macro_db'}
 
 # Mutants that cannot change behaviour, with the reason. Keyed by the mutant's
 # identity (see "identity" below):
@@ -401,6 +404,12 @@ SQL_TARGETS = {'deposit_db', 'unichain_quote', 'band_profile', 'daily', 'capital
 # The report prints each survivor's key: copy it here with a reason. The line
 # number is not in the key, so an edit above a mutant keeps its entry valid.
 EQUIVALENT = {
+    ('pivot', 'calm_board_check', 'drop operand 0', "ok = [v for v in venues if not v['held'] and v['hours'] >= config.VENUE_MIN_HOURS and v.get('row')", 0):
+        'the held pool has no row (venue_view), so v.get(\'row\') leaves it out anyway; ranked in, it cannot beat itself',
+    ('pivot', 'calm_board_check', 'drop operand 2', "ok = [v for v in venues if not v['held'] and v['hours'] >= config.VENUE_MIN_HOURS and v.get('row')", 0):
+        'only the held pool has no row (venue_view), and not v[\'held\'] leaves it out',
+    ('pivot', 'payout_mint_for', 'drop operand 0', 'if not current or not capital.is_stable_mint(current) or wallets.norm(current) in (mint_a, mint_b):', 0):
+        'None or an empty payout token is no stablecoin: the next operand returns None the same',
     ('vault_connect', 'setupRequest', '(?<![<>=!-])>(?![>=]) -> >=', 'seed = (seed > config.smartAccountIndex ? seed : config.smartAccountIndex) + 1n;', 0):
         'a taken seed is never above the program\'s index (its creation set the index to it): at equal both pick the same',
     ('vault_connect', 'setupRequest', '\\?(?=\\s) -> && false ?', 'seed = (seed > config.smartAccountIndex ? seed : config.smartAccountIndex) + 1n;', 0):

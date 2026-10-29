@@ -340,14 +340,16 @@ def activate(name):
     return name
 
 
-def repoint(name, dex, pool, pair_label, token_a, token_b):
+def repoint(name, dex, pool, pair_label, token_a, token_b, mints=None, payout_mint=None):
     """Move a profile to another pool, on any DEX. The bot calls this when the
     board says a different pool pays better and it can open there; the
-    operator can call it by hand through `db.py repoint`."""
+    operator can call it by hand through `db.py repoint`. A pair change also
+    sets the profile's `mints` and `payout_mint` (None: unchanged)."""
     with cursor(commit=True) as cur:
         cur.execute('update config set dex = %s, pool = %s, pair_label = %s, token_a = %s, '
-                    'token_b = %s, updated_at = now() where name = %s returning *',
-                    (dex, pool, pair_label, token_a, token_b, name))
+                    'token_b = %s, mints = coalesce(%s, mints), payout_mint = coalesce(%s, payout_mint), '
+                    'updated_at = now() where name = %s returning *',
+                    (dex, pool, pair_label, token_a, token_b, mints, payout_mint, name))
         row = cur.fetchone()
     if not row:
         raise SystemExit(f'No profile named {name}.')
@@ -535,6 +537,21 @@ def record_fee_state(dex, pool, st):
                     (now(), dex, pool, st['sqrt_price'], st['g0'], st['g1'], json.dumps(st.get('rewards') or []),
                      st['dec_a'], st['dec_b'], st['mint_a'], st['mint_b'], st.get('liquidity')))
         cur.execute('delete from fee_growth where ts < now() - make_interval(days => %s)', (FEE_GROWTH_KEEP_DAYS,))
+
+
+def pool_r(pool, days):
+    """(R, hours) of a pool over the last `days` of pool_hourly (sql/064):
+    fee yield per full-range dollar over the in-band loss, sum(var)/8, as
+    ops/pool_watch.py reports it. (None, hours) without variance; None
+    without rows."""
+    with cursor() as cur:
+        cur.execute("select sum(fee_yield) f, sum(var_sum) v, sum(secs) s from pool_hourly "
+                    "where pool = %s and hour >= now() - make_interval(days => %s)", (pool, days))
+        r = cur.fetchone()
+    if not r['s']:
+        return None
+    v = float(r['v'])
+    return (float(r['f']) / (v / 8) if v > 0 else None), float(r['s']) / 3600
 
 
 def fee_state_span(pool, hours=24):

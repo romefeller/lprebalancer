@@ -173,7 +173,9 @@ class RecentGain(unittest.TestCase):
         venues = [{'dex': 'raydium-clmm', 'address': 'HELD', 'held': True, 'pair': 'SOL/USDC',
                    'total_pct_day': 3.0, 'hours': 24.0, 'row': None},
                   {'dex': 'raydium-clmm', 'address': 'TOP', 'held': False, 'pair': 'SOL/USDC',
-                   'total_pct_day': 4.5, 'hours': 24.0, 'row': {'dex': 'raydium-clmm', 'address': 'TOP'}}]
+                   'total_pct_day': 4.5, 'hours': 24.0,
+                   'row': {'dex': 'raydium-clmm', 'address': 'TOP', 'token_a': {'address': SOL},
+                           'token_b': {'address': USDC}}}]
         recent = {'HELD': recent_held, 'TOP': recent_top}
         moved, told = [], []
         with mock.patch.object(lp.board, 'venue_view', lambda p, q: venues), \
@@ -182,6 +184,8 @@ class RecentGain(unittest.TestCase):
                 mock.patch.object(lp.board.moves, 'rebalance', lambda *a, **k: moved.append(k)), \
                 mock.patch.object(lp.board.books, 'notify', lambda kind, **k: told.append((kind, k))), \
                 mock.patch.object(lp.board.db, 'event', lambda *a: None), \
+                mock.patch.object(lp.board.db, 'pool_r', lambda a, days=7: (1.5, 168.0)), \
+                mock.patch.object(lp.capital, 'pool_tokens', lambda: ((SOL, 'SOL'), (USDC, 'USDC'))), \
                 mock.patch.object(config, 'POOL_PINNED', False), \
                 mock.patch.object(config, 'REGIME_ENABLED', False), \
                 mock.patch.object(config, 'MIGRATE_MIN_GAIN', 0.25), \
