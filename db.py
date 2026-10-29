@@ -1563,7 +1563,7 @@ def token_prices(mints):
 
 
 # The quote tokens a pair's price is dollars in (engine.STABLES).
-STABLE_SYMBOLS = ('USDC', 'USDT', 'PYUSD', 'USDS', 'DAI', 'FDUSD', 'USDE')
+STABLE_SYMBOLS = ('USDC', 'USDT', 'PYUSD', 'USDS', 'DAI', 'FDUSD', 'USDE', 'USD1')
 
 
 def mixed_hold(base_amounts, base_usd, base_price, flows, prices, stable=_is_stable):
@@ -1997,14 +1997,16 @@ def stats(token_a=None, token_b=None, profile=None, wallet_id=None):
 
 def mixed_sides(labels):
     """{'a': bool, 'b': bool}: whether the pairs `labels` (e.g. 'SOL/USDC',
-    'DJT/USDC') hold more than one token on that side. A label with no '/'
-    (or None) names no token. Pure."""
+    'DJT/USDC') hold more than one token on that side. Dollar stablecoins
+    (STABLE_SYMBOLS) are one token: USDC and USD1 amounts add (the SOL/USD1
+    pivot, 2026-10-29). A label with no '/' (or None) names no token. Pure."""
+    one = lambda t: '$' if t.strip() in STABLE_SYMBOLS else t.strip()
     sides = {'a': set(), 'b': set()}
     for label in labels:
         a, sep, b = str(label or '').partition('/')
         if sep:
-            sides['a'].add(a.strip())
-            sides['b'].add(b.strip())
+            sides['a'].add(one(a))
+            sides['b'].add(one(b))
     return {k: len(v) > 1 for k, v in sides.items()}
 
 

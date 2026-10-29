@@ -864,7 +864,10 @@ class WalletNames(unittest.TestCase):
     def test_mixed_sides(self):
         self.assertEqual(db.mixed_sides(['SOL/USDC', 'DJT/USDC']), {'a': True, 'b': False})
         self.assertEqual(db.mixed_sides(['SOL/USDC', 'SOL/USDC']), {'a': False, 'b': False})
-        self.assertEqual(db.mixed_sides(['SOL/USDC', 'SOL/USDT']), {'a': False, 'b': True})
+        self.assertEqual(db.mixed_sides(['SOL/USDC', 'SOL/USDT']), {'a': False, 'b': False})   # dollars add
+        self.assertEqual(db.mixed_sides(['SOL/USDC', 'SOL/USD1']), {'a': False, 'b': False})
+        self.assertEqual(db.mixed_sides(['USDC/HYPE', 'USD1/HYPE']), {'a': False, 'b': False})
+        self.assertEqual(db.mixed_sides(['SOL/USDC', 'SOL/JUP']), {'a': False, 'b': True})
         self.assertEqual(db.mixed_sides(['SOL/USDC', None, '', 'nopair']), {'a': False, 'b': False})
         self.assertEqual(db.mixed_sides([]), {'a': False, 'b': False})
         self.assertEqual(db.mixed_sides(['SOL/USDC', ' SOL / USDC ']), {'a': False, 'b': False})
@@ -873,7 +876,7 @@ class WalletNames(unittest.TestCase):
     @given(st.lists(st.tuples(st.sampled_from(['SOL', 'DJT', 'MU']), st.sampled_from(['USDC', 'USDT'])), max_size=6))
     def test_mixed_is_more_than_one_token_on_the_side(self, pairs):
         got = db.mixed_sides([f'{a}/{b}' for a, b in pairs])
-        self.assertEqual(got, {'a': len({a for a, _ in pairs}) > 1, 'b': len({b for _, b in pairs}) > 1})
+        self.assertEqual(got, {'a': len({a for a, _ in pairs}) > 1, 'b': False})   # every B is a dollar
 
     def test_the_held_pools_lines(self):
         one = {'by_pool': [{'dex': 'orca', 'pair_label': 'DJT/USDC', 'pool': 'P' * 44}]}
